@@ -170,7 +170,11 @@ if !STANDALONE_STATUS! EQU 0 (
 if !STANDALONE_STATUS! EQU 2 (
     echo WARNING: Falling back to npm installation.
     call :InstallNpm
-    if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
+    if !ERRORLEVEL! NEQ 0 (
+        echo WARNING: Standalone archive was unavailable before npm fallback; npm fallback also failed.
+        echo WARNING: Retry with --method standalone to debug the standalone failure, or install Node.js 20+ and rerun --method npm.
+        exit /b !ERRORLEVEL!
+    )
     call :PrintFinalInstructions ""
     endlocal
     exit /b 0
@@ -246,16 +250,19 @@ if "!INSTALL_BIN_DIR!"=="" (
     exit /b 1
 )
 if "!INSTALL_BASE:~1,2!"==":\" goto validate_install_base_ok
+if "!INSTALL_BASE:~1,2!"==":/" goto validate_install_base_ok
 if "!INSTALL_BASE:~0,2!"=="\\" goto validate_install_base_ok
 echo ERROR: QWEN_INSTALL_ROOT must be an absolute path.
 exit /b 1
 :validate_install_base_ok
 if "!INSTALL_DIR:~1,2!"==":\" goto validate_install_dir_ok
+if "!INSTALL_DIR:~1,2!"==":/" goto validate_install_dir_ok
 if "!INSTALL_DIR:~0,2!"=="\\" goto validate_install_dir_ok
 echo ERROR: QWEN_INSTALL_LIB_DIR must be an absolute path.
 exit /b 1
 :validate_install_dir_ok
 if "!INSTALL_BIN_DIR:~1,2!"==":\" goto validate_install_bin_dir_ok
+if "!INSTALL_BIN_DIR:~1,2!"==":/" goto validate_install_bin_dir_ok
 if "!INSTALL_BIN_DIR:~0,2!"=="\\" goto validate_install_bin_dir_ok
 echo ERROR: QWEN_INSTALL_BIN_DIR must be an absolute path.
 exit /b 1

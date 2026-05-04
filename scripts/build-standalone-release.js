@@ -14,6 +14,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { writeSha256Sums } from './create-standalone-package.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,11 +45,13 @@ const RELEASE_TARGETS = [
 ];
 const EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length;
 
-try {
-  await main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+if (isMainModule()) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
 }
 
 async function main() {
@@ -89,10 +92,15 @@ async function main() {
       });
     }
 
+    await writeSha256Sums(outDir);
     assertStandaloneOutput(outDir);
   } finally {
     fs.rmSync(runtimeDir, { recursive: true, force: true });
   }
+}
+
+function isMainModule() {
+  return process.argv[1] && path.resolve(process.argv[1]) === __filename;
 }
 
 async function packageTarget({
@@ -120,6 +128,7 @@ async function packageTarget({
     archivePath,
     '--out-dir',
     outDir,
+    '--skip-checksums',
   ];
   if (releaseVersion) {
     args.push('--version', releaseVersion);
@@ -287,3 +296,5 @@ Options:
 function fail(message) {
   throw new Error(`ERROR: ${message}`);
 }
+
+export { assertStandaloneOutput, parseChecksums, RELEASE_TARGETS };

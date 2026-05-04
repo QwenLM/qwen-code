@@ -22,7 +22,11 @@ const { execFileSync } = await vi.importActual('node:child_process');
 const crypto = await vi.importActual('node:crypto');
 const { tmpdir } = await vi.importActual('node:os');
 const path = await vi.importActual('node:path');
+const { pathToFileURL } = await vi.importActual('node:url');
 const readScript = (path) => readFileSync(path, 'utf8');
+const standaloneReleaseScriptUrl = pathToFileURL(
+  path.resolve('scripts/build-standalone-release.js'),
+).href;
 // These E2E cases execute the Unix shell installer and POSIX symlink behavior.
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
@@ -70,6 +74,12 @@ describe('installation scripts', () => {
     expect(script).toContain('detect_target()');
     expect(script).toContain('verify_checksum()');
     expect(script).toContain('SHA256SUMS not found; cannot verify archive');
+    expect(script).toContain('awk -v archive_name');
+    expect(script).not.toContain(
+      'grep -E "(^|[[:space:]])[*]?${archive_name}$"',
+    );
+    expect(script).toContain('validate_archive_contents()');
+    expect(script).toContain('Archive contains unsafe path');
     expect(script).toContain('qwen-code-${target}');
     expect(script).toContain('*.tar.xz)');
     expect(script).toContain('METHOD="${METHOD:-detect}"');
@@ -89,6 +99,10 @@ describe('installation scripts', () => {
     expect(script).toContain('qwen-code/node/bin/node');
     expect(script).toContain('Archive contains symlinks; refusing to install');
     expect(script).toContain('not a Qwen Code standalone install');
+    expect(script).toContain(
+      'Return 2 only when a standalone archive is unavailable',
+    );
+    expect(script).toContain('npm fallback also failed');
     expect(script).toContain(
       'unzip -q "${archive_path}" -d "${destination}" || return 1',
     );
@@ -157,6 +171,10 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'installer options contain unsafe command characters',
     );
+    expect(script).toContain('[char[]](10,13,33,34');
+    expect(script).toContain('if "!INSTALL_BASE:~1,2!"==":/"');
+    expect(script).toContain('if "!INSTALL_DIR:~1,2!"==":/"');
+    expect(script).toContain('if "!INSTALL_BIN_DIR:~1,2!"==":/"');
     expect(script).toContain(':ValidateVersion');
     expect(script).toContain(
       'call :ValidateHttpsUrlVar "NPM_REGISTRY" "--registry"',
@@ -175,6 +193,7 @@ describe('installation scripts', () => {
     expect(script).toContain('qwen-code\\node\\node.exe');
     expect(script).toContain('Archive contains symlinks or reparse points');
     expect(script).toContain('QWEN_INSTALL_ROOT');
+    expect(script).toContain('npm fallback also failed');
   });
 });
 
@@ -194,11 +213,15 @@ describe('standalone release packaging', () => {
     const packageScript = readScript('scripts/create-standalone-package.js');
     expect(packageScript).toContain('Copyright 2025 Qwen Team');
     expect(packageScript).toContain("'bundled/qc-helper/docs'");
+    expect(packageScript).toContain('DIST_ALLOWED_ENTRIES');
+    expect(packageScript).toContain('Unexpected dist asset');
+    expect(packageScript).toContain('topLevelDistEntryForPath(outDir)');
     expect(packageScript).toContain("path.join(packageRoot, 'package.json')");
     expect(packageScript).toContain('validateNodeRuntime');
-    expect(packageScript).toContain('assertSymlinksStayInside');
-    expect(packageScript).toContain('copyDereferenced');
+    expect(packageScript).toContain('copyNodeRuntimeEntry');
+    expect(packageScript).toContain('symlink cycle');
     expect(packageScript).toContain('refusing to write empty SHA256SUMS');
+    expect(packageScript).toContain('--skip-checksums');
     expect(packageScript).toContain('dereference: true');
     expect(packageScript).toContain('fs.createReadStream');
     expect(packageScript).toContain('Expand-Archive');
@@ -217,6 +240,8 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain('expectedArchiveNames');
     expect(releaseScript).toContain('qwen-code-${qwenTarget}');
     expect(releaseScript).toContain('scripts/create-standalone-package.js');
+    expect(releaseScript).toContain('--skip-checksums');
+    expect(releaseScript).toContain('writeSha256Sums(outDir)');
   });
 
   it('loads the standalone release packaging helper', () => {
@@ -228,6 +253,48 @@ describe('standalone release packaging', () => {
 
     expect(output).toContain('package:standalone:release');
     expect(output).toContain('--node-version VERSION');
+  });
+
+  it('parses Node.js SHASUMS entries', async () => {
+    const { parseChecksums } = await import(standaloneReleaseScriptUrl);
+
+    const checksums = parseChecksums(
+      [
+        'a'.repeat(64) + '  node-v20.19.0-linux-x64.tar.xz',
+        'b'.repeat(64) + ' *node-v20.19.0-win-x64.zip',
+        '',
+      ].join('\n'),
+    );
+
+    expect(checksums.get('node-v20.19.0-linux-x64.tar.xz')).toBe(
+      'a'.repeat(64),
+    );
+    expect(checksums.get('node-v20.19.0-win-x64.zip')).toBe('b'.repeat(64));
+  });
+
+  it('validates standalone release checksum output', async () => {
+    const { assertStandaloneOutput, RELEASE_TARGETS } = await import(
+      standaloneReleaseScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-test-'));
+
+    try {
+      const lines = RELEASE_TARGETS.map(({ qwenTarget }) => {
+        const extension = qwenTarget === 'win-x64' ? 'zip' : 'tar.gz';
+        return `${'a'.repeat(64)}  qwen-code-${qwenTarget}.${extension}`;
+      });
+      writeFileSync(path.join(tmpDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
+
+      expect(() => assertStandaloneOutput(tmpDir)).not.toThrow();
+
+      writeFileSync(
+        path.join(tmpDir, 'SHA256SUMS'),
+        `${lines.join('\n')}\n${'b'.repeat(64)}  qwen-code-extra.tar.gz\n`,
+      );
+      expect(() => assertStandaloneOutput(tmpDir)).toThrow(/Extra/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('rejects a runtime archive without a Node executable', () => {
@@ -368,6 +435,72 @@ describe('standalone release packaging', () => {
       rmSync(tmpDir, { recursive: true, force: true });
       if (createdDist) {
         rmSync('dist', { recursive: true, force: true });
+      }
+    }
+  });
+
+  itOnUnix('rejects Node.js runtime symlink cycles', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'linux-x64',
+            '--node-archive',
+            createFakeNodeArchive(tmpDir, {
+              withNodeSymlinkCycle: true,
+            }),
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          { stdio: 'pipe' },
+        ),
+      ).toThrow(/symlink cycle/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      if (createdDist) {
+        rmSync('dist', { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('rejects unexpected dist assets', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      writeFileSync('dist/debug-cache.tmp', 'debug\n');
+
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'win-x64',
+            '--node-archive',
+            createFakeWindowsNodeArchive(tmpDir),
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          { stdio: 'pipe' },
+        ),
+      ).toThrow(/Unexpected dist asset/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      if (createdDist) {
+        rmSync('dist', { recursive: true, force: true });
+      } else {
+        rmSync('dist/debug-cache.tmp', { force: true });
       }
     }
   });
@@ -537,6 +670,27 @@ describe('Linux/macOS installer end-to-end', () => {
     }
   });
 
+  itOnUnix(
+    'rejects standalone archives containing path traversal entries',
+    () => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = createTraversalStandaloneArchive(tmpDir);
+
+        expect(() =>
+          runUnixInstaller(
+            archive,
+            path.join(tmpDir, 'install'),
+            path.join(tmpDir, 'home'),
+          ),
+        ).toThrow(/Archive contains unsafe path/);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   itOnUnix('refuses to overwrite a non-managed install directory', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
@@ -677,6 +831,54 @@ describe('Linux/macOS installer end-to-end', () => {
       }
     },
   );
+
+  itOnUnix('preserves context when npm fallback also fails', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const fakeBin = path.join(tmpDir, 'bin');
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(path.join(fakeBin, 'curl'), '#!/usr/bin/env sh\nexit 22\n');
+      chmodSync(path.join(fakeBin, 'curl'), 0o755);
+
+      let failureMessage = '';
+      try {
+        execFileSync(
+          'bash',
+          [
+            'scripts/installation/install-qwen-with-source.sh',
+            '--method',
+            'detect',
+            '--base-url',
+            'https://example.invalid/qwen-code',
+            '--source',
+            'smoke',
+          ],
+          {
+            env: {
+              HOME: path.join(tmpDir, 'home'),
+              PATH: `${fakeBin}:/usr/bin:/bin`,
+            },
+            stdio: 'pipe',
+          },
+        );
+      } catch (error) {
+        failureMessage = [
+          error.message,
+          error.stdout?.toString() || '',
+          error.stderr?.toString() || '',
+        ].join('\n');
+      }
+
+      expect(failureMessage).toContain('Falling back to npm installation');
+      expect(failureMessage).toMatch(
+        /Node\.js was not found|Unable to determine Node\.js version/,
+      );
+      expect(failureMessage).toContain('npm fallback also failed');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('Windows installer end-to-end', () => {
@@ -792,6 +994,10 @@ function createFakeNodeArchive(tmpDir, options = {}) {
     const outsideTarget = path.join(tmpDir, 'outside-node-helper.js');
     writeFileSync(outsideTarget, 'outside\n');
     symlinkSync(outsideTarget, path.join(fakeNodeDir, 'bin', 'npm'));
+  }
+
+  if (options.withNodeSymlinkCycle) {
+    symlinkSync('../bin', path.join(fakeNodeDir, 'bin', 'cycle'));
   }
 
   const archive = path.join(tmpDir, 'node-v20.0.0-linux-x64.tar.gz');
@@ -1057,6 +1263,38 @@ function createSymlinkStandaloneArchive(tmpDir) {
       stdio: 'ignore',
     },
   );
+  writeChecksumFile(outDir, path.basename(archive));
+  return archive;
+}
+
+function createTraversalStandaloneArchive(tmpDir) {
+  const maliciousRoot = path.join(tmpDir, 'malicious');
+  const packageRoot = path.join(maliciousRoot, 'qwen-code');
+  mkdirSync(path.join(packageRoot, 'bin'), { recursive: true });
+  mkdirSync(path.join(packageRoot, 'node', 'bin'), { recursive: true });
+  writeFileSync(
+    path.join(packageRoot, 'bin', 'qwen'),
+    '#!/usr/bin/env sh\necho 0.0.0-smoke\n',
+  );
+  chmodSync(path.join(packageRoot, 'bin', 'qwen'), 0o755);
+  writeFileSync(
+    path.join(packageRoot, 'node', 'bin', 'node'),
+    '#!/usr/bin/env sh\necho 0.0.0-smoke\n',
+  );
+  chmodSync(path.join(packageRoot, 'node', 'bin', 'node'), 0o755);
+  writeFileSync(
+    path.join(packageRoot, 'manifest.json'),
+    JSON.stringify({ name: '@qwen-code/qwen-code' }),
+  );
+  writeFileSync(path.join(tmpDir, 'qwen-slip'), 'path traversal\n');
+
+  const outDir = path.join(tmpDir, 'out');
+  mkdirSync(outDir, { recursive: true });
+  const archive = path.join(outDir, 'qwen-code-linux-x64.zip');
+  execFileSync('zip', ['-qr', archive, 'qwen-code', '../qwen-slip'], {
+    cwd: maliciousRoot,
+    stdio: 'ignore',
+  });
   writeChecksumFile(outDir, path.basename(archive));
   return archive;
 }

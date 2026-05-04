@@ -37,13 +37,28 @@ const TARGETS = new Map([
 ]);
 
 const DIST_REQUIRED_PATHS = ['cli.js', 'vendor', 'bundled/qc-helper/docs'];
+const DIST_ALLOWED_ENTRIES = new Set([
+  'cli.js',
+  'vendor',
+  'bundled',
+  'package.json',
+  'README.md',
+  'LICENSE',
+  'locales',
+  'examples',
+]);
+const DIST_ALLOWED_ENTRY_PATTERNS = [
+  /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,
+];
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
 
-try {
-  await main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+if (isMainModule()) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
 }
 
 async function main() {
@@ -85,7 +100,7 @@ async function main() {
     fs.mkdirSync(packageRoot, { recursive: true });
     fs.mkdirSync(runtimeExtractDir, { recursive: true });
 
-    copyRuntimeAssets(packageRoot);
+    copyRuntimeAssets(packageRoot, outDir);
     extractNodeArchive(nodeArchive, runtimeExtractDir);
     const nodeDir = path.join(packageRoot, 'node');
     copyExtractedNode(runtimeExtractDir, nodeDir);
@@ -101,15 +116,23 @@ async function main() {
       fs.rmSync(outputPath, { force: true });
     }
     createArchive(targetConfig.outputExtension, outputPath, tempRoot);
-    await writeSha256Sums(outDir);
+    if (!args.skipChecksums) {
+      await writeSha256Sums(outDir);
+    }
 
     console.log(`Created ${path.relative(rootDir, outputPath)}`);
-    console.log(
-      `Updated ${path.relative(rootDir, path.join(outDir, 'SHA256SUMS'))}`,
-    );
+    if (!args.skipChecksums) {
+      console.log(
+        `Updated ${path.relative(rootDir, path.join(outDir, 'SHA256SUMS'))}`,
+      );
+    }
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
+}
+
+function isMainModule() {
+  return process.argv[1] && path.resolve(process.argv[1]) === __filename;
 }
 
 function parseArgs(argv) {
@@ -117,6 +140,7 @@ function parseArgs(argv) {
     help: false,
     outDir: undefined,
     nodeArchive: undefined,
+    skipChecksums: false,
     target: undefined,
     version: undefined,
   };
@@ -143,6 +167,9 @@ function parseArgs(argv) {
       case '--version':
         args.version = readOptionValue(argv, index, arg);
         index += 1;
+        break;
+      case '--skip-checksums':
+        args.skipChecksums = true;
         break;
       default:
         fail(`Unknown option: ${arg}`);
@@ -171,6 +198,7 @@ Options:
   --node-archive PATH    Downloaded Node.js runtime archive.
   --out-dir DIR          Output directory. Defaults to dist/standalone.
   --version VERSION      Qwen Code version. Defaults to package.json version.
+  --skip-checksums       Do not update SHA256SUMS. Used by release packaging.
   -h, --help             Show this help message.`);
 }
 
@@ -200,13 +228,17 @@ function readPackageVersion() {
   return packageJson.version;
 }
 
-function copyRuntimeAssets(packageRoot) {
+function copyRuntimeAssets(packageRoot, outDir) {
   const libDir = path.join(packageRoot, 'lib');
+  const skippedDistEntry = topLevelDistEntryForPath(outDir);
   fs.mkdirSync(libDir, { recursive: true });
 
   for (const entry of fs.readdirSync(distDir)) {
-    if (entry === 'standalone') {
+    if (entry === skippedDistEntry || entry === '.DS_Store') {
       continue;
+    }
+    if (!isAllowedDistEntry(entry)) {
+      fail(`Unexpected dist asset: ${path.join(distDir, entry)}`);
     }
     fs.cpSync(path.join(distDir, entry), path.join(libDir, entry), {
       recursive: true,
@@ -223,15 +255,30 @@ function copyRuntimeAssets(packageRoot) {
     );
   }
 
-  const distPackageJson = path.join(distDir, 'package.json');
-  if (fs.existsSync(distPackageJson)) {
-    fs.copyFileSync(distPackageJson, path.join(packageRoot, 'package.json'));
-  } else {
-    fs.copyFileSync(
-      path.join(rootDir, 'package.json'),
-      path.join(packageRoot, 'package.json'),
-    );
+  fs.copyFileSync(
+    path.join(rootDir, 'package.json'),
+    path.join(packageRoot, 'package.json'),
+  );
+}
+
+function topLevelDistEntryForPath(candidatePath) {
+  const relative = path.relative(distDir, candidatePath);
+  if (
+    relative === '' ||
+    relative.startsWith('..') ||
+    path.isAbsolute(relative)
+  ) {
+    return undefined;
   }
+
+  return relative.split(path.sep)[0];
+}
+
+function isAllowedDistEntry(entry) {
+  return (
+    DIST_ALLOWED_ENTRIES.has(entry) ||
+    DIST_ALLOWED_ENTRY_PATTERNS.some((pattern) => pattern.test(entry))
+  );
 }
 
 function extractNodeArchive(nodeArchive, extractDir) {
@@ -295,64 +342,95 @@ function copyExtractedNode(extractDir, nodeDir) {
 
   // Official Unix Node.js archives include internal npm/npx symlinks.
   // The installer rejects symlinks in final archives, so keep safe internal
-  // targets by copying their referents and reject any symlink that escapes.
-  assertSymlinksStayInside(sourceRoot);
-  copyDereferenced(sourceRoot, nodeDir);
-  assertNoSymlinks(nodeDir, 'Copied Node.js runtime still contains symlinks.');
+  // targets by copying their referents during a single checked traversal.
+  copyNodeRuntimeEntry(sourceRoot, nodeDir, {
+    realRoot: fs.realpathSync(sourceRoot),
+    sourceRoot,
+    activeDirectories: new Set(),
+  });
 }
 
-function copyDereferenced(source, destination) {
-  const stat = fs.statSync(source);
+function copyNodeRuntimeEntry(source, destination, state) {
+  const lstat = fs.lstatSync(source);
 
-  if (stat.isDirectory()) {
-    fs.mkdirSync(destination, { recursive: true });
-    fs.chmodSync(destination, stat.mode);
-    for (const entry of fs.readdirSync(source)) {
-      copyDereferenced(path.join(source, entry), path.join(destination, entry));
-    }
+  if (lstat.isSymbolicLink()) {
+    copyNodeRuntimeEntry(
+      resolveRuntimeSymlink(source, state),
+      destination,
+      state,
+    );
     return;
   }
 
-  if (stat.isFile()) {
+  if (lstat.isDirectory()) {
+    const realSource = fs.realpathSync(source);
+    if (state.activeDirectories.has(realSource)) {
+      fail(
+        `Node.js runtime contains a symlink cycle at ${displayRuntimePath(
+          state,
+          source,
+        )}`,
+      );
+    }
+
+    state.activeDirectories.add(realSource);
+    fs.mkdirSync(destination, { recursive: true });
+    fs.chmodSync(destination, lstat.mode);
+    for (const entry of fs.readdirSync(source)) {
+      copyNodeRuntimeEntry(
+        path.join(source, entry),
+        path.join(destination, entry),
+        state,
+      );
+    }
+    state.activeDirectories.delete(realSource);
+    return;
+  }
+
+  if (lstat.isFile()) {
     fs.copyFileSync(source, destination);
-    fs.chmodSync(destination, stat.mode);
+    fs.chmodSync(destination, lstat.mode);
     return;
   }
 
   fail(`Unsupported Node.js runtime entry type: ${source}`);
 }
 
-function assertSymlinksStayInside(root) {
-  const realRoot = fs.realpathSync(root);
-
-  for (const entry of walkDirectory(root)) {
-    if (!fs.lstatSync(entry).isSymbolicLink()) {
-      continue;
-    }
-
-    const target = fs.readlinkSync(entry);
-    const resolvedTarget = path.resolve(path.dirname(entry), target);
-    let realTarget;
-    try {
-      realTarget = fs.realpathSync(resolvedTarget);
-    } catch {
-      fail(
-        `Node.js runtime symlink points to a missing target: ${path.relative(
-          root,
-          entry,
-        )} -> ${target}`,
-      );
-    }
-
-    if (!isPathInside(realRoot, realTarget)) {
-      fail(
-        `Node.js runtime symlink escapes the archive: ${path.relative(
-          root,
-          entry,
-        )} -> ${target}`,
-      );
-    }
+function resolveRuntimeSymlink(source, state) {
+  const target = fs.readlinkSync(source);
+  const resolvedTarget = path.resolve(path.dirname(source), target);
+  let realTarget;
+  try {
+    realTarget = fs.realpathSync(resolvedTarget);
+  } catch (error) {
+    const errorCode =
+      error && typeof error === 'object' && 'code' in error
+        ? error.code
+        : undefined;
+    const reason =
+      errorCode === 'ELOOP' ? 'a symlink cycle' : 'a missing target';
+    fail(
+      `Node.js runtime symlink points to ${reason}: ${displayRuntimePath(
+        state,
+        source,
+      )} -> ${target}`,
+    );
   }
+
+  if (!isPathInside(state.realRoot, realTarget)) {
+    fail(
+      `Node.js runtime symlink escapes the archive: ${displayRuntimePath(
+        state,
+        source,
+      )} -> ${target}`,
+    );
+  }
+
+  return resolvedTarget;
+}
+
+function displayRuntimePath(state, source) {
+  return path.relative(state.sourceRoot, source) || '.';
 }
 
 function assertNoSymlinks(root, message) {
@@ -523,3 +601,5 @@ function run(command, args, options = {}) {
 function fail(message) {
   throw new Error(`Error: ${message}`);
 }
+
+export { writeSha256Sums };

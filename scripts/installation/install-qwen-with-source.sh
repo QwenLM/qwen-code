@@ -343,7 +343,7 @@ require_node() {
     if ! command_exists node; then
         log_error "Node.js was not found."
         print_node_help
-        exit 1
+        return 1
     fi
 
     local node_version
@@ -354,13 +354,13 @@ require_node() {
     if [[ -z "${node_major}" ]] || ! [[ "${node_major}" =~ ^[0-9]+$ ]]; then
         log_error "Unable to determine Node.js version."
         print_node_help
-        exit 1
+        return 1
     fi
 
     if [[ "${node_major}" -lt 20 ]]; then
         log_error "Node.js ${node_version:-unknown} is installed, but Node.js 20 or newer is required."
         print_node_help
-        exit 1
+        return 1
     fi
 
     log_success "Node.js ${node_version} detected."
@@ -377,7 +377,7 @@ require_npm() {
     echo "Please install Node.js with npm included, then rerun this installer."
     echo "Download Node.js from https://nodejs.org/ if your package manager"
     echo "installed Node without npm."
-    exit 1
+    return 1
 }
 
 get_npm_global_bin() {
@@ -576,7 +576,16 @@ verify_checksum() {
     fi
 
     local expected
-    expected=$(grep -E "(^|[[:space:]])[*]?${archive_name}$" "${checksum_file}" | awk '{print $1}' | head -n 1)
+    expected=$(awk -v archive_name="${archive_name}" '
+        {
+            name = $2
+            sub(/^\*/, "", name)
+            if (name == archive_name) {
+                print $1
+                exit
+            }
+        }
+    ' "${checksum_file}")
     if [[ -z "${expected}" ]]; then
         rm -f "${temp_checksum}"
         log_error "Checksum entry for ${archive_name} not found."
@@ -600,11 +609,60 @@ verify_checksum() {
     log_success "Checksum verified for ${archive_name}."
 }
 
+validate_archive_entry_path() {
+    local entry="$1"
+
+    while [[ "${entry}" == ./* ]]; do
+        entry="${entry#./}"
+    done
+
+    case "${entry}" in
+        ""|/*|..|../*|*/..|*/../*|*\\*)
+            log_error "Archive contains unsafe path: ${entry:-<empty>}"
+            return 1
+            ;;
+    esac
+}
+
+validate_archive_contents() {
+    local archive_path="$1"
+    local entries
+    local entry
+
+    case "${archive_path}" in
+        *.zip)
+            if ! command_exists unzip; then
+                log_error "unzip is required to inspect ${archive_path}."
+                return 1
+            fi
+            if ! entries=$(unzip -Z1 "${archive_path}"); then
+                log_error "Failed to inspect archive entries: ${archive_path}"
+                return 1
+            fi
+            ;;
+        *.tar.gz|*.tgz|*.tar.xz)
+            if ! entries=$(tar -tf "${archive_path}"); then
+                log_error "Failed to inspect archive entries: ${archive_path}"
+                return 1
+            fi
+            ;;
+        *)
+            log_error "Unsupported archive format: ${archive_path}"
+            return 1
+            ;;
+    esac
+
+    while IFS= read -r entry; do
+        validate_archive_entry_path "${entry}" || return 1
+    done <<< "${entries}"
+}
+
 extract_archive() {
     local archive_path="$1"
     local destination="$2"
 
     mkdir -p "${destination}" || return 1
+    validate_archive_contents "${archive_path}" || return 1
 
     case "${archive_path}" in
         *.zip)
@@ -664,6 +722,9 @@ EOF
 }
 
 install_standalone() {
+    # Return 2 only when a standalone archive is unavailable and detect mode may
+    # fall back to npm. Return 1 for integrity or install failures that should
+    # not be masked by an automatic fallback.
     local target=""
     local archive_name=""
     local archive_path=""
@@ -798,8 +859,8 @@ install_standalone() {
 }
 
 install_npm() {
-    require_node
-    require_npm
+    require_node || return 1
+    require_npm || return 1
 
     if command_exists qwen; then
         local qwen_version
@@ -830,7 +891,7 @@ install_npm() {
     echo "If the failure is a permission error, install Node.js with a user-owned"
     echo "Node version manager or fix your npm global package directory, then run:"
     echo "  npm install -g @qwen-code/qwen-code@latest --registry ${NPM_REGISTRY}"
-    exit 1
+    return 1
 }
 
 print_final_instructions() {
@@ -892,8 +953,13 @@ main() {
                 standalone_status=$?
                 if [[ "${standalone_status}" -eq 2 ]]; then
                     log_warning "Falling back to npm installation."
-                    install_npm
-                    print_final_instructions "$(get_npm_global_bin)"
+                    if install_npm; then
+                        print_final_instructions "$(get_npm_global_bin)"
+                    else
+                        log_warning "Standalone archive was unavailable before npm fallback; npm fallback also failed."
+                        log_warning "Retry with --method standalone to debug the standalone failure, or install Node.js 20+ and rerun --method npm."
+                        exit 1
+                    fi
                 else
                     log_warning "Standalone install failed. Retry with --method npm to use npm, or --method standalone to debug the standalone failure."
                     exit "${standalone_status}"
