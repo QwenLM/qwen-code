@@ -72,7 +72,7 @@ describe('validateSymlinkScope', () => {
     // Without `path.relative`, a naive `realPath.startsWith(base + sep)`
     // check could still false-pass when the target is `/base/skillsX/...`
     // (sibling whose name starts with "skills"). path.relative('/base/skills',
-    // '/base/skillsX/foo') = '../skillsX/foo' → starts with '..' → rejected.
+    // '/base/skillsX/foo') = '../skillsX/foo' → first segment `..` → rejected.
     vi.mocked(fs.realpath).mockResolvedValue('/base/skillsX/foo');
     vi.mocked(fs.stat).mockResolvedValue({
       isDirectory: () => true,
@@ -86,6 +86,39 @@ describe('validateSymlinkScope', () => {
     if (!result.ok) {
       expect(result.reason).toBe('escapes');
     }
+  });
+
+  it('accepts an in-base directory whose first segment starts with two dots (e.g. "..shared")', async () => {
+    // Regression: `path.relative('/base', '/base/..shared/foo')` returns
+    // `'..shared/foo'`. The previous `rel.startsWith('..')` containment
+    // check false-rejected this legitimate in-base path. Containment
+    // must be segment-aware: only a literal `..` first segment escapes.
+    vi.mocked(fs.realpath).mockResolvedValue('/base/skills/..shared/foo');
+    vi.mocked(fs.stat).mockResolvedValue({
+      isDirectory: () => true,
+    } as Awaited<ReturnType<typeof fs.stat>>);
+
+    const result = await validateSymlinkScope(
+      '/base/skills/link',
+      '/base/skills',
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('accepts a single-segment in-base directory whose name is "..bar"', async () => {
+    // Companion to the previous case for the `rel === '..bar'` shape
+    // (no trailing path component). `'..bar'.split(/[/\\]/)[0] === '..bar'`
+    // which is not equal to `..`, so containment passes.
+    vi.mocked(fs.realpath).mockResolvedValue('/base/skills/..bar');
+    vi.mocked(fs.stat).mockResolvedValue({
+      isDirectory: () => true,
+    } as Awaited<ReturnType<typeof fs.stat>>);
+
+    const result = await validateSymlinkScope(
+      '/base/skills/link',
+      '/base/skills',
+    );
+    expect(result.ok).toBe(true);
   });
 
   it('rejects when target exists but is a file, not a directory', async () => {

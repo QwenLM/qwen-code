@@ -65,9 +65,16 @@ export async function validateSymlinkScope(
   const rel = path.relative(baseRealPath, realPath);
   // `rel === ''` means target IS the base directory — degenerate but
   // technically inside scope; let it through and rely on the caller's
-  // SKILL.md presence check to filter. `..` segment OR absolute means
-  // the target sits outside `baseRealPath` after canonicalization.
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+  // SKILL.md presence check to filter. Containment requires that the
+  // FIRST path segment is not `..`. The previous `rel.startsWith('..')`
+  // check false-rejected legitimate in-base directories whose names
+  // happen to start with two dots (`..shared/foo` is `path.relative`'s
+  // output for `/base/..shared/foo` against `/base` — a real filename
+  // shape, not a parent traversal). Split on both `/` and `\\` so the
+  // segment walk works regardless of platform-specific output from
+  // `path.relative`.
+  const segments = rel.split(/[/\\]/);
+  if (segments[0] === '..' || path.isAbsolute(rel)) {
     return { ok: false, reason: 'escapes' };
   }
   let targetStat: Awaited<ReturnType<typeof fs.stat>>;
