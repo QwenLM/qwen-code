@@ -3,7 +3,14 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { readFileSync, statSync, realpathSync } from 'node:fs';
+import {
+  readFileSync,
+  statSync,
+  realpathSync,
+  openSync,
+  readSync,
+  closeSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, extname } from 'node:path';
 import { sendMessage, getUploadUrl, uploadToCdn } from './api.js';
@@ -59,8 +66,12 @@ export function detectImageMime(data: Buffer): string {
   ) {
     return 'image/webp';
   }
-  // Default to JPEG; all others are rejected by extension whitelist
-  return 'image/jpeg';
+  if (data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  throw new Error(
+    'Unrecognized image format: magic bytes do not match any supported type',
+  );
 }
 
 /**
@@ -104,11 +115,13 @@ export function validateImagePath(
   }
 
   // Build the allowlist: /tmp/ (and macOS real /private/tmp/), os.tmpdir(),
-  // plus workspace directories passed by the caller.
+  // plus workspace directories passed by the caller. Use realpathSync to
+  // resolve symlinks (e.g. /tmp → /private/tmp on macOS).
   const ALLOWED_DIRS = [
     '/tmp/',
-    '/private/tmp/',
+    realpathSync('/tmp/') + '/',
     tmpdir() + '/',
+    realpathSync(tmpdir()) + '/',
     ...workspaceDirs.map((d) => resolve(d) + '/'),
   ];
 
@@ -116,21 +129,29 @@ export function validateImagePath(
     throw new Error(`Image path outside allowed directories: ${real}`);
   }
 
-  // Verify magic bytes match the extension
-  const head = readFileSync(real, { flag: 'r' });
-  const mime = detectImageMime(head);
-  const extToExpectedMime: Record<string, string> = {
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.webp': 'image/webp',
-  };
-  const expected = extToExpectedMime[ext];
-  if (mime !== expected) {
-    throw new Error(
-      `Image type mismatch: ext=${ext} expects ${expected} but got ${mime}`,
-    );
+  // Verify magic bytes match the extension (read only first 16 bytes to
+  // avoid TOCTOU double-read — sendImage reads the full file later).
+  let fd: number | undefined;
+  try {
+    fd = openSync(real, 'r');
+    const head = Buffer.alloc(16);
+    const bytesRead = readSync(fd, head, 0, 16, 0);
+    const mime = detectImageMime(head.slice(0, bytesRead));
+    const extToExpectedMime: Record<string, string> = {
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+    };
+    const expected = extToExpectedMime[ext];
+    if (mime !== expected) {
+      throw new Error(
+        `Image type mismatch: ext=${ext} expects ${expected} but got ${mime}`,
+      );
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 
   return real;
@@ -179,7 +200,7 @@ export async function sendImage(params: {
   // Step 1 (security): validate and resolve the image path
   const resolvedPath = validateImagePath(imagePath, workspaceDirs);
 
-  // Step 2: read file, compute metadata + generate random identifiers
+  // Step 1 (continued): read file, compute metadata + generate random identifiers
   const fileBuffer = readFileSync(resolvedPath);
   const rawsize = fileBuffer.length;
   const rawfilemd5 = computeMd5(fileBuffer);

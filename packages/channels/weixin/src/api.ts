@@ -39,6 +39,8 @@ function isRetryableError(err: unknown): boolean {
     if (err.errcode === -14) return false;
     // API-level transient errors (system busy, rate limit)
     if (err.errcode === -1 || err.errcode === 45011) return true;
+    // ret field is used by getUploadUrl and other endpoints
+    if (err.ret !== undefined && err.ret !== 0) return false;
     // Client errors (4xx except 429) — not retryable
     if (err.status >= 400 && err.status < 500) return err.status === 429;
     // Server errors (5xx) or network errors (status 0) — retryable
@@ -205,7 +207,10 @@ export async function sendMessage(
       errcode?: number;
       errmsg?: string;
     }>(baseUrl, '/ilink/bot/sendmessage', body, token);
-    if (resp.ret !== undefined && resp.ret !== 0) {
+    if (
+      (resp.ret !== undefined && resp.ret !== 0) ||
+      (resp.errcode !== undefined && resp.errcode !== 0)
+    ) {
       throw new WeixinApiError(
         `sendMessage failed: ret=${resp.ret} errcode=${resp.errcode} ${resp.errmsg || ''}`,
         200,
@@ -253,6 +258,7 @@ interface GetUploadUrlReq {
 
 interface GetUploadUrlResp {
   ret?: number;
+  errcode?: number;
   errmsg?: string;
   upload_full_url?: string;
   upload_param?: string;
@@ -297,9 +303,10 @@ export async function getUploadUrl(
     // Check API-level error first
     if (resp.ret !== undefined && resp.ret !== 0) {
       throw new WeixinApiError(
-        `getuploadurl failed: ret=${resp.ret} errcode=${undefined} errmsg=${resp.errmsg || '(none)'}`,
+        `getuploadurl failed: ret=${resp.ret} errcode=${resp.errcode ?? '(none)'} errmsg=${resp.errmsg || '(none)'}`,
         200,
         resp.ret,
+        resp.errcode,
       );
     }
 
@@ -314,9 +321,10 @@ export async function getUploadUrl(
     }
 
     throw new WeixinApiError(
-      `getuploadurl returned no URL: ret=${resp.ret} errmsg=${resp.errmsg || '(none)'}`,
+      `getuploadurl returned no URL: ret=${resp.ret} errcode=${resp.errcode ?? '(none)'} errmsg=${resp.errmsg || '(none)'}`,
       200,
       resp.ret,
+      resp.errcode,
     );
   });
 }

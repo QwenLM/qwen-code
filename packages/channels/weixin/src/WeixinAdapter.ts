@@ -19,11 +19,16 @@ import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
 import { sendText, sendImage, detectImageMime } from './send.js';
 import { downloadAndDecrypt } from './media.js';
-import { getConfig, sendTyping } from './api.js';
+import { getConfig, sendTyping, WeixinApiError } from './api.js';
 import { TypingStatus } from './types.js';
 
 /** In-memory typing ticket cache: userId -> typingTicket */
 const typingTickets = new Map<string, string>();
+
+/** Escape special regex characters in a string. */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export class WeixinChannel extends ChannelBase {
   private abortController: AbortController | null = null;
@@ -68,7 +73,9 @@ export class WeixinChannel extends ChannelBase {
         imageInstructions,
       ].join('\n');
     } else if (!this.config.instructions.includes('[IMAGE:')) {
-      this.config.instructions += '\n' + imageInstructions;
+      // Use a local copy to avoid mutating this.config.instructions on reconnect.
+      this.config.instructions =
+        this.config.instructions + '\n' + imageInstructions;
     }
     const account = loadAccount();
     if (!account) {
@@ -192,14 +199,23 @@ export class WeixinChannel extends ChannelBase {
       .replace(/```[\s\S]*?```/g, '')
       .replace(/`[^`]*`/g, '');
 
-    // Extract image paths from code-free text, replace markers in original text.
+    // Extract image paths from code-free text.
     const imageRegex = /\[IMAGE:\s*([^\]]+)\]/gi;
     const parsedImages: string[] = [];
     for (const m of textWithoutCode.matchAll(imageRegex)) {
       const trimmed = m[1]?.trim();
       if (trimmed) parsedImages.push(trimmed);
     }
-    let cleanedText = text.replace(imageRegex, '');
+
+    // Only strip markers that were actually parsed (avoids silently
+    // removing [IMAGE:] inside code blocks from the displayed text).
+    let cleanedText = text;
+    for (const path of parsedImages) {
+      cleanedText = cleanedText.replace(
+        new RegExp(`\\[IMAGE:\\s*${escapeRegex(path)}\\]`, 'gi'),
+        '',
+      );
+    }
 
     // Clean up double blank lines left by removed markers
     cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n').trim();
@@ -230,9 +246,10 @@ export class WeixinChannel extends ChannelBase {
             workspaceDirs,
           });
         } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err);
+          const status = err instanceof WeixinApiError ? err.status : 0;
+          const ret = err instanceof WeixinApiError ? err.ret : undefined;
           process.stderr.write(
-            `[Weixin:${this.name}] Failed to send image ${imagePath}: ${errMsg}\n`,
+            `[Weixin:${this.name}] Failed to send image (status=${status} ret=${ret})\n`,
           );
           try {
             await sendText({

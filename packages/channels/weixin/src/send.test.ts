@@ -28,11 +28,21 @@ vi.mock('node:os', () => ({
   tmpdir: () => '/tmp',
 }));
 
-vi.mock('node:fs', () => ({
-  readFileSync: mockReadFileSync,
-  statSync: mockStatSync,
-  realpathSync: mockRealpathSync,
-}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    readFileSync: mockReadFileSync,
+    statSync: mockStatSync,
+    realpathSync: mockRealpathSync,
+    openSync: vi.fn(() => 42),
+    readSync: vi.fn((_fd: number, buf: Buffer) => {
+      PNG_HEADER.copy(buf);
+      return PNG_HEADER.length;
+    }),
+    closeSync: vi.fn(),
+  };
+});
 
 vi.mock('node:path', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:path')>();
@@ -174,13 +184,11 @@ describe('sendImage', () => {
 
     await sendImage(defaultParams);
 
-    // Step 1: validateImagePath calls readFileSync for MIME check,
-    // then sendImage calls readFileSync for full file read.
-    expect(mockReadFileSync).toHaveBeenCalledTimes(2);
-    expect(mockReadFileSync).toHaveBeenNthCalledWith(1, '/tmp/test.png', {
-      flag: 'r',
-    });
-    expect(mockReadFileSync).toHaveBeenNthCalledWith(2, '/tmp/test.png');
+    // Step 1: validateImagePath uses openSync/readSync for magic-byte
+    // check (only 16 bytes), then sendImage calls readFileSync for
+    // full file read.
+    expect(mockReadFileSync).toHaveBeenCalledTimes(1);
+    expect(mockReadFileSync).toHaveBeenCalledWith('/tmp/test.png');
 
     // Step 2: get upload URL called with correct params
     const encryptedSize = Math.ceil((fakeImageData.length + 1) / 16) * 16;
