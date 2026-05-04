@@ -133,8 +133,10 @@ export function useBackgroundTaskView(
       // Dream entries: only surface tasks that actually fired. `pending`
       // is a sub-second transition state, and `skipped` records would
       // flood the dialog (every UserQuery that misses the gate creates
-      // one). Mirrors Claude Code's split — extractMemories stays
-      // invisible, autoDream/dream surfaces in the bg-tasks UI.
+      // one). Extract tasks intentionally stay out of this view — they
+      // fire on every UserQuery (much higher frequency than dream) and
+      // their completion is already covered by the `memory_saved` toast
+      // in useGeminiStream.
       //
       // Cap retained terminal entries — MemoryManager.tasks Map has no
       // eviction path, so completed/failed dreams accumulate forever
