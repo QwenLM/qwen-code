@@ -160,7 +160,8 @@ export const modelCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'info',
-            content: t('Model') + ': ' + modelName + ' (not in model registry)',
+            content:
+              t('Model') + ': ' + modelName + t(' (not in model registry)'),
           };
         }
       }

@@ -785,7 +785,7 @@ export default {
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'このセッションのモデルを切り替え（--fast で提案モデルを設定）',
   'Set a lighter model for prompt suggestions and speculative execution':
     'プロンプト提案と投機的実行用の軽量モデルを設定',
@@ -794,6 +794,8 @@ export default {
   'Authentication type not available.': '認証タイプが利用できません',
   'No models available for the current authentication type ({{authType}}).':
     '現在の認証タイプ({{authType}})で利用可能なモデルはありません',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
   // Clear
   'Starting a new session, resetting chat, and clearing terminal.':
     '新しいセッションを開始し、チャットをリセットし、ターミナルをクリアしています',
