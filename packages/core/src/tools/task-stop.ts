@@ -140,25 +140,16 @@ class TaskStopInvocation extends BaseToolInvocation<
     // trio (MemoryManager owns its own task map); only `dream` is
     // cancellable — extract is short-lived and runs on the request
     // path, so cancelling it would interfere with the user's own turn.
+    // cancelTask() is synchronous and the status guard above already
+    // confirmed `running`, so the call cannot fail in this branch — no
+    // extra error path is needed.
     const memoryManager = this.config.getMemoryManager();
     const memoryRecord = memoryManager.getTask(taskId);
     if (memoryRecord && memoryRecord.taskType === 'dream') {
       if (memoryRecord.status !== 'running') {
         return notRunningError('dream', taskId, memoryRecord.status);
       }
-      const aborted = memoryManager.cancelTask(taskId);
-      if (!aborted) {
-        return {
-          llmContent:
-            `Error: Dream task "${taskId}" could not be cancelled ` +
-            `(record state changed before abort landed).`,
-          returnDisplay: 'Task could not be cancelled.',
-          error: {
-            message: `Task could not be cancelled: ${taskId}`,
-            type: ToolErrorType.TASK_STOP_NOT_RUNNING,
-          },
-        };
-      }
+      memoryManager.cancelTask(taskId);
       return {
         llmContent:
           `Cancellation requested for dream task "${taskId}". ` +

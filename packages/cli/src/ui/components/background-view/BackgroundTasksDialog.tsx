@@ -309,10 +309,15 @@ const DetailBody: React.FC<{
 
 // ─── Dream detail body ─────────────────────────────────────
 //
-// Read-only for now: dream cancellation lands in the PR-2 follow-up
-// alongside `task_stop` integration. The body shows what the agent is
-// reviewing (session count), what it has touched (topic files, only
-// after completion), and the latest progress text from MemoryManager.
+// Shows what the agent is reviewing (session count), what it has
+// touched (topic files, only populated on completion), and the latest
+// progress text from MemoryManager. Cancellation is wired through the
+// shared `x stop` keystroke (handled by `cancelSelected` in the
+// context, which routes dream entries to `MemoryManager.cancelTask`).
+// In-flight progress is still static — the dream's fork agent reports
+// only at schedule + completion via MemoryManager.update; live
+// per-turn phase reporting requires extending runForkedAgent's
+// AgentPathParams with an onAssistantMessage callback (separate PR).
 //
 // Layout follows the Shell/Monitor convention — flat children of
 // MaxSizedBox separated by empty `<Box />` spacers (nesting a
