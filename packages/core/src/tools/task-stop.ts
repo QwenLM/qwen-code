@@ -125,7 +125,8 @@ class TaskStopInvocation extends BaseToolInvocation<
       monitorRegistry.cancel(taskId);
       return {
         llmContent:
-          `Cancellation requested for monitor "${taskId}".\n` +
+          `Cancellation requested for monitor "${taskId}". ` +
+          `Final status will be visible via /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter) once the process drains.\n` +
           `Command: ${monitorEntry.command}`,
         returnDisplay: `Cancelled monitor: ${monitorEntry.description}`,
       };
