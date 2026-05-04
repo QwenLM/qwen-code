@@ -23,6 +23,7 @@ export enum ToolErrorType {
   READ_CONTENT_FAILURE = 'read_content_failure',
   ATTEMPT_TO_CREATE_EXISTING_FILE = 'attempt_to_create_existing_file',
   FILE_TOO_LARGE = 'file_too_large',
+  FILE_STALE_BEFORE_WRITE = 'file_stale_before_write',
   PERMISSION_DENIED = 'permission_denied',
   NO_SPACE_LEFT = 'no_space_left',
   TARGET_IS_DIRECTORY = 'target_is_directory',

@@ -175,6 +175,33 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     let detectedEncoding: string | undefined;
     let detectedLineEnding: LineEnding | undefined;
     const dirName = path.dirname(file_path);
+
+    // Refuse to clobber a file that has changed since this session last
+    // saw it. The cache only blocks when there *is* a prior interaction
+    // (Read or Write) and the on-disk fingerprint no longer matches —
+    // brand-new files and files the model never read fall through.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      try {
+        const preStats = fs.statSync(file_path);
+        const reason = this.config
+          .getFileReadCache()
+          .staleWriteReason(file_path, preStats);
+        if (reason !== null) {
+          return {
+            llmContent: reason,
+            returnDisplay: reason,
+            error: {
+              message: reason,
+              type: ToolErrorType.FILE_STALE_BEFORE_WRITE,
+            },
+          };
+        }
+      } catch {
+        // stat raced with deletion or transient FS error — let the
+        // existing read/write path produce the canonical error.
+      }
+    }
+
     if (fileExists) {
       try {
         const fileInfo = await this.config

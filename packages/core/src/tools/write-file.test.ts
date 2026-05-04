@@ -70,6 +70,7 @@ const mockConfigInternal = {
     }) as unknown as ToolRegistry,
   getDefaultFileEncoding: () => 'utf-8',
   getFileReadCache: () => fileReadCache,
+  getFileReadCacheDisabled: () => false,
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -85,6 +86,12 @@ describe('WriteFileTool', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // The FileReadCache is module-scoped (line ~41) and would otherwise
+    // accumulate entries from prior tests, including stale (mtime, size)
+    // pairs at inodes the OS may reuse for newly-created fixture files.
+    // Clearing per-test mirrors what every real session start does
+    // (Config initializes a fresh cache).
+    fileReadCache.clear();
     // Create a unique temporary directory for files created outside the root
     tempDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'write-file-test-external-'),
@@ -797,6 +804,54 @@ describe('WriteFileTool', () => {
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
+    });
+
+    it('refuses to overwrite a file that changed since the last tracked Read', async () => {
+      // Reproduces the cross-agent / external-edit scenario: the model
+      // recorded a Read of foo.txt, then something else (another tool
+      // call running in parallel, a hook, or the user's own editor)
+      // mutated the file. WriteFile must not silently clobber.
+      fileReadCache.clear();
+      const filePath = path.join(rootDir, 'stale.txt');
+      fs.writeFileSync(filePath, 'original');
+      const initialStats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, initialStats, {
+        full: true,
+        cacheable: true,
+      });
+
+      // Mutate the file behind the cache's back, ensuring the mtime moves
+      // forward by at least one millisecond so the cache fingerprint
+      // differs from the new on-disk state.
+      const futureMs = initialStats.mtimeMs + 1000;
+      fs.writeFileSync(filePath, 'changed by someone else');
+      fs.utimesSync(filePath, futureMs / 1000, futureMs / 1000);
+
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'attempted overwrite',
+      });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_STALE_BEFORE_WRITE);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('changed by someone else');
+    });
+
+    it('proceeds normally when the model has never read the file', async () => {
+      // First-time writes (brand new files, files the user named without
+      // ever Reading) must continue to work — staleness is only a fence
+      // when the cache has a recorded prior interaction.
+      fileReadCache.clear();
+      const filePath = path.join(rootDir, 'new.txt');
+
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'hello',
+      });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('hello');
     });
   });
 });

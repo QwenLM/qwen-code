@@ -155,6 +155,38 @@ export class FileReadCache {
     this.byInode.delete(FileReadCache.inodeKey(stats));
   }
 
+  /**
+   * Used by Edit / WriteFile to refuse a write whose backing file has
+   * mutated out from under the model since its last tracked Read or
+   * write. Returns a non-null reason string when the caller should
+   * abort; null otherwise.
+   *
+   * The semantics intentionally match {@link check}, with one extra
+   * filter: an `unknown` entry never blocks. A file the model has not
+   * yet touched in this session is fair game to write — that covers
+   * brand new files and files the user named directly without ever
+   * Reading them. We only fence the case where the model *did* see a
+   * version of the file, then the file changed externally (another
+   * agent, a hook, the user's own editor), and the model is now about
+   * to overwrite based on stale knowledge.
+   *
+   * The returned message is what the model will see verbatim, so it is
+   * worded as a recovery instruction, not a stack trace.
+   */
+  staleWriteReason(absPath: string, stats: Stats): string | null {
+    const status = this.check(stats);
+    if (status.state !== 'stale') return null;
+    const entry = status.entry;
+    const prior = entry.lastReadAt ?? entry.lastWriteAt;
+    const ageSeconds =
+      prior === undefined ? undefined : Math.round((Date.now() - prior) / 1000);
+    const ageNote = ageSeconds === undefined ? '' : ` (${ageSeconds}s ago)`;
+    return (
+      `${absPath} has been modified since this session last touched it${ageNote}. ` +
+      `Re-read the file before writing — its contents are no longer what you saw.`
+    );
+  }
+
   /** Drop every entry. Used by tests and on Config shutdown. */
   clear(): void {
     this.byInode.clear();

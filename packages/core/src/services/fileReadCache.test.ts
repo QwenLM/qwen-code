@@ -107,6 +107,56 @@ describe('FileReadCache', () => {
     });
   });
 
+  describe('staleWriteReason', () => {
+    it('returns null for an unknown file (caller should not block)', () => {
+      const cache = new FileReadCache();
+      expect(cache.staleWriteReason('/x/foo.ts', makeStats())).toBeNull();
+    });
+
+    it('returns null when the file is fresh', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+      expect(cache.staleWriteReason('/x/foo.ts', stats)).toBeNull();
+    });
+
+    it('returns a recovery message when mtime drifted after a Read', () => {
+      const cache = new FileReadCache();
+      cache.recordRead('/x/foo.ts', makeStats({ mtimeMs: 1000 }), {
+        full: true,
+        cacheable: true,
+      });
+      const reason = cache.staleWriteReason(
+        '/x/foo.ts',
+        makeStats({ mtimeMs: 2000 }),
+      );
+      expect(reason).not.toBeNull();
+      expect(reason).toContain('/x/foo.ts');
+      expect(reason).toMatch(/re-read/i);
+    });
+
+    it('returns a recovery message when size drifted after a Write', () => {
+      const cache = new FileReadCache();
+      cache.recordWrite('/x/foo.ts', makeStats({ size: 100 }));
+      const reason = cache.staleWriteReason(
+        '/x/foo.ts',
+        makeStats({ size: 250 }),
+      );
+      expect(reason).not.toBeNull();
+      expect(reason).toMatch(/has been modified/i);
+    });
+
+    it("does not block a follow-up write after the tool's own write", () => {
+      // Edit / WriteFile call recordWrite() with the post-write stats;
+      // the cache is then in sync with disk. Without this, a tool that
+      // performs two writes back-to-back would self-block.
+      const cache = new FileReadCache();
+      const stats = makeStats({ mtimeMs: 5000, size: 50 });
+      cache.recordWrite('/x/foo.ts', stats);
+      expect(cache.staleWriteReason('/x/foo.ts', stats)).toBeNull();
+    });
+  });
+
   describe('recordRead', () => {
     beforeEach(() => {
       vi.useFakeTimers();

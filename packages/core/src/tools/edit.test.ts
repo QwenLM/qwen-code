@@ -82,6 +82,7 @@ describe('EditTool', () => {
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
+      getFileReadCacheDisabled: () => false,
     } as unknown as Config;
 
     // Reset mocks before each test

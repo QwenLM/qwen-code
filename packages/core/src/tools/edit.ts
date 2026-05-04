@@ -358,6 +358,33 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @returns Result of the edit operation
    */
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    // Refuse to edit a file that has changed since this session last
+    // saw it. The cache only blocks when there *is* a prior interaction
+    // (Read or Write) and the on-disk fingerprint no longer matches —
+    // first-time edits, brand-new files, and files the model has just
+    // had Read into context all fall through.
+    if (!this.config.getFileReadCacheDisabled()) {
+      try {
+        const preStats = fs.statSync(this.params.file_path);
+        const reason = this.config
+          .getFileReadCache()
+          .staleWriteReason(this.params.file_path, preStats);
+        if (reason !== null) {
+          return {
+            llmContent: reason,
+            returnDisplay: reason,
+            error: {
+              message: reason,
+              type: ToolErrorType.FILE_STALE_BEFORE_WRITE,
+            },
+          };
+        }
+      } catch {
+        // stat failure (file missing, race, etc.) — defer to the
+        // existing edit path's error handling.
+      }
+    }
+
     let editData: CalculatedEdit;
     try {
       editData = await this.calculateEdit(this.params);
