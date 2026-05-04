@@ -333,7 +333,7 @@ describe('Model-specific tool call formats', () => {
     expect(prompt).toContain('<tool_call>');
     expect(prompt).toContain('{"name": "run_shell_command"');
     expect(prompt).toContain(
-      '"arguments": {"command": "node server.js &", "is_background": true}',
+      '"arguments": {"command": "node server.js", "is_background": true}',
     );
     expect(prompt).toContain('</tool_call>');
 

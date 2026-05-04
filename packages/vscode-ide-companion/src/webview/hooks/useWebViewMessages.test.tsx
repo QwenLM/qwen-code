@@ -248,6 +248,24 @@ describe('useWebViewMessages', () => {
     expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
   });
 
+  it('clears waiting state when authCancelled is received', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'authCancelled',
+          },
+        }),
+      );
+    });
+
+    expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
+  });
+
   it('stores the latest insight report path when the ready event arrives', () => {
     const rendered = renderHookHarness();
     root = rendered.root;

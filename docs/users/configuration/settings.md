@@ -73,7 +73,13 @@ When both legacy settings are present with different values, the migration follo
 
 ### Available settings in `settings.json`
 
-Settings are organized into categories. All settings should be placed within their corresponding top-level category object in your `settings.json` file.
+Settings are organized into categories. Most settings should be placed within their corresponding top-level category object in your `settings.json` file. A few compatibility settings, such as `proxy`, are top-level keys.
+
+#### top-level
+
+| Setting | Type   | Description                                                                                                                                                                | Default     |
+| ------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `proxy` | string | Proxy URL for CLI HTTP requests. Precedence is `--proxy` > `proxy` in `settings.json` > `HTTPS_PROXY` / `https_proxy` / `HTTP_PROXY` / `http_proxy` environment variables. | `undefined` |
 
 #### general
 
@@ -470,6 +476,7 @@ Here is an example of a `settings.json` file with the nested structure, new as o
 
 ```
 {
+  "proxy": "http://localhost:7890",
   "general": {
     "vimMode": true,
     "preferredEditor": "code"

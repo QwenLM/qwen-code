@@ -48,22 +48,326 @@ import {
 
 const debugLogger = createDebugLogger('SHELL');
 
-/**
- * Strip a single bare trailing `&` (bash background operator) from a
- * command string. Returns the input unchanged if the trailing form is
- * `&&` (logical AND), `\&` (escaped literal `&`), or there is no `&`
- * at the end at all. Linear time, no regex backtracking risk.
- */
-function stripTrailingBackgroundAmp(command: string): string {
-  const trimmed = command.trimEnd();
-  if (!trimmed.endsWith('&')) return command;
-  if (trimmed.endsWith('&&')) return command;
-  if (trimmed.endsWith('\\&')) return command;
-  return trimmed.slice(0, -1).trimEnd();
-}
-
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
+
+/**
+ * Detect standalone or leading `sleep N` patterns that should use Monitor
+ * instead. Catches `sleep 5`, `sleep 2.5`, `sleep 2s`,
+ * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` — but not sleep
+ * inside pipelines, subshells, backgrounded commands, or scripts (those are
+ * fine).
+ */
+export function detectBlockedSleepPattern(command: string): string | null {
+  // Strip trailing shell comments first; otherwise `sleep 5 # wait` would
+  // present `# wait` as the suffix, which `getSleepSequentialSeparator`
+  // rejects (only &&/||/;/\n are recognized), letting the foreground sleep
+  // bypass the guard. Shell ignores top-level trailing comments, so for the
+  // purposes of detection they are equivalent to end-of-command.
+  const trimmed = trimTrailingShellComment(command).trim();
+  if (!trimmed.startsWith('sleep')) return null;
+  const afterSleep = trimmed.slice('sleep'.length);
+  if (!afterSleep || !/\s/.test(afterSleep[0]!)) return null;
+
+  let index = 0;
+  while (index < afterSleep.length && /\s/.test(afterSleep[index]!)) {
+    index++;
+  }
+  const durationStart = index;
+  while (
+    index < afterSleep.length &&
+    !/\s/.test(afterSleep[index]!) &&
+    ![';', '&', '|', '\n'].includes(afterSleep[index]!)
+  ) {
+    index++;
+  }
+
+  const durationToken = afterSleep.slice(durationStart, index);
+  const secs = parseSleepDurationToSeconds(durationToken);
+  if (secs === null || secs < 2) return null;
+
+  const suffix = afterSleep.slice(index);
+  const separator = getSleepSequentialSeparator(suffix);
+  if (separator === null) return null;
+
+  const rest = separator.rest.trim();
+  return rest
+    ? `sleep ${durationToken} followed by: ${rest}`
+    : `standalone sleep ${durationToken}`;
+}
+
+function parseSleepDurationToSeconds(token: string): number | null {
+  if (!token) return null;
+
+  let index = 0;
+  let seenDigit = false;
+  let seenDot = false;
+  while (index < token.length) {
+    const char = token[index]!;
+    if (char >= '0' && char <= '9') {
+      seenDigit = true;
+      index++;
+      continue;
+    }
+    if (char === '.' && !seenDot) {
+      seenDot = true;
+      index++;
+      continue;
+    }
+    break;
+  }
+
+  if (!seenDigit) return null;
+  const value = Number.parseFloat(token.slice(0, index));
+  if (!Number.isFinite(value)) return null;
+
+  const unit = token.slice(index).toLowerCase();
+  switch (unit || 's') {
+    case 'ms':
+      return value / 1000;
+    case 's':
+      return value;
+    case 'm':
+      return value * 60;
+    case 'h':
+      return value * 60 * 60;
+    case 'd':
+      return value * 60 * 60 * 24;
+    default:
+      return null;
+  }
+}
+
+function getSleepSequentialSeparator(suffix: string): { rest: string } | null {
+  let index = 0;
+  while (
+    index < suffix.length &&
+    suffix[index] !== '\n' &&
+    /\s/.test(suffix[index]!)
+  ) {
+    index++;
+  }
+
+  const restWithSeparator = suffix.slice(index);
+  if (!restWithSeparator) return { rest: '' };
+  if (
+    restWithSeparator.startsWith('&&') ||
+    restWithSeparator.startsWith('||')
+  ) {
+    return { rest: restWithSeparator.slice(2) };
+  }
+  if (restWithSeparator[0] === ';' || restWithSeparator[0] === '\n') {
+    return { rest: restWithSeparator.slice(1) };
+  }
+  return null;
+}
+
+function trimTrailingShellComment(command: string): string {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let escapeNext = false;
+  let commandSubstitutionDepth = 0;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+
+    if (inSingleQuote) {
+      if (ch === "'") inSingleQuote = false;
+      continue;
+    }
+
+    if (inBacktick) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '"') {
+        inDoubleQuote = false;
+        continue;
+      }
+      if (ch === '$' && command[i + 1] === '(') {
+        commandSubstitutionDepth++;
+        i++;
+        continue;
+      }
+      if (ch === ')' && commandSubstitutionDepth > 0) {
+        commandSubstitutionDepth--;
+      }
+      continue;
+    }
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$' && command[i + 1] === '(') {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+    if (
+      ch === '#' &&
+      commandSubstitutionDepth === 0 &&
+      (i === 0 || /\s/.test(command[i - 1]!))
+    ) {
+      return command.slice(0, i);
+    }
+  }
+
+  return command;
+}
+
+function hasTopLevelTrailingBackgroundOperator(command: string): boolean {
+  const commentTrimmed = trimTrailingShellComment(command);
+  const trimmed = commentTrimmed.trimEnd();
+  if (!trimmed.endsWith('&')) return false;
+
+  const trailingAmpIndex = trimmed.length - 1;
+  const previousNonWhitespaceIndex = (() => {
+    for (let i = trailingAmpIndex - 1; i >= 0; i--) {
+      if (!/\s/.test(trimmed[i]!)) return i;
+    }
+    return -1;
+  })();
+
+  if (previousNonWhitespaceIndex >= 0) {
+    const previous = trimmed[previousNonWhitespaceIndex]!;
+    if (previous === '&' || previous === '|' || previous === '\\') {
+      return false;
+    }
+  }
+
+  let backslashCount = 0;
+  for (let i = trailingAmpIndex - 1; i >= 0 && trimmed[i] === '\\'; i--) {
+    backslashCount++;
+  }
+  if (backslashCount % 2 === 1) return false;
+
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let escapeNext = false;
+  let commandSubstitutionDepth = 0;
+
+  for (let i = 0; i <= trailingAmpIndex; i++) {
+    const ch = trimmed[i]!;
+
+    if (inSingleQuote) {
+      if (ch === "'") inSingleQuote = false;
+      continue;
+    }
+
+    if (inBacktick) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '"') {
+        inDoubleQuote = false;
+        continue;
+      }
+      if (ch === '$' && trimmed[i + 1] === '(') {
+        commandSubstitutionDepth++;
+        i++;
+        continue;
+      }
+      if (ch === ')' && commandSubstitutionDepth > 0) {
+        commandSubstitutionDepth--;
+      }
+      continue;
+    }
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$' && trimmed[i + 1] === '(') {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+    if (i === trailingAmpIndex) {
+      return commandSubstitutionDepth === 0;
+    }
+  }
+
+  return false;
+}
 
 export interface ShellToolParams {
   command: string;
@@ -137,6 +441,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
   ): Promise<ToolCallConfirmationDetails> {
     const command = stripShellWrapper(this.params.command);
     const pm = this.config.getPermissionManager?.();
+    const cwd = this.params.directory || this.config.getTargetDir();
 
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
@@ -155,7 +460,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       if (pm) {
         try {
-          if ((await pm.isCommandAllowed(sub)) === 'allow') {
+          if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
             continue;
           }
         } catch (e) {
@@ -215,8 +520,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
   ): Promise<ToolResult> {
-    const strippedCommand = stripShellWrapper(this.params.command);
-
     if (signal.aborted) {
       return {
         llmContent: 'Command was cancelled by user before it could start.',
@@ -239,7 +542,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     // Add co-author to git commit commands
-    const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+    const processedCommand = this.addCoAuthorToGitCommit(
+      this.params.command.trim(),
+    );
     const commandToExecute = processedCommand;
     const cwd = this.params.directory || this.config.getTargetDir();
 
@@ -433,26 +738,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
-    const strippedCommand = stripShellWrapper(this.params.command);
-    // Strip a single bare trailing `&` (the bash background operator) before
-    // spawn: bash treats it as background-detach, exits the wrapper
-    // immediately, and the real child outlives the wrapper — the registry
-    // would settle as `completed` while the shell is still running, and
-    // chunked output would land on a closed stream. The managed path is
-    // itself the backgrounding mechanism, so the trailing `&` is redundant.
-    //
-    // Deliberately precise: do not touch `&&` (logical AND), `\&` (escaped
-    // literal `&`), or commands without a trailing `&`. Earlier `\s*&+\s*$`
-    // was both too greedy (it ate `&&` and `\&`) and a ReDoS hazard on
-    // long all-`&` inputs. Plain string checks here are linear and clearer
-    // than a lookbehind regex.
-    const noTrailingAmp = stripTrailingBackgroundAmp(strippedCommand);
-    if (noTrailingAmp !== strippedCommand) {
-      debugLogger.warn(
-        'Stripped trailing & from background shell command — managed path handles backgrounding',
-      );
-    }
-    const processedCommand = this.addCoAuthorToGitCommit(noTrailingAmp);
+    const processedCommand = this.addCoAuthorToGitCommit(
+      this.params.command.trim(),
+    );
     const cwd = this.params.directory || this.config.getTargetDir();
 
     // Output goes under the project temp dir (which `ReadFileTool`
@@ -760,6 +1048,13 @@ export class ShellTool extends BaseDeclarativeTool<
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
     }
+    const strippedCommand = stripShellWrapper(params.command);
+    if (
+      params.is_background &&
+      hasTopLevelTrailingBackgroundOperator(strippedCommand)
+    ) {
+      return 'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.';
+    }
     if (getCommandRoots(params.command).length === 0) {
       return 'Could not identify command root to obtain permission from user.';
     }
@@ -799,6 +1094,24 @@ export class ShellTool extends BaseDeclarativeTool<
 
       if (!isWithinWorkspace) {
         return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
+      }
+    }
+    // Sleep interception: block sleep >= 2s in foreground, suggest Monitor.
+    // Strip shell wrappers first so `bash -c 'sleep 5'` / `sh -c '...'` etc.
+    // cannot route around the check by hiding the foreground sleep inside a
+    // `-c` script. This matches every other sensitive check in this file
+    // (directory, read-only, command-root extraction, etc.).
+    if (!params.is_background) {
+      const sleepPattern = detectBlockedSleepPattern(
+        stripShellWrapper(params.command),
+      );
+      if (sleepPattern !== null) {
+        return (
+          `Blocked: ${sleepPattern}. ` +
+          'Run blocking commands in the background with is_background: true. ' +
+          'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
+          'If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds.'
+        );
       }
     }
     return null;

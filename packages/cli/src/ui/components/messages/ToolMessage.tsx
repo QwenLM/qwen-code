@@ -342,7 +342,10 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   embeddedShellFocused?: boolean;
   config?: Config;
   forceShowResult?: boolean;
-  /** Whether this tool's subagent confirmation prompt should respond to keyboard input. */
+  /**
+   * Whether this subagent owns keyboard input for confirmations and
+   * Ctrl+E/Ctrl+F display shortcuts.
+   */
   isFocused?: boolean;
   /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
   isWaitingForOtherApproval?: boolean;

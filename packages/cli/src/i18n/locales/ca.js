@@ -1708,6 +1708,7 @@ export default {
     "S'ha trobat {{count}} fitxer d'ordres TOML:",
   'Found {{count}} TOML command files:':
     "S'han trobat {{count}} fitxers d'ordres TOML:",
+  'Current tasks': 'Tasques actuals',
   '... and {{count}} more': '... i {{count}} més',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'El format TOML és obsolet. Voleu migrar-los al format Markdown?',
