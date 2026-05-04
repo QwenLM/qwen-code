@@ -921,9 +921,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Phase-2 cycling guard: require buffer to still look like an
       // "/export <fmt>" input so arrow/Tab keys can't clobber arbitrary text
       // the user typed after filling a format (e.g. after editing to "/help").
+      // Use the strict format parser rather than `startsWith('/export ')`, so
+      // inputs like "/export html --verbose" (with extra arguments) fall
+      // through to default handling instead of being overwritten.
       if (
         exportCompletionSelectionIndexRef.current !== null &&
-        buffer.text.trim().startsWith(`${EXPORT_COMMAND_INPUT} `) &&
+        getExportFormatFromInput(buffer.text) !== null &&
         !key.ctrl &&
         !key.meta &&
         !key.paste &&
@@ -1043,6 +1046,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
+          if (hasExportFormatSuggestions) {
+            // Mirror Up/Down export-specific handling so Tab/Enter in the
+            // Phase-1 popup also seed `exportCompletionSelectionIndexRef`,
+            // allowing Phase-2 cycling to continue from the selected format.
+            const activeIndex =
+              completion.activeSuggestionIndex === -1
+                ? 0
+                : completion.activeSuggestionIndex;
+            setExportCompletionInput(activeIndex);
+            return true;
+          }
           acceptActiveCompletionSuggestion();
           return true;
         }

@@ -999,6 +999,149 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should wrap to jsonl when pressing Up from the /export Phase 1 popup', async () => {
+    // Regression for PR #3701 second-round review: Phase 1 Up-arrow path
+    // (including 0 -> lastIndex wrap) had no test coverage.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[A');
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export jsonl');
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should wrap Phase 2 cycling backward when pressing Up repeatedly', async () => {
+    // Regression for PR #3701 second-round review: Phase 2 Up-arrow wrap
+    // logic had no test coverage (existing tests only used Down).
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Phase 1 Down -> /export md (ref=1).
+    stdin.write('\u001B[B');
+    await wait();
+    // Phase 2 Up -> /export html (ref=0).
+    stdin.write('\u001B[A');
+    await wait();
+    // Phase 2 Up wraps from index 0 to last index -> /export jsonl (ref=3).
+    stdin.write('\u001B[A');
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export html');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(4, '/export jsonl');
+    unmount();
+  });
+
+  it('should seed Phase 2 cycling when Tab accepts a format in the /export popup', async () => {
+    // Regression for PR #3701 second-round review (Suggestion): Tab in the
+    // Phase 1 popup must run the export-specific path so that
+    // exportCompletionSelectionIndexRef is seeded and subsequent arrow/Tab
+    // keys can continue cycling.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Tab in Phase 1 popup fills /export html and seeds the ref.
+    stdin.write('\t');
+    await wait();
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export html');
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+
+    // Phase 2 Down now cycles forward from the seeded ref.
+    stdin.write('\u001B[B');
+    await wait();
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md');
+
+    // Phase 2 Tab should also cycle (covers isCompletionTabKey branch).
+    stdin.write('\t');
+    await wait();
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export json');
+    unmount();
+  });
+
+  it('should not overwrite /export html with extra args when Down is pressed', async () => {
+    // Regression for PR #3701 second-round review (Critical): Phase 2 cycling
+    // guard used startsWith('/export '), which matched inputs like
+    // '/export html --verbose' and silently wiped out the extra arguments.
+    // The strict getExportFormatFromInput guard must let such inputs fall
+    // through without overwriting the buffer.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Seed Phase 2 state: Down fills /export md and sets ref=1.
+    stdin.write('\u001B[B');
+    await wait();
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md');
+
+    // Simulate the user appending extra arguments to the export input.
+    props.buffer.setText('/export md --verbose');
+    (props.buffer.setText as ReturnType<typeof vi.fn>).mockClear();
+
+    // Pressing Down must NOT replace the buffer with '/export json'.
+    stdin.write('\u001B[B');
+    await wait();
+    expect(props.buffer.setText).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should autocomplete on Enter when user arrow-navigated a perfect-match suggestion list', async () => {
     // Regression for PR #3701 review: the isPerfectMatch + navigated + Enter
     // branch was not covered by tests.
