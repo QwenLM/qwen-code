@@ -179,18 +179,23 @@ describe('WriteFileTool', () => {
       expect(() => tool.build(params)).toThrow(`Missing or empty "file_path"`);
     });
 
-    it('should unescape shell-escaped spaces in file_path', () => {
-      const escapedPath = path.join(rootDir, 'my\\ file.txt');
-      const params = {
-        file_path: escapedPath,
-        content: 'hello',
-      };
-      const invocation = tool.build(params);
-      expect(invocation).toBeDefined();
-      expect(invocation.params.file_path).toBe(
-        path.join(rootDir, 'my file.txt'),
-      );
-    });
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped spaces in file_path',
+      () => {
+        // On Windows, unescapePath is a no-op and backslashes are path
+        // separators, so the expected unescape behavior doesn't apply.
+        const escapedPath = path.join(rootDir, 'my\\ file.txt');
+        const params = {
+          file_path: escapedPath,
+          content: 'hello',
+        };
+        const invocation = tool.build(params);
+        expect(invocation).toBeDefined();
+        expect(invocation.params.file_path).toBe(
+          path.join(rootDir, 'my file.txt'),
+        );
+      },
+    );
   });
 
   describe('shouldConfirmExecute', () => {
@@ -472,31 +477,36 @@ describe('WriteFileTool', () => {
       expect(result.llmContent).not.toMatch(/User modified the `content`/);
     });
 
-    it('should write to a file with spaces in its name when given an escaped path', async () => {
-      const realPath = path.join(rootDir, 'my spaced write.txt');
-      const escapedPath = path.join(rootDir, 'my\\ spaced\\ write.txt');
-      const content = 'Written via escaped path.';
+    it.skipIf(process.platform === 'win32')(
+      'should write to a file with spaces in its name when given an escaped path',
+      async () => {
+        // On Windows, unescapePath is a no-op and backslashes are path
+        // separators, so shell-escaping behavior doesn't apply.
+        const realPath = path.join(rootDir, 'my spaced write.txt');
+        const escapedPath = path.join(rootDir, 'my\\ spaced\\ write.txt');
+        const content = 'Written via escaped path.';
 
-      const params = { file_path: escapedPath, content };
-      const invocation = tool.build(params);
+        const params = { file_path: escapedPath, content };
+        const invocation = tool.build(params);
 
-      const confirmDetails =
-        await invocation.getConfirmationDetails(abortSignal);
-      if (
-        typeof confirmDetails === 'object' &&
-        'onConfirm' in confirmDetails &&
-        confirmDetails.onConfirm
-      ) {
-        await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-      }
+        const confirmDetails =
+          await invocation.getConfirmationDetails(abortSignal);
+        if (
+          typeof confirmDetails === 'object' &&
+          'onConfirm' in confirmDetails &&
+          confirmDetails.onConfirm
+        ) {
+          await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+        }
 
-      const result = await invocation.execute(abortSignal);
+        const result = await invocation.execute(abortSignal);
 
-      // Should succeed — file created at the unescaped (real) path
-      expect(result.llmContent).toMatch(/Successfully created and wrote/);
-      expect(fs.existsSync(realPath)).toBe(true);
-      expect(fs.readFileSync(realPath, 'utf8')).toBe(content);
-    });
+        // Should succeed — file created at the unescaped (real) path
+        expect(result.llmContent).toMatch(/Successfully created and wrote/);
+        expect(fs.existsSync(realPath)).toBe(true);
+        expect(fs.readFileSync(realPath, 'utf8')).toBe(content);
+      },
+    );
   });
 
   describe('workspace boundary validation', () => {
