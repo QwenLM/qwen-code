@@ -40,15 +40,18 @@ export const isAtCommand = (query: string): boolean =>
 
 /**
  * Checks if a string looks like a valid slash command name.
- * Command names may contain Unicode letters/numbers/marks and the punctuation
- * used by built-in, MCP-style, extension-qualified, and filename-derived
- * commands, including "+" and "=". The bare "?" help alias is accepted
- * explicitly, while embedded "?" query-style tokens, path separators, and
+ * Command names are normalized to NFC and may contain Unicode
+ * letters/numbers/marks plus the punctuation used by built-in, MCP-style,
+ * extension-qualified, and filename-derived commands, including "+" and "=".
+ * The bare "?" help alias is accepted explicitly, while embedded "?"
+ * query-style tokens, path separators, combining separator lookalikes, and
  * shell operators are treated as regular text instead.
  *
  * @param name The potential command name to check (without the leading '/').
  * @returns True if the name matches the command name pattern, false otherwise.
  */
+const COMBINING_PATH_SEPARATOR_RE = /[\u0337\u0338]/u;
+
 export const looksLikeCommandName = (name: string): boolean => {
   if (!name) {
     return false;
@@ -56,7 +59,11 @@ export const looksLikeCommandName = (name: string): boolean => {
   if (name === '?') {
     return true;
   }
-  return /^[\p{L}\p{N}\p{M}:._@#\-+=]+$/u.test(name);
+  const normalizedName = name.normalize('NFC');
+  if (COMBINING_PATH_SEPARATOR_RE.test(normalizedName)) {
+    return false;
+  }
+  return /^[\p{L}\p{N}\p{M}:._@#+=-]+$/u.test(normalizedName);
 };
 
 /**

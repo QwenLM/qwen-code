@@ -31,7 +31,7 @@ export interface OpenAICredentials {
 }
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
 import { AuthState, MessageType } from '../types.js';
-import type { HistoryItem } from '../types.js';
+import type { HistoryItemWithoutId } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { backupSettingsFile } from '../../utils/settingsUtils.js';
 import {
@@ -92,7 +92,7 @@ export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 export const useAuthCommand = (
   settings: LoadedSettings,
   config: Config,
-  addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
   onAuthChange?: () => void,
 ) => {
   const unAuthenticated = config.getAuthType() === undefined;

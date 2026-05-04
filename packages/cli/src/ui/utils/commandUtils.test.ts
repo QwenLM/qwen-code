@@ -126,7 +126,13 @@ describe('commandUtils', () => {
       expect(looksLikeCommandName('api接口')).toBe(true);
       expect(looksLikeCommandName('命令')).toBe(true);
       expect(looksLikeCommandName('文档')).toBe(true);
+      expect(looksLikeCommandName('cafe\u0301')).toBe(true);
+      expect(looksLikeCommandName('\u0915\u0943')).toBe(true);
       expect(looksLikeCommandName('?')).toBe(true);
+    });
+
+    it('should return false for combining path-separator lookalikes', () => {
+      expect(looksLikeCommandName('etc\u0338passwd')).toBe(false);
     });
 
     it('should return false for embedded query-style question marks', () => {

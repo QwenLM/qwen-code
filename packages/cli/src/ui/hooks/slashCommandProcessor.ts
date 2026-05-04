@@ -58,7 +58,7 @@ type SerializableHistoryItem = Record<string, unknown>;
 const debugLogger = createDebugLogger('SLASH_COMMAND_PROCESSOR');
 
 function serializeHistoryItemForRecording(
-  item: Omit<HistoryItem, 'id'>,
+  item: HistoryItemWithoutId,
 ): SerializableHistoryItem {
   const clone: SerializableHistoryItem = { ...item };
   if ('timestamp' in clone && clone['timestamp'] instanceof Date) {
@@ -81,15 +81,6 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
 function getSlashCommandParts(query: string): string[] {
   const commandText = query.slice(1).trim();
   return commandText ? commandText.split(/\s+/) : [];
-}
-
-function isKnownTopLevelCommandToken(
-  token: string,
-  commands: readonly SlashCommand[],
-): boolean {
-  return commands.some(
-    (command) => command.name === token || command.altNames?.includes(token),
-  );
 }
 
 export interface SlashCommandProcessorActions {
@@ -454,6 +445,7 @@ export const useSlashCommandProcessor = (
       rawQuery: PartListUnion,
       oneTimeShellAllowlist?: Set<string>,
       overwriteConfirmed?: boolean,
+      existingInvocationItemId?: number,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -463,6 +455,12 @@ export const useSlashCommandProcessor = (
       if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
         return false;
       }
+
+      let parsedSlashCommand: ReturnType<typeof parseSlashCommand> | undefined;
+      const getParsedSlashCommand = () => {
+        parsedSlashCommand ??= parseSlashCommand(trimmed, commands);
+        return parsedSlashCommand;
+      };
 
       // For '/' prefix, only keep command-shaped inputs in the slash command
       // flow. Inputs with path separators, such as '/api/endpoint', should be
@@ -481,14 +479,14 @@ export const useSlashCommandProcessor = (
         // command typos remain visible instead of silently going to the model.
         if (
           commandParts.length > 1 &&
-          !isKnownTopLevelCommandToken(firstToken, commands)
+          !getParsedSlashCommand().commandToExecute
         ) {
           return false;
         }
       }
 
-      const recordedItems: Array<Omit<HistoryItem, 'id'>> = [];
-      const recordItem = (item: Omit<HistoryItem, 'id'>) => {
+      const recordedItems: HistoryItemWithoutId[] = [];
+      const recordItem = (item: HistoryItemWithoutId) => {
         recordedItems.push(item);
       };
       const addItemWithRecording: UseHistoryManagerReturn['addItem'] = (
@@ -506,20 +504,21 @@ export const useSlashCommandProcessor = (
       abortControllerRef.current = abortController;
 
       const userMessageTimestamp = Date.now();
-      let invocationItemId: number | undefined;
-      if (!isBtwCommand(trimmed)) {
+      let invocationItemId = existingInvocationItemId;
+      if (!isBtwCommand(trimmed) && invocationItemId === undefined) {
         invocationItemId = addItemWithRecording(
-          { type: MessageType.USER, text: trimmed },
+          { type: MessageType.USER, text: trimmed, sentToModel: false },
           userMessageTimestamp,
         );
       }
 
       let hasError = false;
+      let delegatedToRecursiveInvocation = false;
       const {
         commandToExecute,
         args,
         canonicalPath: resolvedCommandPath,
-      } = parseSlashCommand(trimmed, commands);
+      } = getParsedSlashCommand();
 
       const subcommand =
         resolvedCommandPath.length > 1
@@ -740,10 +739,13 @@ export const useSlashCommandProcessor = (
                     );
                   }
 
+                  delegatedToRecursiveInvocation = true;
                   return await handleSlashCommand(
                     result.originalInvocation.raw,
                     // Pass the approved commands as a one-time grant for this execution.
                     new Set(approvedCommands),
+                    undefined,
+                    invocationItemId,
                   );
                 }
                 case 'confirm_action': {
@@ -770,10 +772,12 @@ export const useSlashCommandProcessor = (
                     return { type: 'handled' };
                   }
 
+                  delegatedToRecursiveInvocation = true;
                   return await handleSlashCommand(
                     result.originalInvocation.raw,
                     undefined,
                     true,
+                    invocationItemId,
                   );
                 }
                 case 'stream_messages': {
@@ -843,6 +847,7 @@ export const useSlashCommandProcessor = (
             trimmed.replace(/^[/?]/, '').split(/\s+/)[0] ||
             trimmed;
           const shouldRecord =
+            !delegatedToRecursiveInvocation &&
             !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
           try {
             if (shouldRecord) {
@@ -866,7 +871,12 @@ export const useSlashCommandProcessor = (
             );
           }
         }
-        if (config && resolvedCommandPath[0] && !hasError) {
+        if (
+          config &&
+          resolvedCommandPath[0] &&
+          !hasError &&
+          !delegatedToRecursiveInvocation
+        ) {
           const event = makeSlashCommandEvent({
             command: resolvedCommandPath[0],
             subcommand,

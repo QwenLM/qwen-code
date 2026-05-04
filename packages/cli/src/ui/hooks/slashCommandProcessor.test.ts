@@ -12,6 +12,7 @@ import {
 } from './slashCommandProcessor.js';
 import type {
   CommandContext,
+  ConfirmActionReturn,
   ConfirmShellCommandsActionReturn,
   SlashCommand,
 } from '../commands/types.js';
@@ -120,10 +121,11 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenMemoryDialog = vi.fn();
   const mockOpenModelDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
+  const mockRecordSlashCommand = vi.fn();
 
   const mockConfig = makeFakeConfig({});
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
-    recordSlashCommand: vi.fn(),
+    recordSlashCommand: mockRecordSlashCommand,
   });
   const mockSettings = {} as LoadedSettings;
 
@@ -278,6 +280,14 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand('/nonexistent');
       });
 
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.USER,
+          text: '/nonexistent',
+          sentToModel: false,
+        },
+        expect.any(Number),
+      );
       // Expect 2 calls: one for the user's input, one for the error message.
       expect(mockAddItem).toHaveBeenCalledTimes(2);
       expect(mockAddItem).toHaveBeenLastCalledWith(
@@ -638,7 +648,7 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.USER, text: '/filecmd' },
+        { type: MessageType.USER, text: '/filecmd', sentToModel: false },
         expect.any(Number),
       );
       expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
@@ -671,7 +681,7 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.USER, text: '/mcpcmd' },
+        { type: MessageType.USER, text: '/mcpcmd', sentToModel: false },
         expect.any(Number),
       );
       expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
@@ -806,6 +816,54 @@ describe('useSlashCommandProcessor', () => {
       expect(finalContext.session.sessionShellAllowlist.size).toBe(0);
     });
 
+    it('should not duplicate the user history item when re-running after shell confirmation', async () => {
+      const action = vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: 'confirm_shell_commands',
+          commandsToConfirm: ['echo ok'],
+          originalInvocation: { raw: '/shellcmd' },
+        } satisfies ConfirmShellCommandsActionReturn)
+        .mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'run the approved command' }],
+        });
+      const command = createTestCommand({ name: 'shellcmd', action });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      act(() => {
+        result.current.handleSlashCommand('/shellcmd');
+      });
+      await waitFor(() => {
+        expect(result.current.shellConfirmationRequest).not.toBeNull();
+      });
+
+      await act(async () => {
+        result.current.shellConfirmationRequest?.onConfirm(
+          ToolConfirmationOutcome.ProceedOnce,
+          ['echo ok'],
+        );
+      });
+
+      await waitFor(() => {
+        expect(action).toHaveBeenCalledTimes(2);
+      });
+
+      const shellInvocationCalls = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === MessageType.USER && item.text === '/shellcmd',
+      );
+      expect(shellInvocationCalls).toHaveLength(1);
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+      expect(
+        mockRecordSlashCommand.mock.calls.filter(
+          ([payload]) =>
+            payload.phase === 'invocation' &&
+            payload.rawCommand === '/shellcmd',
+        ),
+      ).toHaveLength(1);
+    });
+
     it('should re-run command and update session allowlist on "Proceed Always"', async () => {
       const result = setupProcessorHook([shellCommand]);
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
@@ -845,6 +903,58 @@ describe('useSlashCommandProcessor', () => {
           true,
         );
       });
+    });
+  });
+
+  describe('Action Confirmation Flow', () => {
+    it('should not duplicate the user history item when re-running after action confirmation', async () => {
+      const action = vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: 'confirm_action',
+          prompt: 'Proceed?',
+          originalInvocation: { raw: '/confirmcmd' },
+        } satisfies ConfirmActionReturn)
+        .mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Confirmed!',
+        });
+      const command = createTestCommand({ name: 'confirmcmd', action });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      act(() => {
+        result.current.handleSlashCommand('/confirmcmd');
+      });
+      await waitFor(() => {
+        expect(result.current.confirmationRequest).not.toBeNull();
+      });
+
+      await act(async () => {
+        result.current.confirmationRequest?.onConfirm(true);
+      });
+
+      await waitFor(() => {
+        expect(action).toHaveBeenCalledTimes(2);
+      });
+
+      const confirmInvocationCalls = mockAddItem.mock.calls.filter(
+        ([item]) =>
+          item.type === MessageType.USER && item.text === '/confirmcmd',
+      );
+      expect(confirmInvocationCalls).toHaveLength(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.INFO, text: 'Confirmed!' },
+        expect.any(Number),
+      );
+      expect(
+        mockRecordSlashCommand.mock.calls.filter(
+          ([payload]) =>
+            payload.phase === 'invocation' &&
+            payload.rawCommand === '/confirmcmd',
+        ),
+      ).toHaveLength(1);
     });
   });
 
@@ -1136,7 +1246,7 @@ describe('useSlashCommandProcessor', () => {
 
       // It should be added to the history.
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.USER, text: '/exit' },
+        { type: MessageType.USER, text: '/exit', sentToModel: false },
         expect.any(Number),
       );
     });

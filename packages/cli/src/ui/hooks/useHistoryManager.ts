@@ -14,7 +14,7 @@ type HistoryItemUpdater = (
 
 export interface UseHistoryManagerReturn {
   history: HistoryItem[];
-  addItem: (itemData: Omit<HistoryItem, 'id'>, baseTimestamp: number) => number; // Returns the generated ID
+  addItem: (itemData: HistoryItemWithoutId, baseTimestamp: number) => number; // Returns the generated ID
   updateItem: (
     id: number,
     updates: Partial<HistoryItemWithoutId> | HistoryItemUpdater,
@@ -46,7 +46,7 @@ export function useHistory(): UseHistoryManagerReturn {
 
   // Adds a new item to the history state with a unique ID.
   const addItem = useCallback(
-    (itemData: Omit<HistoryItem, 'id'>, baseTimestamp: number): number => {
+    (itemData: HistoryItemWithoutId, baseTimestamp: number): number => {
       const id = getNextMessageId(baseTimestamp);
       const newItem: HistoryItem = { ...itemData, id } as HistoryItem;
 
