@@ -227,6 +227,80 @@ describe('McpClientManager', () => {
     expect(secondClient.disconnect).toHaveBeenCalledOnce();
   });
 
+  it('should coalesce concurrent discovery for the same server', async () => {
+    let resolveDisconnect!: () => void;
+    const disconnectPromise = new Promise<void>((resolve) => {
+      resolveDisconnect = resolve;
+    });
+    const firstClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(() => disconnectPromise),
+      getStatus: vi.fn(),
+    };
+    const replacementClients: Array<{
+      connect: ReturnType<typeof vi.fn>;
+      discover: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
+      getStatus: ReturnType<typeof vi.fn>;
+    }> = [];
+
+    vi.mocked(McpClient).mockImplementation(() => {
+      if (
+        replacementClients.length === 0 &&
+        vi.mocked(McpClient).mock.calls.length === 1
+      ) {
+        return firstClient as unknown as McpClient;
+      }
+
+      const replacementClient = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(),
+      };
+      replacementClients.push(replacementClient);
+      return replacementClient as unknown as McpClient;
+    });
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ 'test-server': {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+
+    await manager.discoverMcpToolsForServer(
+      'test-server',
+      {} as unknown as Config,
+    );
+
+    const firstRediscovery = manager.discoverMcpToolsForServer(
+      'test-server',
+      {} as unknown as Config,
+    );
+    await Promise.resolve();
+
+    const secondRediscovery = manager.discoverMcpToolsForServer(
+      'test-server',
+      {} as unknown as Config,
+    );
+    const disconnectCallsBeforeResolve =
+      firstClient.disconnect.mock.calls.length;
+
+    resolveDisconnect();
+    await Promise.all([firstRediscovery, secondRediscovery]);
+
+    expect(disconnectCallsBeforeResolve).toBe(1);
+    expect(vi.mocked(McpClient)).toHaveBeenCalledTimes(2);
+    expect(replacementClients).toHaveLength(1);
+    expect(replacementClients[0].connect).toHaveBeenCalledOnce();
+    expect(replacementClients[0].discover).toHaveBeenCalledOnce();
+  });
+
   it('should no-op when discovering an unknown server', async () => {
     const mockedMcpClient = {
       connect: vi.fn(),
