@@ -10,6 +10,7 @@ import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { isResolvedPathInsideBase } from './symlink-utils.js';
 
 const debugLogger = createDebugLogger('SKILL_LOAD');
 
@@ -22,6 +23,11 @@ export async function loadSkillsFromDir(
   try {
     const entries = await fs.readdir(baseDir, { withFileTypes: true });
     const skills: SkillConfig[] = [];
+    let baseRealPathPromise: Promise<string> | undefined;
+    const getBaseRealPath = (): Promise<string> => {
+      baseRealPathPromise ??= fs.realpath(baseDir);
+      return baseRealPathPromise;
+    };
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
     for (const entry of entries) {
@@ -47,11 +53,8 @@ export async function loadSkillsFromDir(
       if (isSymlink) {
         try {
           const realPath = await fs.realpath(skillDir);
-          const resolvedBase = path.resolve(baseDir);
-          if (
-            realPath !== resolvedBase &&
-            !realPath.startsWith(resolvedBase + path.sep)
-          ) {
+          const baseRealPath = await getBaseRealPath();
+          if (!isResolvedPathInsideBase(realPath, baseRealPath)) {
             debugLogger.warn(
               `Skipping symlink ${entry.name} that escapes ${baseDir}`,
             );

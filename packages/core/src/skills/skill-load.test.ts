@@ -298,8 +298,8 @@ Valid skill.
 
       // realpath stays within baseDir (in-tree symlink, e.g. user
       // symlinks one skill directory to another in the same tree).
-      vi.mocked(fs.realpath).mockResolvedValue(
-        `${testBaseDir}/symlinked-skill`,
+      vi.mocked(fs.realpath).mockImplementation((p) =>
+        Promise.resolve(String(p)),
       );
       // stat resolves to a directory (symlink target)
       vi.mocked(fs.stat).mockResolvedValue({
@@ -331,7 +331,9 @@ Symlinked skill body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      vi.mocked(fs.realpath).mockResolvedValue(`${testBaseDir}/file-symlink`);
+      vi.mocked(fs.realpath).mockImplementation((p) =>
+        Promise.resolve(String(p)),
+      );
       // stat resolves to a file (not a directory)
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => false,
@@ -378,7 +380,11 @@ Symlinked skill body.
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
       // realpath escapes the tree.
-      vi.mocked(fs.realpath).mockResolvedValue('/etc/cron.d/payload');
+      vi.mocked(fs.realpath).mockImplementation((p) =>
+        Promise.resolve(
+          String(p) === testBaseDir ? testBaseDir : '/etc/cron.d/payload',
+        ),
+      );
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
       } as unknown as Awaited<ReturnType<typeof fs.stat>>);
