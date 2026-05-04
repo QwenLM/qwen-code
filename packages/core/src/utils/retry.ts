@@ -9,6 +9,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
+import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
 
 const debugLogger = createDebugLogger('RETRY');
 
@@ -16,6 +17,7 @@ const debugLogger = createDebugLogger('RETRY');
 const PERSISTENT_MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes — single retry backoff cap
 const PERSISTENT_CAP_MS = 6 * 60 * 60 * 1000; // 6 hours — absolute single wait cap
 const HEARTBEAT_INTERVAL_MS = 30_000; // 30 seconds
+const INTERACTIVE_RETRY_AFTER_CAP_MS = 5 * 60 * 1000; // 5 minutes
 
 export interface HttpError extends Error {
   status?: number;
@@ -185,9 +187,13 @@ export async function retryWithBackoff<T>(
         shouldRetryOnContent &&
         shouldRetryOnContent(result as GenerateContentResponse)
       ) {
-        const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
-        const delayWithJitter = Math.max(0, currentDelay + jitter);
-        await delay(delayWithJitter);
+        const delayMs = getRetryDelayMs({
+          attempt: 1,
+          initialDelayMs: currentDelay,
+          maxDelayMs,
+          jitterRatio: 0.3,
+        });
+        await delay(delayMs);
         currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         continue;
       }
@@ -228,25 +234,28 @@ export async function retryWithBackoff<T>(
       if (shouldPersist) {
         persistentAttempt++;
 
-        // Prefer Retry-After header for 429 errors
         const retryAfterMs =
-          errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
+          errorStatus === 429 ? getRetryAfterDelayMs(error) : null;
 
-        if (retryAfterMs > 0) {
+        if (retryAfterMs !== null && retryAfterMs > 0) {
           // Retry-After is a server-specified wait — respect it, only cap at
           // the absolute limit (capMs/6h), NOT at maxBackoff (5min).
-          delayMs = Math.min(retryAfterMs, capMs);
+          delayMs = getRetryDelayMs({
+            attempt: persistentAttempt,
+            initialDelayMs,
+            maxDelayMs: maxBackoff,
+            retryAfterMode: 'prefer',
+            retryAfterMaxDelayMs: capMs,
+            error,
+          });
         } else {
           // Exponential backoff — cap at maxBackoff (5min) then absolute cap
-          delayMs = Math.min(
-            initialDelayMs * Math.pow(2, persistentAttempt - 1),
-            maxBackoff,
-          );
-          delayMs = Math.min(delayMs, capMs);
-
-          // Add jitter (±25%), then re-apply caps so delay never exceeds limits
-          delayMs += delayMs * 0.25 * (Math.random() * 2 - 1);
-          delayMs = Math.min(Math.max(0, delayMs), maxBackoff, capMs);
+          delayMs = getRetryDelayMs({
+            attempt: persistentAttempt,
+            initialDelayMs,
+            maxDelayMs: Math.min(maxBackoff, capMs),
+            jitterRatio: 0.25,
+          });
         }
 
         const reportedAttempt = persistentAttempt;
@@ -270,22 +279,34 @@ export async function retryWithBackoff<T>(
           attempt = maxAttempts - 1;
         }
       } else {
-        // Normal retry path (unchanged behavior)
+        // Normal retry path.
         const retryAfterMs =
-          errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
+          errorStatus === 429 ? getRetryAfterDelayMs(error) : null;
 
-        if (retryAfterMs > 0) {
+        if (retryAfterMs !== null && retryAfterMs > 0) {
+          const delayMs = getRetryDelayMs({
+            attempt: 1,
+            initialDelayMs: currentDelay,
+            maxDelayMs,
+            retryAfterMode: 'prefer',
+            retryAfterMaxDelayMs: INTERACTIVE_RETRY_AFTER_CAP_MS,
+            error,
+          });
           debugLogger.warn(
-            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
+            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${delayMs}ms...`,
             error,
           );
-          await delay(retryAfterMs);
+          await delay(delayMs);
           currentDelay = initialDelayMs;
         } else {
           logRetryAttempt(attempt, error, errorStatus);
-          const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
-          const delayWithJitter = Math.max(0, currentDelay + jitter);
-          await delay(delayWithJitter);
+          const delayMs = getRetryDelayMs({
+            attempt: 1,
+            initialDelayMs: currentDelay,
+            maxDelayMs,
+            jitterRatio: 0.3,
+          });
+          await delay(delayMs);
           currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         }
       }
@@ -294,44 +315,6 @@ export async function retryWithBackoff<T>(
   // This line should theoretically be unreachable due to the throw in the catch block.
   // Added for type safety and to satisfy the compiler that a promise is always returned.
   throw new Error('Retry attempts exhausted');
-}
-
-/**
- * Extracts the Retry-After delay from an error object's headers.
- * @param error The error object.
- * @returns The delay in milliseconds, or 0 if not found or invalid.
- */
-function getRetryAfterDelayMs(error: unknown): number {
-  if (typeof error === 'object' && error !== null) {
-    // Check for error.response.headers (common in axios errors)
-    if (
-      'response' in error &&
-      typeof (error as { response?: unknown }).response === 'object' &&
-      (error as { response?: unknown }).response !== null
-    ) {
-      const response = (error as { response: { headers?: unknown } }).response;
-      if (
-        'headers' in response &&
-        typeof response.headers === 'object' &&
-        response.headers !== null
-      ) {
-        const headers = response.headers as { 'retry-after'?: unknown };
-        const retryAfterHeader = headers['retry-after'];
-        if (typeof retryAfterHeader === 'string') {
-          const retryAfterSeconds = parseInt(retryAfterHeader, 10);
-          if (!isNaN(retryAfterSeconds)) {
-            return retryAfterSeconds * 1000;
-          }
-          // It might be an HTTP date
-          const retryAfterDate = new Date(retryAfterHeader);
-          if (!isNaN(retryAfterDate.getTime())) {
-            return Math.max(0, retryAfterDate.getTime() - Date.now());
-          }
-        }
-      }
-    }
-  }
-  return 0;
 }
 
 /**
