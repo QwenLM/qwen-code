@@ -484,7 +484,18 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // an external mutation could land and be silently overwritten.
       // This last guard tightens the window from "post-read →
       // writeTextFile (unbounded)" to "stat → writeTextFile (two
-      // syscalls)".
+      // adjacent syscalls)".
+      //
+      // It does NOT eliminate the race. A concurrent writer that
+      // lands between this stat and the writeTextFile call below
+      // can still be clobbered — that residual is an OS-level
+      // limitation of the stat-then-write pattern, and the only
+      // way to close it is an atomic write (write to a temp file,
+      // then rename) or a content-hash post-check that re-reads
+      // the bytes after the write. Both are deferred to a follow-up
+      // PR; operators who care about strict overwrite-protection
+      // should set `fileReadCacheDisabled: true` and rely on
+      // application-level locking.
       //
       // Run unconditionally (not gated on `editData.isNewFile`):
       // `isNewFile` was decided back in calculateEdit, but a file

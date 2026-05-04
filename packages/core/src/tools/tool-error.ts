@@ -36,10 +36,27 @@ export enum ToolErrorType {
   EDIT_EXPECTED_OCCURRENCE_MISMATCH = 'edit_expected_occurrence_mismatch',
   EDIT_NO_CHANGE = 'edit_no_change',
   EDIT_NO_CHANGE_LLM_JUDGEMENT = 'edit_no_change_llm_judgement',
-  // Returned when Edit / WriteFile is asked to mutate a file the model
-  // has not (yet) read this session via ReadFile. The session-scoped
-  // FileReadCache is the source of truth — see read-file.ts and the
-  // related FileReadCache service.
+  // Returned when Edit / WriteFile is asked to mutate a file in a
+  // state the session-scoped FileReadCache cannot vouch for. Three
+  // cases share this code:
+  //
+  //   1. The file has not been read this session via ReadFile (the
+  //      original "model never saw the bytes" case).
+  //   2. The file was read only as a partial / ranged / truncated
+  //      view, so the model has not seen the full text content the
+  //      mutation could touch.
+  //   3. The file is a structural dead end that no amount of
+  //      re-reading can change:
+  //        - non-text payloads (binary / image / audio / video /
+  //          PDF / notebook) — read_file returns these as
+  //          structured values that Edit / WriteFile cannot mutate
+  //          safely; the rejection message tells the model to use
+  //          a different tool (shell with a binary-aware writer).
+  //        - special files (FIFO / socket / character or block
+  //          device) — read_file rejects these as "not a regular
+  //          file", so an enforcement loop on read_file would
+  //          never terminate; the rejection points the model at
+  //          shell instead.
   //
   // Despite the `EDIT_` prefix this code is shared between EditTool
   // and WriteFileTool: the boundary it guards is "the model is about

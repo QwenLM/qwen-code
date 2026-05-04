@@ -359,6 +359,17 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     // an external mutation that lands in the gap between those
     // operations and the writeTextFile below is caught.
     //
+    // It does NOT eliminate the race. A concurrent writer that
+    // lands between this stat and the writeTextFile call below
+    // can still be clobbered — that residual is an OS-level
+    // limitation of the stat-then-write pattern, and the only way
+    // to close it is an atomic write (write-to-temp + rename) or
+    // a content-hash post-check that re-reads the bytes after the
+    // write. Both are deferred to a follow-up; operators who care
+    // about strict overwrite-protection should set
+    // `fileReadCacheDisabled: true` and rely on application-level
+    // locking.
+    //
     // Run unconditionally (not gated on `fileExists`): if the path
     // was absent during the earlier checkPriorRead but a different
     // process creates it before this writeTextFile, the gated form
