@@ -384,6 +384,11 @@
         }
       }
     },
+    "modelPricing": {
+      "description": "Optional per-model pricing for cost estimation in /stats model. Example: {\"qwen3-coder\": {\"inputPerMillionTokens\": 0.30, \"outputPerMillionTokens\": 1.20}}",
+      "type": "object",
+      "additionalProperties": true
+    },
     "context": {
       "description": "Settings for managing context provided to the model.",
       "type": "object",

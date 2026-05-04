@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import {
   type PartListUnion,
   type Content,
+  type FunctionDeclaration,
   type GenerateContentResponseUsageMetadata,
   createUserContent,
   createModelContent,
@@ -92,7 +93,9 @@ export interface ChatRecord {
     | 'notification'
     | 'cron'
     | 'custom_title'
-    | 'rewind';
+    | 'rewind'
+    | 'agent_bootstrap'
+    | 'agent_launch_prompt';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -135,7 +138,8 @@ export interface ChatRecord {
     | AtCommandRecordPayload
     | CustomTitleRecordPayload
     | NotificationRecordPayload
-    | RewindRecordPayload;
+    | RewindRecordPayload
+    | AgentBootstrapRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -149,6 +153,27 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
+}
+
+export interface AgentBootstrapRecordPayload {
+  /** Bootstrap kind for future-proof decoding. */
+  kind: 'fork';
+  /**
+   * Exact model-facing history prefix seeded before the agent emitted any
+   * runtime events. For forks, this includes the inherited parent context and
+   * the original first task prompt/user turn.
+   */
+  history: Content[];
+  /**
+   * Immutable launch-time system instruction for the fork runtime. Resume must
+   * reuse this exact value rather than reading the current parent config.
+   */
+  systemInstruction?: string | Content;
+  /**
+   * Immutable launch-time tool declarations / allowlist for the fork runtime.
+   * Resume must reuse this exact capability set or stay blocked.
+   */
+  tools?: Array<string | FunctionDeclaration>;
 }
 
 /**

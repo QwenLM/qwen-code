@@ -212,6 +212,9 @@ describe('useGeminiStream', () => {
       getBackgroundTaskRegistry: vi.fn(() => ({
         setNotificationCallback: vi.fn(),
       })),
+      getMonitorRegistry: vi.fn(() => ({
+        setNotificationCallback: vi.fn(),
+      })),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -2917,7 +2920,7 @@ describe('useGeminiStream', () => {
               type: ServerGeminiEventType.Retry,
             };
             yield {
-              type: ServerGeminiEventType.Text,
+              type: ServerGeminiEventType.Content,
               value: 'Success after retry',
             };
             yield {
@@ -3223,7 +3226,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Text,
+            type: ServerGeminiEventType.Content,
             value: 'Success response',
           };
         })(),

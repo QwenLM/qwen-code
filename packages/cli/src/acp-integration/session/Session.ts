@@ -37,8 +37,6 @@ import {
   readManyFiles,
   Storage,
   ToolNames,
-  buildPermissionCheckContext,
-  evaluatePermissionRules,
   fireNotificationHook,
   firePermissionRequestHook,
   firePreToolUseHook,
@@ -53,6 +51,9 @@ import {
   getPlanModeSystemReminder,
   getSubagentSystemReminder,
   getArenaSystemReminder,
+  evaluatePermissionFlow,
+  needsConfirmation,
+  isPlanModeBlocked,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -1383,39 +1384,22 @@ export class Session implements SessionContext {
       // The VS Code extension is just a UI layer for requestPermission.
       const isAskUserQuestionTool = fc.name === ToolNames.ASK_USER_QUESTION;
 
-      // ---- L3: Tool's default permission ----
-      // In YOLO mode, force 'allow' for everything except ask_user_question.
-      const defaultPermission =
-        this.config.getApprovalMode() !== ApprovalMode.YOLO ||
-        isAskUserQuestionTool
-          ? await invocation.getDefaultPermission()
-          : 'allow';
-
-      // ---- L4: PermissionManager override (if relevant rules exist) ----
+      // ---- L3→L4: Shared permission flow ----
       const toolParams = invocation.params as Record<string, unknown>;
-      const pmCtx = buildPermissionCheckContext(
+      const flowResult = await evaluatePermissionFlow(
+        this.config,
+        invocation,
         fc.name,
         toolParams,
-        this.config.getTargetDir?.() ?? '',
       );
-      const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
-        pm,
-        defaultPermission,
-        pmCtx,
-      );
-
-      const needsConfirmation = finalPermission === 'ask';
+      const { finalPermission, pmForcedAsk, pmCtx, denyMessage } = flowResult;
 
       // ---- L5: ApprovalMode overrides ----
       const isPlanMode = approvalMode === ApprovalMode.PLAN;
 
       if (finalPermission === 'deny') {
         return earlyErrorResponse(
-          new Error(
-            defaultPermission === 'deny'
-              ? `Tool "${fc.name}" is denied: command substitution is not allowed for security reasons.`
-              : `Tool "${fc.name}" is denied by permission rules.`,
-          ),
+          new Error(denyMessage ?? `Tool "${fc.name}" is denied.`),
           fc.name,
         );
       }
@@ -1423,7 +1407,7 @@ export class Session implements SessionContext {
       let didRequestPermission = false;
       let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
-      if (needsConfirmation) {
+      if (needsConfirmation(finalPermission, approvalMode, fc.name)) {
         confirmationDetails =
           await invocation.getConfirmationDetails(abortSignal);
 
@@ -1431,10 +1415,12 @@ export class Session implements SessionContext {
         injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
 
         if (
-          isPlanMode &&
-          !isExitPlanModeTool &&
-          !isAskUserQuestionTool &&
-          confirmationDetails.type !== 'info'
+          isPlanModeBlocked(
+            isPlanMode,
+            isExitPlanModeTool,
+            isAskUserQuestionTool,
+            confirmationDetails,
+          )
         ) {
           return earlyErrorResponse(
             new Error(

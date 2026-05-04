@@ -34,6 +34,24 @@ function shellEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
   } as DialogEntry;
 }
 
+function monitorEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
+  return {
+    kind: 'monitor',
+    monitorId: 'mon-1',
+    command: 'tail -f app.log',
+    description: 'watch app logs',
+    status: 'running',
+    startTime: 0,
+    abortController: new AbortController(),
+    eventCount: 0,
+    lastEventTime: 0,
+    maxEvents: 1000,
+    idleTimeoutMs: 300_000,
+    droppedLines: 0,
+    ...overrides,
+  } as DialogEntry;
+}
+
 describe('getPillLabel', () => {
   it('uses singular form for one running agent', () => {
     expect(getPillLabel([agentEntry({ agentId: 'a' })])).toBe('1 local agent');
@@ -72,6 +90,42 @@ describe('getPillLabel', () => {
     ).toBe('2 shells, 1 local agent');
   });
 
+  it('uses singular form for one running monitor', () => {
+    expect(getPillLabel([monitorEntry({ monitorId: 'mon-a' })])).toBe(
+      '1 monitor',
+    );
+  });
+
+  it('uses plural form for multiple running monitors', () => {
+    expect(
+      getPillLabel([
+        monitorEntry({ monitorId: 'mon-a' }),
+        monitorEntry({ monitorId: 'mon-b' }),
+      ]),
+    ).toBe('2 monitors');
+  });
+
+  it('groups all three kinds with shells → agents → monitors order', () => {
+    expect(
+      getPillLabel([
+        agentEntry({ agentId: 'a' }),
+        shellEntry({ shellId: 'bg_a' }),
+        monitorEntry({ monitorId: 'mon-a' }),
+        monitorEntry({ monitorId: 'mon-b' }),
+      ]),
+    ).toBe('1 shell, 1 local agent, 2 monitors');
+  });
+
+  it('counts only running entries when monitors mix with terminal entries', () => {
+    expect(
+      getPillLabel([
+        monitorEntry({ monitorId: 'mon-a', status: 'running' }),
+        monitorEntry({ monitorId: 'mon-b', status: 'completed' }),
+        monitorEntry({ monitorId: 'mon-c', status: 'cancelled' }),
+      ]),
+    ).toBe('1 monitor');
+  });
+
   it('counts only running entries when running and terminal mix', () => {
     expect(
       getPillLabel([
@@ -80,6 +134,12 @@ describe('getPillLabel', () => {
         shellEntry({ shellId: 'bg_a', status: 'cancelled' }),
       ]),
     ).toBe('1 local agent');
+  });
+
+  it('uses paused form when only paused entries remain', () => {
+    expect(getPillLabel([agentEntry({ agentId: 'a', status: 'paused' })])).toBe(
+      '1 local agent paused',
+    );
   });
 
   it('uses generic done form when all entries are terminal', () => {

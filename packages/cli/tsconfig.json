@@ -3,8 +3,13 @@
   "compilerOptions": {
     "outDir": "dist",
     "jsx": "react-jsx",
+    "baseUrl": ".",
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
+      "@qwen-code/qwen-code-core/*": ["../core/src/*"]
+    }
   },
   "include": [
     "index.ts",

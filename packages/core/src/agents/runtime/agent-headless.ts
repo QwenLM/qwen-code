@@ -14,6 +14,7 @@
  * For persistent interactive agents, see AgentInteractive (Phase 2).
  */
 
+import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type {
@@ -194,6 +195,9 @@ export class AgentHeadless {
     context: ContextState,
     externalSignal?: AbortSignal,
   ): Promise<void> {
+    const initialMessagesOverride = context.get('initial_messages_override') as
+      | Content[]
+      | undefined;
     // Record the initial user turn in the observable message log before
     // anything that can throw — createChat / prepareTools failures still
     // get a transcript showing the task that was asked, which is what
@@ -202,7 +206,9 @@ export class AgentHeadless {
     const initialTaskText = String(
       (context.get('task_prompt') as string) ?? 'Get Started!',
     );
-    this.core.pushMessage('user', initialTaskText);
+    if (!initialMessagesOverride || initialMessagesOverride.length === 0) {
+      this.core.pushMessage('user', initialTaskText);
+    }
 
     const chat = await this.core.createChat(context);
 
@@ -225,9 +231,10 @@ export class AgentHeadless {
 
     const toolsList = await this.core.prepareTools();
 
-    const initialMessages = [
-      { role: 'user' as const, parts: [{ text: initialTaskText }] },
-    ];
+    const initialMessages =
+      initialMessagesOverride && initialMessagesOverride.length > 0
+        ? initialMessagesOverride
+        : [{ role: 'user' as const, parts: [{ text: initialTaskText }] }];
 
     const startTime = Date.now();
     this.core.executionStats.startTimeMs = startTime;
