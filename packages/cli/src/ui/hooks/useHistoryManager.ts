@@ -5,19 +5,19 @@
  */
 
 import { useState, useRef, useCallback, useMemo } from 'react';
-import type { HistoryItem } from '../types.js';
+import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 
 // Type for the updater function passed to updateHistoryItem
 type HistoryItemUpdater = (
   prevItem: HistoryItem,
-) => Partial<Omit<HistoryItem, 'id'>>;
+) => Partial<HistoryItemWithoutId>;
 
 export interface UseHistoryManagerReturn {
   history: HistoryItem[];
   addItem: (itemData: Omit<HistoryItem, 'id'>, baseTimestamp: number) => number; // Returns the generated ID
   updateItem: (
     id: number,
-    updates: Partial<Omit<HistoryItem, 'id'>> | HistoryItemUpdater,
+    updates: Partial<HistoryItemWithoutId> | HistoryItemUpdater,
   ) => void;
   clearItems: () => void;
   loadHistory: (newHistory: HistoryItem[]) => void;
@@ -79,7 +79,7 @@ export function useHistory(): UseHistoryManagerReturn {
   const updateItem = useCallback(
     (
       id: number,
-      updates: Partial<Omit<HistoryItem, 'id'>> | HistoryItemUpdater,
+      updates: Partial<HistoryItemWithoutId> | HistoryItemUpdater,
     ) => {
       setHistory((prevHistory) =>
         prevHistory.map((item) => {

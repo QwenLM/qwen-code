@@ -38,18 +38,38 @@ export const isAtCommand = (query: string): boolean =>
   // Check if starts with @ OR has a space, then @
   query.startsWith('@') || /\s@/.test(query);
 
-const SLASH_PATH_SEPARATOR_RE = /[/\\]/;
-
-const getSlashCommandFirstToken = (query: string): string =>
-  query.slice(1).trimStart().split(/\s+/)[0] ?? '';
-
-export const hasSlashCommandPathSeparator = (query: string): boolean =>
-  SLASH_PATH_SEPARATOR_RE.test(getSlashCommandFirstToken(query));
+/**
+ * Checks if a string looks like a valid slash command name.
+ * Command names may contain Unicode letters/numbers/marks and the punctuation
+ * used by built-in, MCP-style, extension-qualified, and filename-derived
+ * commands, including "+" and "=". The bare "?" help alias is accepted
+ * explicitly, while embedded "?" query-style tokens, path separators, and
+ * shell operators are treated as regular text instead.
+ *
+ * @param name The potential command name to check (without the leading '/').
+ * @returns True if the name matches the command name pattern, false otherwise.
+ */
+export const looksLikeCommandName = (name: string): boolean => {
+  if (!name) {
+    return false;
+  }
+  if (name === '?') {
+    return true;
+  }
+  return /^[\p{L}\p{N}\p{M}:._@#\-+=]+$/u.test(name);
+};
 
 /**
  * Checks if a query string potentially represents an '/' command.
- * It triggers if the query starts with '/' but excludes code comments like '//'
- * and '/*', and file paths where the first token contains a path separator.
+ * It triggers if the query starts with '/' but excludes:
+ * - Code comments starting with '//' or '/*'
+ * - File paths where the first token contains non-command characters
+ *   (e.g. '/api/endpoint', '/Users/name/path')
+ *
+ * This is an optimistic lexical check for UI routing and completion. The
+ * slash command processor still resolves the token against loaded commands and
+ * aliases before deciding whether to handle the input locally or let it fall
+ * through to the model.
  *
  * @param query The input query string.
  * @returns True if the query looks like an '/' command, false otherwise.
@@ -69,7 +89,13 @@ export const isSlashCommand = (query: string): boolean => {
     return false;
   }
 
-  if (hasSlashCommandPathSeparator(query)) {
+  // Extract the first token after '/' (split by whitespace).
+  // If it contains characters not valid in command names (like '/' for file
+  // paths), treat the input as regular text rather than a slash command.
+  // A bare '/' with no token is allowed — it signals the start of command
+  // input and triggers the autocomplete dropdown.
+  const firstToken = query.slice(1).trimStart().split(/\s+/)[0] ?? '';
+  if (firstToken && !looksLikeCommandName(firstToken)) {
     return false;
   }
 

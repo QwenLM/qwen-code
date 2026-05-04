@@ -762,6 +762,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isConfigInitialized,
     logger,
     setSessionName,
+    historyManager.updateItem,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -1141,10 +1142,12 @@ export const AppContainer = (props: AppContainerProps) => {
                       .filter(Boolean)
                       .join('');
                     if (text) {
-                      historyManager.addItem(
-                        { type: 'user' as const, text },
-                        now,
-                      );
+                      const userHistoryItem = {
+                        type: 'user',
+                        text,
+                        sentToModel: true,
+                      } satisfies HistoryItemWithoutId;
+                      historyManager.addItem(userHistoryItem, now);
                     }
                   }
                   // functionResponse parts are rendered as part of the tool_group below
@@ -2240,7 +2243,8 @@ export const AppContainer = (props: AppContainerProps) => {
     if (dialogsVisible) return;
     if (messageQueue.length === 0) return;
 
-    // Two-phase: batch plain prompts as one turn, else pop next slash command.
+    // Batch the leading plain-prompt run; if the queue starts with a slash
+    // command, submit that segment on its own to preserve typed order.
     const plainPrompts = drainQueue();
     const submission =
       plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();

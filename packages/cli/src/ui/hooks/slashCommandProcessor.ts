@@ -46,10 +46,7 @@ import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
-import {
-  hasSlashCommandPathSeparator,
-  isBtwCommand,
-} from '../utils/commandUtils.js';
+import { isBtwCommand, looksLikeCommandName } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import {
@@ -81,7 +78,21 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'btw',
 ]);
 
-interface SlashCommandProcessorActions {
+function getSlashCommandParts(query: string): string[] {
+  const commandText = query.slice(1).trim();
+  return commandText ? commandText.split(/\s+/) : [];
+}
+
+function isKnownTopLevelCommandToken(
+  token: string,
+  commands: readonly SlashCommand[],
+): boolean {
+  return commands.some(
+    (command) => command.name === token || command.altNames?.includes(token),
+  );
+}
+
+export interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
   openArenaDialog?: (type: Exclude<ArenaDialogType, null>) => void;
   openThemeDialog: () => void;
@@ -128,6 +139,7 @@ export const useSlashCommandProcessor = (
   isConfigInitialized: boolean,
   logger: Logger | null,
   setSessionName?: (name: string | null) => void,
+  updateItem?: UseHistoryManagerReturn['updateItem'],
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -451,8 +463,28 @@ export const useSlashCommandProcessor = (
       if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
         return false;
       }
-      if (trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)) {
-        return false;
+
+      // For '/' prefix, only keep command-shaped inputs in the slash command
+      // flow. Inputs with path separators, such as '/api/endpoint', should be
+      // sent to the model as regular text.
+      if (trimmed.startsWith('/')) {
+        const commandParts = getSlashCommandParts(trimmed);
+        const firstToken = commandParts[0] ?? '';
+        if (firstToken && !looksLikeCommandName(firstToken)) {
+          return false;
+        }
+        // Loaded commands and aliases win. Otherwise, slash-prefixed input
+        // with arguments is ambiguous with root-level paths such as
+        // "/data foo", so let the model handle it instead of reporting
+        // "Unknown command" and dropping the user's content.
+        // A single unknown "/token" still reports "Unknown command" so likely
+        // command typos remain visible instead of silently going to the model.
+        if (
+          commandParts.length > 1 &&
+          !isKnownTopLevelCommandToken(firstToken, commands)
+        ) {
+          return false;
+        }
       }
 
       const recordedItems: Array<Omit<HistoryItem, 'id'>> = [];
@@ -474,8 +506,9 @@ export const useSlashCommandProcessor = (
       abortControllerRef.current = abortController;
 
       const userMessageTimestamp = Date.now();
+      let invocationItemId: number | undefined;
       if (!isBtwCommand(trimmed)) {
-        addItemWithRecording(
+        invocationItemId = addItemWithRecording(
           { type: MessageType.USER, text: trimmed },
           userMessageTimestamp,
         );
@@ -665,6 +698,9 @@ export const useSlashCommandProcessor = (
                   return { type: 'handled' };
 
                 case 'submit_prompt':
+                  if (invocationItemId !== undefined) {
+                    updateItem?.(invocationItemId, { sentToModel: true });
+                  }
                   return {
                     type: 'submit_prompt',
                     content: result.content,
@@ -852,6 +888,7 @@ export const useSlashCommandProcessor = (
       setSessionShellAllowlist,
       setIsProcessing,
       setConfirmationRequest,
+      updateItem,
     ],
   );
 
