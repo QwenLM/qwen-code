@@ -1747,6 +1747,17 @@ export class CoreToolScheduler {
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
+    // Normalize shell-escaped path params so hooks operate on actual filesystem
+    // paths, matching the normalization done in tool validation.
+    if (typeof toolInput['file_path'] === 'string') {
+      toolInput['file_path'] = unescapePath(
+        String(toolInput['file_path']).trim(),
+      );
+    }
+    if (typeof toolInput['path'] === 'string') {
+      toolInput['path'] = unescapePath(String(toolInput['path']).trim());
+    }
+
     // Generate unique tool_use_id for hook tracking
     const toolUseId = generateToolUseId();
 

@@ -593,7 +593,7 @@ Expectation for required parameters:
   ): string | null {
     // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
     // that may reach the LLM via at-completion or manual typing.
-    params.file_path = unescapePath(params.file_path);
+    params.file_path = unescapePath(params.file_path.trim());
 
     if (!params.file_path) {
       return "The 'file_path' parameter must be non-empty.";
@@ -614,14 +614,15 @@ Expectation for required parameters:
 
   getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {
     return {
-      getFilePath: (params: EditToolParams) => params.file_path,
+      getFilePath: (params: EditToolParams) => unescapePath(params.file_path),
       getCurrentContent: async (params: EditToolParams): Promise<string> => {
-        const fileExists = await isFilefileExists(params.file_path);
+        const filePath = unescapePath(params.file_path);
+        const fileExists = await isFilefileExists(filePath);
         if (fileExists) {
           try {
             const { content } = await this.config
               .getFileSystemService()
-              .readTextFile({ path: params.file_path });
+              .readTextFile({ path: filePath });
             return content;
           } catch (err) {
             if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
@@ -632,11 +633,12 @@ Expectation for required parameters:
         }
       },
       getProposedContent: async (params: EditToolParams): Promise<string> => {
-        if (fs.existsSync(params.file_path)) {
+        const filePath = unescapePath(params.file_path);
+        if (fs.existsSync(filePath)) {
           try {
             const { content: currentContent } = await this.config
               .getFileSystemService()
-              .readTextFile({ path: params.file_path });
+              .readTextFile({ path: filePath });
             return applyReplacement(
               currentContent,
               params.old_string,

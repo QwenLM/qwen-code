@@ -406,7 +406,7 @@ export class WriteFileTool
   ): string | null {
     // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
     // that may reach the LLM via at-completion or manual typing.
-    const filePath = unescapePath(params.file_path);
+    const filePath = unescapePath(params.file_path.trim());
     params.file_path = filePath;
 
     if (!filePath) {
@@ -443,14 +443,16 @@ export class WriteFileTool
     _abortSignal: AbortSignal,
   ): ModifyContext<WriteFileToolParams> {
     return {
-      getFilePath: (params: WriteFileToolParams) => params.file_path,
+      getFilePath: (params: WriteFileToolParams) =>
+        unescapePath(params.file_path),
       getCurrentContent: async (params: WriteFileToolParams) => {
-        const fileExists = await isFilefileExists(params.file_path);
+        const filePath = unescapePath(params.file_path);
+        const fileExists = await isFilefileExists(filePath);
         if (fileExists) {
           try {
             const { content } = await this.config
               .getFileSystemService()
-              .readTextFile({ path: params.file_path });
+              .readTextFile({ path: filePath });
             return content;
           } catch (err) {
             if (!isNodeError(err) || err.code !== 'ENOENT') throw err;

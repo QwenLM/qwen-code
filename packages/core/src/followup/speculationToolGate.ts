@@ -18,6 +18,7 @@
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { ApprovalMode } from '../config/config.js';
+import { unescapePath } from '../utils/paths.js';
 import type { OverlayFs } from './overlayFs.js';
 
 export interface ToolGateResult {
@@ -120,7 +121,7 @@ async function resolveReadPaths(
   const pathKeys = ['file_path', 'filePath', 'path', 'notebook_path'];
   for (const key of pathKeys) {
     if (typeof args[key] === 'string') {
-      args[key] = overlayFs.resolveReadPath(args[key] as string);
+      args[key] = overlayFs.resolveReadPath(unescapePath(args[key] as string));
       return;
     }
   }
@@ -138,7 +139,9 @@ export async function rewritePathArgs(
   const pathKeys = ['file_path', 'filePath', 'path', 'notebook_path'];
   for (const key of pathKeys) {
     if (typeof args[key] === 'string') {
-      args[key] = await overlayFs.redirectWrite(args[key] as string);
+      args[key] = await overlayFs.redirectWrite(
+        unescapePath(args[key] as string),
+      );
       return;
     }
   }

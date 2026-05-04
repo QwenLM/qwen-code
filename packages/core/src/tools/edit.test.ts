@@ -262,6 +262,12 @@ describe('EditTool', () => {
     });
 
     it('should preserve literal backslashes in file_path', () => {
+      // On Windows, backslashes are path separators, and unescapePath is a
+      // no-op. This test only validates literal-backslash preservation on
+      // platforms where backslashes are not path separators.
+      if (process.platform === 'win32') {
+        return;
+      }
       const pathWithBackslash = path.join(
         rootDir,
         'path\\\\with\\\\slashes.txt',

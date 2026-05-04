@@ -205,8 +205,15 @@ export function escapePath(filePath: string): string {
 /**
  * Unescapes special characters in a file path.
  * Removes backslash escaping from shell metacharacters.
+ *
+ * On Windows, backslashes are path separators, not shell escape characters
+ * (PowerShell uses backtick, cmd.exe uses caret). Skipping unescaping on
+ * win32 avoids corrupting valid absolute paths like C:\(v2)\file.txt.
  */
 export function unescapePath(filePath: string): string {
+  if (os.platform() === 'win32') {
+    return filePath;
+  }
   return filePath.replace(
     new RegExp(`\\\\([${SHELL_SPECIAL_CHARS.source.slice(1, -1)}])`, 'g'),
     '$1',

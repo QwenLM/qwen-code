@@ -192,6 +192,21 @@ describe('escapePath', () => {
 });
 
 describe('unescapePath', () => {
+  // On Windows, backslashes are path separators, not shell escape chars.
+  // unescapePath is intentionally a no-op on win32.
+  if (process.platform === 'win32') {
+    it('should be a no-op on Windows', () => {
+      expect(unescapePath('C:\\Users\\my file.txt')).toBe(
+        'C:\\Users\\my file.txt',
+      );
+      expect(unescapePath('C:\\(v2)\\file.txt')).toBe('C:\\(v2)\\file.txt');
+      expect(unescapePath('path\\to\\file\\ name.txt')).toBe(
+        'path\\to\\file\\ name.txt',
+      );
+    });
+    return;
+  }
+
   it('should unescape spaces', () => {
     expect(unescapePath('my\\ file.txt')).toBe('my file.txt');
   });

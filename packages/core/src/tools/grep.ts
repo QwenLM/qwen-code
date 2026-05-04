@@ -15,7 +15,11 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('GREP');
-import { resolveAndValidatePath, isSubpath } from '../utils/paths.js';
+import {
+  resolveAndValidatePath,
+  isSubpath,
+  unescapePath,
+} from '../utils/paths.js';
 import { getMemoryBaseDir } from '../memory/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { isGitRepository } from '../utils/gitUtils.js';
@@ -616,7 +620,7 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
     // Only validate path if one is provided
     if (params.path) {
       try {
-        resolveAndValidatePath(this.config, params.path, {
+        resolveAndValidatePath(this.config, unescapePath(params.path), {
           allowExternalPaths: true,
         });
       } catch (error) {
