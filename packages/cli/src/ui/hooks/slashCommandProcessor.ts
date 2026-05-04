@@ -816,7 +816,7 @@ export const useSlashCommandProcessor = (
           const chatRecorder = config.getChatRecordingService();
           const primaryCommand =
             resolvedCommandPath[0] ||
-            trimmed.replace(/^[/?]/, '').split(/\s+/)[0] ||
+            trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
             trimmed;
           const shouldRecord =
             !delegatedToRecursiveInvocation &&

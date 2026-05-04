@@ -299,6 +299,15 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(actionResult).toBe(false);
+
+      let absPathResult;
+      await act(async () => {
+        absPathResult = await result.current.handleSlashCommand(
+          '/Users/zhoushuo/Desktop/dw-operator-skill 帮我安装',
+        );
+      });
+
+      expect(absPathResult).toBe(false);
       expect(mockAddItem).not.toHaveBeenCalled();
     });
 
