@@ -794,8 +794,17 @@ describe('ShellTool', () => {
       // on user-cancel / timeout / external signal (their own
       // messaging is enough), and never fire on the background path
       // (returns before the threshold by construction).
+      //
+      // Faking BOTH `Date` and `performance` here — shell.ts uses
+      // `performance.now()` (monotonic, NTP-resilient) for the
+      // long-run elapsed measurement, so without faking performance
+      // the elapsed would always read as "near zero" under
+      // `advanceTimersByTimeAsync` and the hint tests would never
+      // fire. Date stays faked so that `lastUpdateTime = Date.now()`
+      // (streaming throttle) and other Date-based callers in the
+      // execute path also stay deterministic.
       beforeEach(() => {
-        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.useFakeTimers({ toFake: ['Date', 'performance'] });
       });
       afterEach(() => {
         vi.useRealTimers();
@@ -1064,12 +1073,34 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('foreground command ran for 305s');
       });
 
-      it('debug-mode TUI mirror is re-synced after the hint append', async () => {
-        // Pin the debug-mode re-sync introduced to avoid the agent
-        // suddenly suggesting `is_background: true` with no visible
-        // trigger in the TUI. All other tests in this describe run
-        // under the default `getDebugMode → false`; this one flips it
-        // to true and asserts the hint is in `returnDisplay` too.
+      it('hint appears in non-debug returnDisplay (user TUI)', async () => {
+        // The hint is useful to the user too — they're the one waiting
+        // for long commands. Pin that the non-debug TUI gets the hint
+        // appended (terse form: result.output + hint, separated by
+        // blank line). Default `getDebugMode → false`.
+        const invocation = shellTool.build({
+          command: 'pytest -q',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({ output: 'all green', exitCode: 0 });
+        const result = await promise;
+        // Both surfaces have the hint.
+        expect(result.llmContent).toContain('foreground command ran for 60s');
+        expect(result.returnDisplay).toContain(
+          'foreground command ran for 60s',
+        );
+        // Original output preserved (not replaced by hint).
+        expect(result.returnDisplay).toContain('all green');
+      });
+
+      it('hint also appears in debug-mode returnDisplay (mirrors LLM view)', async () => {
+        // Same hint visibility but through the debug-mode mirror code
+        // path. Both branches now use append-style re-sync (preserving
+        // any prior content like the truncation marker), so the
+        // assertion is the same — but exercising both flips guards
+        // the branch from regressing independently.
         const debugMock = mockConfig as unknown as { getDebugMode: Mock };
         debugMock.getDebugMode.mockReturnValue(true);
         try {
@@ -1082,10 +1113,38 @@ describe('ShellTool', () => {
           resolveShellExecution({ output: 'all green', exitCode: 0 });
           const result = await promise;
           expect(result.llmContent).toContain('foreground command ran for 60s');
-          expect(result.returnDisplay).toContain('foreground command ran for 60s');
+          expect(result.returnDisplay).toContain(
+            'foreground command ran for 60s',
+          );
         } finally {
           debugMock.getDebugMode.mockReturnValue(false);
         }
+      });
+
+      it('hint survives the error path (appended to error.message)', async () => {
+        // `coreToolScheduler` builds the model-facing functionResponse
+        // from `error.message` (NOT llmContent) when toolResult.error
+        // is set. So if a long command fails, the hint we appended to
+        // llmContent would be silently dropped before reaching the
+        // agent. Pin that the hint also lives in error.message.
+        const invocation = shellTool.build({
+          command: 'flaky.sh',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(75_000);
+        resolveShellExecution({
+          output: '',
+          exitCode: 1,
+          error: new Error('spawn ENOENT'),
+        });
+        const result = await promise;
+        // The hint must appear in the error.message path so the LLM
+        // sees it via the scheduler's error branch.
+        expect(result.error?.message).toContain('spawn ENOENT');
+        expect(result.error?.message).toContain(
+          'foreground command ran for 75s',
+        );
       });
     });
 

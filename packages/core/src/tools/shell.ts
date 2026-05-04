@@ -58,8 +58,17 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 // not at 60s. The 1/2 ratio is chosen so the hint surfaces well before
 // the timeout would hard-kill, but late enough that normal foreground
 // commands (under the 120s default) don't trigger it before ~60s.
+//
+// Floor of 1000ms guards the pathological `timeout: 0` / `timeout: 1`
+// edge: without a floor, `Math.floor(0 / 2)` is 0, so `elapsedMs >= 0`
+// would fire on every invocation showing "ran for 0s" — the hint would
+// surface before the command had a chance to fail by timing out.
+const MIN_LONG_RUN_THRESHOLD_MS = 1000;
 function longRunThresholdFor(effectiveTimeoutMs: number): number {
-  return Math.floor(effectiveTimeoutMs / 2);
+  return Math.max(
+    MIN_LONG_RUN_THRESHOLD_MS,
+    Math.floor(effectiveTimeoutMs / 2),
+  );
 }
 
 /**
@@ -78,13 +87,16 @@ export function buildLongRunningForegroundHint(elapsedMs: number): string {
   const seconds = Math.round(elapsedMs / 1000);
   return (
     `Note: this foreground command ran for ${seconds}s. ` +
-    `For long-running processes (build watchers, dev servers, soak ` +
-    `tests, polling loops), prefer re-running with ` +
-    `\`is_background: true\` so the agent isn't blocked while the ` +
-    `command runs. The output stays inspectable via /tasks (text, any ` +
-    `mode) or the on-disk output file; in interactive mode the ` +
-    `Background tasks dialog also has a per-entry detail view + live ` +
-    `updates.`
+    `Next time you run a similar long-running process (build watchers, ` +
+    `dev servers, soak tests, polling loops), pass \`is_background: true\` ` +
+    `so the agent isn't blocked while the command runs. ` +
+    `(This is forward-looking guidance for FUTURE invocations — do NOT ` +
+    `re-run the command that just completed; for stateful operations ` +
+    `like deploys, migrations, or git push, that would cause double ` +
+    `side effects.) The output of background runs stays inspectable ` +
+    `via /tasks (text, any mode) or the on-disk output file; in ` +
+    `interactive mode the Background tasks dialog also has a per-entry ` +
+    `detail view + live updates.`
   );
 }
 
@@ -595,7 +607,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // can decide whether to append the long-run advisory. Mirrors the
     // `entry.startTime` capture in the background-shell path. Only added
     // side state for the foreground long-run hint feature.
-    const executionStartTime = Date.now();
+    //
+    // `performance.now()` (monotonic high-res, ms-precision) instead of
+    // `Date.now()` so NTP corrections / VM clock drift between capture
+    // and read can't make `elapsedMs` go negative (which would silently
+    // skip the hint with no observable failure). Returned origin is
+    // arbitrary but consistent across the two reads — only the
+    // difference matters here.
+    const executionStartTime = performance.now();
 
     const { result: resultPromise, pid } = await ShellExecutionService.execute(
       commandToExecute,
@@ -736,11 +755,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //     and isn't representative of the command's actual wait.
     // Fires on both successful and naturally-failed completions since
     // the advice ("next time, background it") is the same in both.
-    const elapsedMs = Date.now() - executionStartTime;
+    const elapsedMs = performance.now() - executionStartTime;
+    const longRunThreshold = longRunThresholdFor(effectiveTimeout);
     const shouldAppendLongRunHint =
       !result.aborted &&
       result.signal === null &&
-      elapsedMs >= longRunThresholdFor(effectiveTimeout);
+      elapsedMs >= longRunThreshold;
+    // Observability: the hint decision is otherwise invisible. If a
+    // user reports "my 65s command didn't get the hint" or "5s command
+    // got the hint", the debug log shows which suppression branch fired
+    // (aborted / signal / under-threshold) plus the actual elapsed and
+    // computed threshold. No PII — just timing + result flags.
+    debugLogger.debug(
+      `long-run hint: elapsed=${Math.round(elapsedMs)}ms threshold=${longRunThreshold}ms ` +
+        `aborted=${result.aborted} signal=${result.signal} → ${shouldAppendLongRunHint ? 'fire' : 'suppress'}`,
+    );
 
     // returnDisplayMessage is rebuilt below. In debug mode it mirrors
     // `llmContent`, but the hint is appended AFTER both the truncation
@@ -800,23 +829,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // header (which the LLM might misread as part of the command's own
     // output). The hint is process metadata about the command, not
     // command output, so it belongs outside the truncation envelope.
-    if (shouldAppendLongRunHint) {
+    const longRunHint = shouldAppendLongRunHint
+      ? buildLongRunningForegroundHint(elapsedMs)
+      : null;
+    if (longRunHint) {
       if (typeof llmContent === 'string') {
-        const hint = buildLongRunningForegroundHint(elapsedMs);
-        llmContent += `\n\n${hint}`;
+        llmContent += `\n\n${longRunHint}`;
         // Surface the hint in the user-facing TUI too — the user is
         // the one waiting for long commands and benefits from the
         // same "consider backgrounding next time" cue the agent sees.
-        // Debug mode mirrors the full llmContent (covers both the
-        // truncation block's stale snapshot and the new hint in one
-        // re-sync); non-debug mode appends only the hint to preserve
-        // the terse output-or-status form built above.
-        if (this.config.getDebugMode()) {
-          returnDisplayMessage = llmContent;
-        } else {
-          returnDisplayMessage +=
-            (returnDisplayMessage ? '\n\n' : '') + hint;
-        }
+        // Append (not replace) in BOTH modes so the truncation marker
+        // line ("Output too long and was saved to: ...") and any
+        // pre-existing returnDisplayMessage content (debug snapshot,
+        // status line, command output) are preserved.
+        returnDisplayMessage +=
+          (returnDisplayMessage ? '\n\n' : '') + longRunHint;
       }
       // else: llmContent is a structured `Part[]` / `Part` rather than
       // a plain string. Today shell.ts only emits string llmContent,
@@ -828,10 +855,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // someone adds a non-string return path.
     }
 
+    // When `result.error` is set, `coreToolScheduler` builds the
+    // model-facing functionResponse from `error.message`, NOT from
+    // `llmContent` (see `convertToFunctionResponse` and the error
+    // branch in scheduler's success/error split). So for the
+    // long-running command-failed case the hint we appended to
+    // llmContent above would be silently dropped before reaching the
+    // agent. Append the hint to error.message too so the advisory
+    // survives whichever branch the scheduler takes.
     const executionError = result.error
       ? {
           error: {
-            message: result.error.message,
+            message:
+              result.error.message + (longRunHint ? `\n\n${longRunHint}` : ''),
             type: ToolErrorType.SHELL_EXECUTE_ERROR,
           },
         }
