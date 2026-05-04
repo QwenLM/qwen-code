@@ -27,6 +27,9 @@ const readScript = (path) => readFileSync(path, 'utf8');
 const standaloneReleaseScriptUrl = pathToFileURL(
   path.resolve('scripts/build-standalone-release.js'),
 ).href;
+const installationAssetsScriptUrl = pathToFileURL(
+  path.resolve('scripts/build-installation-assets.js'),
+).href;
 // These E2E cases execute the Unix shell installer and POSIX symlink behavior.
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
@@ -207,8 +210,12 @@ describe('standalone release packaging', () => {
     expect(packageJson.scripts['package:standalone:release']).toBe(
       'node scripts/build-standalone-release.js',
     );
+    expect(packageJson.scripts['package:installation-assets']).toBe(
+      'node scripts/build-installation-assets.js',
+    );
     expect(existsSync('scripts/create-standalone-package.js')).toBe(true);
     expect(existsSync('scripts/build-standalone-release.js')).toBe(true);
+    expect(existsSync('scripts/build-installation-assets.js')).toBe(true);
 
     const packageScript = readScript('scripts/create-standalone-package.js');
     expect(packageScript).toContain('Copyright 2025 Qwen Team');
@@ -242,6 +249,16 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain('scripts/create-standalone-package.js');
     expect(releaseScript).toContain('--skip-checksums');
     expect(releaseScript).toContain('writeSha256Sums(outDir)');
+
+    const installationAssetsScript = readScript(
+      'scripts/build-installation-assets.js',
+    );
+    expect(installationAssetsScript).toContain('Copyright 2025 Qwen Team');
+    expect(installationAssetsScript).toContain('install-qwen-with-source.sh');
+    expect(installationAssetsScript).toContain('install-qwen.sh');
+    expect(installationAssetsScript).toContain('install-qwen-with-source.bat');
+    expect(installationAssetsScript).toContain('install-qwen.bat');
+    expect(installationAssetsScript).toContain('writeSha256Sums(outDir)');
   });
 
   it('loads the standalone release packaging helper', () => {
@@ -283,7 +300,14 @@ describe('standalone release packaging', () => {
         const extension = qwenTarget === 'win-x64' ? 'zip' : 'tar.gz';
         return `${'a'.repeat(64)}  qwen-code-${qwenTarget}.${extension}`;
       });
-      writeFileSync(path.join(tmpDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
+      writeFileSync(
+        path.join(tmpDir, 'SHA256SUMS'),
+        `${[
+          ...lines,
+          `${'c'.repeat(64)}  install-qwen.sh`,
+          `${'d'.repeat(64)}  install-qwen.bat`,
+        ].join('\n')}\n`,
+      );
 
       expect(() => assertStandaloneOutput(tmpDir)).not.toThrow();
 
@@ -292,6 +316,38 @@ describe('standalone release packaging', () => {
         `${lines.join('\n')}\n${'b'.repeat(64)}  qwen-code-extra.tar.gz\n`,
       );
       expect(() => assertStandaloneOutput(tmpDir)).toThrow(/Extra/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('builds release installation assets with checksums', async () => {
+    const { buildInstallationAssets } = await import(
+      installationAssetsScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-assets-'));
+
+    try {
+      writeFileSync(path.join(tmpDir, 'qwen-code-linux-x64.tar.gz'), 'fake');
+
+      await buildInstallationAssets(tmpDir);
+
+      const installSh = path.join(tmpDir, 'install-qwen.sh');
+      const installBat = path.join(tmpDir, 'install-qwen.bat');
+      const checksums = readScript(path.join(tmpDir, 'SHA256SUMS'));
+
+      expect(readScript(installSh)).toBe(
+        readScript('scripts/installation/install-qwen-with-source.sh'),
+      );
+      expect(readScript(installBat)).toBe(
+        readScript('scripts/installation/install-qwen-with-source.bat'),
+      );
+      expect(checksums).toContain('qwen-code-linux-x64.tar.gz');
+      expect(checksums).toContain('install-qwen.sh');
+      expect(checksums).toContain('install-qwen.bat');
+      if (process.platform !== 'win32') {
+        expect(lstatSync(installSh).mode & 0o111).not.toBe(0);
+      }
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -509,9 +565,12 @@ describe('standalone release packaging', () => {
     const workflow = readScript('.github/workflows/release.yml');
 
     expect(workflow).toContain('npm run package:standalone:release --');
+    expect(workflow).toContain('npm run package:installation-assets --');
     expect(workflow).not.toContain('verify_node_checksum()');
     expect(workflow).not.toContain('download_node()');
     expect(workflow).toContain('dist/standalone/qwen-code-*');
+    expect(workflow).toContain('dist/standalone/install-qwen.sh');
+    expect(workflow).toContain('dist/standalone/install-qwen.bat');
     expect(workflow).toContain('dist/standalone/SHA256SUMS');
   });
 

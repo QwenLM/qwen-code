@@ -16,13 +16,13 @@ available on PATH.
 **Linux / macOS**
 
 ```sh
-curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
+curl -fsSL https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.sh | bash
 ```
 
 **Windows**
 
 ```cmd
-powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+powershell -Command "Invoke-WebRequest 'https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
 ```
 
 > [!note]
@@ -31,7 +31,9 @@ powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou
 > immediately available on PATH. If the installation fails, please refer to
 > [Manual Installation](./quickstart#manual-installation) in the Quickstart
 > guide. For offline installation, download a release archive and run the
-> installer with `--archive PATH`; keep `SHA256SUMS` next to the archive.
+> installer with `--archive PATH`; keep `SHA256SUMS` next to the archive. The
+> installer scripts are published as release assets for each version. Pass
+> `--version vX.Y.Z` to pin a standalone release instead of installing `latest`.
 
 ### Start using Qwen Code:
 

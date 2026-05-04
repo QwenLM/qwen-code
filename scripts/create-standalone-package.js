@@ -552,14 +552,7 @@ function createZipArchive(outputPath, cwd) {
 }
 
 async function writeSha256Sums(outDir) {
-  const entries = fs
-    .readdirSync(outDir)
-    .filter(
-      (entry) =>
-        entry.startsWith('qwen-code-') &&
-        (entry.endsWith('.tar.gz') || entry.endsWith('.zip')),
-    )
-    .sort();
+  const entries = fs.readdirSync(outDir).filter(isReleaseChecksumAsset).sort();
 
   if (entries.length === 0) {
     fail(
@@ -575,6 +568,17 @@ async function writeSha256Sums(outDir) {
   }
 
   fs.writeFileSync(path.join(outDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
+}
+
+function isReleaseChecksumAsset(entry) {
+  if (
+    entry.startsWith('qwen-code-') &&
+    (entry.endsWith('.tar.gz') || entry.endsWith('.zip'))
+  ) {
+    return true;
+  }
+
+  return entry === 'install-qwen.sh' || entry === 'install-qwen.bat';
 }
 
 async function sha256File(filePath) {

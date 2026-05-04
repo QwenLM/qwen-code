@@ -25,13 +25,13 @@ To install Qwen Code, use one of the following methods:
 **Linux / macOS**
 
 ```sh
-curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
+curl -fsSL https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.sh | bash
 ```
 
 **Windows**
 
 ```cmd
-powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+powershell -Command "Invoke-WebRequest 'https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
 ```
 
 > [!note]
@@ -39,7 +39,9 @@ powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou
 > It's recommended to restart your terminal after installation if `qwen` is not
 > immediately available on PATH. For offline installation, download a release
 > archive such as `qwen-code-linux-x64.tar.gz` or `qwen-code-win-x64.zip` plus
-> `SHA256SUMS`, then run the installer with `--archive PATH`.
+> `SHA256SUMS`, then run the installer with `--archive PATH`. The installer
+> scripts are published as release assets for each version. Pass
+> `--version vX.Y.Z` to pin a standalone release instead of installing `latest`.
 
 ### Manual Installation
 

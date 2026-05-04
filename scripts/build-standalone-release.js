@@ -200,6 +200,7 @@ function assertStandaloneOutput(outDir) {
     .filter((line) => /^[0-9a-f]{64}\s+/.test(line))
     .map((line) => line.trim().split(/\s+/, 2)[1]?.replace(/^\*/, ''))
     .filter(Boolean)
+    .filter(isStandaloneArchiveName)
     .sort();
   const expectedArchiveNames = RELEASE_TARGETS.map(
     ({ qwenTarget }) =>
@@ -230,6 +231,13 @@ function assertStandaloneOutput(outDir) {
   }
 
   console.log(`Verified ${archiveNames.length} standalone release checksums.`);
+}
+
+function isStandaloneArchiveName(archiveName) {
+  return (
+    archiveName.startsWith('qwen-code-') &&
+    (archiveName.endsWith('.tar.gz') || archiveName.endsWith('.zip'))
+  );
 }
 
 function parseArgs(argv) {

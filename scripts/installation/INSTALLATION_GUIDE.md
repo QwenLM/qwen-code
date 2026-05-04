@@ -34,7 +34,23 @@ GitHub releases publish these standalone archives:
 - `qwen-code-linux-arm64.tar.gz`
 - `qwen-code-linux-x64.tar.gz`
 - `qwen-code-win-x64.zip`
+- `install-qwen.sh`
+- `install-qwen.bat`
 - `SHA256SUMS`
+
+The installer scripts are published as release assets so the default install
+entrypoint can be distributed alongside the standalone archives:
+
+```bash
+curl -fsSL https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.sh | bash
+```
+
+```bat
+powershell -Command "Invoke-WebRequest 'https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+```
+
+The installer defaults to `latest`. Pass `--version vX.Y.Z` to pin the
+standalone archive version.
 
 Archive layout:
 

@@ -95,9 +95,9 @@ Options:
   -h, --help               Show this help message.
 
 Examples:
-  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
-  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash -s -- --source github
-  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash -s -- --method standalone
+  curl -fsSL https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.sh | bash
+  curl -fsSL https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.sh | bash -s -- --source github
+  curl -fsSL https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.sh | bash -s -- --method standalone
   ./install-qwen-with-source.sh --archive ./qwen-code-linux-x64.tar.gz
 EOF
 }
