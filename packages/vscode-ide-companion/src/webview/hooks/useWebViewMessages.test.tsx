@@ -319,6 +319,140 @@ describe('useWebViewMessages', () => {
     });
   });
 
+  it('indexes user turns when loading a conversation transcript', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'conversationLoaded',
+            data: {
+              messages: [
+                { role: 'user', content: 'loaded first', timestamp: 10 },
+                { role: 'assistant', content: 'reply', timestamp: 20 },
+                { role: 'user', content: 'loaded second', timestamp: 30 },
+              ],
+            },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.handlers.messageHandling.setMessages).toHaveBeenCalledWith([
+      {
+        role: 'user',
+        content: 'loaded first',
+        timestamp: 10,
+        turnIndex: 0,
+      },
+      { role: 'assistant', content: 'reply', timestamp: 20 },
+      {
+        role: 'user',
+        content: 'loaded second',
+        timestamp: 30,
+        turnIndex: 1,
+      },
+    ]);
+  });
+
+  it('resets user turn indexing after a conversation is cleared', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'qwenSessionSwitched',
+            data: {
+              sessionId: 'conversation-2',
+              session: { title: 'Persisted Session' },
+              messages: [
+                { role: 'user', content: 'persisted first', timestamp: 10 },
+                { role: 'assistant', content: 'reply', timestamp: 20 },
+                { role: 'user', content: 'persisted second', timestamp: 30 },
+              ],
+            },
+          },
+        }),
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'conversationCleared',
+            data: {},
+          },
+        }),
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'message',
+            data: { role: 'user', content: 'restart', timestamp: 40 },
+          },
+        }),
+      );
+    });
+
+    expect(
+      rendered.handlers.messageHandling.addMessage,
+    ).toHaveBeenLastCalledWith({
+      role: 'user',
+      content: 'restart',
+      timestamp: 40,
+      turnIndex: 0,
+    });
+  });
+
+  it('resets user turn indexing when switching to a session without messages', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'qwenSessionSwitched',
+            data: {
+              sessionId: 'conversation-2',
+              session: { title: 'Empty Session' },
+            },
+          },
+        }),
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'message',
+            data: { role: 'user', content: 'first', timestamp: 10 },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.handlers.messageHandling.clearMessages).toHaveBeenCalled();
+    expect(rendered.handlers.messageHandling.addMessage).toHaveBeenCalledWith({
+      role: 'user',
+      content: 'first',
+      timestamp: 10,
+      turnIndex: 0,
+    });
+  });
+
   it('clears the generic waiting state when insight progress starts', () => {
     const rendered = renderHookHarness();
     root = rendered.root;

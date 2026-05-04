@@ -171,6 +171,7 @@ type ConversationResetHandlers = {
     UseWebViewMessagesProps['sessionManagement'],
     'setCurrentSessionId' | 'setCurrentSessionTitle'
   >;
+  resetUserTurnCounter?: () => void;
   setUsageStats?: UseWebViewMessagesProps['setUsageStats'];
 };
 
@@ -189,6 +190,7 @@ export function resetConversationState({
   handlers.messageHandling.clearThinking();
   handlers.messageHandling.clearMessages();
   handlers.clearToolCalls();
+  handlers.resetUserTurnCounter?.();
   handlers.setPlanEntries([]);
   handlers.handlePermissionRequest(null);
   handlers.handleAskUserQuestion(null);
@@ -218,6 +220,25 @@ function indexUserMessagesForEditRewind(messages: WebViewMessageBase[]): {
   });
 
   return { messages: indexedMessages, nextTurnIndex };
+}
+
+function restoreMessagesForEditRewind({
+  messages,
+  materializeMessages,
+}: {
+  messages: WebViewMessageBase[];
+  materializeMessages: (messages: WebViewMessageBase[]) => WebViewMessage[];
+}): { messages: WebViewMessage[]; nextTurnIndex: number } {
+  // IMPORTANT: indexUserMessagesForEditRewind must be called before
+  // materializeMessages. Image message expansion creates additional
+  // user-role entries that share the parent's turnIndex.
+  const { messages: indexedMessages, nextTurnIndex } =
+    indexUserMessagesForEditRewind(messages);
+
+  return {
+    messages: materializeMessages(indexedMessages),
+    nextTurnIndex,
+  };
 }
 
 /**
@@ -579,16 +600,15 @@ export const useWebViewMessages = ({
 
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
-          const { messages: indexedMessages, nextTurnIndex } =
-            indexUserMessagesForEditRewind(
-              conversation.messages as WebViewMessageBase[],
-            );
+          const { messages: restoredMessages, nextTurnIndex } =
+            restoreMessagesForEditRewind({
+              messages: conversation.messages as WebViewMessageBase[],
+              materializeMessages,
+            });
           userTurnCounterRef.current = nextTurnIndex;
           clearInsightState();
           clearImageResolutions();
-          handlers.messageHandling.setMessages(
-            materializeMessages(indexedMessages),
-          );
+          handlers.messageHandling.setMessages(restoredMessages);
           break;
         }
 
@@ -1100,14 +1120,13 @@ export const useWebViewMessages = ({
           }
           if (message.data.messages) {
             clearImageResolutions();
-            const { messages: indexedMessages, nextTurnIndex } =
-              indexUserMessagesForEditRewind(
-                message.data.messages as WebViewMessageBase[],
-              );
+            const { messages: restoredMessages, nextTurnIndex } =
+              restoreMessagesForEditRewind({
+                messages: message.data.messages as WebViewMessageBase[],
+                materializeMessages,
+              });
             userTurnCounterRef.current = nextTurnIndex;
-            handlers.messageHandling.setMessages(
-              materializeMessages(indexedMessages),
-            );
+            handlers.messageHandling.setMessages(restoredMessages);
           } else {
             userTurnCounterRef.current = 0;
             handlers.messageHandling.clearMessages();
@@ -1153,6 +1172,9 @@ export const useWebViewMessages = ({
               ...handlers,
               clearActiveExecToolCalls: () => {
                 activeExecToolCallsRef.current.clear();
+              },
+              resetUserTurnCounter: () => {
+                userTurnCounterRef.current = 0;
               },
             },
             clearImageResolutions,
