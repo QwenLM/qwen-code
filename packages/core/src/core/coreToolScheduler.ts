@@ -50,6 +50,7 @@ import type {
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { escapeXml } from '../utils/xml.js';
+import { unescapePath } from '../utils/paths.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
@@ -1908,7 +1909,9 @@ export class CoreToolScheduler {
         // FS_PATH_TOOL_NAMES) so MCP / non-FS tools that reuse those
         // parameter names with different semantics never enter the
         // activation pipeline.
-        const candidatePaths = extractToolFilePaths(toolName, toolInput);
+        const candidatePaths = extractToolFilePaths(toolName, toolInput).map(
+          (p) => unescapePath(p),
+        );
 
         if (candidatePaths.length > 0) {
           const rulesRegistry = this.config.getConditionalRulesRegistry();
