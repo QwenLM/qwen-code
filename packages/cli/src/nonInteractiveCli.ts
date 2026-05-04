@@ -156,8 +156,8 @@ export async function runNonInteractive(
   input: string,
   prompt_id: string,
   options: RunNonInteractiveOptions = {},
-): Promise<void> {
-  return promptIdContext.run(prompt_id, async () => {
+): Promise<number> {
+  return promptIdContext.run(prompt_id, async (): Promise<number> => {
     // Create output adapter based on format
     let adapter: JsonOutputAdapterInterface;
     const outputFormat = config.getOutputFormat();
@@ -288,7 +288,7 @@ export async function runNonInteractive(
                 config,
                 startTimeMs: startTime,
               });
-              return;
+              return slashCommandResult.messageType === 'error' ? 1 : 0;
             }
             case 'stream_messages':
               throw new FatalInputError(
@@ -302,7 +302,7 @@ export async function runNonInteractive(
                 config,
                 startTimeMs: startTime,
               });
-              return;
+              return 1;
             }
             case 'no_command':
               break;
@@ -497,15 +497,20 @@ export async function runNonInteractive(
           // invalid structured_output mid-batch (`[structured_output(bad),
           // write_file(...)]`) would still fall through to the trailing
           // tool before the retry turn.
-          const requestsToExecute =
+          let requestsToExecute = toolCallRequests;
+          let suppressedCalls: ToolCallRequestInfo[] = [];
+          if (
             config.getJsonSchema() &&
             toolCallRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT)
-              ? [
-                  toolCallRequests.find(
-                    (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
-                  )!,
-                ]
-              : toolCallRequests;
+          ) {
+            const structuredIdx = toolCallRequests.findIndex(
+              (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+            );
+            requestsToExecute = [toolCallRequests[structuredIdx]];
+            suppressedCalls = toolCallRequests.filter(
+              (_, i) => i !== structuredIdx,
+            );
+          }
 
           for (const requestInfo of requestsToExecute) {
             const finalRequestInfo = requestInfo;
@@ -562,20 +567,6 @@ export async function runNonInteractive(
 
             adapter.emitToolResult(finalRequestInfo, toolResponse);
 
-            if (
-              finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
-              !toolResponse.error
-            ) {
-              // Honour the "first valid call ends the session" contract.
-              // The pre-scan above already filtered the batch to the first
-              // structured_output, so any other tool_use blocks the model
-              // emitted in this turn lack a matching tool_result — which is
-              // consistent with how other terminal paths (max-turns,
-              // cancellation) leave the stream.
-              structuredSubmission = finalRequestInfo.args;
-              break;
-            }
-
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
             }
@@ -585,6 +576,22 @@ export async function runNonInteractive(
             // while non-skill tools (field absent) leave the current override intact.
             if ('modelOverride' in toolResponse) {
               modelOverride = toolResponse.modelOverride;
+            }
+
+            if (
+              finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+              !toolResponse.error
+            ) {
+              // Honour the "first valid call ends the session" contract.
+              // The pre-scan above already filtered the batch to the first
+              // structured_output, so any other tool_use blocks the model
+              // emitted in this turn lack a matching tool_result — which is
+              // consistent with how other terminal paths (max-turns,
+              // cancellation) leave the stream. The break is after the
+              // responseParts/modelOverride capture above so future changes
+              // to SyntheticOutputTool can't silently drop those signals.
+              structuredSubmission = finalRequestInfo.args;
+              break;
             }
           }
           if (structuredSubmission !== undefined) {
@@ -607,7 +614,27 @@ export async function runNonInteractive(
               stats,
               structuredResult: structuredSubmission,
             });
-            return;
+            return 0;
+          }
+          // Retry path: structured_output either wasn't called or its args
+          // failed validation. If the pre-scan suppressed sibling tool calls
+          // from this turn, the prior assistant message still contained
+          // their tool_use blocks — synthesize matching tool_result blocks
+          // now so the next-turn payload pairs every tool_use with a
+          // tool_result. Anthropic and OpenAI both reject batches with
+          // unpaired tool_use entries, which would otherwise turn the
+          // retry path into an opaque provider-side error.
+          for (const call of suppressedCalls) {
+            toolResponseParts.push({
+              functionResponse: {
+                id: call.callId,
+                name: call.name,
+                response: {
+                  output:
+                    'Skipped: structured_output was also requested in this turn and takes precedence as the terminal output contract. Re-issue this call in a separate turn if needed.',
+                },
+              },
+            });
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
@@ -873,8 +900,8 @@ export async function runNonInteractive(
           // structured_output tool. Reaching this branch means it emitted
           // plain text instead — surface as an error rather than silently
           // returning whatever free-form summary the adapter collected.
-          // Setting exitCode + returning (rather than throwing) avoids the
-          // outer catch re-emitting the result a second time.
+          // Returning a non-zero exit code (rather than throwing) avoids
+          // the outer catch re-emitting the result a second time.
           if (config.getJsonSchema()) {
             adapter.emitResult({
               isError: true,
@@ -886,8 +913,7 @@ export async function runNonInteractive(
               usage,
               stats,
             });
-            process.exitCode = 1;
-            return;
+            return 1;
           }
 
           adapter.emitResult({
@@ -898,7 +924,7 @@ export async function runNonInteractive(
             usage,
             stats,
           });
-          return;
+          return 0;
         }
       }
     } catch (error) {
@@ -974,5 +1000,9 @@ export async function runNonInteractive(
         await shutdownTelemetry();
       }
     }
+    // Unreachable in practice: the catch block awaits handleError() which
+    // returns Promise<never> (it always exits the process or rethrows).
+    // This return exists only so TS sees the function as total.
+    return 1;
   });
 }

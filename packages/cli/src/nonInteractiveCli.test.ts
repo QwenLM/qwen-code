@@ -2733,18 +2733,13 @@ describe('runNonInteractive', () => {
         createStreamFromEvents(plainTextTurn),
       );
 
-      const originalExitCode = process.exitCode;
-      try {
-        await runNonInteractive(
-          mockConfig,
-          mockSettings,
-          'Should call structured_output',
-          'prompt-id-plaintext',
-        );
-        expect(process.exitCode).toBe(1);
-      } finally {
-        process.exitCode = originalExitCode;
-      }
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Should call structured_output',
+        'prompt-id-plaintext',
+      );
+      expect(exitCode).toBe(1);
 
       const result = writes
         .join('')
@@ -2760,6 +2755,111 @@ describe('runNonInteractive', () => {
         );
       expect(result?.is_error).toBe(true);
       expect(result?.error?.message).toMatch(/structured_output/);
+    });
+
+    it('synthesises tool_result for suppressed sibling calls when structured_output fails validation', async () => {
+      // Same-turn batch: [side_effect_tool, structured_output(bad)]. The
+      // pre-scan suppresses the side_effect_tool; structured_output then
+      // fails validation. The retry turn must still pair both tool_use
+      // blocks from the prior assistant message with tool_result blocks,
+      // or providers like Anthropic reject the request. We synthesise a
+      // "skipped" functionResponse for every suppressed call.
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+
+      const leadingCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-leading',
+          name: 'side_effect_tool',
+          args: { path: '/tmp/should-not-write' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-suppress-pair',
+        },
+      };
+      const badStructuredCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured-bad',
+          name: 'structured_output',
+          args: { wrong: 'shape' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-suppress-pair',
+        },
+      };
+      const goodStructuredCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured-good',
+          name: 'structured_output',
+          args: { summary: 'retry ok' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-suppress-pair',
+        },
+      };
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([leadingCall, badStructuredCall]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents([goodStructuredCall]));
+
+      // First call (the bad structured_output) returns an error response;
+      // second call (the retry's good structured_output) succeeds.
+      mockCoreExecuteToolCall
+        .mockResolvedValueOnce({
+          error: new Error('args invalid'),
+          errorType: 'TOOL_INVALID_ARGUMENTS',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-structured-bad',
+                name: 'structured_output',
+                response: { error: 'args invalid' },
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          responseParts: [{ text: 'ok' }],
+        });
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output',
+        'prompt-id-suppress-pair',
+      );
+
+      // The side-effect tool must NEVER have been executed.
+      const executedNames = mockCoreExecuteToolCall.mock.calls.map(
+        (call) => (call[1] as { name: string }).name,
+      );
+      expect(executedNames).toEqual(['structured_output', 'structured_output']);
+
+      // The retry message sent to the model must contain BOTH a tool_result
+      // for the suppressed side_effect_tool and one for the failed
+      // structured_output, so every prior tool_use is paired.
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      const retryParts = mockGeminiClient.sendMessageStream.mock.calls[1][0] as
+        | Array<{
+            functionResponse?: { id?: string; name?: string };
+          }>
+        | undefined;
+      const responseIds = (retryParts || [])
+        .map((p) => p.functionResponse?.id)
+        .filter(Boolean);
+      expect(responseIds).toContain('tool-leading');
+      expect(responseIds).toContain('tool-structured-bad');
+      const suppressed = (retryParts || []).find(
+        (p) => p.functionResponse?.id === 'tool-leading',
+      );
+      expect(suppressed?.functionResponse?.name).toBe('side_effect_tool');
     });
   });
 });

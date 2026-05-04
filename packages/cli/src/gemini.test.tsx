@@ -279,7 +279,7 @@ describe('gemini.tsx main function', () => {
     vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
     vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
-    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue();
+    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
 
     try {
       await main();

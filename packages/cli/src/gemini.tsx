@@ -765,13 +765,19 @@ export async function main() {
 
     debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
-    await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
-    // Call cleanup before process.exit, which causes cleanup to not run
+    const exitCode = await runNonInteractive(
+      nonInteractiveConfig,
+      settings,
+      input,
+      prompt_id,
+    );
+    // Call cleanup before process.exit, which causes cleanup to not run.
+    // Capture the exit code BEFORE cleanup so any cleanup task that
+    // mutates process.exitCode can't silently turn a structured-output
+    // failure (or other explicit non-zero return from runNonInteractive)
+    // into a zero exit.
     await runExitCleanup();
-    // Honour any non-zero exitCode set by runNonInteractive (e.g. the
-    // --json-schema "model emitted plain text" failure path); fall back to 0
-    // when nothing failed.
-    process.exit(process.exitCode ?? 0);
+    process.exit(exitCode);
   }
 }
 
