@@ -235,14 +235,15 @@ export class GeminiClient {
     // gets expensive in long-running sessions.
     const prevLen = this.getChat().getHistoryLength();
     this.getChat().truncateHistory(keepCount);
-    // Truncation can drop prior read_file results past keepCount while
-    // the FileReadCache still records those reads — same staleness
-    // risk as setHistory. Only clear when entries were actually
-    // removed; a no-op truncate (keepCount >= prevLen) leaves the
-    // cache valid against the unchanged history.
-    if (keepCount < prevLen) {
+    // Decide whether to invalidate based on the *actual* post-truncate
+    // length, not on the keepCount argument. Comparing keepCount alone
+    // misses pathological inputs (e.g. NaN: slice(0, NaN) returns [],
+    // emptying history, but `NaN < prevLen` is false and would skip
+    // the clear, reintroducing the file_unchanged placeholder bug).
+    const newLen = this.getChat().getHistoryLength();
+    if (newLen < prevLen) {
       debugLogger.debug(
-        `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen})`,
+        `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
     }

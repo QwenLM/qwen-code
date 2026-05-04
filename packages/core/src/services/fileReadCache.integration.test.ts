@@ -72,14 +72,10 @@ describe('FileReadCache integration: read after history rewrite', () => {
     const tool = new ReadFileTool(config);
 
     // STEP 1 — first real Read populates the cache.
-    const inv1 = (
-      tool as unknown as {
-        createInvocation: (p: { file_path: string }) => {
-          execute(s: AbortSignal): Promise<{ llmContent: unknown }>;
-        };
-      }
-    ).createInvocation({ file_path: filePath });
-    const r1 = await inv1.execute(new AbortController().signal);
+    const r1 = await tool.buildAndExecute(
+      { file_path: filePath },
+      new AbortController().signal,
+    );
     expect(typeof r1.llmContent).toBe('string');
     expect(r1.llmContent as string).toContain('export function hello');
     expect(cache.size()).toBe(1);
@@ -133,14 +129,10 @@ describe('FileReadCache integration: read after history rewrite', () => {
 
     // STEP 4 — pre-fix code path: cache is NOT cleared after microcompact.
     // User reads foo.ts again. File on disk is unchanged.
-    const inv2 = (
-      tool as unknown as {
-        createInvocation: (p: { file_path: string }) => {
-          execute(s: AbortSignal): Promise<{ llmContent: unknown }>;
-        };
-      }
-    ).createInvocation({ file_path: filePath });
-    const r2 = await inv2.execute(new AbortController().signal);
+    const r2 = await tool.buildAndExecute(
+      { file_path: filePath },
+      new AbortController().signal,
+    );
 
     // THE BUG: returned content is the placeholder, NOT the real file.
     expect(r2.llmContent as string).toContain(
@@ -167,27 +159,19 @@ describe('FileReadCache integration: read after history rewrite', () => {
     const config = makeConfig(tmpDir, cache);
     const tool = new ReadFileTool(config);
 
-    const inv1 = (
-      tool as unknown as {
-        createInvocation: (p: { file_path: string }) => {
-          execute(s: AbortSignal): Promise<{ llmContent: unknown }>;
-        };
-      }
-    ).createInvocation({ file_path: filePath });
-    const r1 = await inv1.execute(new AbortController().signal);
+    const r1 = await tool.buildAndExecute(
+      { file_path: filePath },
+      new AbortController().signal,
+    );
     expect(r1.llmContent as string).toContain('export function hello');
 
     // The fix.
     cache.clear();
 
-    const inv2 = (
-      tool as unknown as {
-        createInvocation: (p: { file_path: string }) => {
-          execute(s: AbortSignal): Promise<{ llmContent: unknown }>;
-        };
-      }
-    ).createInvocation({ file_path: filePath });
-    const r2 = await inv2.execute(new AbortController().signal);
+    const r2 = await tool.buildAndExecute(
+      { file_path: filePath },
+      new AbortController().signal,
+    );
 
     expect(r2.llmContent as string).toContain('export function hello');
     expect(r2.llmContent as string).not.toContain(
@@ -208,15 +192,10 @@ describe('FileReadCache integration: read after history rewrite', () => {
     fs.writeFileSync(otherPath, 'unrelated\n');
 
     // Read foo.ts (target file).
-    await (
-      tool as unknown as {
-        createInvocation: (p: { file_path: string }) => {
-          execute(s: AbortSignal): Promise<{ llmContent: unknown }>;
-        };
-      }
-    )
-      .createInvocation({ file_path: filePath })
-      .execute(new AbortController().signal);
+    await tool.buildAndExecute(
+      { file_path: filePath },
+      new AbortController().signal,
+    );
 
     // Build history: 1 foo.ts read, then 1 other.ts read (kept).
     const fooContent = fs.readFileSync(filePath, 'utf-8');
@@ -283,15 +262,10 @@ describe('FileReadCache integration: read after history rewrite', () => {
     );
 
     // Now Read foo.ts again — pre-fix, cache returns placeholder.
-    const r = await (
-      tool as unknown as {
-        createInvocation: (p: { file_path: string }) => {
-          execute(s: AbortSignal): Promise<{ llmContent: unknown }>;
-        };
-      }
-    )
-      .createInvocation({ file_path: filePath })
-      .execute(new AbortController().signal);
+    const r = await tool.buildAndExecute(
+      { file_path: filePath },
+      new AbortController().signal,
+    );
 
     expect(r.llmContent as string).toContain(
       'unchanged since last read in this session',

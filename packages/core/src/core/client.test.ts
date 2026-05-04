@@ -479,32 +479,56 @@ describe('Gemini Client (client.ts)', () => {
       expect(cacheClear).toHaveBeenCalled();
     });
 
-    it('truncateHistory clears the cache when entries are actually removed', () => {
-      const cacheClear = mockFileReadCacheClear();
-      client['chat'] = {
-        getHistoryLength: vi.fn().mockReturnValue(3),
+    /**
+     * Test helper: mock a GeminiChat whose history length goes from
+     * `before` to `after` across truncateHistory(). The first
+     * getHistoryLength() call (pre-truncate) returns `before`; the
+     * second (post-truncate) returns `after`.
+     */
+    function mockChatWithLengths(before: number, after: number): GeminiChat {
+      return {
+        getHistoryLength: vi
+          .fn()
+          .mockReturnValueOnce(before)
+          .mockReturnValueOnce(after),
         truncateHistory: vi.fn(),
       } as unknown as GeminiChat;
+    }
+
+    it('truncateHistory clears the cache when entries are actually removed', () => {
+      const cacheClear = mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(3, 2);
 
       client.truncateHistory(2);
 
       expect(cacheClear).toHaveBeenCalled();
     });
 
-    it('truncateHistory does NOT clear the cache when keepCount >= history length (no-op)', () => {
+    it('truncateHistory does NOT clear the cache when nothing was removed (keepCount >= history length)', () => {
       const cacheClear = mockFileReadCacheClear();
-      client['chat'] = {
-        getHistoryLength: vi.fn().mockReturnValue(2),
-        truncateHistory: vi.fn(),
-      } as unknown as GeminiChat;
 
-      // keepCount equals history length — nothing dropped, cache stays valid.
+      // keepCount equals history length — nothing dropped.
+      client['chat'] = mockChatWithLengths(2, 2);
       client.truncateHistory(2);
       expect(cacheClear).not.toHaveBeenCalled();
 
       // keepCount exceeds history length — also a no-op.
+      client['chat'] = mockChatWithLengths(2, 2);
       client.truncateHistory(99);
       expect(cacheClear).not.toHaveBeenCalled();
+    });
+
+    it('truncateHistory clears the cache when a non-finite keepCount empties history (NaN regression)', () => {
+      // slice(0, NaN) returns [], but `NaN < prevLen` evaluates to
+      // false. Comparing the actual post-truncate length closes that
+      // hole — without this guard the cache would survive a history
+      // wipe and the file_unchanged placeholder bug returns.
+      const cacheClear = mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(3, 0);
+
+      client.truncateHistory(NaN);
+
+      expect(cacheClear).toHaveBeenCalled();
     });
 
     it('truncateHistory uses O(1) getHistoryLength, not getHistory (avoids structuredClone)', () => {
