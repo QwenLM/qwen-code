@@ -785,6 +785,471 @@ describe('ShellTool', () => {
       });
     });
 
+    describe('long-running foreground hint', () => {
+      // Auto-bg advisory. Threshold = effectiveTimeout / 2 — for the
+      // default 120s timeout that's 60_000ms, which the tests below
+      // assume. Tests use vi fake timers to drive the wall-clock past
+      // the threshold without actually sleeping. Hint must fire on
+      // success AND error completions (advice is the same), suppress
+      // on user-cancel / timeout / external signal (their own
+      // messaging is enough), and never fire on the background path
+      // (returns before the threshold by construction).
+      //
+      // Faking BOTH `Date` and `performance` here — shell.ts uses
+      // `performance.now()` (monotonic, NTP-resilient) for the
+      // long-run elapsed measurement, so without faking performance
+      // the elapsed would always read as "near zero" under
+      // `advanceTimersByTimeAsync` and the hint tests would never
+      // fire. Date stays faked so that `lastUpdateTime = Date.now()`
+      // (streaming throttle) and other Date-based callers in the
+      // execute path also stay deterministic.
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('appends the long-run hint when a foreground command runs ≥ 60s', async () => {
+        const invocation = shellTool.build({
+          command: 'pytest -q',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        // Advance the wall-clock past the 60s threshold.
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({ output: 'all green', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).toContain(
+          'this foreground command ran for 60s',
+        );
+        expect(result.llmContent).toContain('is_background: true');
+        expect(result.llmContent).toContain('/tasks');
+      });
+
+      it('appends the hint when a successful foreground command with empty output runs ≥ 60s', async () => {
+        // Empty-output success: write-only commands (e.g. `tar czf …`,
+        // `cp -r large-dir/`, `dd if=…`) frequently produce no stdout
+        // and exit 0. The non-debug `returnDisplayMessage` build leaves
+        // the message as `''` in this branch (output empty, exitCode 0,
+        // no abort/signal/error), so the hint append is the only thing
+        // that ever populates the user-facing TUI line. Pin both that
+        // the hint reaches the LLM AND that it surfaces in the user's
+        // returnDisplay even when the command produced nothing else to
+        // show — the user is the one who waited 60s, they should see
+        // the same advisory the agent does.
+        const invocation = shellTool.build({
+          command: 'write-to-disk.sh',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(65_000);
+        resolveShellExecution({ output: '', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).toContain('foreground command ran for 65s');
+        expect(result.returnDisplay).toContain(
+          'foreground command ran for 65s',
+        );
+      });
+
+      it('omits the hint when a foreground command finishes under threshold', async () => {
+        const invocation = shellTool.build({
+          command: 'echo hi',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(5_000);
+        resolveShellExecution({ output: 'hi', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).not.toContain('foreground command ran for');
+        expect(result.llmContent).not.toContain('is_background: true');
+      });
+
+      it('appends the hint when a long-running foreground command exits non-zero', async () => {
+        // Non-zero exit (without spawn error) is the common "command
+        // ran but failed" shape. `ShellExecutionResult.error` is
+        // reserved for spawn/setup failures (see the doc on the field
+        // in shellExecutionService.ts) — exit-code-N completions leave
+        // `error: null` and `exitCode: N`. The agent still got blocked
+        // for >60s on something that errored; "next time background
+        // it" is exactly the right advice for either failure shape.
+        const invocation = shellTool.build({
+          command: 'flaky.sh',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(75_000);
+        resolveShellExecution({
+          output: '',
+          exitCode: 1,
+          error: null, // realistic shape: non-zero exit, no spawn error
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('Exit Code: 1');
+        expect(result.llmContent).toContain(
+          'this foreground command ran for 75s',
+        );
+      });
+
+      it('omits the hint on aborted commands (timeout / user-cancel paths surface their own messaging)', async () => {
+        // `tail -f` (not `sleep N`) so the sleep-interception validator
+        // doesn't reject the command at build-time before we even reach
+        // the long-run hint logic.
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(120_000);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          aborted: true,
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('Command was cancelled');
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('omits the hint on the timeout path (combinedSignal aborted, signal not)', async () => {
+        // The plain `aborted: true` resolution above exercises the user-
+        // cancel branch (`combinedSignal.aborted && signal.aborted`).
+        // The TIMEOUT branch (`combinedSignal.aborted && !signal.aborted`)
+        // needs an `AbortSignal.any` mock that returns an already-aborted
+        // combined signal — same pattern as `should handle timeout vs
+        // user cancellation correctly` further down. Pinning the timeout
+        // branch separately so a future regression that flips the
+        // suppression check (e.g. `!result.aborted` → `!combinedSignal.aborted`)
+        // would fail loudly on this case.
+        const userAbort = new AbortController();
+        const mockTimeoutSignal = {
+          aborted: false,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        } as unknown as AbortSignal;
+        const mockCombinedSignal = {
+          aborted: true,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        } as unknown as AbortSignal;
+        const originalAbortSignal = globalThis.AbortSignal;
+        vi.stubGlobal('AbortSignal', {
+          ...originalAbortSignal,
+          timeout: vi.fn().mockReturnValue(mockTimeoutSignal),
+          any: vi.fn().mockReturnValue(mockCombinedSignal),
+        });
+
+        try {
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+            timeout: 60_000,
+          });
+          const promise = invocation.execute(userAbort.signal);
+          await vi.advanceTimersByTimeAsync(60_000);
+          resolveShellExecution({
+            output: 'partial',
+            exitCode: null,
+            aborted: true,
+          });
+          const result = await promise;
+
+          expect(result.llmContent).toContain(
+            'Command timed out after 60000ms',
+          );
+          expect(result.llmContent).not.toContain('foreground command ran for');
+        } finally {
+          // Restore even if assertions throw, otherwise globalThis.AbortSignal
+          // stays patched and cascades into unrelated subsequent tests.
+          vi.stubGlobal('AbortSignal', originalAbortSignal);
+        }
+      });
+
+      it('omits the hint when the process was killed by an external signal (SIGTERM / OOM / etc.)', async () => {
+        // External signals (`result.signal != null`) with `aborted: false`:
+        // `shellExecutionService` only sets `aborted` when the AbortSignal
+        // we passed was triggered, so SIGTERM from container shutdown,
+        // k8s eviction, OOM killer, or a sibling reaping the process group
+        // falls through to the non-aborted branch. The advisory shouldn't
+        // fire there either — the process didn't run to its conclusion,
+        // so "next time, background it" doesn't apply.
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(75_000);
+        // SIGTERM = 15; ShellExecutionResult stores the numeric signal
+        // code (see `signal: number | null` in shellExecutionService.ts
+        // and the `os.constants.signals[signal]` lookup at the spawn
+        // settle path).
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: 15,
+          aborted: false,
+        });
+        const result = await promise;
+        // Falls through to the normal result formatter (non-aborted).
+        expect(result.llmContent).toContain('Signal: 15');
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('off-by-one: omits the hint at threshold − 1ms', async () => {
+        // Pin the boundary so a regression that flips `>=` to `>` would
+        // fail loudly. Pairs with the existing 60_000ms-exactly test
+        // (which fires) — these two together pin the boundary tightly.
+        const invocation = shellTool.build({
+          command: 'echo hi',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(59_999);
+        resolveShellExecution({ output: 'hi', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('appends the hint AFTER truncation (so it survives `truncateToolOutput`)', async () => {
+        // `truncateToolOutput` wraps over-budget output in a "Truncated
+        // part of the output:" envelope. If the hint were appended
+        // inside that envelope (i.e. before truncation), the LLM might
+        // read the advisory as part of the command's own output. Pin
+        // the post-truncation insertion order: the hint must appear
+        // outside the truncation marker.
+        //
+        // Mock `truncateToolOutput` directly rather than driving real
+        // truncation — the real path needs `fs.writeFile` to actually
+        // succeed (the catch fallback returns no `outputFile`, so the
+        // shell.ts replacement branch never fires). Mocking here pins
+        // ordering, which is all this test cares about.
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({
+            content:
+              'Tool output was too large and has been truncated.\n[mocked truncated body]',
+            outputFile: '/tmp/qwen-temp/shell_mocked.output',
+          });
+
+        try {
+          const invocation = shellTool.build({
+            command: 'long-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          await vi.advanceTimersByTimeAsync(60_000);
+          resolveShellExecution({ output: 'A'.repeat(500), exitCode: 0 });
+          const result = await promise;
+
+          const content = result.llmContent as string;
+          // Hint present.
+          expect(content).toContain('foreground command ran for 60s');
+          // Truncation envelope present (proves the truncation branch
+          // actually ran in shell.ts — `outputFile` was set so the
+          // replacement happened).
+          expect(content).toContain(
+            'Tool output was too large and has been truncated.',
+          );
+          // Hint comes AFTER the truncation marker — pins the
+          // post-truncation insertion order so a regression that
+          // moves the append back inside the non-aborted llmContent
+          // builder (where it'd get wrapped by the truncation
+          // envelope on long output) would fail loudly.
+          const truncIdx = content.indexOf(
+            'Tool output was too large and has been truncated.',
+          );
+          const hintIdx = content.indexOf('foreground command ran for');
+          expect(hintIdx).toBeGreaterThan(truncIdx);
+        } finally {
+          // Restore even if assertions throw — otherwise the
+          // truncateToolOutput spy leaks into subsequent tests.
+          spy.mockRestore();
+        }
+      });
+
+      it('threshold scales with the user-supplied timeout (not the default)', async () => {
+        // User explicitly sets timeout: 600_000 (10 min) because they
+        // expect a long command. Threshold is half that, so a 100s
+        // run should NOT trigger the advisory — the user already told
+        // us this command is allowed to run long. Pins the per-
+        // invocation coupling so a regression that goes back to the
+        // fixed `LONG_RUNNING_FOREGROUND_THRESHOLD_MS` constant
+        // would fail this test.
+        const invocation = shellTool.build({
+          command: 'pytest --slow',
+          is_background: false,
+          timeout: 600_000,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(100_000); // 100s, well under threshold (300s)
+        resolveShellExecution({ output: 'all green', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('threshold-scaling positive case: hint DOES fire at the scaled threshold', async () => {
+        // Pair with the negative test above. If `longRunThresholdFor`
+        // regressed to a fixed 60s, the negative test would still pass
+        // (no hint at 100s under default threshold either) but THIS
+        // one would also fire incorrectly at 100s — pinning both ends
+        // catches the failure mode.
+        const invocation = shellTool.build({
+          command: 'pytest --slow',
+          is_background: false,
+          timeout: 600_000,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(305_000); // past 300s scaled threshold
+        resolveShellExecution({ output: 'all green', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).toContain('foreground command ran for 305s');
+      });
+
+      it('hint appears in non-debug returnDisplay (user TUI)', async () => {
+        // The hint is useful to the user too — they're the one waiting
+        // for long commands. Pin that the non-debug TUI gets the hint
+        // appended (terse form: result.output + hint, separated by
+        // blank line). Default `getDebugMode → false`.
+        const invocation = shellTool.build({
+          command: 'pytest -q',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({ output: 'all green', exitCode: 0 });
+        const result = await promise;
+        // Both surfaces have the hint.
+        expect(result.llmContent).toContain('foreground command ran for 60s');
+        expect(result.returnDisplay).toContain(
+          'foreground command ran for 60s',
+        );
+        // Original output preserved (not replaced by hint).
+        expect(result.returnDisplay).toContain('all green');
+      });
+
+      it('hint also appears in debug-mode returnDisplay (mirrors LLM view)', async () => {
+        // Same hint visibility but through the debug-mode mirror code
+        // path. Both branches now use append-style re-sync (preserving
+        // any prior content like the truncation marker), so the
+        // assertion is the same — but exercising both flips guards
+        // the branch from regressing independently.
+        const debugMock = mockConfig as unknown as { getDebugMode: Mock };
+        debugMock.getDebugMode.mockReturnValue(true);
+        try {
+          const invocation = shellTool.build({
+            command: 'pytest -q',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          await vi.advanceTimersByTimeAsync(60_000);
+          resolveShellExecution({ output: 'all green', exitCode: 0 });
+          const result = await promise;
+          expect(result.llmContent).toContain('foreground command ran for 60s');
+          expect(result.returnDisplay).toContain(
+            'foreground command ran for 60s',
+          );
+        } finally {
+          debugMock.getDebugMode.mockReturnValue(false);
+        }
+      });
+
+      it('honors the MIN_LONG_RUN_THRESHOLD_MS floor for pathological tiny timeouts', async () => {
+        // `longRunThresholdFor(1)` would otherwise be `Math.floor(0.5) = 0`,
+        // making `elapsedMs >= 0` true on every invocation and emitting
+        // a "ran for 0s" advisory. The floor at MIN_LONG_RUN_THRESHOLD_MS
+        // (1000ms) keeps the threshold sensible. This test pins it: a
+        // 500ms run with `timeout: 1` finishes BELOW the floor and must
+        // NOT trigger the hint. (The result is mocked with `aborted: false`
+        // since we're isolating the threshold logic from the abort path —
+        // a regression that strips the `Math.max(...)` guard would fire
+        // the hint here while the real-world abort path stays intact.)
+        const invocation = shellTool.build({
+          command: 'echo done',
+          is_background: false,
+          timeout: 1,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(500);
+        resolveShellExecution({ output: 'done', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('hint survives the error path (appended to error.message)', async () => {
+        // `coreToolScheduler` builds the model-facing functionResponse
+        // from `error.message` (NOT llmContent) when toolResult.error
+        // is set. So if a long command fails AND hits the spawn-error
+        // path, the hint we appended to llmContent would be silently
+        // dropped before reaching the agent. Pin that the hint also
+        // lives in error.message.
+        //
+        // Note on realism: `ShellExecutionResult.error` is reserved for
+        // spawn / setup failures (per the field's doc comment in
+        // shellExecutionService.ts) — non-zero exits leave it null.
+        // Real spawn failures (ENOENT, permission denied) typically
+        // resolve in <1s, so the long-elapsed + spawn-error combination
+        // tested here is rare in practice. The test still pins the
+        // CODE PATH because slow spawn paths exist (PTY init dragging,
+        // remote-fs exec syscalls, security scanners interposing) and
+        // a future regression that drops the error-path hint
+        // preservation would silently break those edge cases.
+        const slowSpawnError = new Error('PTY initialization failed after 75s');
+        const invocation = shellTool.build({
+          command: 'cmd-that-fails-to-spawn',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(75_000);
+        resolveShellExecution({
+          output: '',
+          exitCode: null, // spawn never produced an exit code
+          error: slowSpawnError,
+        });
+        const result = await promise;
+        // The hint must appear in the error.message path so the LLM
+        // sees it via the scheduler's error branch.
+        expect(result.error?.message).toContain(
+          'PTY initialization failed after 75s',
+        );
+        expect(result.error?.message).toContain(
+          'foreground command ran for 75s',
+        );
+        // `\n---\n` divider so downstream consumers
+        // (firePostToolUseFailureHook, telemetry grouping, SIEM, hook
+        // parsers) have an unambiguous boundary between the original
+        // error body and the appended advisory. Without the divider,
+        // pattern-matching on error messages would absorb the ~400-
+        // char advisory into the matched body.
+        expect(result.error?.message).toMatch(
+          /PTY initialization failed after 75s\n\n---\n/,
+        );
+      });
+
+      it('never appends the long-run hint on background commands', async () => {
+        // Background path returns immediately with `Background shell
+        // started.` and a different result shape — by construction the
+        // hint logic only lives in `executeForeground`, so this can't
+        // fail today. Defensive pin: a future refactor that hoists the
+        // long-run advisory into a shared post-execute path would
+        // accidentally tag every background launch with a "ran for 0s,
+        // consider is_background: true" suggestion (nonsense — it's
+        // already backgrounded). This test fails loudly on that
+        // regression.
+        const invocation = shellTool.build({
+          command: 'pytest -q',
+          is_background: true,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        expect(result.llmContent).toContain('Background shell started');
+        expect(result.llmContent).not.toContain('foreground command ran for');
+        // The hint text contains the literal `is_background: true` —
+        // the background path's own llmContent doesn't, so this guards
+        // against the hint leaking in via a shared code path.
+        expect(result.llmContent).not.toContain('is_background: true');
+      });
+    });
+
     describe('addCoAuthorToGitCommit', () => {
       it('should add co-author to git commit with double quotes', async () => {
         const command = 'git commit -m "Initial commit"';
