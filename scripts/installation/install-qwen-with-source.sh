@@ -51,6 +51,30 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+TEMP_DIRS=()
+
+cleanup_temp_dirs() {
+    local temp_dir
+    for temp_dir in "${TEMP_DIRS[@]}"; do
+        if [[ -n "${temp_dir}" ]]; then
+            rm -rf "${temp_dir}"
+        fi
+    done
+}
+
+register_temp_dir() {
+    local temp_dir="$1"
+    TEMP_DIRS+=("${temp_dir}")
+}
+
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+trap cleanup_temp_dirs EXIT
+trap 'cleanup_temp_dirs; exit 130' INT
+trap 'cleanup_temp_dirs; exit 143' TERM
+
 print_usage() {
     cat <<EOF
 Qwen Code Installer
@@ -124,6 +148,41 @@ validate_https_url() {
     exit 1
 }
 
+validate_version() {
+    if [[ "${VERSION}" == "latest" ]]; then
+        return 0
+    fi
+
+    if [[ "${VERSION}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+        return 0
+    fi
+
+    log_error "--version must be 'latest' or a semver string."
+    exit 1
+}
+
+validate_install_path() {
+    local value="$1"
+    local option_name="$2"
+
+    if [[ -z "${value}" ]]; then
+        log_error "${option_name} must not be empty."
+        exit 1
+    fi
+
+    case "${value}" in
+        *$'\n'*|*$'\r'*)
+            log_error "${option_name} must not contain newlines."
+            exit 1
+            ;;
+    esac
+
+    if [[ "${value}" != /* ]]; then
+        log_error "${option_name} must be an absolute path."
+        exit 1
+    fi
+}
+
 validate_options() {
     METHOD="${METHOD:-detect}"
 
@@ -146,6 +205,12 @@ validate_options() {
     esac
 
     validate_https_url "${BASE_URL}" "--base-url"
+    validate_https_url "${NPM_REGISTRY}" "--registry"
+    validate_version
+    validate_install_path "${INSTALL_ROOT}" "QWEN_INSTALL_ROOT"
+    validate_install_path "${INSTALL_LIB_PARENT}" "QWEN_INSTALL_LIB_PARENT"
+    validate_install_path "${INSTALL_LIB_DIR}" "QWEN_INSTALL_LIB_DIR"
+    validate_install_path "${INSTALL_BIN_DIR}" "QWEN_INSTALL_BIN_DIR"
     validate_source
 }
 
@@ -445,7 +510,7 @@ download_file() {
     fi
 
     if command_exists wget; then
-        wget -q "${url}" -O "${destination}"
+        wget -q --tries=3 "${url}" -O "${destination}" || return 1
         return $?
     fi
 
@@ -539,7 +604,7 @@ extract_archive() {
     local archive_path="$1"
     local destination="$2"
 
-    mkdir -p "${destination}"
+    mkdir -p "${destination}" || return 1
 
     case "${archive_path}" in
         *.zip)
@@ -547,13 +612,13 @@ extract_archive() {
                 log_error "unzip is required to extract ${archive_path}."
                 return 1
             fi
-            unzip -q "${archive_path}" -d "${destination}"
+            unzip -q "${archive_path}" -d "${destination}" || return 1
             ;;
         *.tar.gz|*.tgz)
-            tar -xzf "${archive_path}" -C "${destination}"
+            tar -xzf "${archive_path}" -C "${destination}" || return 1
             ;;
         *.tar.xz)
-            tar -xf "${archive_path}" -C "${destination}"
+            tar -xf "${archive_path}" -C "${destination}" || return 1
             ;;
         *)
             log_error "Unsupported archive format: ${archive_path}"
@@ -583,6 +648,19 @@ ensure_managed_install_dir() {
     log_error "${install_dir} exists but is not a Qwen Code standalone install."
     log_error "Refusing to overwrite it. Move or remove it manually, then rerun the installer."
     return 1
+}
+
+write_unix_wrapper() {
+    local wrapper_path="$1"
+    local qwen_bin="$2"
+    local quoted_qwen_bin
+    quoted_qwen_bin=$(shell_quote "${qwen_bin}")
+
+    cat > "${wrapper_path}" <<EOF
+#!/usr/bin/env sh
+exec ${quoted_qwen_bin} "\$@"
+EOF
+    chmod +x "${wrapper_path}"
 }
 
 install_standalone() {
@@ -621,6 +699,7 @@ install_standalone() {
         fi
 
         temp_dir=$(mktemp -d)
+        register_temp_dir "${temp_dir}"
         archive_path="${temp_dir}/${archive_name}"
 
         log_info "Downloading ${archive_url}"
@@ -633,6 +712,7 @@ install_standalone() {
 
     if [[ -z "${temp_dir}" ]]; then
         temp_dir=$(mktemp -d)
+        register_temp_dir "${temp_dir}"
     fi
 
     # Verify integrity before extraction or changing the install directory.
@@ -660,19 +740,29 @@ install_standalone() {
         return 1
     fi
 
-    mkdir -p "${INSTALL_LIB_PARENT}" "${INSTALL_BIN_DIR}"
+    mkdir -p "${INSTALL_LIB_PARENT}" "${INSTALL_BIN_DIR}" || {
+        rm -rf "${temp_dir}"
+        return 1
+    }
 
     # Stage into .new and keep .old so failed upgrades can roll back.
     local new_install_dir="${INSTALL_LIB_DIR}.new"
     local old_install_dir="${INSTALL_LIB_DIR}.old"
+    local wrapper_tmp="${INSTALL_BIN_DIR}/qwen.new"
     if ! ensure_managed_install_dir "${INSTALL_LIB_DIR}" ||
         ! ensure_managed_install_dir "${new_install_dir}" ||
         ! ensure_managed_install_dir "${old_install_dir}"; then
         rm -rf "${temp_dir}"
         return 1
     fi
-    rm -rf "${new_install_dir}" "${old_install_dir}"
+    rm -rf "${new_install_dir}" "${old_install_dir}" "${wrapper_tmp}"
     mv "${extract_dir}/qwen-code" "${new_install_dir}"
+
+    if ! write_unix_wrapper "${wrapper_tmp}" "${INSTALL_LIB_DIR}/bin/qwen"; then
+        rm -rf "${temp_dir}" "${new_install_dir}" "${wrapper_tmp}"
+        log_error "Failed to create qwen wrapper in ${INSTALL_BIN_DIR}."
+        return 1
+    fi
 
     if [[ -e "${INSTALL_LIB_DIR}" ]]; then
         mv "${INSTALL_LIB_DIR}" "${old_install_dir}"
@@ -682,17 +772,22 @@ install_standalone() {
         if [[ -e "${old_install_dir}" ]]; then
             mv "${old_install_dir}" "${INSTALL_LIB_DIR}"
         fi
-        rm -rf "${temp_dir}"
+        rm -rf "${temp_dir}" "${wrapper_tmp}"
         log_error "Failed to install standalone archive to ${INSTALL_LIB_DIR}."
         return 1
     fi
 
+    if ! mv -f "${wrapper_tmp}" "${INSTALL_BIN_DIR}/qwen"; then
+        rm -rf "${INSTALL_LIB_DIR}" "${wrapper_tmp}"
+        if [[ -e "${old_install_dir}" ]]; then
+            mv "${old_install_dir}" "${INSTALL_LIB_DIR}"
+        fi
+        rm -rf "${temp_dir}"
+        log_error "Failed to create qwen wrapper in ${INSTALL_BIN_DIR}."
+        return 1
+    fi
+
     rm -rf "${old_install_dir}"
-    cat > "${INSTALL_BIN_DIR}/qwen" <<EOF
-#!/usr/bin/env sh
-exec "${INSTALL_LIB_DIR}/bin/qwen" "\$@"
-EOF
-    chmod +x "${INSTALL_BIN_DIR}/qwen"
     export PATH="${INSTALL_BIN_DIR}:${PATH}"
 
     create_source_json

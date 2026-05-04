@@ -81,10 +81,22 @@ describe('installation scripts', () => {
       'Standalone install failed. Retry with --method npm',
     );
     expect(script).not.toContain('ln -sf "${INSTALL_LIB_DIR}/bin/qwen"');
-    expect(script).toContain('exec "${INSTALL_LIB_DIR}/bin/qwen"');
+    expect(script).toContain('shell_quote()');
+    expect(script).toContain('exec ${quoted_qwen_bin} "\\$@"');
+    expect(script).toContain('validate_version()');
+    expect(script).toContain('validate_install_path');
+    expect(script).toContain('validate_https_url "${NPM_REGISTRY}"');
     expect(script).toContain('qwen-code/node/bin/node');
     expect(script).toContain('Archive contains symlinks; refusing to install');
     expect(script).toContain('not a Qwen Code standalone install');
+    expect(script).toContain(
+      'unzip -q "${archive_path}" -d "${destination}" || return 1',
+    );
+    expect(script).toContain(
+      'tar -xzf "${archive_path}" -C "${destination}" || return 1',
+    );
+    expect(script).toContain('wget -q --tries=3 "${url}" -O "${destination}"');
+    expect(script).toContain('TEMP_DIRS+=');
     expect(script).not.toContain('-print -quit');
   });
 
@@ -138,6 +150,17 @@ describe('installation scripts', () => {
     expect(script).toContain('$env:QWEN_DOWNLOAD_URL');
     expect(script).toContain('$env:QWEN_ARCHIVE_FILE');
     expect(script).toContain(
+      'if defined QWEN_INSTALL_ROOT set "INSTALL_BASE=!QWEN_INSTALL_ROOT!"',
+    );
+    expect(script).not.toContain('%QWEN_INSTALL_ROOT%');
+    expect(script).toContain(':ValidateSafeVar');
+    expect(script).toContain('set "SAFE_VALUE=!%~1!"');
+    expect(script).toContain(':ValidateVersion');
+    expect(script).toContain(
+      'call :ValidateHttpsUrlVar "NPM_REGISTRY" "--registry"',
+    );
+    expect(script).toContain("$ErrorActionPreference = 'Stop'; try");
+    expect(script).toContain(
       '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL)',
     );
     expect(script).toContain('must start with https://');
@@ -174,6 +197,8 @@ describe('standalone release packaging', () => {
     expect(packageScript).toContain('assertSymlinksStayInside');
     expect(packageScript).toContain('copyDereferenced');
     expect(packageScript).toContain('refusing to write empty SHA256SUMS');
+    expect(packageScript).toContain('dereference: true');
+    expect(packageScript).toContain('fs.createReadStream');
     expect(packageScript).toContain('Expand-Archive');
     expect(packageScript).toContain('Compress-Archive');
 
@@ -182,7 +207,11 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain('https://nodejs.org/dist/v${nodeVersion}');
     expect(releaseScript).toContain('SHASUMS256.txt');
     expect(releaseScript).toContain('verifyNodeArchive');
-    expect(releaseScript).toContain('EXPECTED_ARCHIVE_COUNT = 5');
+    expect(releaseScript).toContain(
+      'EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length',
+    );
+    expect(releaseScript).toContain('nodeArchiveExtension');
+    expect(releaseScript).toContain('fs.createReadStream');
     expect(releaseScript).toContain('expectedArchiveNames');
     expect(releaseScript).toContain('qwen-code-${qwenTarget}');
     expect(releaseScript).toContain('scripts/create-standalone-package.js');
@@ -404,6 +433,43 @@ describe('Linux/macOS installer end-to-end', () => {
       }
     },
   );
+
+  itOnUnix('shell-quotes custom install paths in the generated wrapper', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = packageFakeStandalone(tmpDir);
+      const installRoot = path.join(tmpDir, 'install');
+      const home = path.join(tmpDir, 'home');
+      const installLibDir = path.join(
+        installRoot,
+        'lib',
+        'qwen-code$(touch qwen-pwned)',
+      );
+
+      runUnixInstaller(archive, installRoot, home, 'standalone', {
+        QWEN_INSTALL_LIB_DIR: installLibDir,
+      });
+
+      const version = execFileSync(
+        path.join(installRoot, 'bin', 'qwen'),
+        ['--version'],
+        {
+          cwd: tmpDir,
+        },
+      )
+        .toString()
+        .trim();
+      expect(version).toBe('0.0.0-smoke');
+      expect(existsSync(path.join(tmpDir, 'qwen-pwned'))).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      if (createdDist) {
+        rmSync('dist', { recursive: true, force: true });
+      }
+    }
+  });
 
   itOnUnix('rejects a tampered local archive', () => {
     const createdDist = ensureMinimalDist();
@@ -664,6 +730,30 @@ describe('Windows installer end-to-end', () => {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  itOnWindows('rejects unsafe environment-derived install paths', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = createFakeWindowsStandaloneArchive(tmpDir);
+      const marker = path.join(tmpDir, 'pwned.txt');
+
+      expect(() =>
+        runWindowsInstaller(
+          archive,
+          path.join(tmpDir, 'install'),
+          path.join(tmpDir, 'home'),
+          'standalone',
+          {
+            QWEN_INSTALL_ROOT: `${path.join(tmpDir, 'install')}" & echo pwned > "${marker}" & "`,
+          },
+        ),
+      ).toThrow(/unsafe command characters/);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 function ensureMinimalDist() {
@@ -848,7 +938,13 @@ function packageFakeStandalone(tmpDir, nodeArchiveOptions = {}) {
   return path.join(outDir, 'qwen-code-linux-x64.tar.gz');
 }
 
-function runUnixInstaller(archive, installRoot, home, method = 'standalone') {
+function runUnixInstaller(
+  archive,
+  installRoot,
+  home,
+  method = 'standalone',
+  extraEnv = {},
+) {
   mkdirSync(home, { recursive: true });
   try {
     return execFileSync(
@@ -867,6 +963,7 @@ function runUnixInstaller(archive, installRoot, home, method = 'standalone') {
           ...process.env,
           HOME: home,
           QWEN_INSTALL_ROOT: installRoot,
+          ...extraEnv,
         },
         stdio: 'pipe',
       },
@@ -888,6 +985,7 @@ function runWindowsInstaller(
   installRoot,
   home,
   method = 'standalone',
+  extraEnv = {},
 ) {
   mkdirSync(home, { recursive: true });
   try {
@@ -904,6 +1002,7 @@ function runWindowsInstaller(
       {
         USERPROFILE: home,
         QWEN_INSTALL_ROOT: installRoot,
+        ...extraEnv,
       },
     );
   } catch (error) {

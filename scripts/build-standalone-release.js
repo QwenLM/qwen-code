@@ -11,34 +11,45 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
-const EXPECTED_ARCHIVE_COUNT = 5;
 const RELEASE_TARGETS = [
   {
     qwenTarget: 'darwin-arm64',
     nodeTarget: 'darwin-arm64',
-    extension: 'tar.gz',
+    nodeArchiveExtension: 'tar.gz',
   },
   {
     qwenTarget: 'darwin-x64',
     nodeTarget: 'darwin-x64',
-    extension: 'tar.gz',
+    nodeArchiveExtension: 'tar.gz',
   },
   {
     qwenTarget: 'linux-arm64',
     nodeTarget: 'linux-arm64',
-    extension: 'tar.xz',
+    nodeArchiveExtension: 'tar.xz',
   },
-  { qwenTarget: 'linux-x64', nodeTarget: 'linux-x64', extension: 'tar.xz' },
-  { qwenTarget: 'win-x64', nodeTarget: 'win-x64', extension: 'zip' },
+  {
+    qwenTarget: 'linux-x64',
+    nodeTarget: 'linux-x64',
+    nodeArchiveExtension: 'tar.xz',
+  },
+  { qwenTarget: 'win-x64', nodeTarget: 'win-x64', nodeArchiveExtension: 'zip' },
 ];
+const EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length;
 
-await main();
+try {
+  await main();
+} catch (error) {
+  console.error(error instanceof Error ? error.message : error);
+  process.exitCode = 1;
+}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -87,7 +98,7 @@ async function main() {
 async function packageTarget({
   qwenTarget,
   nodeTarget,
-  extension,
+  nodeArchiveExtension,
   nodeDistUrl,
   nodeVersion,
   outDir,
@@ -95,11 +106,11 @@ async function packageTarget({
   runtimeDir,
   checksums,
 }) {
-  const archiveName = `node-v${nodeVersion}-${nodeTarget}.${extension}`;
+  const archiveName = `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
   const archivePath = path.join(runtimeDir, archiveName);
 
   await downloadFile(`${nodeDistUrl}/${archiveName}`, archivePath);
-  verifyNodeArchive(archivePath, archiveName, checksums);
+  await verifyNodeArchive(archivePath, archiveName, checksums);
 
   const args = [
     'scripts/create-standalone-package.js',
@@ -128,8 +139,13 @@ async function downloadFile(url, destination) {
       `Failed to download ${url}: ${response.status} ${response.statusText}`,
     );
   }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  fs.writeFileSync(destination, buffer);
+  if (!response.body) {
+    fail(`Failed to download ${url}: response body was empty`);
+  }
+  await pipeline(
+    Readable.fromWeb(response.body),
+    fs.createWriteStream(destination),
+  );
 }
 
 function parseChecksums(content) {
@@ -143,21 +159,24 @@ function parseChecksums(content) {
   return checksums;
 }
 
-function verifyNodeArchive(archivePath, archiveName, checksums) {
+async function verifyNodeArchive(archivePath, archiveName, checksums) {
   const expected = checksums.get(archiveName);
   if (!expected) {
     fail(`Node.js SHASUMS256.txt does not list ${archiveName}`);
   }
 
-  const actual = crypto
-    .createHash('sha256')
-    .update(fs.readFileSync(archivePath))
-    .digest('hex');
+  const actual = await sha256File(archivePath);
   if (actual !== expected) {
     fail(`Checksum verification failed for ${archiveName}`);
   }
 
   console.log(`Verified Node.js runtime checksum for ${archiveName}`);
+}
+
+async function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  await pipeline(fs.createReadStream(filePath), hash);
+  return hash.digest('hex');
 }
 
 function assertStandaloneOutput(outDir) {
@@ -266,6 +285,5 @@ Options:
 }
 
 function fail(message) {
-  console.error(`ERROR: ${message}`);
-  process.exit(1);
+  throw new Error(`ERROR: ${message}`);
 }

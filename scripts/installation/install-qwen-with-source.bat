@@ -6,21 +6,28 @@ REM This script intentionally does not install Node.js or change npm config.
 setlocal enabledelayedexpansion
 
 set "SOURCE=unknown"
-set "METHOD=%QWEN_INSTALL_METHOD%"
+set "METHOD="
+if defined QWEN_INSTALL_METHOD set "METHOD=!QWEN_INSTALL_METHOD!"
 set "MIRROR=github"
-if not "%QWEN_INSTALL_MIRROR%"=="" set "MIRROR=%QWEN_INSTALL_MIRROR%"
-set "BASE_URL=%QWEN_INSTALL_BASE_URL%"
-set "ARCHIVE_PATH=%QWEN_INSTALL_ARCHIVE%"
+if defined QWEN_INSTALL_MIRROR set "MIRROR=!QWEN_INSTALL_MIRROR!"
+set "BASE_URL="
+if defined QWEN_INSTALL_BASE_URL set "BASE_URL=!QWEN_INSTALL_BASE_URL!"
+set "ARCHIVE_PATH="
+if defined QWEN_INSTALL_ARCHIVE set "ARCHIVE_PATH=!QWEN_INSTALL_ARCHIVE!"
 set "VERSION=latest"
-if not "%QWEN_INSTALL_VERSION%"=="" set "VERSION=%QWEN_INSTALL_VERSION%"
+if defined QWEN_INSTALL_VERSION set "VERSION=!QWEN_INSTALL_VERSION!"
 set "NPM_REGISTRY=https://registry.npmmirror.com"
-if not "%QWEN_NPM_REGISTRY%"=="" set "NPM_REGISTRY=%QWEN_NPM_REGISTRY%"
-set "INSTALL_BASE=%LOCALAPPDATA%\qwen-code"
-if not "%QWEN_INSTALL_ROOT%"=="" set "INSTALL_BASE=%QWEN_INSTALL_ROOT%"
-set "INSTALL_DIR=%INSTALL_BASE%\qwen-code"
-if not "%QWEN_INSTALL_LIB_DIR%"=="" set "INSTALL_DIR=%QWEN_INSTALL_LIB_DIR%"
-set "INSTALL_BIN_DIR=%INSTALL_BASE%\bin"
-if not "%QWEN_INSTALL_BIN_DIR%"=="" set "INSTALL_BIN_DIR=%QWEN_INSTALL_BIN_DIR%"
+if defined QWEN_NPM_REGISTRY set "NPM_REGISTRY=!QWEN_NPM_REGISTRY!"
+if defined LOCALAPPDATA (
+    set "INSTALL_BASE=!LOCALAPPDATA!\qwen-code"
+) else (
+    set "INSTALL_BASE=!USERPROFILE!\AppData\Local\qwen-code"
+)
+if defined QWEN_INSTALL_ROOT set "INSTALL_BASE=!QWEN_INSTALL_ROOT!"
+set "INSTALL_DIR=!INSTALL_BASE!\qwen-code"
+if defined QWEN_INSTALL_LIB_DIR set "INSTALL_DIR=!QWEN_INSTALL_LIB_DIR!"
+set "INSTALL_BIN_DIR=!INSTALL_BASE!\bin"
+if defined QWEN_INSTALL_BIN_DIR set "INSTALL_BIN_DIR=!QWEN_INSTALL_BIN_DIR!"
 
 REM Parse flags before any network or filesystem work.
 :parse_args
@@ -201,6 +208,25 @@ exit /b 0
 :ValidateOptions
 if "!METHOD!"=="" set "METHOD=detect"
 
+call :ValidateSafeVar "METHOD" "--method"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+call :ValidateSafeVar "MIRROR" "--mirror"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+call :ValidateSafeVar "BASE_URL" "--base-url"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+call :ValidateSafeVar "ARCHIVE_PATH" "--archive"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+call :ValidateSafeVar "VERSION" "--version"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+call :ValidateSafeVar "NPM_REGISTRY" "--registry"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+call :ValidateSafePathVar "INSTALL_BASE" "QWEN_INSTALL_ROOT"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+call :ValidateSafePathVar "INSTALL_DIR" "QWEN_INSTALL_LIB_DIR"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+call :ValidateSafePathVar "INSTALL_BIN_DIR" "QWEN_INSTALL_BIN_DIR"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+
 if /i "!METHOD!"=="detect" goto validate_method_ok
 if /i "!METHOD!"=="standalone" goto validate_method_ok
 if /i "!METHOD!"=="npm" goto validate_method_ok
@@ -214,19 +240,70 @@ echo ERROR: --mirror must be github or aliyun.
 exit /b 1
 
 :validate_mirror_ok
-call :ValidateHttpsUrl "!BASE_URL!" "--base-url"
+call :ValidateHttpsUrlVar "BASE_URL" "--base-url"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+
+call :ValidateHttpsUrlVar "NPM_REGISTRY" "--registry"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+
+call :ValidateVersion
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
 call :ValidateSource
 exit /b %ERRORLEVEL%
 
-:ValidateHttpsUrl
-set "URL_VALUE=%~1"
+:ValidateSafeVar
+set "SAFE_VALUE=!%~1!"
+set "SAFE_OPTION=%~2"
+call :ValidateSafeCurrentValue
+exit /b %ERRORLEVEL%
+
+:ValidateSafeCurrentValue
+if "!SAFE_VALUE!"=="" exit /b 0
+if not "!SAFE_VALUE:"=!"=="!SAFE_VALUE!" goto unsafe_value
+if not "!SAFE_VALUE:&=!"=="!SAFE_VALUE!" goto unsafe_value
+if not "!SAFE_VALUE:|=!"=="!SAFE_VALUE!" goto unsafe_value
+if not "!SAFE_VALUE:<=!"=="!SAFE_VALUE!" goto unsafe_value
+if not "!SAFE_VALUE:>=!"=="!SAFE_VALUE!" goto unsafe_value
+if not "!SAFE_VALUE:^^=!"=="!SAFE_VALUE!" goto unsafe_value
+if not "!SAFE_VALUE:%%=!"=="!SAFE_VALUE!" goto unsafe_value
+if not "!SAFE_VALUE:`=!"=="!SAFE_VALUE!" goto unsafe_value
+exit /b 0
+
+:unsafe_value
+echo ERROR: !SAFE_OPTION! contains unsafe command characters.
+exit /b 1
+
+:ValidateSafePathVar
+set "PATH_VALUE=!%~1!"
+set "PATH_OPTION=%~2"
+set "SAFE_VALUE=!PATH_VALUE!"
+set "SAFE_OPTION=!PATH_OPTION!"
+call :ValidateSafeCurrentValue
+if %ERRORLEVEL% NEQ 0 exit /b 1
+if "!PATH_VALUE!"=="" (
+    echo ERROR: !PATH_OPTION! must not be empty.
+    exit /b 1
+)
+if "!PATH_VALUE:~1,2!"==":\" exit /b 0
+if "!PATH_VALUE:~0,2!"=="\\" exit /b 0
+echo ERROR: !PATH_OPTION! must be an absolute path.
+exit /b 1
+
+:ValidateHttpsUrlVar
+set "URL_VALUE=!%~1!"
 set "URL_OPTION=%~2"
 if "!URL_VALUE!"=="" exit /b 0
 if /i "!URL_VALUE:~0,8!"=="https://" exit /b 0
 
 echo ERROR: !URL_OPTION! must start with https://
+exit /b 1
+
+:ValidateVersion
+if /i "!VERSION!"=="latest" exit /b 0
+echo(!VERSION!| findstr /R /C:"^v*[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[A-Za-z0-9.-]*$" >nul
+if %ERRORLEVEL% EQU 0 exit /b 0
+echo ERROR: --version must be 'latest' or a semver string.
 exit /b 1
 
 :ValidateSource
@@ -287,7 +364,7 @@ exit /b %PS_STATUS%
 :DownloadFile
 set "QWEN_DOWNLOAD_URL=%~1"
 set "QWEN_DOWNLOAD_DEST=%~2"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile($env:QWEN_DOWNLOAD_URL, $env:QWEN_DOWNLOAD_DEST)"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $client = New-Object Net.WebClient; $client.DownloadFile($env:QWEN_DOWNLOAD_URL, $env:QWEN_DOWNLOAD_DEST); exit 0 } catch { exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="
@@ -509,12 +586,28 @@ if !ERRORLEVEL! NEQ 0 (
     exit /b 1
 )
 
-if exist "!OLD_INSTALL_DIR!" rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
-
 (
 echo @echo off
 echo call "!INSTALL_DIR!\bin\qwen.cmd" %%*
-) > "!INSTALL_BIN_DIR!\qwen.cmd"
+) > "!INSTALL_BIN_DIR!\qwen.cmd.new"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!INSTALL_DIR!" rmdir /S /Q "!INSTALL_DIR!" >nul 2>&1
+    if exist "!OLD_INSTALL_DIR!" move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    echo ERROR: Failed to create qwen wrapper in !INSTALL_BIN_DIR!.
+    exit /b 1
+)
+move /Y "!INSTALL_BIN_DIR!\qwen.cmd.new" "!INSTALL_BIN_DIR!\qwen.cmd" >nul
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!INSTALL_BIN_DIR!\qwen.cmd.new" del /F /Q "!INSTALL_BIN_DIR!\qwen.cmd.new" >nul 2>&1
+    if exist "!INSTALL_DIR!" rmdir /S /Q "!INSTALL_DIR!" >nul 2>&1
+    if exist "!OLD_INSTALL_DIR!" move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    echo ERROR: Failed to create qwen wrapper in !INSTALL_BIN_DIR!.
+    exit /b 1
+)
+
+if exist "!OLD_INSTALL_DIR!" rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
 
 set "PATH=!INSTALL_BIN_DIR!;!PATH!"
 call :CreateSourceJson
@@ -619,16 +712,16 @@ exit /b 0
 :CreateSourceJson
 if "!SOURCE!"=="unknown" exit /b 0
 
-set "QWEN_DIR=%USERPROFILE%\.qwen"
-if not exist "%QWEN_DIR%" mkdir "%QWEN_DIR%"
+set "QWEN_DIR=!USERPROFILE!\.qwen"
+if not exist "!QWEN_DIR!" mkdir "!QWEN_DIR!"
 
 (
 echo {
 echo   "source": "!SOURCE!"
 echo }
-) > "%QWEN_DIR%\source.json"
+) > "!QWEN_DIR!\source.json"
 
-echo SUCCESS: Installation source saved to %USERPROFILE%\.qwen\source.json
+echo SUCCESS: Installation source saved to !USERPROFILE!\.qwen\source.json
 exit /b 0
 
 :PrintFinalInstructions

@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -38,9 +39,14 @@ const TARGETS = new Map([
 const DIST_REQUIRED_PATHS = ['cli.js', 'vendor', 'bundled/qc-helper/docs'];
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
 
-main();
+try {
+  await main();
+} catch (error) {
+  console.error(error instanceof Error ? error.message : error);
+  process.exitCode = 1;
+}
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help) {
@@ -95,7 +101,7 @@ function main() {
       fs.rmSync(outputPath, { force: true });
     }
     createArchive(targetConfig.outputExtension, outputPath, tempRoot);
-    writeSha256Sums(outDir);
+    await writeSha256Sums(outDir);
 
     console.log(`Created ${path.relative(rootDir, outputPath)}`);
     console.log(
@@ -204,9 +210,11 @@ function copyRuntimeAssets(packageRoot) {
     }
     fs.cpSync(path.join(distDir, entry), path.join(libDir, entry), {
       recursive: true,
-      verbatimSymlinks: true,
+      dereference: true,
+      verbatimSymlinks: false,
     });
   }
+  assertNoSymlinks(libDir, 'Copied runtime assets still contain symlinks.');
 
   for (const fileName of ROOT_REQUIRED_PATHS) {
     fs.copyFileSync(
@@ -465,7 +473,7 @@ function createZipArchive(outputPath, cwd) {
   run('zip', ['-qr', outputPath, 'qwen-code'], { cwd });
 }
 
-function writeSha256Sums(outDir) {
+async function writeSha256Sums(outDir) {
   const entries = fs
     .readdirSync(outDir)
     .filter(
@@ -481,16 +489,20 @@ function writeSha256Sums(outDir) {
     );
   }
 
-  const lines = entries.map((entry) => {
+  const lines = [];
+  for (const entry of entries) {
     const filePath = path.join(outDir, entry);
-    const hash = crypto
-      .createHash('sha256')
-      .update(fs.readFileSync(filePath))
-      .digest('hex');
-    return `${hash}  ${entry}`;
-  });
+    const hash = await sha256File(filePath);
+    lines.push(`${hash}  ${entry}`);
+  }
 
   fs.writeFileSync(path.join(outDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
+}
+
+async function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  await pipeline(fs.createReadStream(filePath), hash);
+  return hash.digest('hex');
 }
 
 function run(command, args, options = {}) {
@@ -509,6 +521,5 @@ function run(command, args, options = {}) {
 }
 
 function fail(message) {
-  console.error(`Error: ${message}`);
-  process.exit(1);
+  throw new Error(`Error: ${message}`);
 }
