@@ -12,7 +12,7 @@ import {
 } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
-import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
+import { isDeepSeekHostname } from './provider/deepseek.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
 
@@ -378,11 +378,7 @@ export class ContentGenerationPipeline {
       // Hostname-gated: self-hosted DeepSeek (sglang/vllm) or older
       // DeepSeek versions may not accept the V4 thinking parameter, so
       // we don't push it there. See https://api-docs.deepseek.com/.
-      if (
-        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname(
-          this.contentGeneratorConfig,
-        )
-      ) {
+      if (isDeepSeekHostname(this.contentGeneratorConfig)) {
         typed['thinking'] = { type: 'disabled' };
       }
     }

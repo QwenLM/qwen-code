@@ -11,6 +11,60 @@ import type { ExtendedChatCompletionAssistantMessageParam } from '../converter.j
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { GenerateContentConfig } from '@google/genai';
 
+/**
+ * Hostname-only check used to decide whether `reasoning.effort` should be
+ * rewritten into DeepSeek's flat `reasoning_effort` body parameter, and
+ * whether to emit `thinking: { type: 'disabled' }` when reasoning is
+ * turned off. The broader `isDeepSeekProvider` falls back to model-name
+ * matching to cover self-hosted deployments (sglang/vllm/ollama) — that
+ * fallback is right for content-part flattening (a model-format
+ * constraint) but trusting it for the body-shape rewrite would push a
+ * DeepSeek extension at strict OpenAI-compat backends that may not
+ * accept it. Keep the two decisions separated.
+ *
+ * Parses the baseUrl with `new URL(...)` and matches the hostname
+ * against `api.deepseek.com` (and its subdomains) exactly — a naive
+ * substring check would false-positive on hostile hosts like
+ * `https://api.deepseek.com.evil.com/v1`. Invalid URLs are treated as
+ * non-DeepSeek. Mirrors `isDeepSeekAnthropicHostname` on the Anthropic
+ * side.
+ *
+ * Exposed as a free function so consumers (the pipeline post-processing
+ * hook, in particular) can run the check without coupling to the
+ * concrete `DeepSeekOpenAICompatibleProvider` class.
+ */
+export function isDeepSeekHostname(
+  contentGeneratorConfig: ContentGeneratorConfig,
+): boolean {
+  const baseUrl = contentGeneratorConfig.baseUrl ?? '';
+  if (!baseUrl) return false;
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return (
+      hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Broad detection used to select the DeepSeek provider class for
+ * content-part flattening: hostname OR model-name. Self-hosted
+ * deployments (sglang/vllm/ollama) running DeepSeek models share the
+ * same input-format constraint, so the model-name fallback is
+ * intentional. For decisions that depend on the wire shape DeepSeek's
+ * own API exposes (e.g. `reasoning_effort`, `thinking`), use
+ * `isDeepSeekHostname` instead — see https://github.com/QwenLM/qwen-code/issues/3613.
+ */
+export function isDeepSeekProvider(
+  contentGeneratorConfig: ContentGeneratorConfig,
+): boolean {
+  if (isDeepSeekHostname(contentGeneratorConfig)) return true;
+  const model = contentGeneratorConfig.model ?? '';
+  return model.toLowerCase().includes('deepseek');
+}
+
 export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -19,54 +73,13 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
     super(contentGeneratorConfig, cliConfig);
   }
 
-  static isDeepSeekProvider(
-    contentGeneratorConfig: ContentGeneratorConfig,
-  ): boolean {
-    if (this.isDeepSeekHostname(contentGeneratorConfig)) {
-      return true;
-    }
-
-    // DeepSeek models served behind any OpenAI-compatible endpoint (sglang,
-    // vllm, ollama, etc.) share the same content-format constraint that the
-    // official api.deepseek.com endpoint has. Detect them by model name so
-    // the buildRequest flattening below kicks in.
-    // See https://github.com/QwenLM/qwen-code/issues/3613
-    const model = contentGeneratorConfig.model ?? '';
-    return model.toLowerCase().includes('deepseek');
-  }
-
   /**
-   * Hostname-only check used to decide whether `reasoning.effort` should be
-   * rewritten into DeepSeek's flat `reasoning_effort` body parameter. The
-   * broader `isDeepSeekProvider` falls back to model-name matching to cover
-   * self-hosted deployments (sglang/vllm/ollama) — that fallback is right
-   * for content-part flattening (a model-format constraint) but trusting
-   * it for the body-shape rewrite would push a DeepSeek extension at
-   * strict OpenAI-compat backends that may not accept it. Keep the two
-   * decisions separated.
-   *
-   * Parses the baseUrl with `new URL(...)` and matches the hostname
-   * against `api.deepseek.com` (and its subdomains) exactly — a naive
-   * substring check would false-positive on hostile hosts like
-   * `https://api.deepseek.com.evil.com/v1`. Invalid URLs are treated as
-   * non-DeepSeek. Mirrors `isDeepSeekAnthropicHostname` on the Anthropic
-   * side.
+   * Backward-compatible static delegates for the free `isDeepSeek*`
+   * helpers. New call sites should import the free functions directly to
+   * avoid coupling to this class.
    */
-  static isDeepSeekHostname(
-    contentGeneratorConfig: ContentGeneratorConfig,
-  ): boolean {
-    const baseUrl = contentGeneratorConfig.baseUrl ?? '';
-    if (!baseUrl) return false;
-    try {
-      const hostname = new URL(baseUrl).hostname.toLowerCase();
-      return (
-        hostname === 'api.deepseek.com' ||
-        hostname.endsWith('.api.deepseek.com')
-      );
-    } catch {
-      return false;
-    }
-  }
+  static isDeepSeekProvider = isDeepSeekProvider;
+  static isDeepSeekHostname = isDeepSeekHostname;
 
   /**
    * DeepSeek's API requires message content to be a plain string, not an
@@ -86,9 +99,7 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
 
-    const reshaped = DeepSeekOpenAICompatibleProvider.isDeepSeekHostname(
-      this.contentGeneratorConfig,
-    )
+    const reshaped = isDeepSeekHostname(this.contentGeneratorConfig)
       ? translateReasoningEffort(baseRequest)
       : baseRequest;
     if (!reshaped.messages?.length) {
