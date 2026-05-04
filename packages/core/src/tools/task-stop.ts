@@ -125,8 +125,12 @@ class TaskStopInvocation extends BaseToolInvocation<
       monitorRegistry.cancel(taskId);
       return {
         llmContent:
-          `Cancellation requested for monitor "${taskId}". ` +
-          `Final status will be visible via /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter) once the process drains.\n` +
+          // Unlike background shells (which settle asynchronously when the
+          // child process exits), `monitorRegistry.cancel()` settles the
+          // entry synchronously — the cancelled state is observable right
+          // now, no drain phrasing.
+          `Monitor "${taskId}" cancelled. ` +
+          `Status is visible via /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter).\n` +
           `Command: ${monitorEntry.command}`,
         returnDisplay: `Cancelled monitor: ${monitorEntry.description}`,
       };

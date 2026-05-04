@@ -235,7 +235,7 @@ describe('TaskStopTool', () => {
       );
 
       expect(result.error).toBeUndefined();
-      expect(result.llmContent).toContain('monitor "mon_123"');
+      expect(result.llmContent).toContain('Monitor "mon_123" cancelled');
       expect(result.llmContent).toContain('tail -f app.log');
       expect(result.returnDisplay).toContain('watch app log');
       expect(monitorRegistry.get('mon_123')!.status).toBe('cancelled');
