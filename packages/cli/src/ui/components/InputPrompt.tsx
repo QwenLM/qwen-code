@@ -89,6 +89,27 @@ const getExportFormatFromInput = (
     : null;
 };
 
+/**
+ * Compute the next index for export format cycling (round-robin).
+ * Extracted as a module-level pure function to avoid per-keystroke
+ * closure recreation inside handleInput.
+ */
+const getNextExportCompletionIndex = (
+  formatList: readonly string[],
+  currentIndex: number,
+  direction: 'up' | 'down',
+) => {
+  const total = formatList.length;
+  if (total === 0) {
+    return currentIndex;
+  }
+  const lastIndex = total - 1;
+  if (direction === 'up') {
+    return currentIndex <= 0 ? lastIndex : currentIndex - 1;
+  }
+  return currentIndex >= lastIndex ? 0 : currentIndex + 1;
+};
+
 export interface InputPromptProps {
   buffer: TextBuffer;
   onSubmit: (value: string) => void;
@@ -263,6 +284,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       value: format,
     }));
   }, [slashCommands]);
+
+  // Cache the export format names (keys only) so the cycle logic inside
+  // handleInput does not call .map() on every keystroke.
+  const exportCycleFormats = useMemo(
+    () => exportFormatSuggestions.map((suggestion) => suggestion.value),
+    [exportFormatSuggestions],
+  );
 
   const reverseSearchCompletion = useReverseSearchCompletion(
     buffer,
@@ -860,14 +888,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.meta &&
         !key.paste;
 
-      // Runtime source of truth for the export cycle order — derived from
-      // slashCommands via exportFormatSuggestions. Decoupling from the static
-      // EXPORT_FORMAT_COMPLETIONS constant ensures new /export sub-commands
-      // extend the cycle automatically.
-      const exportCycleFormats = exportFormatSuggestions.map(
-        (suggestion) => suggestion.value,
-      );
-
       const setExportCompletionInput = (index: number): boolean => {
         const format = exportCycleFormats[index];
         if (!format) {
@@ -882,21 +902,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         completionSelectionWasNavigatedRef.current = false;
         setExpandedSuggestionIndex(-1);
         return true;
-      };
-
-      const getNextExportCompletionIndex = (
-        currentIndex: number,
-        direction: 'up' | 'down',
-      ) => {
-        const total = exportCycleFormats.length;
-        if (total === 0) {
-          return currentIndex;
-        }
-        const lastIndex = total - 1;
-        if (direction === 'up') {
-          return currentIndex <= 0 ? lastIndex : currentIndex - 1;
-        }
-        return currentIndex >= lastIndex ? 0 : currentIndex + 1;
       };
 
       // Export-completion cycling is a two-phase state machine:
@@ -934,8 +939,21 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ) {
         // Tab cycles forward like Down for a natural "next format" feel.
         const direction = isCompletionUpKey ? 'up' : 'down';
+        // Derive the current index from the actual buffer text rather than
+        // trusting exportCompletionSelectionIndexRef, which can go stale
+        // when the user manually edits the buffer (e.g. typing a different
+        // export format).
+        // getExportFormatFromInput null was already ruled out by the guard
+        // above; the fallback to exportCompletionSelectionIndexRef is kept
+        // as belt-and-suspenders in case the guard is ever relaxed.
+        const currentFormat = getExportFormatFromInput(buffer.text);
+        const currentIndex =
+          currentFormat !== null
+            ? exportCycleFormats.indexOf(currentFormat)
+            : exportCompletionSelectionIndexRef.current;
         const nextIndex = getNextExportCompletionIndex(
-          exportCompletionSelectionIndexRef.current,
+          exportCycleFormats,
+          currentIndex,
           direction,
         );
         setExportCompletionInput(nextIndex);
@@ -1014,7 +1032,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                 completion.activeSuggestionIndex === -1
                   ? 0
                   : completion.activeSuggestionIndex;
-              const nextIndex = getNextExportCompletionIndex(activeIndex, 'up');
+              const nextIndex = getNextExportCompletionIndex(
+                exportCycleFormats,
+                activeIndex,
+                'up',
+              );
               setExportCompletionInput(nextIndex);
               return true;
             }
@@ -1031,6 +1053,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                   ? 0
                   : completion.activeSuggestionIndex;
               const nextIndex = getNextExportCompletionIndex(
+                exportCycleFormats,
                 activeIndex,
                 'down',
               );
@@ -1360,7 +1383,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setBgPillFocused,
       followup,
       onPromptSuggestionDismiss,
-      exportFormatSuggestions,
+      exportCycleFormats,
     ],
   );
 
@@ -1483,7 +1506,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const selectedExportFormatIndex =
     selectedExportFormat === null
       ? -1
-      : EXPORT_FORMAT_COMPLETIONS.indexOf(selectedExportFormat);
+      : exportFormatSuggestions.findIndex(
+          (s) => s.value === selectedExportFormat,
+        );
   const shouldKeepExportFormatSuggestions =
     !reverseSearchActive &&
     !commandSearchActive &&

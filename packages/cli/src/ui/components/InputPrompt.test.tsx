@@ -1142,6 +1142,95 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should reset export cycling state on Escape so arrows no longer cycle', async () => {
+    // Regression for PR #3701 third-round review (Suggestion): ESC resets
+    // exportCompletionSelectionIndexRef but this path had no test coverage,
+    // so a regression could silently break the reset.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Phase 1 Down -> /export md (enters Phase 2).
+    stdin.write('\u001B[B');
+    await wait();
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md');
+    (props.buffer.setText as ReturnType<typeof vi.fn>).mockClear();
+
+    // Press Escape — should reset the cycling state.
+    stdin.write('\x1B');
+    await wait();
+
+    // Subsequent Down must NOT overwrite the buffer with an export format.
+    stdin.write('\u001B[B');
+    await wait();
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export json');
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export html');
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export jsonl');
+    expect(props.buffer.setText).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should reset export cycling state on Ctrl+C so new input is not overwritten', async () => {
+    // Regression for PR #3701 third-round review (Suggestion): Ctrl+C resets
+    // exportCompletionSelectionIndexRef but this path had no test coverage,
+    // so the ref could leak into the new input. Verify that after Ctrl+C
+    // the user can type a completely unrelated command without arrow keys
+    // clobbering it with export formats.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Phase 1 Down -> /export md (enters Phase 2).
+    stdin.write('\u001B[B');
+    await wait();
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md');
+    (props.buffer.setText as ReturnType<typeof vi.fn>).mockClear();
+
+    // Ctrl+C clears the buffer.
+    stdin.write('\x03');
+    await wait();
+
+    // Set a completely different command into the buffer.
+    props.buffer.setText('/help');
+    (props.buffer.setText as ReturnType<typeof vi.fn>).mockClear();
+
+    // Pressing Down must NOT overwrite '/help' with an export format.
+    stdin.write('\u001B[B');
+    await wait();
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export json');
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export html');
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export jsonl');
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export md');
+    expect(props.buffer.setText).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should autocomplete on Enter when user arrow-navigated a perfect-match suggestion list', async () => {
     // Regression for PR #3701 review: the isPerfectMatch + navigated + Enter
     // branch was not covered by tests.
