@@ -214,6 +214,16 @@ vi.mock('../skills/skill-manager.js', () => {
   SkillManagerMock.prototype.listSkills = vi.fn().mockResolvedValue([]);
   SkillManagerMock.prototype.addChangeListener = vi.fn();
   SkillManagerMock.prototype.removeChangeListener = vi.fn();
+  // Path-conditional skill activation hook (called from
+  // CoreToolScheduler.executeSingleToolCall on every tool invocation).
+  // Mocks return empty so no activation-side effects fire in tests that
+  // exercise the scheduler.
+  SkillManagerMock.prototype.matchAndActivateByPath = vi
+    .fn()
+    .mockResolvedValue([]);
+  SkillManagerMock.prototype.matchAndActivateByPaths = vi
+    .fn()
+    .mockResolvedValue([]);
   return { SkillManager: SkillManagerMock };
 });
 

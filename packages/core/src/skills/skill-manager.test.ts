@@ -89,6 +89,52 @@ describe('SkillManager', () => {
           'argument-hint': '[topic]',
         };
       }
+      // Match a frontmatter-level `paths:` field, not any incidental
+      // occurrence of "paths:" in the body. Multiline + start-anchor matches
+      // a top-level YAML key.
+      if (/^paths:/m.test(yamlString)) {
+        // Branch handles paths-related tests by reading the literal YAML so
+        // the parser-behavior nuance (array vs scalar vs empty) is preserved.
+        // Names are inferred from the literal `name: <x>` line so multiple
+        // fixtures can coexist in the same test (e.g. cross-level shadowing).
+        const nameMatch = yamlString.match(/name:\s*(\S+)/);
+        const name = nameMatch ? nameMatch[1] : 'test-skill';
+        const description = yamlString.includes('React skill')
+          ? 'React skill'
+          : yamlString.includes('Hidden helper')
+            ? 'Hidden helper'
+            : 'A test skill';
+        let paths: unknown = undefined;
+        if (yamlString.includes('paths: []')) {
+          paths = [];
+        } else if (yamlString.includes('paths: "src/**/*.tsx"')) {
+          // Invalid (scalar) — surface as string so our validator rejects it.
+          paths = 'src/**/*.tsx';
+        } else if (yamlString.includes('src/**/*.tsx')) {
+          paths = yamlString.includes('test/**/*.tsx')
+            ? ['src/**/*.tsx', 'test/**/*.tsx']
+            : ['src/**/*.tsx'];
+        } else if (yamlString.includes('"src/**"')) {
+          paths = ['src/**'];
+        } else if (yamlString.includes('"lib/**"')) {
+          paths = ['lib/**'];
+        } else if (yamlString.includes('"src/**/*.ts"')) {
+          paths = ['src/**/*.ts'];
+        } else {
+          // Generic fallback: extract any quoted string under a `- "..."`
+          // bullet inside the paths block. Lets the oversized-glob and
+          // similar fixtures work without a per-test branch.
+          const bulletMatches = yamlString.match(/-\s+"([^"]+)"/g);
+          if (bulletMatches) {
+            paths = bulletMatches.map((m) => m.replace(/^-\s+"|"$/g, ''));
+          }
+        }
+        const result: Record<string, unknown> = { name, description, paths };
+        if (yamlString.includes('disable-model-invocation: true')) {
+          result['disable-model-invocation'] = true;
+        }
+        return result;
+      }
       if (yamlString.includes('name: skill1')) {
         return { name: 'skill1', description: 'First skill' };
       }
@@ -263,6 +309,76 @@ Skill body.
       );
 
       expect(config.argumentHint).toBe('[topic]');
+    });
+
+    it('should parse content with paths (conditional skill)', () => {
+      const markdown = `---
+name: tsx-helper
+description: React skill
+paths:
+  - "src/**/*.tsx"
+  - "test/**/*.tsx"
+---
+
+Body.
+`;
+      const config = manager.parseSkillContent(
+        markdown,
+        validSkillConfig.filePath,
+        'project',
+      );
+      expect(config.paths).toEqual(['src/**/*.tsx', 'test/**/*.tsx']);
+    });
+
+    it('should leave paths undefined when frontmatter omits it', () => {
+      const markdown = `---
+name: test-skill
+description: A test skill
+---
+
+Body.
+`;
+      const config = manager.parseSkillContent(
+        markdown,
+        validSkillConfig.filePath,
+        'project',
+      );
+      expect(config.paths).toBeUndefined();
+    });
+
+    it('should treat an empty paths array as undefined (unconditional)', () => {
+      const markdown = `---
+name: test-skill
+description: A test skill
+paths: []
+---
+
+Body.
+`;
+      const config = manager.parseSkillContent(
+        markdown,
+        validSkillConfig.filePath,
+        'project',
+      );
+      expect(config.paths).toBeUndefined();
+    });
+
+    it('should throw when paths is not an array', () => {
+      const markdown = `---
+name: test-skill
+description: A test skill
+paths: "src/**/*.tsx"
+---
+
+Body.
+`;
+      expect(() =>
+        manager.parseSkillContent(
+          markdown,
+          validSkillConfig.filePath,
+          'project',
+        ),
+      ).toThrow(/"paths" must be an array/);
     });
 
     it('should determine level from file path', () => {
@@ -817,6 +933,364 @@ Review content`);
 
       expect(listener).not.toHaveBeenCalled();
     });
+
+    it('awaits async listeners before resolving', async () => {
+      // Regression: notifyChangeListeners must await the Promises returned
+      // by listeners (e.g. SkillTool.refreshSkills) before resolving — the
+      // <system-reminder> envelope is emitted off the resolution of
+      // matchAndActivateByPath, and announcing a skill before
+      // SkillTool.setTools() finishes leaves the model unable to invoke
+      // the just-activated skill.
+      let resolveListener: () => void = () => {};
+      const listenerSettled = new Promise<void>((resolve) => {
+        resolveListener = resolve;
+      });
+      let listenerObserved = false;
+      manager.addChangeListener(() =>
+        listenerSettled.then(() => {
+          listenerObserved = true;
+        }),
+      );
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      // Refresh kicks off the listener; without await semantics it would
+      // race ahead.
+      const refreshDone = manager.refreshCache();
+      // Give microtasks one tick so the listener's outer Promise enters
+      // its `.then` callback (still parked on `listenerSettled`).
+      await Promise.resolve();
+      expect(listenerObserved).toBe(false);
+
+      resolveListener();
+      await refreshDone;
+      expect(listenerObserved).toBe(true);
+    });
+
+    it('isolates listener throws via allSettled — siblings still run', async () => {
+      // Regression: a single buggy listener (e.g. a third-party hook
+      // throwing during refresh) must not stop the other listeners or
+      // make refreshCache itself reject. allSettled preserves this; if
+      // someone swaps it back to Promise.all the throw propagates and
+      // every subsequent listener silently dies.
+      const throwing = vi.fn(() => {
+        throw new Error('listener exploded');
+      });
+      const sibling = vi.fn();
+      manager.addChangeListener(throwing);
+      manager.addChangeListener(sibling);
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      await expect(manager.refreshCache()).resolves.toBeUndefined();
+      expect(throwing).toHaveBeenCalled();
+      expect(sibling).toHaveBeenCalled();
+    });
+
+    it('isolates async listener rejections — siblings still run', async () => {
+      // Same property as the sync-throw case but via a rejected Promise:
+      // the wrapper `Promise.resolve().then(listener)` flips both shapes
+      // into the same Promise pipeline, but it's worth pinning explicitly
+      // because a refactor that special-cases sync throws could
+      // accidentally regress the async branch.
+      const asyncRejector = vi.fn(() =>
+        Promise.reject(new Error('async fail')),
+      );
+      const sibling = vi.fn();
+      manager.addChangeListener(asyncRejector);
+      manager.addChangeListener(sibling);
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      await expect(manager.refreshCache()).resolves.toBeUndefined();
+      expect(asyncRejector).toHaveBeenCalled();
+      expect(sibling).toHaveBeenCalled();
+    });
+
+    it('clears the per-listener timeout once the race settles', async () => {
+      // Regression: the 30s timeout was previously only `unref`d, leaving
+      // a pending timer on every fast-resolving listener. Under
+      // high-frequency activation, vitest's open-handle diagnostic and
+      // any tooling snapshotting the active-handle set saw the pile-up.
+      // The `.finally(clearTimeout)` wrapper makes the cleanup explicit.
+      const setSpy = vi.spyOn(global, 'setTimeout');
+      const clearSpy = vi.spyOn(global, 'clearTimeout');
+
+      const fastListener = vi.fn(() => Promise.resolve());
+      manager.addChangeListener(fastListener);
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      // Capture timer ids set during the refresh — only the listener
+      // timeouts use setTimeout in this code path. Other tests in this
+      // file can leak setTimeout calls (chokidar, etc.) so we diff
+      // before/after.
+      const setCallsBefore = setSpy.mock.calls.length;
+      const clearCallsBefore = clearSpy.mock.calls.length;
+
+      await manager.refreshCache();
+
+      const setCallsAfter = setSpy.mock.calls.length;
+      const clearCallsAfter = clearSpy.mock.calls.length;
+      // We expect at least one timer set (the listener wrapper's) and
+      // a matching clear. Equal deltas guarantees nothing was leaked.
+      const setDelta = setCallsAfter - setCallsBefore;
+      const clearDelta = clearCallsAfter - clearCallsBefore;
+      expect(setDelta).toBeGreaterThanOrEqual(1);
+      expect(clearDelta).toBeGreaterThanOrEqual(setDelta);
+
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+    });
+  });
+
+  describe('conditional skill activation', () => {
+    // Minimal setup: a project dir containing one conditional skill whose
+    // paths glob matches `src/**/*.tsx`. After refreshCache() loads it,
+    // matchAndActivateByPath() should activate it and fire listeners.
+    async function loadConditionalFixture() {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'tsx-helper',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: tsx-helper
+description: React skill
+paths:
+  - "src/**/*.tsx"
+---
+
+Body.
+`);
+      await manager.refreshCache();
+    }
+
+    it('keeps conditional skills inactive until a matching path is touched', async () => {
+      await loadConditionalFixture();
+
+      const all = await manager.listSkills();
+      const tsx = all.find((s) => s.name === 'tsx-helper');
+      expect(tsx).toBeDefined();
+      expect(manager.isSkillActive(tsx!)).toBe(false);
+    });
+
+    it('activates a conditional skill when a matching file path is touched', async () => {
+      await loadConditionalFixture();
+
+      const newly = await manager.matchAndActivateByPath(
+        '/test/project/src/App.tsx',
+      );
+      expect(newly).toEqual(['tsx-helper']);
+      expect(manager.getActivatedSkillNames().has('tsx-helper')).toBe(true);
+
+      const all = await manager.listSkills();
+      const tsx = all.find((s) => s.name === 'tsx-helper')!;
+      expect(manager.isSkillActive(tsx)).toBe(true);
+    });
+
+    it('does not re-notify listeners on subsequent matches of the same skill', async () => {
+      await loadConditionalFixture();
+
+      const listener = vi.fn();
+      manager.addChangeListener(listener);
+
+      expect(
+        await manager.matchAndActivateByPath('/test/project/src/A.tsx'),
+      ).toEqual(['tsx-helper']);
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      // Same pattern touched again — skill already active, no new
+      // notification.
+      expect(
+        await manager.matchAndActivateByPath('/test/project/src/B.tsx'),
+      ).toEqual([]);
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('does nothing for paths outside the project root', async () => {
+      await loadConditionalFixture();
+      expect(
+        await manager.matchAndActivateByPath('/other/place/foo.tsx'),
+      ).toEqual([]);
+      expect(manager.getActivatedSkillNames().size).toBe(0);
+    });
+
+    it('does not activate a conditional skill that is also disable-model-invocation', async () => {
+      // Regression for ultrareview bug_004: a SKILL.md with both `paths:`
+      // and `disable-model-invocation: true` would enter the activation
+      // registry, fire a "now available" system-reminder on path match, and
+      // then SkillTool would refuse to invoke it because the disabled flag
+      // hides it everywhere else.
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'secret-helper',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: secret-helper
+description: Hidden helper
+paths:
+  - "src/**/*.ts"
+disable-model-invocation: true
+---
+
+Body.
+`);
+      await manager.refreshCache();
+
+      const newly = await manager.matchAndActivateByPath(
+        '/test/project/src/foo.ts',
+      );
+      expect(newly).toEqual([]);
+      expect(manager.getActivatedSkillNames().size).toBe(0);
+    });
+
+    it('matchAndActivateByPaths fires listeners exactly once across multiple paths', async () => {
+      // Regression for /review: when a single tool call yields multiple
+      // candidate paths (e.g. ripGrep `paths: [a, b, c]`), the per-path
+      // listener fire was triggering N successive SkillTool.refreshSkills /
+      // geminiClient.setTools() round-trips. The batch API should fire
+      // listeners once with the union of activations.
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'tsx-helper',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: tsx-helper
+description: React skill
+paths:
+  - "src/**/*.tsx"
+---
+
+Body.
+`);
+      await manager.refreshCache();
+
+      const listener = vi.fn();
+      manager.addChangeListener(listener);
+      const baselineCalls = listener.mock.calls.length;
+
+      const newly = await manager.matchAndActivateByPaths([
+        '/test/project/src/A.tsx',
+        '/test/project/src/B.tsx',
+        '/test/project/src/C.tsx',
+      ]);
+      expect(newly).toEqual(['tsx-helper']);
+      // One listener call total, not three.
+      expect(listener.mock.calls.length - baselineCalls).toBe(1);
+    });
+
+    it('matchAndActivateByPaths returns empty (no listener) when no path matches', async () => {
+      await loadConditionalFixture();
+
+      const listener = vi.fn();
+      manager.addChangeListener(listener);
+      const baselineCalls = listener.mock.calls.length;
+
+      const newly = await manager.matchAndActivateByPaths([
+        '/test/project/lib/a.ts',
+        '/test/project/lib/b.ts',
+      ]);
+      expect(newly).toEqual([]);
+      // No new activations means the listener stays silent.
+      expect(listener.mock.calls.length).toBe(baselineCalls);
+    });
+
+    it('does not activate a visible skill from a shadowed copy paths', async () => {
+      // Regression for ultrareview bug_001: cross-level skills with the
+      // same name but different `paths:` globs. listSkills() dedupes by
+      // precedence (project wins), so the model only sees the project
+      // copy. The activation registry must use the same precedence —
+      // otherwise the user copy's globs activate the visible (project)
+      // skill, even when the touched file is outside the project skill's
+      // declared paths.
+      const projectQwenSkillsDir = path.join(
+        '/test/project',
+        '.qwen',
+        'skills',
+      );
+      const userQwenSkillsDir = path.join('/home/user', '.qwen', 'skills');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockImplementation((dirPath: any) => {
+        const pathStr = String(dirPath);
+        if (pathStr === projectQwenSkillsDir || pathStr === userQwenSkillsDir) {
+          return Promise.resolve([
+            {
+              name: 'foo',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.startsWith(projectQwenSkillsDir)) {
+          return Promise.resolve(`---
+name: foo
+description: A test skill
+paths:
+  - "src/**"
+---
+
+Project body.
+`);
+        }
+        if (pathStr.startsWith(userQwenSkillsDir)) {
+          return Promise.resolve(`---
+name: foo
+description: A test skill
+paths:
+  - "lib/**"
+---
+
+User body.
+`);
+        }
+        return Promise.reject(new Error('File not found'));
+      });
+      await manager.refreshCache();
+
+      // Touching `lib/x.ts` (matches user-foo's paths but project-foo wins
+      // in listSkills) must NOT activate the visible project-foo.
+      expect(
+        await manager.matchAndActivateByPath('/test/project/lib/x.ts'),
+      ).toEqual([]);
+      expect(manager.getActivatedSkillNames().has('foo')).toBe(false);
+
+      // Touching `src/x.ts` (matches the visible project-foo's paths) does
+      // activate it.
+      expect(
+        await manager.matchAndActivateByPath('/test/project/src/x.ts'),
+      ).toEqual(['foo']);
+    });
   });
 
   describe('parse errors', () => {
@@ -839,6 +1313,44 @@ Review content`);
       const errors = manager.getParseErrors();
       expect(errors.size).toBeGreaterThan(0);
     });
+
+    it('surfaces invalid `paths:` glob patterns through parseErrors', async () => {
+      // Regression: bad globs were only logged at debug level, leaving
+      // affected skills with a permanent "gated by path-based
+      // activation" error and no actionable diagnostic. The registry
+      // now calls back into SkillManager.parseErrors so the failure is
+      // visible through `getParseErrors()` (and the `/skills` UI).
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'bad-glob-skill',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      // 70 KB pattern — picomatch's default pattern length cap is 65,536
+      // chars, so it throws at compile time.
+      const oversizedGlob = 'a'.repeat(70_000);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: bad-glob-skill
+description: Has an oversized glob
+paths:
+  - "${oversizedGlob}"
+---
+
+Body.
+`);
+
+      await manager.refreshCache();
+
+      const errors = manager.getParseErrors();
+      const entries = Array.from(errors.entries());
+      const oversizedEntry = entries.find(([key]) => key.includes('#paths['));
+      expect(oversizedEntry).toBeDefined();
+      expect(oversizedEntry![1].message).toMatch(/Invalid glob in "paths"/);
+      expect(oversizedEntry![1].skillName).toBe('bad-glob-skill');
+    });
   });
 
   describe('symlink support', () => {
@@ -852,6 +1364,10 @@ Review content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
+      // realpath stays within baseDir (in-tree symlink)
+      vi.mocked(fs.realpath).mockImplementation((p) =>
+        Promise.resolve(String(p)),
+      );
       // Mock fs.stat to return directory stats for the symlink target
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
@@ -881,6 +1397,9 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
+      vi.mocked(fs.realpath).mockImplementation((p) =>
+        Promise.resolve(String(p)),
+      );
       // Mock fs.stat to return file stats (not a directory)
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => false,
@@ -901,13 +1420,63 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // Mock fs.stat to throw error (symlink target doesn't exist)
-      vi.mocked(fs.stat).mockRejectedValue(
-        new Error('ENOENT: no such file or directory'),
-      );
+      // realpath(baseDir) succeeds (the directory itself is fine);
+      // realpath(target) throws because the link is broken. Without
+      // discriminating, the new realpath-base step in loadSkillsFromDir
+      // would also throw and bail the whole directory before reaching
+      // the per-symlink check we want to test.
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s.endsWith('broken-symlink')) {
+          return Promise.reject(
+            new Error('ENOENT: no such file or directory'),
+          );
+        }
+        return Promise.resolve(s);
+      });
 
       const skills = await manager.listSkills({ force: true });
 
+      expect(skills).toHaveLength(0);
+    });
+
+    it('should skip symlinks that escape baseDir (prevents arbitrary-skill-load attack)', async () => {
+      // Regression: a symlink whose target falls outside the skills
+      // tree (e.g. attacker pointing at /etc/cron.d) must be dropped
+      // — skills can ship hooks that execute shell commands, so
+      // arbitrary-load is a code-execution vector. realpath + scope
+      // check guards this.
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'escape-symlink',
+          isDirectory: () => false,
+          isSymbolicLink: () => true,
+          isFile: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      // realpath(baseDir) returns the base canonical form; only the
+      // symlink target escapes. A bare `mockResolvedValue` would map
+      // both calls to the same value and accidentally let the attack
+      // through (path.relative(x, x) === '' which is in-scope).
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s.endsWith('escape-symlink')) {
+          return Promise.resolve('/etc/cron.d/payload');
+        }
+        return Promise.resolve(s);
+      });
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => true,
+      } as Awaited<ReturnType<typeof fs.stat>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: hijacked
+description: Should never load
+---
+malicious body`);
+
+      const skills = await manager.listSkills({ force: true });
       expect(skills).toHaveLength(0);
     });
 
@@ -927,6 +1496,9 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
+      vi.mocked(fs.realpath).mockImplementation((p) =>
+        Promise.resolve(String(p)),
+      );
       // Mock fs.stat to return directory stats for the symlink
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,

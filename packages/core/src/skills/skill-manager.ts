@@ -19,9 +19,20 @@ import type {
   SkillValidationResult,
   SkillHooksSettings,
 } from './types.js';
-import { SkillError, SkillErrorCode, parseModelField } from './types.js';
+import {
+  SkillError,
+  SkillErrorCode,
+  parseModelField,
+  parsePathsField,
+  validateSkillName,
+} from './types.js';
 import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
+import { validateSymlinkScope } from './symlinkScope.js';
+import {
+  SkillActivationRegistry,
+  splitConditionalSkills,
+} from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { SKILL_PROVIDER_CONFIG_DIRS } from '../config/storage.js';
@@ -60,12 +71,17 @@ export function watcherIgnored(
  */
 export class SkillManager {
   private skillsCache: Map<SkillLevel, SkillConfig[]> | null = null;
-  private readonly changeListeners: Set<() => void> = new Set();
+  // Listeners may be sync or async; the type matches `addChangeListener`
+  // so future async listeners get checked instead of relying on the
+  // `Promise.resolve().then(listener)` runtime adapter to swallow the
+  // mismatch silently.
+  private readonly changeListeners: Set<() => void | Promise<void>> = new Set();
   private parseErrors: Map<string, SkillError> = new Map();
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
   private readonly bundledSkillsDir: string;
+  private activationRegistry: SkillActivationRegistry | null = null;
 
   constructor(private readonly config: Config) {
     this.bundledSkillsDir = path.join(
@@ -75,10 +91,14 @@ export class SkillManager {
   }
 
   /**
-   * Adds a listener that will be called when skills change.
+   * Adds a listener that will be called when skills change. Listeners may
+   * return a Promise, which `notifyChangeListeners` will await before
+   * resolving — callers (e.g. `matchAndActivateByPath`) can therefore wait
+   * for downstream consumers like `SkillTool.refreshSkills()` to apply the
+   * updated state before continuing.
    * @returns A function to remove the listener.
    */
-  addChangeListener(listener: () => void): () => void {
+  addChangeListener(listener: () => void | Promise<void>): () => void {
     this.changeListeners.add(listener);
     return () => {
       this.changeListeners.delete(listener);
@@ -86,14 +106,63 @@ export class SkillManager {
   }
 
   /**
-   * Notifies all registered change listeners.
+   * Notifies all registered change listeners and awaits any returned
+   * promises. Sync listeners resolve immediately; async listeners (e.g.
+   * `SkillTool.refreshSkills`) hold the activation pipeline until their
+   * downstream tool descriptions are refreshed, eliminating the race where
+   * a system-reminder announces a skill before the model can actually see
+   * it in `<available_skills>`.
+   *
+   * Listeners run in parallel via `Promise.allSettled`. They're
+   * independent reads (each rebuilds its own derived state from the
+   * shared registry); serializing them used to make `matchAndActivateByPaths`
+   * scale linearly with the number of registered listeners — a real
+   * cost since per-subagent SkillTool instances each register one.
+   * `allSettled` (not `Promise.all`) so a single listener throwing
+   * still lets the others finish.
    */
-  private notifyChangeListeners(): void {
-    for (const listener of this.changeListeners) {
-      try {
-        listener();
-      } catch (error) {
-        debugLogger.warn('Skill change listener threw an error:', error);
+  private async notifyChangeListeners(): Promise<void> {
+    // Cap each listener at 30s. Without this, a hung listener (e.g.
+    // `SkillTool.refreshSkills` → `setTools()` blocked on a network
+    // call inside the gemini client) would permanently stall
+    // `matchAndActivateByPaths` and `refreshCache`. The activation
+    // registry itself has already been mutated synchronously in the
+    // caller, so dropping a slow listener after the timeout is the
+    // best-effort behavior — the listener can still finish later, it
+    // just no longer holds up the activation reminder.
+    const TIMEOUT_MS = 30_000;
+    const withTimeout = (p: Promise<unknown>): Promise<unknown> => {
+      // Capture the timer handle in the outer scope so the `.finally`
+      // can clear it once the race settles. Without the clear, every
+      // listener-wins-the-race case leaves a 30s pending timer behind:
+      // `unref()` keeps it from blocking process exit but vitest's
+      // open-handle diagnostic and any tooling that snapshots the active
+      // handle set still see the pile-up under high-frequency activation.
+      let timerId: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise((_, reject) => {
+        timerId = setTimeout(
+          () => reject(new Error(`listener timeout after ${TIMEOUT_MS}ms`)),
+          TIMEOUT_MS,
+        );
+        if (typeof timerId === 'object' && timerId !== null && 'unref' in timerId) {
+          (timerId as { unref: () => void }).unref();
+        }
+      });
+      return Promise.race([p, timeoutPromise]).finally(() => {
+        if (timerId !== undefined) clearTimeout(timerId);
+      });
+    };
+    const results = await Promise.allSettled(
+      Array.from(this.changeListeners).map((listener) =>
+        withTimeout(Promise.resolve().then(listener)),
+      ),
+    );
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        debugLogger.warn(
+          'Skill change listener threw an error:',
+          result.reason,
+        );
       }
     }
   }
@@ -268,20 +337,148 @@ export class SkillManager {
     this.parseErrors.clear();
 
     const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
-    let totalSkills = 0;
 
-    for (const level of levels) {
-      const levelSkills = await this.listSkillsAtLevel(level);
-      skillsCache.set(level, levelSkills);
-      totalSkills += levelSkills.length;
-      debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
+    // Use allSettled so an unrecoverable error at one level (e.g. a hung
+    // FS, a permission denial, an OS-level enoent on a removed config dir)
+    // does not nuke the other three. Each level's own internal loop is
+    // already error-isolated per skill — this guard catches errors that
+    // bubble up to the level boundary.
+    const settled = await Promise.allSettled(
+      levels.map(async (level) => {
+        const levelSkills = await this.listSkillsAtLevel(level);
+        debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
+        return [level, levelSkills] as const;
+      }),
+    );
+
+    let totalSkills = 0;
+    for (let i = 0; i < settled.length; i++) {
+      const result = settled[i];
+      if (result.status === 'fulfilled') {
+        const [level, levelSkills] = result.value;
+        skillsCache.set(level, levelSkills);
+        totalSkills += levelSkills.length;
+      } else {
+        debugLogger.warn(
+          `Failed to load ${levels[i]} level skills:`,
+          result.reason,
+        );
+      }
     }
 
     this.skillsCache = skillsCache;
-    debugLogger.info(
-      `Skills cache refreshed: ${totalSkills} total skills loaded`,
+
+    // Rebuild the activation registry so that newly added/removed `paths:`
+    // frontmatter takes effect. Prior activations do not carry across reloads.
+    //
+    // Two filters apply before a skill enters the registry:
+    //
+    // 1. Cross-level dedup with the same precedence as `listSkills()`
+    //    (project > user > extension > bundled). Without this, a shadowed
+    //    copy's `paths` glob can flip the visible (higher-precedence) skill
+    //    of the same name to "active", even when the touched file does not
+    //    match the visible skill's own globs.
+    //
+    // 2. Drop `disable-model-invocation` skills. They are hidden from the
+    //    SkillTool listing entirely, so allowing path activation would only
+    //    emit a misleading "<skill> is now available" reminder for a skill
+    //    the model cannot then invoke.
+    const seenForActivation = new Set<string>();
+    const eligibleForActivation: SkillConfig[] = [];
+    for (const level of levels) {
+      for (const skill of skillsCache.get(level) ?? []) {
+        if (seenForActivation.has(skill.name)) continue;
+        seenForActivation.add(skill.name);
+        if (skill.disableModelInvocation) continue;
+        eligibleForActivation.push(skill);
+      }
+    }
+    const { conditional } = splitConditionalSkills(eligibleForActivation);
+    // Surface picomatch compile failures via parseErrors so a malformed
+    // `paths:` glob shows up in `getParseErrors()` (and downstream
+    // `/skills` UI) instead of only landing in debug logs. Otherwise
+    // an author who wrote `src/***/file.tsx` sees a permanent "gated
+    // by path-based activation" error with no actionable diagnostic.
+    this.activationRegistry = new SkillActivationRegistry(
+      conditional,
+      this.config.getProjectRoot(),
+      (skill, pattern, error) => {
+        this.parseErrors.set(
+          `${skill.filePath}#paths[${pattern}]`,
+          new SkillError(
+            `Invalid glob in "paths": ${pattern} — ${error.message}`,
+            SkillErrorCode.INVALID_CONFIG,
+            skill.name,
+          ),
+        );
+      },
     );
-    this.notifyChangeListeners();
+
+    debugLogger.info(
+      `Skills cache refreshed: ${totalSkills} total skills loaded ` +
+        `(${conditional.length} conditional)`,
+    );
+    await this.notifyChangeListeners();
+  }
+
+  /**
+   * Whether the given skill is currently eligible to appear in the SkillTool
+   * listing. Unconditional skills are always eligible; conditional skills
+   * become eligible only after a tool invocation touches a file matching
+   * their `paths:` globs.
+   */
+  isSkillActive(skill: SkillConfig): boolean {
+    if (!skill.paths || skill.paths.length === 0) return true;
+    return this.activationRegistry?.isActivated(skill.name) ?? false;
+  }
+
+  /**
+   * Activate any conditional skills whose `paths:` globs match `filePath`.
+   * Returns the names of skills newly activated by this call. When at least
+   * one skill activates, change listeners are notified and awaited — so by
+   * the time this method resolves, downstream consumers (notably
+   * `SkillTool.refreshSkills` updating the model-facing tool description)
+   * have applied the new state. Callers can therefore announce the
+   * activation in the same turn without racing against a stale tool list.
+   *
+   * The activation registry reference is captured at call entry; if a
+   * concurrent `refreshCache` rebuilds the registry mid-call, this
+   * invocation finishes against the registry it started with, so a
+   * returned name is consistent with the listener state that's about to
+   * be observed.
+   */
+  async matchAndActivateByPath(filePath: string): Promise<string[]> {
+    return this.matchAndActivateByPaths([filePath]);
+  }
+
+  /**
+   * Batch variant of {@link matchAndActivateByPath}: activate skills for
+   * an array of file paths and fire change listeners exactly once across
+   * all of them. Used by `coreToolScheduler` so a single tool call that
+   * names N paths (e.g. ripGrep with multiple `paths:` entries) does not
+   * trigger N successive `SkillTool.refreshSkills` /
+   * `geminiClient.setTools()` round-trips.
+   */
+  async matchAndActivateByPaths(
+    filePaths: readonly string[],
+  ): Promise<string[]> {
+    const registry = this.activationRegistry;
+    if (!registry || filePaths.length === 0) return [];
+    const newlyAcrossPaths = new Set<string>();
+    for (const filePath of filePaths) {
+      for (const name of registry.matchAndConsume(filePath)) {
+        newlyAcrossPaths.add(name);
+      }
+    }
+    if (newlyAcrossPaths.size > 0) {
+      await this.notifyChangeListeners();
+    }
+    return Array.from(newlyAcrossPaths);
+  }
+
+  /** Names of all conditional skills activated so far (read-only snapshot). */
+  getActivatedSkillNames(): ReadonlySet<string> {
+    return this.activationRegistry?.getActivatedNames() ?? new Set();
   }
 
   /**
@@ -412,6 +609,10 @@ export class SkillManager {
 
       // Convert to strings
       const name = String(nameRaw);
+      // Reject unsafe names early — the value flows into the SkillTool
+      // description, schema enums, and the path-activation
+      // <system-reminder>, all of which the model treats as trusted text.
+      validateSkillName(name);
       const description = String(descriptionRaw);
 
       // Extract optional fields
@@ -466,6 +667,10 @@ export class SkillManager {
           ? true
           : undefined;
 
+      // Optional `paths` frontmatter: glob patterns that gate when this skill
+      // is offered to the model (conditional skill).
+      const paths = parsePathsField(frontmatter);
+
       const config: SkillConfig = {
         name,
         description,
@@ -479,6 +684,7 @@ export class SkillManager {
         body: body.trim(),
         whenToUse,
         disableModelInvocation,
+        paths,
       };
 
       // Validate the parsed configuration
@@ -694,13 +900,19 @@ export class SkillManager {
     // Iterate provider directories in PROVIDER_CONFIG_DIRS order.
     // The first directory that contains a skill with a given name wins,
     // so the order defines implicit precedence (.qwen > .agent > .cursor > ...).
+    // Load in parallel but fold sequentially to preserve precedence.
     const baseDirs = this.getSkillsBaseDirs(level);
+    const perDirSkills = await Promise.all(
+      baseDirs.map((baseDir) => {
+        debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
+        return this.loadSkillsFromDir(baseDir, level);
+      }),
+    );
     const skills: SkillConfig[] = [];
     const seenNames = new Set<string>();
-    for (const baseDir of baseDirs) {
-      debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
-      const skillsFromDir = await this.loadSkillsFromDir(baseDir, level);
-      for (const skill of skillsFromDir) {
+    for (let i = 0; i < baseDirs.length; i++) {
+      const baseDir = baseDirs[i];
+      for (const skill of perDirSkills[i]) {
         if (seenNames.has(skill.name)) {
           debugLogger.debug(
             `Skipping duplicate skill at ${level} level: ${skill.name} from ${baseDir}`,
@@ -722,67 +934,90 @@ export class SkillManager {
     debugLogger.debug(`Loading skills from directory: ${baseDir}`);
     try {
       const entries = await fs.readdir(baseDir, { withFileTypes: true });
-      const skills: SkillConfig[] = [];
       debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
-      for (const entry of entries) {
-        // Check if it's a directory or a symlink
-        const isDirectory = entry.isDirectory();
-        const isSymlink = entry.isSymbolicLink();
-
-        if (!isDirectory && !isSymlink) {
-          debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
-          continue;
-        }
-
-        const skillDir = path.join(baseDir, entry.name);
-
-        // For symlinks, verify the target is a directory
-        if (isSymlink) {
-          try {
-            const targetStat = await fs.stat(skillDir);
-            if (!targetStat.isDirectory()) {
-              debugLogger.warn(
-                `Skipping symlink ${entry.name} that does not point to a directory`,
-              );
-              continue;
-            }
-          } catch (error) {
-            debugLogger.warn(
-              `Skipping invalid symlink ${entry.name}: ${error instanceof Error ? error.message : 'Unknown error'}`,
-            );
-            continue;
-          }
-        }
-
-        const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
-
-        try {
-          // Check if SKILL.md exists
-          await fs.access(skillManifest);
-
-          const config = await this.parseSkillFileInternal(
-            skillManifest,
-            level,
-          );
-          skills.push(config);
-        } catch (error) {
-          // Skip directories without valid SKILL.md
-          if (error instanceof SkillError) {
-            // Parse error was already recorded
-            debugLogger.error(
-              `Failed to parse skill at ${skillDir}: ${error.message}`,
-            );
-          } else {
-            debugLogger.debug(
-              `No valid SKILL.md found in ${skillDir}, skipping`,
-            );
-          }
-          continue;
-        }
+      // Resolve baseDir once outside the parallel map. Symlink scope
+      // validation needs the canonical form to compare against; doing
+      // it per-entry would burn N realpath syscalls (one per entry) for
+      // the same answer. `fs.readdir` succeeded above so the directory
+      // exists; if realpath still throws (FS race / permissions), treat
+      // the whole directory as unreadable rather than letting the per-
+      // symlink check trip on every entry.
+      let baseRealPath: string;
+      try {
+        baseRealPath = await fs.realpath(baseDir);
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
+        debugLogger.debug(
+          `Cannot realpath skills baseDir ${baseDir}: ${errorMessage}`,
+        );
+        return [];
       }
 
-      return skills;
+      // The returned `loaded` array preserves entries order via Promise.all,
+      // but `parseSkillFileInternal` writes into `this.parseErrors` as each
+      // promise settles, so the Map's insertion order reflects parse-finish
+      // order, not on-disk order. Today the only consumer iterates without
+      // any ordering assumption (`tools/skill.ts`); preserve that contract.
+      const loaded = await Promise.all(
+        entries.map(async (entry) => {
+          const isDirectory = entry.isDirectory();
+          const isSymlink = entry.isSymbolicLink();
+
+          if (!isDirectory && !isSymlink) {
+            debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
+            return null;
+          }
+
+          const skillDir = path.join(baseDir, entry.name);
+
+          // For symlinks, verify the target (a) resolves, (b) is a
+          // directory, and (c) stays within `baseDir`. Shared with
+          // `skill-load.ts` so the two parsers can't drift on this
+          // code-execution-vector gate (skills can ship hooks that run
+          // shell commands).
+          if (isSymlink) {
+            const check = await validateSymlinkScope(skillDir, baseRealPath);
+            if (!check.ok) {
+              if (check.reason === 'escapes') {
+                debugLogger.warn(
+                  `Skipping symlink ${entry.name} that escapes ${baseDir}`,
+                );
+              } else if (check.reason === 'not-directory') {
+                debugLogger.warn(
+                  `Skipping symlink ${entry.name} that does not point to a directory`,
+                );
+              } else {
+                debugLogger.warn(
+                  `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
+                );
+              }
+              return null;
+            }
+          }
+
+          const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
+
+          try {
+            await fs.access(skillManifest);
+            return await this.parseSkillFileInternal(skillManifest, level);
+          } catch (error) {
+            if (error instanceof SkillError) {
+              debugLogger.error(
+                `Failed to parse skill at ${skillDir}: ${error.message}`,
+              );
+            } else {
+              debugLogger.debug(
+                `No valid SKILL.md found in ${skillDir}, skipping`,
+              );
+            }
+            return null;
+          }
+        }),
+      );
+
+      return loaded.filter((s): s is SkillConfig => s !== null);
     } catch (error) {
       // Directory doesn't exist or can't be read
       const errorMessage =

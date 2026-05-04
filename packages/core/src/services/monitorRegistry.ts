@@ -16,6 +16,7 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('MONITOR_REGISTRY');
 
@@ -24,17 +25,6 @@ const MAX_DESCRIPTION_LENGTH = 80;
 export const MAX_CONCURRENT_MONITORS = 16;
 export const MAX_RETAINED_TERMINAL_MONITORS = 128;
 
-function escapeXml(text: string): string {
-  // Escape all five XML metacharacters. `"` and `'` are not strictly
-  // required in element content today, but escaping them defensively keeps
-  // the helper safe to reuse in any future attribute context.
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
 
 /**
  * Strip C0 control characters (except tab) and C1 control characters from a
