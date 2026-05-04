@@ -172,10 +172,12 @@ export interface CliArgs {
 /**
  * Returns true if the root of the given schema can accept a JSON object.
  *
- * Considers:
- *  - explicit root `type` (string or array)
- *  - root `anyOf` / `oneOf` branches (at least one branch must accept
- *    object-typed values)
+ * JSON Schema applies sibling keywords conjunctively, so `type`, `anyOf`,
+ * and `oneOf` at the same level must EACH allow an object — they can't
+ * rescue one another. For example, `{type:"object", anyOf:[{type:"string"}]}`
+ * is unsatisfiable for any value because `type` requires object while
+ * `anyOf` requires string. Walk all three rather than returning on the
+ * first hit.
  *
  * Leaves `allOf` alone — tight interactions between `allOf` branches with
  * contradictory types are rare for `--json-schema` input and we'd rather
@@ -185,18 +187,19 @@ function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
   const rawType = schema['type'];
   if (rawType !== undefined) {
     const types = Array.isArray(rawType) ? rawType : [rawType];
-    return types.includes('object');
+    if (!types.includes('object')) return false;
   }
   for (const key of ['anyOf', 'oneOf'] as const) {
     const variants = schema[key];
     if (Array.isArray(variants) && variants.length > 0) {
-      return variants.some(
+      const anyAcceptsObject = variants.some(
         (v) =>
           typeof v === 'object' &&
           v !== null &&
           !Array.isArray(v) &&
           schemaRootAcceptsObject(v as Record<string, unknown>),
       );
+      if (!anyAcceptsObject) return false;
     }
   }
   // No narrowing at the root — lenient default, treated as object-compatible.
@@ -263,9 +266,9 @@ export function resolveJsonSchemaArg(
   if (!schemaRootAcceptsObject(parsed as Record<string, unknown>)) {
     throw new FatalConfigError(
       '--json-schema root must accept object-typed values (tool parameters ' +
-        'are always JSON objects). Every branch of a root anyOf/oneOf must ' +
-        'be satisfiable by an object, or the root must omit `type` / declare ' +
-        '`type: "object"`.',
+        'are always JSON objects). At least one branch of a root anyOf/oneOf ' +
+        'must be satisfiable by an object, and a root `type` (when present) ' +
+        'must include "object".',
     );
   }
 

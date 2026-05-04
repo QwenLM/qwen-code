@@ -72,7 +72,7 @@ export class SchemaValidator {
    * to surface invalid schemas instead of letting them no-op at runtime.
    */
   static compileStrict(schema: unknown): string | null {
-    if (!schema || typeof schema !== 'object') {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
       return 'schema must be a JSON object';
     }
     const validator = getValidator(schema as AnySchema);

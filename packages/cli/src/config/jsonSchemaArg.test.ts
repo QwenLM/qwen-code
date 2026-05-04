@@ -42,9 +42,7 @@ describe('resolveJsonSchemaArg', () => {
   });
 
   it('throws on invalid JSON', () => {
-    expect(() => resolveJsonSchemaArg('{not json}')).toThrow(
-      /not valid JSON/,
-    );
+    expect(() => resolveJsonSchemaArg('{not json}')).toThrow(/not valid JSON/);
   });
 
   it('throws when the parsed value is not an object', () => {
@@ -104,9 +102,7 @@ describe('resolveJsonSchemaArg', () => {
 
   it('rejects root anyOf where no branch accepts object', () => {
     expect(() =>
-      resolveJsonSchemaArg(
-        '{"anyOf":[{"type":"array"},{"type":"string"}]}',
-      ),
+      resolveJsonSchemaArg('{"anyOf":[{"type":"array"},{"type":"string"}]}'),
     ).toThrow(/must accept object-typed values/);
   });
 
@@ -127,6 +123,24 @@ describe('resolveJsonSchemaArg', () => {
     // The recursion should see through one level of nesting.
     const schema = resolveJsonSchemaArg(
       '{"anyOf":[{"oneOf":[{"type":"object"}]},{"type":"string"}]}',
+    );
+    expect(schema).toBeDefined();
+  });
+
+  it('rejects type:"object" combined with an anyOf that excludes object', () => {
+    // type and anyOf are AND'd at the same level — type:"object" alone is
+    // not enough if a sibling anyOf forbids every object branch. Without
+    // this check the synthetic tool would register an unsatisfiable schema.
+    expect(() =>
+      resolveJsonSchemaArg(
+        '{"type":"object","anyOf":[{"type":"string"},{"type":"number"}]}',
+      ),
+    ).toThrow(/must accept object-typed values/);
+  });
+
+  it('accepts type:"object" combined with anyOf where one branch admits object', () => {
+    const schema = resolveJsonSchemaArg(
+      '{"type":"object","anyOf":[{"type":"object","properties":{"a":{"type":"string"}}},{"type":"object","properties":{"b":{"type":"number"}}}]}',
     );
     expect(schema).toBeDefined();
   });

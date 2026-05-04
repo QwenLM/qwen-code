@@ -478,5 +478,15 @@ describe('SchemaValidator', () => {
       expect(SchemaValidator.compileStrict(undefined)).toMatch(/JSON object/);
       expect(SchemaValidator.compileStrict('a string')).toMatch(/JSON object/);
     });
+
+    it('rejects array input with the JSON-object error message', () => {
+      // Arrays satisfy `typeof === 'object'` so without an explicit
+      // Array.isArray() guard they would slip past the type check and
+      // surface a less helpful Ajv compile error instead.
+      expect(SchemaValidator.compileStrict([])).toMatch(/JSON object/);
+      expect(SchemaValidator.compileStrict([{ type: 'object' }])).toMatch(
+        /JSON object/,
+      );
+    });
   });
 });
