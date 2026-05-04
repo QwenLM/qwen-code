@@ -261,26 +261,26 @@ describe('EditTool', () => {
       );
     });
 
-    it('should preserve literal backslashes in file_path', () => {
-      // On Windows, backslashes are path separators, and unescapePath is a
-      // no-op. This test only validates literal-backslash preservation on
-      // platforms where backslashes are not path separators.
-      if (process.platform === 'win32') {
-        return;
-      }
-      const pathWithBackslash = path.join(
-        rootDir,
-        'path\\\\with\\\\slashes.txt',
-      );
-      const params: EditToolParams = {
-        file_path: pathWithBackslash,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      expect(tool.validateToolParams(params)).toBeNull();
-      // Double backslashes (literal) should be preserved
-      expect(params.file_path).toBe(pathWithBackslash);
-    });
+    it.skipIf(process.platform === 'win32')(
+      'should preserve literal backslashes in file_path',
+      () => {
+        // On Windows, backslashes are path separators, and unescapePath is a
+        // no-op. This test only validates literal-backslash preservation on
+        // platforms where backslashes are not path separators.
+        const pathWithBackslash = path.join(
+          rootDir,
+          'path\\\\with\\\\slashes.txt',
+        );
+        const params: EditToolParams = {
+          file_path: pathWithBackslash,
+          old_string: 'old',
+          new_string: 'new',
+        };
+        expect(tool.validateToolParams(params)).toBeNull();
+        // Double backslashes (literal) should be preserved
+        expect(params.file_path).toBe(pathWithBackslash);
+      },
+    );
   });
 
   describe('getConfirmationDetails', () => {

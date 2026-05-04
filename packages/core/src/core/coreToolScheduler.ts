@@ -50,7 +50,7 @@ import type {
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { escapeXml } from '../utils/xml.js';
-import { unescapePath } from '../utils/paths.js';
+import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
@@ -1539,7 +1539,7 @@ export class CoreToolScheduler {
         const normalizedArgs = {
           ...waitingToolCall.request.args,
         } as typeof waitingToolCall.request.args;
-        for (const key of ['file_path', 'path', 'filePath']) {
+        for (const key of PATH_ARG_KEYS) {
           if (typeof normalizedArgs[key] === 'string') {
             (normalizedArgs as Record<string, unknown>)[key] = unescapePath(
               String(normalizedArgs[key]).trim(),
@@ -1762,11 +1762,7 @@ export class CoreToolScheduler {
 
     // Normalize shell-escaped path params so hooks operate on actual filesystem
     // paths, matching the normalization done in tool validation.
-    // Covers all path arg keys used across tools:
-    //   file_path (Edit, ReadFile, WriteFile), path (Glob, Grep, Ls, RipGrep),
-    //   filePath (Lsp), notebook_path.
-    const PATH_KEYS = ['file_path', 'path', 'filePath', 'notebook_path'];
-    for (const key of PATH_KEYS) {
+    for (const key of PATH_ARG_KEYS) {
       if (typeof toolInput[key] === 'string') {
         toolInput[key] = unescapePath(String(toolInput[key]).trim());
       }
