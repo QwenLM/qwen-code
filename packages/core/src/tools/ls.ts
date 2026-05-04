@@ -8,8 +8,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
-import { isSubpaths, isSubpath } from '../utils/paths.js';
+import {
+  makeRelative,
+  shortenPath,
+  unescapePath,
+  isSubpaths,
+  isSubpath,
+} from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
@@ -355,6 +360,8 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: LSToolParams,
   ): string | null {
+    params.path = unescapePath(params.path.trim());
+
     if (!path.isAbsolute(params.path)) {
       return `Path must be absolute: ${params.path}`;
     }

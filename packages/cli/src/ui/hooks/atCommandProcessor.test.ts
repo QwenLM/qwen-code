@@ -219,36 +219,39 @@ describe('handleAtCommand', () => {
     });
   });
 
-  it('should correctly unescape paths with escaped spaces', async () => {
-    const fileContent = 'This is the file content.';
-    const filePath = await createTestFile(
-      path.join(testRootDir, 'path', 'to', 'my file.txt'),
-      fileContent,
-    );
-    const escapedpath = path.join(testRootDir, 'path', 'to', 'my\\ file.txt');
-    const query = `@${escapedpath}`;
+  it.skipIf(process.platform === 'win32')(
+    'should correctly unescape paths with escaped spaces',
+    async () => {
+      const fileContent = 'This is the file content.';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'path', 'to', 'my file.txt'),
+        fileContent,
+      );
+      const escapedpath = path.join(testRootDir, 'path', 'to', 'my\\ file.txt');
+      const query = `@${escapedpath}`;
 
-    const result = await handleAtCommand({
-      query,
-      config: mockConfig,
-      onDebugMessage: mockOnDebugMessage,
-      messageId: 125,
-      signal: abortController.signal,
-    });
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 125,
+        signal: abortController.signal,
+      });
 
-    expect(result.processedQuery).toEqual([
-      { text: `@${filePath}` },
-      { text: '\n--- Content from referenced files ---' },
-      { text: `\nContent from ${filePath}:\n` },
-      { text: fileContent },
-      { text: '\n--- End of content ---' },
-    ]);
-    expect(result.shouldProceed).toBe(true);
-    // toolDisplays should be returned for caller to add to UI history
-    expect(result.toolDisplays).toBeDefined();
-    expect(result.toolDisplays).toHaveLength(1);
-    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
-  });
+      expect(result.processedQuery).toEqual([
+        { text: `@${filePath}` },
+        { text: '\n--- Content from referenced files ---' },
+        { text: `\nContent from ${filePath}:\n` },
+        { text: fileContent },
+        { text: '\n--- End of content ---' },
+      ]);
+      expect(result.shouldProceed).toBe(true);
+      // toolDisplays should be returned for caller to add to UI history
+      expect(result.toolDisplays).toBeDefined();
+      expect(result.toolDisplays).toHaveLength(1);
+      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+    },
+  );
 
   it('should handle multiple @file references', async () => {
     const content1 = 'Content file1';
@@ -782,34 +785,37 @@ describe('handleAtCommand', () => {
       });
     });
 
-    it('should still handle escaped spaces in paths before punctuation', async () => {
-      const fileContent = 'Spaced file content';
-      const filePath = await createTestFile(
-        path.join(testRootDir, 'spaced file.txt'),
-        fileContent,
-      );
-      const escapedPath = path.join(testRootDir, 'spaced\\ file.txt');
-      const query = `Check @${escapedPath}, it has spaces.`;
+    it.skipIf(process.platform === 'win32')(
+      'should still handle escaped spaces in paths before punctuation',
+      async () => {
+        const fileContent = 'Spaced file content';
+        const filePath = await createTestFile(
+          path.join(testRootDir, 'spaced file.txt'),
+          fileContent,
+        );
+        const escapedPath = path.join(testRootDir, 'spaced\\ file.txt');
+        const query = `Check @${escapedPath}, it has spaces.`;
 
-      const result = await handleAtCommand({
-        query,
-        config: mockConfig,
-        onDebugMessage: mockOnDebugMessage,
-        messageId: 412,
-        signal: abortController.signal,
-      });
+        const result = await handleAtCommand({
+          query,
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 412,
+          signal: abortController.signal,
+        });
 
-      expect(result).toMatchObject({
-        processedQuery: [
-          { text: `Check @${filePath}, it has spaces.` },
-          { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from ${filePath}:\n` },
-          { text: fileContent },
-          { text: '\n--- End of content ---' },
-        ],
-        shouldProceed: true,
-      });
-    });
+        expect(result).toMatchObject({
+          processedQuery: [
+            { text: `Check @${filePath}, it has spaces.` },
+            { text: '\n--- Content from referenced files ---' },
+            { text: `\nContent from ${filePath}:\n` },
+            { text: fileContent },
+            { text: '\n--- End of content ---' },
+          ],
+          shouldProceed: true,
+        });
+      },
+    );
 
     it('should not break file paths with periods in extensions', async () => {
       const fileContent = 'TypeScript content';

@@ -82,6 +82,21 @@ describe('ReadFileTool', () => {
       );
     });
 
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped spaces in file_path',
+      () => {
+        const escapedPath = path.join(tempRootDir, 'my\\ file.txt');
+        const params: ReadFileToolParams = {
+          file_path: escapedPath,
+        };
+        const invocation = tool.build(params);
+        expect(invocation).toBeDefined();
+        expect(invocation.params.file_path).toBe(
+          path.join(tempRootDir, 'my file.txt'),
+        );
+      },
+    );
+
     it('should allow path outside root (external path support)', () => {
       const params: ReadFileToolParams = {
         file_path: '/outside/root.txt',
@@ -267,6 +282,29 @@ describe('ReadFileTool', () => {
         returnDisplay: '',
       });
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should read a file with spaces in its name when given an escaped path',
+      async () => {
+        const realFileName = 'my spaced read.txt';
+        const realPath = path.join(tempRootDir, realFileName);
+        const fileContent = 'Content with spaces in filename.';
+        await fsp.writeFile(realPath, fileContent, 'utf-8');
+
+        // Pass an ESCAPED path (as the LLM might from at-completion)
+        const escapedPath = path.join(tempRootDir, 'my\\ spaced\\ read.txt');
+        const params: ReadFileToolParams = { file_path: escapedPath };
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+
+        expect(await invocation.execute(abortSignal)).toEqual({
+          llmContent: fileContent,
+          returnDisplay: '',
+        });
+      },
+    );
 
     it('should return error if path is a directory', async () => {
       const dirPath = path.join(tempRootDir, 'directory');
