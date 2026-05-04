@@ -1121,6 +1121,28 @@ describe('ShellTool', () => {
         }
       });
 
+      it('honors the MIN_LONG_RUN_THRESHOLD_MS floor for pathological tiny timeouts', async () => {
+        // `longRunThresholdFor(1)` would otherwise be `Math.floor(0.5) = 0`,
+        // making `elapsedMs >= 0` true on every invocation and emitting
+        // a "ran for 0s" advisory. The floor at MIN_LONG_RUN_THRESHOLD_MS
+        // (1000ms) keeps the threshold sensible. This test pins it: a
+        // 500ms run with `timeout: 1` finishes BELOW the floor and must
+        // NOT trigger the hint. (The result is mocked with `aborted: false`
+        // since we're isolating the threshold logic from the abort path —
+        // a regression that strips the `Math.max(...)` guard would fire
+        // the hint here while the real-world abort path stays intact.)
+        const invocation = shellTool.build({
+          command: 'echo done',
+          is_background: false,
+          timeout: 1,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(500);
+        resolveShellExecution({ output: 'done', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
       it('hint survives the error path (appended to error.message)', async () => {
         // `coreToolScheduler` builds the model-facing functionResponse
         // from `error.message` (NOT llmContent) when toolResult.error
