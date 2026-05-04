@@ -49,7 +49,7 @@ export const modelCommand: SlashCommand = {
     } else if (partialArg.trim()) {
       // Include model IDs matching the partial argument
       return getAvailableModelIds(context).filter((id) =>
-        id.startsWith(partialArg),
+        id.startsWith(partialArg.trim()),
       );
     } else {
       return null;
