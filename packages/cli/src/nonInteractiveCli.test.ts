@@ -2531,6 +2531,103 @@ describe('runNonInteractive', () => {
       expect(result.structured_result).toEqual(structuredArgs);
     });
 
+    it('skips side-effecting tool calls that precede structured_output in the same turn', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+
+      const abortAllSpy = vi.fn();
+      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
+        setNotificationCallback: vi.fn(),
+        setRegisterCallback: vi.fn(),
+        getAll: vi.fn().mockReturnValue([]),
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        abortAll: abortAllSpy,
+      });
+
+      const writes: string[] = [];
+      processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+        writes.push(
+          typeof chunk === 'string'
+            ? chunk
+            : Buffer.from(chunk).toString('utf8'),
+        );
+        return true;
+      });
+
+      // Same turn, reverse order: a side-effecting tool comes BEFORE
+      // structured_output. The pre-scan must drop the leading call so the
+      // side effect never runs — accepting the structured result while
+      // having already executed write_file would violate the "structured
+      // output is the terminal contract" guarantee.
+      const structuredArgs = { summary: 'done' };
+      const leadingCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-leading',
+          name: 'side_effect_tool',
+          args: { path: '/tmp/should-not-write' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-leading',
+        },
+      };
+      const structuredCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured',
+          name: 'structured_output',
+          args: structuredArgs,
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-leading',
+        },
+      };
+
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'ok' }],
+      });
+
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([leadingCall, structuredCall]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output',
+        'prompt-id-leading',
+      );
+
+      // Only the structured_output call should have been executed; the
+      // leading side-effect tool must have been suppressed by the pre-scan.
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+      const onlyCallArg = mockCoreExecuteToolCall.mock.calls[0][1] as {
+        name: string;
+      };
+      expect(onlyCallArg.name).toBe('structured_output');
+      // No follow-up turn should have been issued.
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(abortAllSpy).toHaveBeenCalledTimes(1);
+
+      const result = writes
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line))
+        .flat()
+        .find(
+          (m: unknown) =>
+            typeof m === 'object' &&
+            m !== null &&
+            (m as { type?: string }).type === 'result',
+        );
+      expect(result).toBeDefined();
+      expect(result.is_error).toBe(false);
+      expect(result.structured_result).toEqual(structuredArgs);
+    });
+
     it('keeps the session running when structured_output args fail validation so the model can retry', async () => {
       (mockConfig.getJsonSchema as Mock).mockReturnValue({
         type: 'object',

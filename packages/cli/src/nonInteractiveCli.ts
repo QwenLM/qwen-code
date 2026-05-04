@@ -487,7 +487,27 @@ export async function runNonInteractive(
           // submitted args as the structured result.
           let structuredSubmission: unknown = undefined;
 
-          for (const requestInfo of toolCallRequests) {
+          // If --json-schema is active and the model emitted a
+          // `structured_output` call in the same assistant turn as other
+          // tools, the structured call is the terminal contract — pre-scan
+          // the batch and execute ONLY the first `structured_output`,
+          // suppressing both leading and trailing tool calls. Without this,
+          // a batch like `[write_file(...), structured_output(...)]` would
+          // run the side-effecting tool before the run is accepted, and an
+          // invalid structured_output mid-batch (`[structured_output(bad),
+          // write_file(...)]`) would still fall through to the trailing
+          // tool before the retry turn.
+          const requestsToExecute =
+            config.getJsonSchema() &&
+            toolCallRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT)
+              ? [
+                  toolCallRequests.find(
+                    (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+                  )!,
+                ]
+              : toolCallRequests;
+
+          for (const requestInfo of requestsToExecute) {
             const finalRequestInfo = requestInfo;
 
             const inputFormat =
@@ -546,12 +566,11 @@ export async function runNonInteractive(
               finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
               !toolResponse.error
             ) {
-              // Honour the "first valid call ends the session" contract:
-              // stop processing the remaining tool calls from this turn so
-              // we don't execute side-effecting tools after the result has
-              // already been accepted. Any trailing tool_use blocks the
-              // model emitted will simply lack a matching tool_result, which
-              // is consistent with how other terminal paths (max-turns,
+              // Honour the "first valid call ends the session" contract.
+              // The pre-scan above already filtered the batch to the first
+              // structured_output, so any other tool_use blocks the model
+              // emitted in this turn lack a matching tool_result — which is
+              // consistent with how other terminal paths (max-turns,
               // cancellation) leave the stream.
               structuredSubmission = finalRequestInfo.args;
               break;
