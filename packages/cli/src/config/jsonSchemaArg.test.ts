@@ -235,4 +235,46 @@ describe('resolveJsonSchemaArg', () => {
     );
     expect(schema).toBeDefined();
   });
+
+  it('rejects an empty root anyOf / oneOf as unsatisfiable', () => {
+    expect(() => resolveJsonSchemaArg('{"anyOf":[]}')).toThrow(
+      /must accept object-typed values/,
+    );
+    expect(() => resolveJsonSchemaArg('{"oneOf":[]}')).toThrow(
+      /must accept object-typed values/,
+    );
+  });
+
+  it('accepts boolean subschemas in anyOf where any branch is true', () => {
+    // `true` matches every value (per JSON Schema 2019-09+), so it admits
+    // objects. `{anyOf:[true]}` should pass.
+    const a = resolveJsonSchemaArg('{"anyOf":[true]}');
+    expect(a).toBeDefined();
+    const b = resolveJsonSchemaArg('{"anyOf":[false,true]}');
+    expect(b).toBeDefined();
+    const c = resolveJsonSchemaArg('{"anyOf":[true,{"type":"string"}]}');
+    expect(c).toBeDefined();
+  });
+
+  it('rejects anyOf where every branch is `false`', () => {
+    // `false` matches nothing, so an anyOf of all-false is unsatisfiable.
+    expect(() => resolveJsonSchemaArg('{"anyOf":[false]}')).toThrow(
+      /must accept object-typed values/,
+    );
+    expect(() => resolveJsonSchemaArg('{"anyOf":[false,false]}')).toThrow(
+      /must accept object-typed values/,
+    );
+  });
+
+  it('handles boolean subschemas in allOf', () => {
+    // `true` is neutral in allOf, `false` makes the whole schema unsatisfiable.
+    const ok = resolveJsonSchemaArg('{"allOf":[true,{"type":"object"}]}');
+    expect(ok).toBeDefined();
+    expect(() =>
+      resolveJsonSchemaArg('{"allOf":[false,{"type":"object"}]}'),
+    ).toThrow(/must accept object-typed values/);
+    expect(() => resolveJsonSchemaArg('{"allOf":[false]}')).toThrow(
+      /must accept object-typed values/,
+    );
+  });
 });

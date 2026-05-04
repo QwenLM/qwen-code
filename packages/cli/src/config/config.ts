@@ -226,30 +226,36 @@ function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
     if (!anyObjectMember) return false;
   }
 
+  // JSON Schema (draft-06+) treats `true` and `false` as valid subschemas
+  // for any keyword that accepts a schema: `true` matches every value,
+  // `false` matches nothing. Honour those alongside object subschemas so
+  // shapes like `{anyOf:[true]}` or `{allOf:[true,{type:"object"}]}` pass
+  // and `{anyOf:[false]}` is rejected.
+  const variantAcceptsObject = (v: unknown): boolean => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      return schemaRootAcceptsObject(v as Record<string, unknown>);
+    }
+    return false;
+  };
+
   for (const key of ['anyOf', 'oneOf'] as const) {
     const variants = schema[key];
-    if (Array.isArray(variants) && variants.length > 0) {
-      const anyAcceptsObject = variants.some(
-        (v) =>
-          typeof v === 'object' &&
-          v !== null &&
-          !Array.isArray(v) &&
-          schemaRootAcceptsObject(v as Record<string, unknown>),
-      );
-      if (!anyAcceptsObject) return false;
+    if (Array.isArray(variants)) {
+      // Empty anyOf/oneOf is unsatisfiable per JSON Schema — no value can
+      // match a member of an empty union. Reject rather than treating it
+      // as "no constraint".
+      if (variants.length === 0) return false;
+      if (!variants.some(variantAcceptsObject)) return false;
     }
   }
 
   const allOf = schema['allOf'];
   if (Array.isArray(allOf) && allOf.length > 0) {
-    const everyBranchAcceptsObject = allOf.every(
-      (v) =>
-        typeof v === 'object' &&
-        v !== null &&
-        !Array.isArray(v) &&
-        schemaRootAcceptsObject(v as Record<string, unknown>),
-    );
-    if (!everyBranchAcceptsObject) return false;
+    // allOf is conjunctive — `false` in any branch makes the schema
+    // unsatisfiable, `true` is neutral.
+    if (!allOf.every(variantAcceptsObject)) return false;
   }
 
   // Best-effort `not` handling: when `not` directly forbids object via its
@@ -822,14 +828,12 @@ export async function parseArguments(): Promise<CliArgs> {
               // wins.
               return '--json-schema cannot be used with --input-format stream-json; the "first structured_output call ends the session" contract is incompatible with the long-lived stream-json input protocol.';
             }
-            const hasPrompt = !!argv['prompt'];
-            const query = argv['query'] as string | string[] | undefined;
-            const hasPositionalQuery = Array.isArray(query)
-              ? query.length > 0
-              : !!query;
-            if (!hasPrompt && !hasPositionalQuery) {
-              return '--json-schema only applies to non-interactive mode; pass a prompt via -p or as a positional argument.';
-            }
+            // We deliberately do NOT reject the no-prompt / no-positional
+            // case here: the headless CLI still accepts a prompt piped via
+            // stdin (e.g. `cat prompt.txt | qwen --json-schema '...'`),
+            // and stdin availability isn't known at parse time. The
+            // existing "No input provided via stdin..." runtime error
+            // (gemini.tsx) covers genuinely empty input.
           }
           return true;
         }),
