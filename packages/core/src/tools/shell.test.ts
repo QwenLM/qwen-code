@@ -1167,6 +1167,13 @@ describe('ShellTool', () => {
         expect(result.error?.message).toContain(
           'foreground command ran for 75s',
         );
+        // `\n---\n` divider so downstream consumers
+        // (firePostToolUseFailureHook, telemetry grouping, SIEM, hook
+        // parsers) have an unambiguous boundary between the original
+        // error body and the appended advisory. Without the divider,
+        // pattern-matching on error messages would absorb the ~400-
+        // char advisory into the matched body.
+        expect(result.error?.message).toMatch(/spawn ENOENT\n\n---\n/);
       });
     });
 

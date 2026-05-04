@@ -59,10 +59,13 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 // the timeout would hard-kill, but late enough that normal foreground
 // commands (under the 120s default) don't trigger it before ~60s.
 //
-// Floor of 1000ms guards the pathological `timeout: 0` / `timeout: 1`
-// edge: without a floor, `Math.floor(0 / 2)` is 0, so `elapsedMs >= 0`
-// would fire on every invocation showing "ran for 0s" — the hint would
-// surface before the command had a chance to fail by timing out.
+// Floor of 1000ms guards the pathological tiny-positive-timeout edge.
+// `timeout <= 0` is already rejected by `validateToolParamValues` so
+// only positive values reach here, but `timeout: 1` (or any value < 2)
+// would otherwise produce `Math.floor(timeout / 2) = 0` and make
+// `elapsedMs >= 0` fire on every invocation showing "ran for 0s",
+// surfacing the hint before the command had a chance to fail by
+// timing out.
 const MIN_LONG_RUN_THRESHOLD_MS = 1000;
 function longRunThresholdFor(effectiveTimeoutMs: number): number {
   return Math.max(
@@ -863,11 +866,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // llmContent above would be silently dropped before reaching the
     // agent. Append the hint to error.message too so the advisory
     // survives whichever branch the scheduler takes.
+    //
+    // Use a `---` divider line so downstream consumers of
+    // `error.message` (firePostToolUseFailureHook, telemetry grouping,
+    // SIEM alerting, hook-side error parsers) have an unambiguous
+    // boundary they can split on rather than getting ~400 chars of
+    // advisory text mixed inline with the original error body.
     const executionError = result.error
       ? {
           error: {
             message:
-              result.error.message + (longRunHint ? `\n\n${longRunHint}` : ''),
+              result.error.message +
+              (longRunHint ? `\n\n---\n${longRunHint}` : ''),
             type: ToolErrorType.SHELL_EXECUTE_ERROR,
           },
         }
