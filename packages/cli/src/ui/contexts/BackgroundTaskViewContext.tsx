@@ -194,6 +194,13 @@ export function BackgroundTaskViewProvider({
       case 'monitor':
         config.getMonitorRegistry().cancel(target.monitorId);
         break;
+      case 'dream':
+        // Cancellation lands in the PR-2 follow-up (MemoryManager.cancelTask
+        // + dream-fork abort + lock rollback). The dialog suppresses the
+        // 'x stop' hint for dream entries until then, so this branch
+        // shouldn't be reachable through normal flow — keeping it explicit
+        // for exhaustiveness and to avoid an exhaustive-check throw.
+        break;
       default: {
         const _exhaustive: never = target;
         throw new Error(

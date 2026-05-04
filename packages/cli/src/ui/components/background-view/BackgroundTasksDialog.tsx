@@ -33,6 +33,7 @@ import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
+  type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
 
@@ -118,6 +119,13 @@ function rowLabel(entry: DialogEntry): string {
       return `[shell] ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
+    case 'dream': {
+      const sessionsHint =
+        entry.sessionCount !== undefined
+          ? ` reviewing ${entry.sessionCount} session${entry.sessionCount === 1 ? '' : 's'}`
+          : '';
+      return `[dream] memory consolidation${sessionsHint}`;
+    }
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -282,6 +290,14 @@ const DetailBody: React.FC<{
           maxWidth={maxWidth}
         />
       );
+    case 'dream':
+      return (
+        <DreamDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -289,6 +305,135 @@ const DetailBody: React.FC<{
       );
     }
   }
+};
+
+// ─── Dream detail body ─────────────────────────────────────
+//
+// Read-only for now: dream cancellation lands in the PR-2 follow-up
+// alongside `task_stop` integration. The body shows what the agent is
+// reviewing (session count), what it has touched (topic files, only
+// after completion), and the latest progress text from MemoryManager.
+//
+// Layout follows the Shell/Monitor convention — flat children of
+// MaxSizedBox separated by empty `<Box />` spacers (nesting a
+// `flexDirection="column"` container inside MaxSizedBox eats the
+// children silently).
+const DreamDetailBody: React.FC<{
+  entry: DreamDialogEntry;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = 'Dream';
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.sessionCount !== undefined) {
+    dimSubtitleParts.push(
+      `${entry.sessionCount} session${entry.sessionCount === 1 ? '' : 's'}`,
+    );
+  }
+  if (entry.touchedTopics && entry.touchedTopics.length > 0) {
+    dimSubtitleParts.push(
+      `${entry.touchedTopics.length} topic${entry.touchedTopics.length === 1 ? '' : 's'}`,
+    );
+  }
+
+  // Topic file lists can grow for an active session sweep; cap the
+  // displayed slice and add a "+N more" tail rather than letting the
+  // dialog body push the hint footer off-screen.
+  const MAX_TOPICS = 8;
+  const topics = entry.touchedTopics ?? [];
+  const visibleTopics = topics.slice(0, MAX_TOPICS);
+  const hiddenTopicCount = Math.max(0, topics.length - visibleTopics.length);
+  const hasError = Boolean(entry.error);
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${STATUS_VERBS[entry.status]} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      {entry.sessionCount !== undefined && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              Sessions reviewing
+            </Text>
+          </Box>
+          <Box>
+            <Text>{String(entry.sessionCount)}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {entry.progressText && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              Progress
+            </Text>
+          </Box>
+          <Box>
+            <Text wrap="wrap">{entry.progressText}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {topics.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {`Topics touched (${topics.length})`}
+            </Text>
+          </Box>
+          {visibleTopics.map((topic) => (
+            <Box key={topic}>
+              <Text>{`  · ${topic}`}</Text>
+            </Box>
+          ))}
+          {hiddenTopicCount > 0 && (
+            <Box>
+              <Text
+                color={theme.text.secondary}
+              >{`  · +${hiddenTopicCount} more`}</Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              Error
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
 };
 
 const AgentDetailBody: React.FC<{
@@ -817,11 +962,16 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     selectedEntry.status === 'paused' &&
     !selectedEntry.resumeBlockedReason;
 
-  // Hint footer — context-sensitive.
+  // Hint footer — context-sensitive. Dream entries are read-only in PR-1
+  // (cancellation arrives in the PR-2 follow-up that adds
+  // MemoryManager.cancelTask + task_stop integration), so suppress
+  // 'x stop' for them; otherwise the keystroke would silently no-op.
+  const selectedEntryAllowsCancel =
+    selectedEntry?.status === 'running' && selectedEntry.kind !== 'dream';
   const hints: string[] = [];
   if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
-    if (selectedEntry?.status === 'running') hints.push('x stop');
+    if (selectedEntryAllowsCancel) hints.push('x stop');
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');
@@ -829,7 +979,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 go back', 'Esc/Enter/Space close');
-    if (selectedEntry?.status === 'running') hints.push('x stop');
+    if (selectedEntryAllowsCancel) hints.push('x stop');
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');

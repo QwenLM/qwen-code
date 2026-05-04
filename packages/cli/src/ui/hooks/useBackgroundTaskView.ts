@@ -5,11 +5,14 @@
  */
 
 /**
- * useBackgroundTaskView — subscribes to all three registries (background
- * subagents, managed shells, and event monitors) and merges them into a
- * single ordered snapshot of `DialogEntry`s. Each registry fires
+ * useBackgroundTaskView — subscribes to the three background-task
+ * registries (background subagents, managed shells, and event monitors)
+ * AND to `MemoryManager` for dream consolidation tasks, merging them
+ * into a single ordered snapshot of `DialogEntry`s. Each registry fires
  * `statusChange` on register too, so a single subscription per registry
  * is enough to keep the snapshot fresh for new + transitioning entries.
+ * `MemoryManager.subscribe` (multi-listener Set, not single-slot)
+ * carries dream task transitions on the same refresh path.
  *
  * Surfaces that only care about live work (the footer pill, the
  * composer's Down-arrow route) filter for `running` themselves.
@@ -29,21 +32,56 @@ import {
   type MonitorEntry,
 } from '@qwen-code/qwen-code-core';
 
+// Cap on retained terminal dream entries surfaced via the dialog.
+// `MemoryManager.tasks` has no eviction; without this cap the list
+// grows unboundedly with completed dreams over the project's lifetime.
+// 3 is small enough to stay glanceable yet keeps the most recent
+// outcomes visible across rapid succession (e.g. the user opening the
+// dialog right after two dreams completed).
+const MAX_RETAINED_TERMINAL_DREAMS = 3;
+
 export type AgentDialogEntry = BackgroundTaskEntry & {
   kind: 'agent';
   resumeBlockedReason?: string;
 };
 
 /**
+ * Dream-task adapter. MemoryManager owns its own task records
+ * (MemoryTaskRecord) and intentionally lives outside the registry trio;
+ * this view-model wraps the subset of fields the dialog needs and
+ * narrows status to the three values that ever appear in the dialog
+ * (skipped/pending records are filtered out at the source).
+ *
+ * Cancellation is not yet wired (lands in the PR-2 follow-up that adds
+ * MemoryManager.cancelTask + task_stop integration). The dialog must
+ * suppress the "x stop" hint for dream entries until then.
+ */
+export type DreamDialogEntry = {
+  kind: 'dream';
+  /** MemoryTaskRecord.id — used as React key + lookup. */
+  dreamId: string;
+  status: 'running' | 'completed' | 'failed';
+  startTime: number;
+  endTime?: number;
+  progressText?: string;
+  error?: string;
+  /** Number of sessions the dream is reviewing — populated on schedule. */
+  sessionCount?: number;
+  /** Memory topic files written — populated on completion. */
+  touchedTopics?: readonly string[];
+};
+
+/**
  * A unified view-model entry the dialog/pill/context render against.
  * Discriminated by `kind`; per-kind fields are inlined verbatim so
  * renderer code can stay mechanical (`entry.kind === 'agent'` /
- * `'shell'` / `'monitor'` guard, then access fields directly).
+ * `'shell'` / `'monitor'` / `'dream'` guard, then access fields directly).
  */
 export type DialogEntry =
   | AgentDialogEntry
   | (BackgroundShellEntry & { kind: 'shell' })
-  | (MonitorEntry & { kind: 'monitor' });
+  | (MonitorEntry & { kind: 'monitor' })
+  | DreamDialogEntry;
 
 export interface UseBackgroundTaskViewResult {
   entries: readonly DialogEntry[];
@@ -58,6 +96,8 @@ export function entryId(entry: DialogEntry): string {
       return entry.shellId;
     case 'monitor':
       return entry.monitorId;
+    case 'dream':
+      return entry.dreamId;
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -77,6 +117,8 @@ export function useBackgroundTaskView(
     const agentRegistry = config.getBackgroundTaskRegistry();
     const shellRegistry = config.getBackgroundShellRegistry();
     const monitorRegistry = config.getMonitorRegistry();
+    const memoryManager = config.getMemoryManager();
+    const projectRoot = config.getProjectRoot();
 
     const refresh = () => {
       const agentEntries: DialogEntry[] = agentRegistry
@@ -88,12 +130,54 @@ export function useBackgroundTaskView(
       const monitorEntries: DialogEntry[] = monitorRegistry
         .getAll()
         .map((e) => ({ ...e, kind: 'monitor' as const }));
+      // Dream entries: only surface tasks that actually fired. `pending`
+      // is a sub-second transition state, and `skipped` records would
+      // flood the dialog (every UserQuery that misses the gate creates
+      // one). Mirrors Claude Code's split — extractMemories stays
+      // invisible, autoDream/dream surfaces in the bg-tasks UI.
+      //
+      // Cap retained terminal entries — MemoryManager.tasks Map has no
+      // eviction path, so completed/failed dreams accumulate forever
+      // (every fired dream over the project's lifetime). Without this
+      // cap the dialog would grow unbounded; with it the user sees all
+      // running dreams plus the most recent few terminal results
+      // (mirrors MonitorRegistry.MAX_RETAINED_TERMINAL_MONITORS).
+      const allDreams = memoryManager.listTasksByType('dream', projectRoot);
+      const runningDreams = allDreams.filter((t) => t.status === 'running');
+      const terminalDreams = allDreams
+        .filter((t) => t.status === 'completed' || t.status === 'failed')
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        .slice(0, MAX_RETAINED_TERMINAL_DREAMS);
+      const dreamEntries: DialogEntry[] = [
+        ...runningDreams,
+        ...terminalDreams,
+      ].map((t) => {
+        const sessionCount = t.metadata?.['sessionCount'];
+        const touchedTopics = t.metadata?.['touchedTopics'];
+        return {
+          kind: 'dream' as const,
+          dreamId: t.id,
+          status: t.status as 'running' | 'completed' | 'failed',
+          startTime: Date.parse(t.createdAt),
+          endTime: t.status === 'running' ? undefined : Date.parse(t.updatedAt),
+          progressText: t.progressText,
+          error: t.error,
+          sessionCount:
+            typeof sessionCount === 'number' ? sessionCount : undefined,
+          touchedTopics: Array.isArray(touchedTopics)
+            ? (touchedTopics.filter((s) => typeof s === 'string') as string[])
+            : undefined,
+        };
+      });
       // Merge by startTime so the order matches launch order across all
-      // registries (matters when an agent, shell, and monitor are
+      // sources (matters when an agent, shell, monitor, and dream are
       // launched alternately).
-      const merged = [...agentEntries, ...shellEntries, ...monitorEntries].sort(
-        (a, b) => a.startTime - b.startTime,
-      );
+      const merged = [
+        ...agentEntries,
+        ...shellEntries,
+        ...monitorEntries,
+        ...dreamEntries,
+      ].sort((a, b) => a.startTime - b.startTime);
       setEntries(merged);
     };
 
@@ -102,11 +186,13 @@ export function useBackgroundTaskView(
     agentRegistry.setStatusChangeCallback(refresh);
     shellRegistry.setStatusChangeCallback(refresh);
     monitorRegistry.setStatusChangeCallback(refresh);
+    const unsubscribeMemory = memoryManager.subscribe(refresh);
 
     return () => {
       agentRegistry.setStatusChangeCallback(undefined);
       shellRegistry.setStatusChangeCallback(undefined);
       monitorRegistry.setStatusChangeCallback(undefined);
+      unsubscribeMemory();
     };
   }, [config]);
 

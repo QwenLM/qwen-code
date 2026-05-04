@@ -25,14 +25,39 @@ function makeFakeRegistry(): FakeRegistry {
   };
 }
 
+interface FakeMemoryManager {
+  subscribe: ReturnType<typeof vi.fn>;
+  unsubscribe: ReturnType<typeof vi.fn>;
+  /** Test helper — invokes the currently-subscribed listener. */
+  fire: () => void;
+}
+
+function makeFakeMemoryManager(): FakeMemoryManager {
+  let listener: (() => void) | undefined;
+  const unsubscribe = vi.fn(() => {
+    listener = undefined;
+  });
+  return {
+    subscribe: vi.fn((next: () => void) => {
+      listener = next;
+      return unsubscribe;
+    }),
+    unsubscribe,
+    fire: () => listener?.(),
+  };
+}
+
 function makeConfig(opts: {
   agents: () => unknown[];
   shells: () => unknown[];
   monitors: () => unknown[];
+  dreams?: () => unknown[];
 }) {
   const agentReg = makeFakeRegistry();
   const shellReg = makeFakeRegistry();
   const monitorReg = makeFakeRegistry();
+  const memoryMgr = makeFakeMemoryManager();
+  const dreams = opts.dreams ?? (() => []);
 
   const config = {
     getBackgroundTaskRegistry: () => ({
@@ -47,9 +72,16 @@ function makeConfig(opts: {
       ...monitorReg,
       getAll: opts.monitors,
     }),
+    getMemoryManager: () => ({
+      subscribe: memoryMgr.subscribe,
+      // Hook only ever requests dream-typed records; ignore the type arg
+      // and return whatever the test provided.
+      listTasksByType: (_type: string, _projectRoot?: string) => dreams(),
+    }),
+    getProjectRoot: () => '/test/project',
   } as unknown as Config;
 
-  return { config, agentReg, shellReg, monitorReg };
+  return { config, agentReg, shellReg, monitorReg, memoryMgr };
 }
 
 const agent = (id: string, startTime: number) => ({
@@ -82,6 +114,30 @@ const monitor = (id: string, startTime: number) => ({
   maxEvents: 1000,
   idleTimeoutMs: 300_000,
   droppedLines: 0,
+});
+
+// Mirror the MemoryTaskRecord shape that MemoryManager.listTasksByType
+// returns. Status defaults to 'running'; tests override to exercise the
+// filter (`pending` / `skipped` records must be excluded).
+const dream = (
+  id: string,
+  startTimeMs: number,
+  overrides: Partial<{
+    status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+    progressText: string;
+    error: string;
+    metadata: Record<string, unknown>;
+  }> = {},
+) => ({
+  id,
+  taskType: 'dream' as const,
+  projectRoot: '/test/project',
+  status: overrides.status ?? ('running' as const),
+  createdAt: new Date(startTimeMs).toISOString(),
+  updatedAt: new Date(startTimeMs).toISOString(),
+  progressText: overrides.progressText,
+  error: overrides.error,
+  metadata: overrides.metadata,
 });
 
 describe('useBackgroundTaskView', () => {
@@ -154,7 +210,7 @@ describe('useBackgroundTaskView', () => {
   });
 
   it('clears all three subscriptions on unmount', () => {
-    const { config, agentReg, shellReg, monitorReg } = makeConfig({
+    const { config, agentReg, shellReg, monitorReg, memoryMgr } = makeConfig({
       agents: () => [],
       shells: () => [],
       monitors: () => [],
@@ -178,5 +234,97 @@ describe('useBackgroundTaskView', () => {
       [expect.any(Function)],
       [undefined],
     ]);
+    // MemoryManager uses subscribe()/unsubscribe rather than the
+    // setCallback pattern; the unsubscribe returned from subscribe must
+    // run on cleanup or stale dream listeners leak across remounts.
+    expect(memoryMgr.subscribe).toHaveBeenCalledTimes(1);
+    expect(memoryMgr.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces dream tasks with kind=dream and skips pending/skipped records', () => {
+    const { config } = makeConfig({
+      agents: () => [],
+      shells: () => [],
+      monitors: () => [],
+      // Three dream records covering: a pre-fire pending record (must
+      // not surface — would flood the dialog with one row per
+      // UserQuery), a running fire (must surface), and a skipped
+      // gate-miss (must not surface — same flood concern).
+      dreams: () => [
+        dream('d-pending', 100, { status: 'pending' }),
+        dream('d-running', 200),
+        dream('d-skipped', 300, { status: 'skipped' }),
+      ],
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    expect(result.current.entries).toHaveLength(1);
+    const [only] = result.current.entries;
+    expect(only.kind).toBe('dream');
+    expect(only.status).toBe('running');
+    expect(entryId(only)).toBe('d-running');
+  });
+
+  it('caps retained terminal dream entries at 3 most-recent (by updatedAt) plus all running', () => {
+    // MemoryManager has no eviction; without the cap, accumulating
+    // completed dreams across a long session would blow up the dialog.
+    // The cap keeps the dialog glanceable while still surfacing the
+    // most recent outcomes (mirrors MonitorRegistry's terminal cap).
+    const baseMs = Date.parse('2026-05-04T12:00:00.000Z');
+    const completed = (id: string, mtime: number) => ({
+      id,
+      taskType: 'dream' as const,
+      projectRoot: '/test/project',
+      status: 'completed' as const,
+      createdAt: new Date(baseMs + mtime - 1000).toISOString(),
+      updatedAt: new Date(baseMs + mtime).toISOString(),
+    });
+    const { config } = makeConfig({
+      agents: () => [],
+      shells: () => [],
+      monitors: () => [],
+      dreams: () => [
+        completed('d-old-1', 1_000),
+        completed('d-old-2', 2_000),
+        completed('d-mid', 3_000),
+        completed('d-recent', 4_000),
+        completed('d-newest', 5_000),
+        // Plus a running entry that must always survive the cap (caps
+        // only trim terminals; running dreams are uncapped).
+        dream('d-running-now', baseMs + 6_000, { status: 'running' }),
+      ],
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    const ids = result.current.entries.map(entryId).sort();
+    // Surviving terminal entries: d-newest, d-recent, d-mid (top 3 by
+    // updatedAt desc). The two oldest (d-old-1, d-old-2) get dropped.
+    // The running dream survives unconditionally.
+    expect(ids).toEqual(
+      ['d-mid', 'd-newest', 'd-recent', 'd-running-now'].sort(),
+    );
+  });
+
+  it('refreshes entries when the memory manager fires its subscribe listener', () => {
+    const dreams: Array<ReturnType<typeof dream>> = [];
+    const { config, memoryMgr } = makeConfig({
+      agents: () => [],
+      shells: () => [],
+      monitors: () => [],
+      dreams: () => dreams,
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    expect(result.current.entries).toEqual([]);
+
+    dreams.push(dream('d-1', 100));
+    act(() => memoryMgr.fire());
+    expect(result.current.entries.map(entryId)).toEqual(['d-1']);
+
+    // A subsequent terminal state update must propagate the new status
+    // (running → completed) and survive the filter (only pending /
+    // skipped get dropped).
+    dreams.splice(0, dreams.length, dream('d-1', 100, { status: 'completed' }));
+    act(() => memoryMgr.fire());
+    const [only] = result.current.entries;
+    expect(only.kind).toBe('dream');
+    expect(only.status).toBe('completed');
   });
 });
