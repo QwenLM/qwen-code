@@ -892,12 +892,17 @@ export function convertOpenAIResponseToGemini(
   if (choice) {
     const parts: Part[] = [];
 
-    // Handle reasoning content (thoughts)
-    const reasoningText =
-      (choice.message as ExtendedCompletionMessage).reasoning_content ??
-      (choice.message as ExtendedCompletionMessage).reasoning;
-    if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
+    // Handle reasoning content (thoughts).
+    // When taggedThinkingTags is enabled, thought content is already
+    // extracted from the text content via convertOpenAITextToParts.
+    // Skip reasoning_content extraction to avoid duplicating thought parts.
+    if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+      const reasoningText =
+        (choice.message as ExtendedCompletionMessage).reasoning_content ??
+        (choice.message as ExtendedCompletionMessage).reasoning;
+      if (reasoningText) {
+        parts.push({ text: reasoningText, thought: true });
+      }
     }
 
     // Handle text content
@@ -1016,11 +1021,17 @@ export function convertOpenAIChunkToGemini(
   if (choice) {
     const parts: Part[] = [];
 
-    const reasoningText =
-      (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
-      (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
-    if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
+    // Handle reasoning content (thoughts).
+    // When taggedThinkingTags is enabled, thought content is already
+    // extracted from the text content via convertOpenAITextToParts.
+    // Skip reasoning_content extraction to avoid duplicating thought parts.
+    if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+      const reasoningText =
+        (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
+        (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
+      if (reasoningText) {
+        parts.push({ text: reasoningText, thought: true });
+      }
     }
 
     // Handle text content

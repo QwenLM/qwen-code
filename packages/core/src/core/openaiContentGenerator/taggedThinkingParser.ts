@@ -5,7 +5,13 @@
  */
 
 import type { Part } from '@google/genai';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 
+const debugLogger = createDebugLogger('TAGGED_THINKING_PARSER');
+
+// Parser uses a binary mode toggle rather than a tag stack, so
+// <think>content</thinking> is valid and cross-matching is intentional.
+// MiniMax only uses one tag type per response in practice.
 const OPEN_TAGS = ['<think>', '<thinking>'] as const;
 const CLOSE_TAGS = ['</think>', '</thinking>'] as const;
 
@@ -75,6 +81,9 @@ export class TaggedThinkingParser {
       const matchedTag = findMatchingTag(lower, index, activeTags);
 
       if (matchedTag) {
+        debugLogger.debug(
+          `taggedThinking: detected tag "${matchedTag}" at offset ${index}`,
+        );
         appendPart(parts, segment, this.mode);
         segment = '';
         this.mode = this.mode === 'text' ? 'thought' : 'text';
@@ -93,11 +102,24 @@ export class TaggedThinkingParser {
     if (index < this.buffer.length) {
       appendPart(parts, segment, this.mode);
       this.buffer = this.buffer.slice(index);
+      debugLogger.debug(
+        `taggedThinking: emitted ${parts.length} part(s), buffered ${this.buffer.length} char(s)`,
+      );
       return parts;
     }
 
     this.buffer = '';
+    // Safety net: log when flushing an unclosed thought buffer
+    // to make this silent data-loss scenario observable.
+    if (this.mode === 'thought' && segment) {
+      debugLogger.warn(
+        `taggedThinking: flushing ${segment.length} chars of unclosed thought on stream end`,
+      );
+    }
     appendPart(parts, segment, this.mode);
+    debugLogger.debug(
+      `taggedThinking: emitted ${parts.length} part(s), flush complete`,
+    );
     return parts;
   }
 }

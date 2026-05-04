@@ -41,6 +41,24 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
       ).toBe(true);
     });
 
+    it('matches known hosts via exact match (api.minimaxi.com)', () => {
+      // Exact match on the well-known host, not suffix-based
+      expect(
+        MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+          createConfig('https://api.minimaxi.com/v1/chat/completions'),
+        ),
+      ).toBe(true);
+    });
+
+    it('matches known hosts via exact match (api.minimax.io)', () => {
+      // Exact match on the well-known host, not suffix-based
+      expect(
+        MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+          createConfig('https://api.minimax.io/v1/chat/completions'),
+        ),
+      ).toBe(true);
+    });
+
     it('matches MiniMax subdomain hosts via wildcard suffix', () => {
       expect(
         MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
@@ -55,6 +73,21 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
       expect(
         MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
           createConfig('https://custom.api.minimax.io/v1'),
+        ),
+      ).toBe(true);
+    });
+
+    it('matches custom proxy subdomains via suffix fallback', () => {
+      // Suffix matching intentionally matches any subdomain under
+      // minimaxi.com / minimax.io to support custom MiniMax deployments.
+      expect(
+        MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+          createConfig('https://my-proxy.minimaxi.com/v1'),
+        ),
+      ).toBe(true);
+      expect(
+        MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+          createConfig('https://custom-gateway.minimax.io/v1'),
         ),
       ).toBe(true);
     });

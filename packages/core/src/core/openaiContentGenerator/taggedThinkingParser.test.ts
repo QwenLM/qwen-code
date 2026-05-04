@@ -230,4 +230,49 @@ describe('TaggedThinkingParser', () => {
       { text: 'final <thi' },
     ]);
   });
+
+  // ── Cross-matching tags (binary mode toggle) ──────────
+
+  it('should handle cross-matching: <think> content </thinking>', () => {
+    const parser = new TaggedThinkingParser();
+    // Binary mode toggle allows </thinking> to close <think>
+    expect(parser.parse('<think>reasoning</thinking>visible', true)).toEqual([
+      { text: 'reasoning', thought: true },
+      { text: 'visible' },
+    ]);
+  });
+
+  it('should handle cross-matching: <thinking> content </think>', () => {
+    const parser = new TaggedThinkingParser();
+    // Binary mode toggle allows </think> to close <thinking>
+    expect(parser.parse('<thinking>reasoning</think>visible', true)).toEqual([
+      { text: 'reasoning', thought: true },
+      { text: 'visible' },
+    ]);
+  });
+
+  // ── Unclosed thought flush on stream end ────────────────
+
+  it('should flush unclosed thought as thought part on final (stream truncated after <think>)', () => {
+    const parser = new TaggedThinkingParser();
+    // Simulate stream truncation: <think> opened, network drops, final flush
+    // The content is flushed as thought (invisible to user), but the debugLogger.warn
+    // makes this observable. This test verifies the flush behavior itself.
+    expect(parser.parse('<think>partial response', true)).toEqual([
+      { text: 'partial response', thought: true },
+    ]);
+  });
+
+  it('should flush unclosed thought as text when stream ends with visible prefix', () => {
+    const parser = new TaggedThinkingParser();
+    // <think> opens thought mode, </think> closes it, then another <think> opens
+    // but stream ends before closing → final flush as thought
+    expect(
+      parser.parse('<think>done</think>visible <think>unclosed', true),
+    ).toEqual([
+      { text: 'done', thought: true },
+      { text: 'visible ' },
+      { text: 'unclosed', thought: true },
+    ]);
+  });
 });
