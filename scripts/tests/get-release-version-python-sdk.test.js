@@ -884,7 +884,7 @@ describe('python sdk get-release-version', () => {
       }),
     );
 
-    const consoleSpy = vi.spyOn(console, 'log');
+    const consoleSpy = vi.spyOn(console, 'error');
     const getVersion = await loadGetVersion();
 
     await expect(getVersion({ type: 'preview' })).resolves.toMatchObject({

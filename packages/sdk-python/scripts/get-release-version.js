@@ -374,7 +374,7 @@ function getStableVersion(args, versions) {
 
   if (latestPrerelease) {
     if (latestPrerelease.source !== 'preview') {
-      console.log(
+      console.error(
         `::warning::Stable release ${latestPrerelease.baseVersion} derived from ${latestPrerelease.source} (no preview release found with this base version).`,
       );
     }
@@ -511,7 +511,7 @@ async function getVersion(options = {}) {
         `GitHub release ${TAG_PREFIX}v${versionData.releaseVersion} already exists.`,
       );
     } else if (releaseState.gitTagExists) {
-      console.log(
+      console.error(
         `::warning::Orphan git tag ${TAG_PREFIX}v${versionData.releaseVersion} exists without a PyPI version or GitHub release. Skipping to next version slot.`,
       );
     } else if (releaseState.packageVersionExistsOnPyPI) {
