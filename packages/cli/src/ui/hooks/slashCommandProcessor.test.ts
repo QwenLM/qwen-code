@@ -289,6 +289,28 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
+    it('should let slash-prefixed file paths fall through to the model', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/api/apiFunction/接口的实现',
+        );
+      });
+
+      expect(actionResult).toBe(false);
+      expect(mockAddItem).not.toHaveBeenCalled();
+
+      const absPathResult = await act(async () =>
+        result.current.handleSlashCommand(
+          '/Users/zhoushuo/Desktop/dw-operator-skill 帮我安装',
+        ),
+      );
+      expect(absPathResult).toBe(false);
+    });
+
     it('should keep a bare slash in the slash command flow', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.slashCommands).toBeDefined());
@@ -954,25 +976,6 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
-    it('should return false for file-path-like input (issue #1804)', async () => {
-      const result = setupProcessorHook();
-      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
-
-      // File paths should not enter the slash command flow when the first
-      // token contains a path separator.
-      const pathResult = await act(async () =>
-        result.current.handleSlashCommand('/api/apiFunction/接口的实现'),
-      );
-      expect(pathResult).toBe(false);
-
-      const absPathResult = await act(async () =>
-        result.current.handleSlashCommand(
-          '/Users/zhoushuo/Desktop/dw-operator-skill 帮我安装',
-        ),
-      );
-      expect(absPathResult).toBe(false);
-    });
-
     it('should return false for unknown slash-prefixed input with arguments', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.slashCommands).toBeDefined());
@@ -1159,6 +1162,8 @@ describe('useSlashCommandProcessor', () => {
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized
           null, // logger
+          undefined, // setSessionName
+          mockUpdateItem,
         ),
       );
 

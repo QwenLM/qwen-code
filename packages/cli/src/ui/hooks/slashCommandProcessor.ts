@@ -138,8 +138,8 @@ export const useSlashCommandProcessor = (
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
   logger: Logger | null,
-  setSessionName?: (name: string | null) => void,
-  updateItem?: UseHistoryManagerReturn['updateItem'],
+  setSessionName: ((name: string | null) => void) | undefined,
+  updateItem: UseHistoryManagerReturn['updateItem'],
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -699,7 +699,7 @@ export const useSlashCommandProcessor = (
 
                 case 'submit_prompt':
                   if (invocationItemId !== undefined) {
-                    updateItem?.(invocationItemId, { sentToModel: true });
+                    updateItem(invocationItemId, { sentToModel: true });
                   }
                   return {
                     type: 'submit_prompt',

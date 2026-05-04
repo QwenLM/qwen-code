@@ -230,22 +230,20 @@ describe('commandUtils', () => {
       expect(isSlashCommand('/*comment without space*/')).toBe(false);
     });
 
-    it('should return false for file paths (issue #1804)', () => {
-      // Unix absolute paths
+    it('should return false for slash-prefixed file paths', () => {
       expect(isSlashCommand('/api/apiFunction/接口的实现')).toBe(false);
+      expect(isSlashCommand('/Users/me/project/src/index.ts')).toBe(false);
+      expect(isSlashCommand('/var/log/syslog check this')).toBe(false);
+      expect(isSlashCommand('/home/user/.qwen/settings.json')).toBe(false);
+      expect(isSlashCommand('/tmp/test.txt')).toBe(false);
+      expect(isSlashCommand('/tmp\\test.txt')).toBe(false);
       expect(
         isSlashCommand(
           '/Users/zhoushuo/Desktop/AI_operator/dw-operator-skill 帮我安装',
         ),
       ).toBe(false);
-      expect(isSlashCommand('/var/log/syslog check this')).toBe(false);
-      expect(isSlashCommand('/tmp/test.txt')).toBe(false);
       expect(isSlashCommand('/home/user/.config/settings.json')).toBe(false);
       expect(isSlashCommand('/etc/nginx/nginx.conf')).toBe(false);
-    });
-
-    it('should return false for paths with non-ASCII path segments', () => {
-      expect(isSlashCommand('/api/接口实现')).toBe(false);
     });
   });
 
