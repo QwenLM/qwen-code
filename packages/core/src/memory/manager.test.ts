@@ -515,6 +515,70 @@ describe('MemoryManager', () => {
       expect(mgr.getTask(taskId)?.status).toBe('cancelled');
     });
 
+    it('keeps the record cancelled even when runManagedAutoMemoryDream resolves successfully after abort', async () => {
+      // The realistic abort path: runForkedAgent maps
+      // AgentTerminateMode.CANCELLED to a resolved `{status: 'cancelled'}`
+      // rather than a rejection. dreamAgentPlanner is supposed to
+      // rethrow that case, but the manager carries an additional
+      // signal.aborted check after the await as defense in depth.
+      // This test simulates the "resolved despite cancel" scenario by
+      // having the mock RESOLVE on abort instead of rejecting — without
+      // the guard, runDream's success path would overwrite the
+      // user-cancelled record to 'completed' and bump dream metadata
+      // for an aborted run.
+      let resolveStarted!: () => void;
+      const started = new Promise<void>((r) => {
+        resolveStarted = r;
+      });
+      vi.mocked(runManagedAutoMemoryDream).mockImplementation(
+        async (_root, _now, _config, signal) => {
+          resolveStarted();
+          await new Promise<void>((resolve) => {
+            signal?.addEventListener('abort', () => resolve());
+          });
+          return {
+            touchedTopics: ['user', 'project'],
+            dedupedEntries: 0,
+            systemMessage: 'Managed auto-memory dream completed.',
+          };
+        },
+      );
+
+      const mgr = new MemoryManager(async () => [
+        'sess-0',
+        'sess-1',
+        'sess-2',
+        'sess-3',
+        'sess-4',
+      ]);
+      const config = makeMockConfig();
+      const result = await mgr.scheduleDream({
+        projectRoot,
+        sessionId: 'sess-x',
+        config,
+        now: new Date('2026-04-02T10:00:00.000Z'),
+      });
+      const taskId = result.taskId!;
+      await started;
+      mgr.cancelTask(taskId);
+      await mgr.drain({ timeoutMs: 1000 });
+
+      expect(mgr.getTask(taskId)?.status).toBe('cancelled');
+      // Metadata write must NOT have happened — lastDreamAt should
+      // still be the scaffold's initial value, not the cancelled-run's
+      // `now`. (Bumping it would suppress the next legitimate dream.)
+      const metaRaw = await fs.readFile(
+        getAutoMemoryMetadataPath(projectRoot),
+        'utf-8',
+      );
+      const meta = JSON.parse(metaRaw) as {
+        lastDreamAt?: string;
+        lastDreamSessionId?: string;
+      };
+      expect(meta.lastDreamAt).not.toBe('2026-04-02T10:00:00.000Z');
+      expect(meta.lastDreamSessionId).not.toBe('sess-x');
+    });
+
     it('returns false for unknown task ids', async () => {
       const mgr = new MemoryManager();
       expect(mgr.cancelTask('does-not-exist')).toBe(false);

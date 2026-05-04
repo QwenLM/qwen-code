@@ -811,6 +811,16 @@ export class MemoryManager {
           params.config,
           abortSignal,
         );
+        // Defense-in-depth: runForkedAgent maps cancelled fork-agents
+        // to a resolved `{status: 'cancelled'}` rather than a rejection.
+        // dreamAgentPlanner now rethrows that case so the catch path
+        // below handles it, but if anything in the call chain ever
+        // forgets to propagate, this guard prevents the success path
+        // from clobbering the user-cancelled record with 'completed'
+        // and bumping dream metadata for an aborted run.
+        if (abortSignal.aborted) {
+          return record;
+        }
         const nextMetadata = await readDreamMetadata(params.projectRoot);
         nextMetadata.lastDreamAt = now.toISOString();
         nextMetadata.lastDreamSessionId = params.sessionId;
