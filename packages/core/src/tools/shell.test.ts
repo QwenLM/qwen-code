@@ -838,10 +838,14 @@ describe('ShellTool', () => {
         expect(result.llmContent).not.toContain('is_background: true');
       });
 
-      it('appends the hint when a long-running foreground command exits with error', async () => {
-        // Non-aborted but failed completions still benefit — the agent
-        // got blocked for >60s on something that errored, "next time
-        // background it" is exactly the right advice.
+      it('appends the hint when a long-running foreground command exits non-zero', async () => {
+        // Non-zero exit (without spawn error) is the common "command
+        // ran but failed" shape. `ShellExecutionResult.error` is
+        // reserved for spawn/setup failures (see the doc on the field
+        // in shellExecutionService.ts) — exit-code-N completions leave
+        // `error: null` and `exitCode: N`. The agent still got blocked
+        // for >60s on something that errored; "next time background
+        // it" is exactly the right advice for either failure shape.
         const invocation = shellTool.build({
           command: 'flaky.sh',
           is_background: false,
@@ -851,7 +855,7 @@ describe('ShellTool', () => {
         resolveShellExecution({
           output: '',
           exitCode: 1,
-          error: new Error('exit 1'),
+          error: null, // realistic shape: non-zero exit, no spawn error
         });
         const result = await promise;
         expect(result.llmContent).toContain('Exit Code: 1');
@@ -1146,24 +1150,41 @@ describe('ShellTool', () => {
       it('hint survives the error path (appended to error.message)', async () => {
         // `coreToolScheduler` builds the model-facing functionResponse
         // from `error.message` (NOT llmContent) when toolResult.error
-        // is set. So if a long command fails, the hint we appended to
-        // llmContent would be silently dropped before reaching the
-        // agent. Pin that the hint also lives in error.message.
+        // is set. So if a long command fails AND hits the spawn-error
+        // path, the hint we appended to llmContent would be silently
+        // dropped before reaching the agent. Pin that the hint also
+        // lives in error.message.
+        //
+        // Note on realism: `ShellExecutionResult.error` is reserved for
+        // spawn / setup failures (per the field's doc comment in
+        // shellExecutionService.ts) — non-zero exits leave it null.
+        // Real spawn failures (ENOENT, permission denied) typically
+        // resolve in <1s, so the long-elapsed + spawn-error combination
+        // tested here is rare in practice. The test still pins the
+        // CODE PATH because slow spawn paths exist (PTY init dragging,
+        // remote-fs exec syscalls, security scanners interposing) and
+        // a future regression that drops the error-path hint
+        // preservation would silently break those edge cases.
+        const slowSpawnError = new Error(
+          'PTY initialization failed after 75s',
+        );
         const invocation = shellTool.build({
-          command: 'flaky.sh',
+          command: 'cmd-that-fails-to-spawn',
           is_background: false,
         });
         const promise = invocation.execute(mockAbortSignal);
         await vi.advanceTimersByTimeAsync(75_000);
         resolveShellExecution({
           output: '',
-          exitCode: 1,
-          error: new Error('spawn ENOENT'),
+          exitCode: null, // spawn never produced an exit code
+          error: slowSpawnError,
         });
         const result = await promise;
         // The hint must appear in the error.message path so the LLM
         // sees it via the scheduler's error branch.
-        expect(result.error?.message).toContain('spawn ENOENT');
+        expect(result.error?.message).toContain(
+          'PTY initialization failed after 75s',
+        );
         expect(result.error?.message).toContain(
           'foreground command ran for 75s',
         );
@@ -1173,7 +1194,9 @@ describe('ShellTool', () => {
         // error body and the appended advisory. Without the divider,
         // pattern-matching on error messages would absorb the ~400-
         // char advisory into the matched body.
-        expect(result.error?.message).toMatch(/spawn ENOENT\n\n---\n/);
+        expect(result.error?.message).toMatch(
+          /PTY initialization failed after 75s\n\n---\n/,
+        );
       });
     });
 

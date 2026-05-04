@@ -778,14 +778,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `aborted=${result.aborted} signal=${result.signal} → ${shouldAppendLongRunHint ? 'fire' : 'suppress'}`,
     );
 
-    // returnDisplayMessage is rebuilt below. In debug mode it mirrors
-    // `llmContent`, but the hint is appended AFTER both the truncation
-    // block and the returnDisplayMessage build (so debug-mode TUI shows
-    // the same pre-hint content the agent would see if hint were
-    // suppressed). We re-sync the debug branch after the hint append
-    // below so the user actually sees the advisory in the TUI too —
-    // otherwise the agent would suddenly suggest `is_background: true`
-    // with no visible trigger.
+    // returnDisplayMessage build order — chronologically:
+    //   1. Initial value: in debug mode, snapshot of pre-truncation
+    //      `llmContent`; in non-debug mode, terse output-or-status.
+    //   2. Truncation block (below) appends `Output too long and was
+    //      saved to: <path>` if truncation fired (BOTH modes).
+    //   3. Long-run hint append (further below) appends the hint
+    //      itself with append-style re-sync (BOTH modes), so the user
+    //      sees the same advisory the agent does — otherwise the
+    //      agent would suddenly suggest `is_background: true` with no
+    //      visible trigger in the TUI.
+    // The pre-existing debug snapshot is captured here (pre-truncation,
+    // pre-hint); both subsequent steps APPEND to it rather than
+    // replacing, so all information accumulates rather than being lost
+    // when later steps fire.
     let returnDisplayMessage = '';
     if (this.config.getDebugMode()) {
       returnDisplayMessage = llmContent;
@@ -865,11 +871,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // When `result.error` is set, `coreToolScheduler` builds the
     // model-facing functionResponse from `error.message`, NOT from
     // `llmContent` (see `convertToFunctionResponse` and the error
-    // branch in scheduler's success/error split). So for the
-    // long-running command-failed case the hint we appended to
-    // llmContent above would be silently dropped before reaching the
-    // agent. Append the hint to error.message too so the advisory
-    // survives whichever branch the scheduler takes.
+    // branch in scheduler's success/error split). So if a long
+    // command hits this path the hint we appended to llmContent above
+    // would be silently dropped before reaching the agent. Append the
+    // hint to error.message too so the advisory survives whichever
+    // branch the scheduler takes.
+    //
+    // Note on reach: `ShellExecutionResult.error` is reserved for
+    // SPAWN / setup failures (per the field's doc comment in
+    // shellExecutionService.ts); non-zero exits leave it null. Real
+    // spawn failures (ENOENT, permission denied) typically resolve in
+    // <1s, so the elapsed >= threshold + spawn-error combination is
+    // rare. The preservation is here for the slow-spawn edge cases
+    // (PTY init dragging, remote-fs exec syscalls, security scanners
+    // interposing) where the rare path could still trigger and the
+    // hint would otherwise vanish.
     //
     // Use a `---` divider line so downstream consumers of
     // `error.message` (firePostToolUseFailureHook, telemetry grouping,
