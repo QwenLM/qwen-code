@@ -46,7 +46,10 @@ import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
-import { isBtwCommand, looksLikeCommandName } from '../utils/commandUtils.js';
+import {
+  hasSlashCommandPathSeparator,
+  isBtwCommand,
+} from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import {
@@ -77,11 +80,6 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'delete',
   'btw',
 ]);
-
-function getSlashCommandParts(query: string): string[] {
-  const commandText = query.slice(1).trim();
-  return commandText ? commandText.split(/\s+/) : [];
-}
 
 export interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
@@ -455,34 +453,8 @@ export const useSlashCommandProcessor = (
       if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
         return false;
       }
-
-      let parsedSlashCommand: ReturnType<typeof parseSlashCommand> | undefined;
-      const getParsedSlashCommand = () => {
-        parsedSlashCommand ??= parseSlashCommand(trimmed, commands);
-        return parsedSlashCommand;
-      };
-
-      // For '/' prefix, only keep command-shaped inputs in the slash command
-      // flow. Inputs with path separators, such as '/api/endpoint', should be
-      // sent to the model as regular text.
-      if (trimmed.startsWith('/')) {
-        const commandParts = getSlashCommandParts(trimmed);
-        const firstToken = commandParts[0] ?? '';
-        if (firstToken && !looksLikeCommandName(firstToken)) {
-          return false;
-        }
-        // Loaded commands and aliases win. Otherwise, slash-prefixed input
-        // with arguments is ambiguous with root-level paths such as
-        // "/data foo", so let the model handle it instead of reporting
-        // "Unknown command" and dropping the user's content.
-        // A single unknown "/token" still reports "Unknown command" so likely
-        // command typos remain visible instead of silently going to the model.
-        if (
-          commandParts.length > 1 &&
-          !getParsedSlashCommand().commandToExecute
-        ) {
-          return false;
-        }
+      if (trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)) {
+        return false;
       }
 
       const recordedItems: HistoryItemWithoutId[] = [];
@@ -518,7 +490,7 @@ export const useSlashCommandProcessor = (
         commandToExecute,
         args,
         canonicalPath: resolvedCommandPath,
-      } = getParsedSlashCommand();
+      } = parseSlashCommand(trimmed, commands);
 
       const subcommand =
         resolvedCommandPath.length > 1

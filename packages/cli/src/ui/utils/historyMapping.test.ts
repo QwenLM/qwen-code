@@ -121,27 +121,6 @@ describe('computeApiTruncationIndex', () => {
       ];
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
     });
-
-    it('counts slash-prefixed prompts that were sent to the model', () => {
-      const ui: HistoryItem[] = [
-        userItem(1, 'hello'),
-        geminiItem(2),
-        userItem(3, '/data foo', true),
-        geminiItem(4),
-        userItem(5, 'world'),
-        geminiItem(6),
-      ];
-      const api: Content[] = [
-        userContent('hello'),
-        modelContent('response 1'),
-        userContent('/data foo'),
-        modelContent('response 2'),
-        userContent('world'),
-        modelContent('response 3'),
-      ];
-
-      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
-    });
   });
 
   describe('with startup context pair', () => {
@@ -238,6 +217,48 @@ describe('computeApiTruncationIndex', () => {
       // Slash '/help' (id=3) should not be counted
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(2);
     });
+
+    it('counts path-like slash prompts that were sent to the model', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, '/api/apiFunction/接口的实现'),
+        geminiItem(4),
+        userItem(5, 'world'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('hello'),
+        modelContent('response 1'),
+        userContent('/api/apiFunction/接口的实现'),
+        modelContent('response 2'),
+        userContent('world'),
+        modelContent('response 3'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
+
+    it('counts slash command invocations explicitly marked as sent to the model', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, '/filecmd', true),
+        geminiItem(4),
+        userItem(5, 'world'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('hello'),
+        modelContent('response 1'),
+        userContent('expanded file command prompt'),
+        modelContent('response 2'),
+        userContent('world'),
+        modelContent('response 3'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
   });
 
   describe('single turn', () => {
@@ -263,9 +284,18 @@ describe('isRealUserTurn', () => {
     expect(isRealUserTurn(userItem(1, '/stats'))).toBe(false);
   });
 
-  it('uses explicit sentToModel metadata for slash-prefixed prompts', () => {
-    expect(isRealUserTurn(userItem(1, '/data foo', true))).toBe(true);
+  it('uses explicit model-sent metadata for slash commands', () => {
+    expect(isRealUserTurn(userItem(1, '/filecmd', true))).toBe(true);
     expect(isRealUserTurn(userItem(1, '/help', false))).toBe(false);
+  });
+
+  it('returns true for path-like slash prompts', () => {
+    expect(isRealUserTurn(userItem(1, '/api/apiFunction/接口的实现'))).toBe(
+      true,
+    );
+    expect(isRealUserTurn(userItem(1, '/Users/name/project 帮我安装'))).toBe(
+      true,
+    );
   });
 
   it('returns false for ? commands', () => {

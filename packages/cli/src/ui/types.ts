@@ -97,8 +97,8 @@ export type HistoryItemUser = HistoryItemBase & {
   text: string;
   /**
    * Whether this UI history item represents a user turn that reached the model.
-   * Some slash-command invocations are shown as user entries but only affect
-   * local UI state.
+   * Slash-command invocations can be visible user entries while still being
+   * handled locally without entering API history.
    */
   sentToModel?: boolean;
 };

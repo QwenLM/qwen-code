@@ -2575,7 +2575,6 @@ describe('useGeminiStream', () => {
       {
         type: MessageType.USER,
         text: rawQuery,
-        sentToModel: true,
       },
       userMessageTimestamp,
     );

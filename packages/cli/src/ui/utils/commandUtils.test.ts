@@ -11,7 +11,6 @@ import { EventEmitter } from 'node:events';
 import {
   isAtCommand,
   isSlashCommand,
-  looksLikeCommandName,
   copyToClipboard,
   getUrlOpenCommand,
   CodePage,
@@ -90,128 +89,12 @@ describe('commandUtils', () => {
     });
   });
 
-  describe('looksLikeCommandName', () => {
-    it('should return true for valid command names', () => {
-      expect(looksLikeCommandName('help')).toBe(true);
-      expect(looksLikeCommandName('config')).toBe(true);
-      expect(looksLikeCommandName('clear')).toBe(true);
-      expect(looksLikeCommandName('pr-review')).toBe(true);
-      expect(looksLikeCommandName('issue_triage')).toBe(true);
-      expect(looksLikeCommandName('commit')).toBe(true);
-    });
-
-    it('should return true for MCP-style command names with colons', () => {
-      expect(looksLikeCommandName('mcp:server__tool')).toBe(true);
-      expect(looksLikeCommandName('code:review')).toBe(true);
-    });
-
-    it('should return true for names with hyphens, underscores, and digits', () => {
-      expect(looksLikeCommandName('my-command-2')).toBe(true);
-      expect(looksLikeCommandName('tool_v3')).toBe(true);
-      expect(looksLikeCommandName('123')).toBe(true);
-    });
-
-    it('should return true for loaded command names with filename punctuation', () => {
-      expect(looksLikeCommandName('deploy@prod')).toBe(true);
-      expect(looksLikeCommandName('cmd#1')).toBe(true);
-    });
-
-    it('should return true for extension-qualified command names with dots', () => {
-      expect(looksLikeCommandName('gcp.deploy')).toBe(true);
-      expect(looksLikeCommandName('gcp.deploy1')).toBe(true);
-    });
-
-    it('should return true for Unicode command names and aliases', () => {
-      expect(looksLikeCommandName('接口')).toBe(true);
-      expect(looksLikeCommandName('api接口')).toBe(true);
-      expect(looksLikeCommandName('命令')).toBe(true);
-      expect(looksLikeCommandName('文档')).toBe(true);
-      expect(looksLikeCommandName('cafe\u0301')).toBe(true);
-      expect(looksLikeCommandName('\u0915\u0943')).toBe(true);
-      expect(looksLikeCommandName('?')).toBe(true);
-    });
-
-    it('should return false for combining path-separator lookalikes', () => {
-      expect(looksLikeCommandName('etc\u0338passwd')).toBe(false);
-    });
-
-    it('should return false for embedded query-style question marks', () => {
-      expect(looksLikeCommandName('help?format=json')).toBe(false);
-      expect(looksLikeCommandName('cmd?')).toBe(false);
-    });
-
-    it('should return false for empty string', () => {
-      expect(looksLikeCommandName('')).toBe(false);
-    });
-
-    it('should return false for strings containing path separators', () => {
-      expect(looksLikeCommandName('api/endpoint')).toBe(false);
-      expect(looksLikeCommandName('Users/name/path')).toBe(false);
-      expect(looksLikeCommandName('var/log/syslog')).toBe(false);
-    });
-
-    it('should return false for strings containing whitespace or path separators', () => {
-      expect(looksLikeCommandName('my command')).toBe(false);
-      expect(looksLikeCommandName('path\\to')).toBe(false);
-    });
-
-    it('should return false for shell-metacharacter tokens', () => {
-      expect(looksLikeCommandName('$HOME')).toBe(false);
-      expect(looksLikeCommandName('!important')).toBe(false);
-      expect(looksLikeCommandName('|pipe')).toBe(false);
-      expect(looksLikeCommandName(';comment')).toBe(false);
-      expect(looksLikeCommandName('`cmd`')).toBe(false);
-      expect(looksLikeCommandName('~user')).toBe(false);
-      expect(looksLikeCommandName('cmd&next')).toBe(false);
-      expect(looksLikeCommandName('<tag>')).toBe(false);
-      expect(looksLikeCommandName('(group)')).toBe(false);
-      expect(looksLikeCommandName('{json}')).toBe(false);
-      expect(looksLikeCommandName('100%')).toBe(false);
-    });
-  });
-
   describe('isSlashCommand', () => {
-    it('should return true for valid slash commands', () => {
+    it('should return true when query starts with /', () => {
       expect(isSlashCommand('/help')).toBe(true);
       expect(isSlashCommand('/config set')).toBe(true);
       expect(isSlashCommand('/clear')).toBe(true);
-      expect(isSlashCommand('/pr-review')).toBe(true);
-      expect(isSlashCommand('/commit')).toBe(true);
-    });
-
-    it('should return true for MCP-style slash commands with colons', () => {
-      expect(isSlashCommand('/mcp:server__tool args')).toBe(true);
-    });
-
-    it('should return true for extension-qualified slash commands with dots', () => {
-      expect(isSlashCommand('/gcp.deploy args')).toBe(true);
-      expect(isSlashCommand('/gcp.deploy1')).toBe(true);
-    });
-
-    it('should return true for loaded command names with filename punctuation', () => {
-      expect(isSlashCommand('/deploy@prod args')).toBe(true);
-      expect(isSlashCommand('/cmd#1')).toBe(true);
-    });
-
-    it('should return true for bare slash (triggers autocomplete)', () => {
       expect(isSlashCommand('/')).toBe(true);
-    });
-
-    it('should return true for help alias and Unicode slash commands', () => {
-      expect(isSlashCommand('/?')).toBe(true);
-      expect(isSlashCommand('/接口实现')).toBe(true);
-      expect(isSlashCommand('/文档 查看内容')).toBe(true);
-    });
-
-    it('should return false for query-style slash tokens', () => {
-      expect(isSlashCommand('/help?format=json')).toBe(false);
-    });
-
-    it('should return false for slash-prefixed shell-metacharacter tokens', () => {
-      expect(isSlashCommand('/$HOME')).toBe(false);
-      expect(isSlashCommand('/!important')).toBe(false);
-      expect(isSlashCommand('/|pipe')).toBe(false);
-      expect(isSlashCommand('/;comment')).toBe(false);
     });
 
     it('should return false when query does not start with /', () => {
@@ -243,13 +126,6 @@ describe('commandUtils', () => {
       expect(isSlashCommand('/home/user/.qwen/settings.json')).toBe(false);
       expect(isSlashCommand('/tmp/test.txt')).toBe(false);
       expect(isSlashCommand('/tmp\\test.txt')).toBe(false);
-      expect(
-        isSlashCommand(
-          '/Users/zhoushuo/Desktop/AI_operator/dw-operator-skill 帮我安装',
-        ),
-      ).toBe(false);
-      expect(isSlashCommand('/home/user/.config/settings.json')).toBe(false);
-      expect(isSlashCommand('/etc/nginx/nginx.conf')).toBe(false);
     });
   });
 

@@ -12,7 +12,6 @@ import {
 } from './slashCommandProcessor.js';
 import type {
   CommandContext,
-  ConfirmActionReturn,
   ConfirmShellCommandsActionReturn,
   SlashCommand,
 } from '../commands/types.js';
@@ -29,8 +28,6 @@ import {
   ToolConfirmationOutcome,
   makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
-
-type SlashCommandProcessorActionsArg = SlashCommandProcessorActions;
 
 const { logSlashCommand } = vi.hoisted(() => ({
   logSlashCommand: vi.fn(),
@@ -121,15 +118,14 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenMemoryDialog = vi.fn();
   const mockOpenModelDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
-  const mockRecordSlashCommand = vi.fn();
 
   const mockConfig = makeFakeConfig({});
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
-    recordSlashCommand: mockRecordSlashCommand,
+    recordSlashCommand: vi.fn(),
   });
   const mockSettings = {} as LoadedSettings;
 
-  const createMockActions = (): SlashCommandProcessorActionsArg => ({
+  const createMockActions = (): SlashCommandProcessorActions => ({
     openAuthDialog: mockOpenAuthDialog,
     openArenaDialog: vi.fn(),
     openThemeDialog: mockOpenThemeDialog,
@@ -280,14 +276,6 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand('/nonexistent');
       });
 
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.USER,
-          text: '/nonexistent',
-          sentToModel: false,
-        },
-        expect.any(Number),
-      );
       // Expect 2 calls: one for the user's input, one for the error message.
       expect(mockAddItem).toHaveBeenCalledTimes(2);
       expect(mockAddItem).toHaveBeenLastCalledWith(
@@ -312,31 +300,6 @@ describe('useSlashCommandProcessor', () => {
 
       expect(actionResult).toBe(false);
       expect(mockAddItem).not.toHaveBeenCalled();
-
-      const absPathResult = await act(async () =>
-        result.current.handleSlashCommand(
-          '/Users/zhoushuo/Desktop/dw-operator-skill 帮我安装',
-        ),
-      );
-      expect(absPathResult).toBe(false);
-    });
-
-    it('should keep a bare slash in the slash command flow', async () => {
-      const result = setupProcessorHook();
-      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
-
-      const commandResult = await act(async () =>
-        result.current.handleSlashCommand('/'),
-      );
-
-      expect(commandResult).toEqual({ type: 'handled' });
-      expect(mockAddItem).toHaveBeenLastCalledWith(
-        {
-          type: MessageType.ERROR,
-          text: 'Unknown command: /',
-        },
-        expect.any(Number),
-      );
     });
 
     it('should display help for a parent command invoked without a subcommand', async () => {
@@ -816,20 +779,19 @@ describe('useSlashCommandProcessor', () => {
       expect(finalContext.session.sessionShellAllowlist.size).toBe(0);
     });
 
-    it('should not duplicate the user history item when re-running after shell confirmation', async () => {
-      const action = vi
-        .fn()
+    it('should not duplicate user history when a confirmed command submits a prompt', async () => {
+      mockCommandAction
         .mockResolvedValueOnce({
           type: 'confirm_shell_commands',
-          commandsToConfirm: ['echo ok'],
+          commandsToConfirm: ['rm -rf /'],
           originalInvocation: { raw: '/shellcmd' },
-        } satisfies ConfirmShellCommandsActionReturn)
+        } as ConfirmShellCommandsActionReturn)
         .mockResolvedValueOnce({
           type: 'submit_prompt',
-          content: [{ text: 'run the approved command' }],
+          content: [{ text: 'run approved command' }],
         });
-      const command = createTestCommand({ name: 'shellcmd', action });
-      const result = setupProcessorHook([command]);
+
+      const result = setupProcessorHook([shellCommand]);
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       act(() => {
@@ -842,26 +804,18 @@ describe('useSlashCommandProcessor', () => {
       await act(async () => {
         result.current.shellConfirmationRequest?.onConfirm(
           ToolConfirmationOutcome.ProceedOnce,
-          ['echo ok'],
+          ['rm -rf /'],
         );
       });
 
       await waitFor(() => {
-        expect(action).toHaveBeenCalledTimes(2);
+        expect(mockCommandAction).toHaveBeenCalledTimes(2);
       });
-
-      const shellInvocationCalls = mockAddItem.mock.calls.filter(
+      const userInvocationCalls = mockAddItem.mock.calls.filter(
         ([item]) => item.type === MessageType.USER && item.text === '/shellcmd',
       );
-      expect(shellInvocationCalls).toHaveLength(1);
+      expect(userInvocationCalls).toHaveLength(1);
       expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
-      expect(
-        mockRecordSlashCommand.mock.calls.filter(
-          ([payload]) =>
-            payload.phase === 'invocation' &&
-            payload.rawCommand === '/shellcmd',
-        ),
-      ).toHaveLength(1);
     });
 
     it('should re-run command and update session allowlist on "Proceed Always"', async () => {
@@ -903,58 +857,6 @@ describe('useSlashCommandProcessor', () => {
           true,
         );
       });
-    });
-  });
-
-  describe('Action Confirmation Flow', () => {
-    it('should not duplicate the user history item when re-running after action confirmation', async () => {
-      const action = vi
-        .fn()
-        .mockResolvedValueOnce({
-          type: 'confirm_action',
-          prompt: 'Proceed?',
-          originalInvocation: { raw: '/confirmcmd' },
-        } satisfies ConfirmActionReturn)
-        .mockResolvedValueOnce({
-          type: 'message',
-          messageType: 'info',
-          content: 'Confirmed!',
-        });
-      const command = createTestCommand({ name: 'confirmcmd', action });
-      const result = setupProcessorHook([command]);
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      act(() => {
-        result.current.handleSlashCommand('/confirmcmd');
-      });
-      await waitFor(() => {
-        expect(result.current.confirmationRequest).not.toBeNull();
-      });
-
-      await act(async () => {
-        result.current.confirmationRequest?.onConfirm(true);
-      });
-
-      await waitFor(() => {
-        expect(action).toHaveBeenCalledTimes(2);
-      });
-
-      const confirmInvocationCalls = mockAddItem.mock.calls.filter(
-        ([item]) =>
-          item.type === MessageType.USER && item.text === '/confirmcmd',
-      );
-      expect(confirmInvocationCalls).toHaveLength(1);
-      expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.INFO, text: 'Confirmed!' },
-        expect.any(Number),
-      );
-      expect(
-        mockRecordSlashCommand.mock.calls.filter(
-          ([payload]) =>
-            payload.phase === 'invocation' &&
-            payload.rawCommand === '/confirmcmd',
-        ),
-      ).toHaveLength(1);
     });
   });
 
@@ -1000,23 +902,6 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
-    it('should correctly match the help alias via slash prefix', async () => {
-      const action = vi.fn();
-      const command = createTestCommand({
-        name: 'help',
-        altNames: ['?'],
-        action,
-      });
-      const result = setupProcessorHook([command]);
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      await act(async () => {
-        await result.current.handleSlashCommand('/?');
-      });
-
-      expect(action).toHaveBeenCalledTimes(1);
-    });
-
     it('should handle extra whitespace around the command', async () => {
       const action = vi.fn();
       const command = createTestCommand({ name: 'test', action });
@@ -1028,118 +913,6 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(action).toHaveBeenCalledWith(expect.anything(), 'with-args');
-    });
-
-    it('should execute Unicode custom commands', async () => {
-      const action = vi.fn();
-      const command = createTestCommand({ name: '文档', action });
-      const result = setupProcessorHook([command]);
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      await act(async () => {
-        await result.current.handleSlashCommand('/文档 查看内容');
-      });
-
-      expect(action).toHaveBeenCalledWith(expect.anything(), '查看内容');
-    });
-
-    it('should execute extension-qualified commands with dots', async () => {
-      const action = vi.fn();
-      const command = createTestCommand({ name: 'gcp.deploy', action });
-      const result = setupProcessorHook([command]);
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      await act(async () => {
-        await result.current.handleSlashCommand('/gcp.deploy with-args');
-      });
-
-      expect(action).toHaveBeenCalledWith(expect.anything(), 'with-args');
-    });
-
-    it('should execute loaded commands with filename punctuation', async () => {
-      const action = vi.fn();
-      const command = createTestCommand({ name: 'deploy@prod', action });
-      const result = setupProcessorHook([command]);
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      await act(async () => {
-        await result.current.handleSlashCommand('/deploy@prod with-args');
-      });
-
-      expect(action).toHaveBeenCalledWith(expect.anything(), 'with-args');
-    });
-
-    it('should execute loaded commands before falling back for slash-prefixed input with args', async () => {
-      const action = vi.fn();
-      const command = createTestCommand({ name: 'tmp', action });
-      const result = setupProcessorHook([command]);
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      await act(async () => {
-        await result.current.handleSlashCommand('/tmp inspect');
-      });
-
-      expect(action).toHaveBeenCalledWith(expect.anything(), 'inspect');
-      expect(mockAddItem).not.toHaveBeenCalledWith(
-        expect.objectContaining({ type: MessageType.ERROR }),
-        expect.any(Number),
-      );
-    });
-
-    it('should return false for unknown slash-prefixed input with arguments', async () => {
-      const result = setupProcessorHook();
-      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
-
-      const tmpResult = await act(async () =>
-        result.current.handleSlashCommand('/tmp inspect'),
-      );
-      const etcResult = await act(async () =>
-        result.current.handleSlashCommand('/etc explain'),
-      );
-      const readmeResult = await act(async () =>
-        result.current.handleSlashCommand('/README.md summarize'),
-      );
-      const dataResult = await act(async () =>
-        result.current.handleSlashCommand('/data foo'),
-      );
-      const vendorResult = await act(async () =>
-        result.current.handleSlashCommand('/vendor explain'),
-      );
-      const workspaceResult = await act(async () =>
-        result.current.handleSlashCommand('/workspace check'),
-      );
-
-      expect(tmpResult).toBe(false);
-      expect(etcResult).toBe(false);
-      expect(readmeResult).toBe(false);
-      expect(dataResult).toBe(false);
-      expect(vendorResult).toBe(false);
-      expect(workspaceResult).toBe(false);
-      expect(mockAddItem).not.toHaveBeenCalled();
-    });
-
-    it('should return false for slash-prefixed shell-metacharacter input', async () => {
-      const result = setupProcessorHook();
-      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
-
-      const envResult = await act(async () =>
-        result.current.handleSlashCommand('/$HOME'),
-      );
-      const bangResult = await act(async () =>
-        result.current.handleSlashCommand('/!important'),
-      );
-      const pipeResult = await act(async () =>
-        result.current.handleSlashCommand('/|pipe'),
-      );
-      const semicolonResult = await act(async () =>
-        result.current.handleSlashCommand('/;comment'),
-      );
-
-      expect(envResult).toBe(false);
-      expect(bangResult).toBe(false);
-      expect(pipeResult).toBe(false);
-      expect(semicolonResult).toBe(false);
-      expect(mockAddItem).not.toHaveBeenCalled();
     });
 
     it('should handle `?` as a command prefix', async () => {
