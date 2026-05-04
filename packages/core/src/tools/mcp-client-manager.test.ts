@@ -299,6 +299,18 @@ describe('McpClientManager', () => {
     expect(replacementClients).toHaveLength(1);
     expect(replacementClients[0].connect).toHaveBeenCalledOnce();
     expect(replacementClients[0].discover).toHaveBeenCalledOnce();
+
+    // Verify map was cleaned up: a third call should do real work,
+    // not get coalesced into a stale promise.
+    await manager.discoverMcpToolsForServer(
+      'test-server',
+      {} as unknown as Config,
+    );
+
+    expect(vi.mocked(McpClient)).toHaveBeenCalledTimes(3);
+    expect(replacementClients).toHaveLength(2);
+    expect(replacementClients[1].connect).toHaveBeenCalledOnce();
+    expect(replacementClients[1].discover).toHaveBeenCalledOnce();
   });
 
   it('should no-op when discovering an unknown server', async () => {
