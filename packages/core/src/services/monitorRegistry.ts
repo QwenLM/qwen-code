@@ -193,8 +193,11 @@ export class MonitorRegistry {
         `Monitor ${monitorId} reached max events (${entry.maxEvents}), stopping`,
       );
       // Persist the reason so the dialog's detail view can surface it
-      // after the monitor terminates (the chat-history notification is
-      // separate and not visible from /tasks dialog reopens).
+      // after the monitor terminates. The chat-history notification is
+      // separate from the registry's persistent state, so reopening the
+      // Background tasks dialog or running `/tasks` later won't surface
+      // it on its own — the persisted `entry.error` is what those
+      // surfaces actually read.
       entry.error = 'Max events reached';
       this.settle(entry, 'completed');
       entry.abortController.abort();

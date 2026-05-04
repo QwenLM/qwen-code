@@ -610,7 +610,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
         `max_events: ${maxEvents}\n` +
         `idle_timeout: ${idleTimeoutMs}ms\n` +
         `Events will be delivered as notifications. ` +
-        `The monitor auto-stops after ${maxEvents} events or ${idleTimeoutMs}ms of silence.`,
+        `The monitor auto-stops after ${maxEvents} events or ${idleTimeoutMs}ms of silence.\n` +
+        `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates).`,
       returnDisplay: `Monitor started: ${displayDescription} (${monitorId})`,
     };
   }
