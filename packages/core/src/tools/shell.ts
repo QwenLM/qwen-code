@@ -606,19 +606,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let totalLines = 0;
     let totalBytes = 0;
 
-    // Bracket the spawn → settle wall-clock so the result builder below
-    // can decide whether to append the long-run advisory. Mirrors the
-    // `entry.startTime` capture in the background-shell path. Only added
-    // side state for the foreground long-run hint feature.
-    //
-    // `performance.now()` (monotonic high-res, ms-precision) instead of
-    // `Date.now()` so NTP corrections / VM clock drift between capture
-    // and read can't make `elapsedMs` go negative (which would silently
-    // skip the hint with no observable failure). Returned origin is
-    // arbitrary but consistent across the two reads — only the
-    // difference matters here.
-    const executionStartTime = performance.now();
-
     const { result: resultPromise, pid } = await ShellExecutionService.execute(
       commandToExecute,
       cwd,
@@ -689,6 +676,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (pid && setPidCallback) {
       setPidCallback(pid);
     }
+
+    // Bracket the spawn → settle wall-clock so the result builder below
+    // can decide whether to append the long-run advisory. Captured AFTER
+    // `await ShellExecutionService.execute(...)` returns its handle so
+    // pre-spawn setup (PTY dynamic import via `getPty()`, ~50–200ms on
+    // first call) is excluded — the elapsed should reflect the
+    // command's actual runtime, not the tool call's total wall time.
+    // The `pid` set above confirms the process has been spawned by this
+    // point, so subtraction below is true post-spawn-to-settle.
+    //
+    // `performance.now()` (monotonic high-res, ms-precision) instead of
+    // `Date.now()` so NTP corrections / VM clock drift between capture
+    // and read can't make `elapsedMs` go negative (which would silently
+    // skip the hint with no observable failure). Returned origin is
+    // arbitrary but consistent across the two reads — only the
+    // difference matters here.
+    const executionStartTime = performance.now();
 
     const result = await resultPromise;
 
