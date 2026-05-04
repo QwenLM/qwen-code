@@ -2421,6 +2421,25 @@ describe('runNonInteractive', () => {
   });
 
   describe('--json-schema structured output', () => {
+    // Helper: walk an emitted event and extract the first tool_use_id when
+    // it represents a tool_result block. Returns undefined for any other
+    // event shape.
+    const extractToolResultId = (event: unknown): string | undefined => {
+      if (typeof event !== 'object' || event === null) return undefined;
+      const e = event as {
+        type?: unknown;
+        message?: { content?: unknown };
+      };
+      if (e.type !== 'user') return undefined;
+      const content = e.message?.content;
+      if (!Array.isArray(content) || content.length === 0) return undefined;
+      const block = content[0] as { type?: unknown; tool_use_id?: unknown };
+      if (block?.type !== 'tool_result') return undefined;
+      return typeof block.tool_use_id === 'string'
+        ? block.tool_use_id
+        : undefined;
+    };
+
     it('stops executing remaining tool calls from the same turn once structured_output succeeds', async () => {
       (mockConfig.getJsonSchema as Mock).mockReturnValue({
         type: 'object',
@@ -2506,22 +2525,23 @@ describe('runNonInteractive', () => {
       // torn down before we emit the terminal result.
       expect(abortAllSpy).toHaveBeenCalledTimes(1);
 
-      // The emitted result must carry the submitted args under `result` as
-      // the JSON-stringified payload (the headless JSON formatter encodes
-      // the structured submission so SDK consumers always see a string here,
-      // matching how text-mode `result` is also a string).
-      const result = writes
+      const events = writes
         .join('')
         .split('\n')
         .filter((line) => line.trim().length > 0)
         .map((line) => JSON.parse(line))
-        .flat()
-        .find(
-          (m: unknown) =>
-            typeof m === 'object' &&
-            m !== null &&
-            (m as { type?: string }).type === 'result',
-        );
+        .flat();
+
+      // The emitted result must carry the submitted args under `result` as
+      // the JSON-stringified payload (the headless JSON formatter encodes
+      // the structured submission so SDK consumers always see a string here,
+      // matching how text-mode `result` is also a string).
+      const result = events.find(
+        (m: unknown) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { type?: string }).type === 'result',
+      );
       expect(result).toBeDefined();
       expect(result.is_error).toBe(false);
       expect(typeof result.result).toBe('string');
@@ -2529,6 +2549,14 @@ describe('runNonInteractive', () => {
       // The raw object is also exposed under `structured_result` for SDK
       // consumers that don't want to re-parse the stringified payload.
       expect(result.structured_result).toEqual(structuredArgs);
+
+      // The suppressed trailing tool_use must have a synthesised
+      // tool_result so the event log pairs every tool_use with a
+      // tool_result, even on the success path.
+      const trailingToolResult = events.find(
+        (m: unknown) => extractToolResultId(m) === 'tool-trailing',
+      );
+      expect(trailingToolResult).toBeDefined();
     });
 
     it('skips side-effecting tool calls that precede structured_output in the same turn', async () => {
@@ -2611,21 +2639,29 @@ describe('runNonInteractive', () => {
       expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
       expect(abortAllSpy).toHaveBeenCalledTimes(1);
 
-      const result = writes
+      const events = writes
         .join('')
         .split('\n')
         .filter((line) => line.trim().length > 0)
         .map((line) => JSON.parse(line))
-        .flat()
-        .find(
-          (m: unknown) =>
-            typeof m === 'object' &&
-            m !== null &&
-            (m as { type?: string }).type === 'result',
-        );
+        .flat();
+      const result = events.find(
+        (m: unknown) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { type?: string }).type === 'result',
+      );
       expect(result).toBeDefined();
       expect(result.is_error).toBe(false);
       expect(result.structured_result).toEqual(structuredArgs);
+
+      // The suppressed leading tool_use must have a synthesised
+      // tool_result event so the event log pairs every tool_use with a
+      // tool_result on the success path.
+      const leadingToolResult = events.find(
+        (m: unknown) => extractToolResultId(m) === 'tool-leading',
+      );
+      expect(leadingToolResult).toBeDefined();
     });
 
     it('keeps the session running when structured_output args fail validation so the model can retry', async () => {

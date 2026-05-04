@@ -111,10 +111,8 @@ export type {
   ExitPlanModeTool,
   ExitPlanModeParams,
 } from './tools/exitPlanMode.js';
-export type {
-  SyntheticOutputTool,
-  StructuredOutputParams,
-} from './tools/syntheticOutput.js';
+export { SyntheticOutputTool } from './tools/syntheticOutput.js';
+export type { StructuredOutputParams } from './tools/syntheticOutput.js';
 export type { GlobTool, GlobToolParams, GlobPath } from './tools/glob.js';
 export type { GrepTool, GrepToolParams } from './tools/grep.js';
 export type { LSTool, LSToolParams, FileEntry } from './tools/ls.js';

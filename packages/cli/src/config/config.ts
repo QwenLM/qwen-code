@@ -231,6 +231,34 @@ function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
     if (!everyBranchAcceptsObject) return false;
   }
 
+  // Best-effort `not` handling: when `not` directly forbids object via its
+  // own `type` keyword (e.g. `{not:{type:"object"}}` or
+  // `{not:{type:["object","null"]}}`), the schema can never be satisfied
+  // by an object — reject. We don't try to do full satisfiability analysis
+  // for arbitrary `not` schemas (e.g. `not:{const:"foo"}` is fine, but
+  // `not:{anyOf:[{type:"object"},…]}` would also reject objects); those
+  // fall through to Ajv at runtime.
+  const notSchema = schema['not'];
+  if (
+    typeof notSchema === 'object' &&
+    notSchema !== null &&
+    !Array.isArray(notSchema)
+  ) {
+    const notType = (notSchema as Record<string, unknown>)['type'];
+    if (notType !== undefined) {
+      const types = Array.isArray(notType) ? notType : [notType];
+      // If `not.type` *only* lists types that include "object", every
+      // object value matches `not.type`, so the negation rejects every
+      // object. The simplest sound check: if "object" is in the list at
+      // all and there's no sibling positive constraint that would allow
+      // an object some other way, reject. We've already validated the
+      // sibling type / anyOf / oneOf / allOf above — at this point we
+      // know they at least permit objects, so a `not.type` containing
+      // "object" still excludes them.
+      if (types.includes('object')) return false;
+    }
+  }
+
   // No narrowing at the root — lenient default, treated as object-compatible.
   return true;
 }

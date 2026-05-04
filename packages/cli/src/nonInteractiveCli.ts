@@ -489,12 +489,12 @@ export async function runNonInteractive(
 
           // If --json-schema is active and the model emitted a
           // `structured_output` call in the same assistant turn as other
-          // tools, the structured call is the terminal contract — pre-scan
-          // the batch and execute ONLY the first `structured_output`,
-          // suppressing both leading and trailing tool calls. Without this,
+          // tools, the structured call is the terminal contract — execute
+          // ONLY the first `structured_output` and synthesise a "skipped"
+          // tool_result for every other call in the batch. Without this,
           // a batch like `[write_file(...), structured_output(...)]` would
-          // run the side-effecting tool before the run is accepted, and an
-          // invalid structured_output mid-batch (`[structured_output(bad),
+          // run the side-effecting tool before the run is accepted, and
+          // an invalid structured_output mid-batch (`[structured_output(bad),
           // write_file(...)]`) would still fall through to the trailing
           // tool before the retry turn.
           let requestsToExecute = toolCallRequests;
@@ -583,22 +583,57 @@ export async function runNonInteractive(
               !toolResponse.error
             ) {
               // Honour the "first valid call ends the session" contract.
-              // The pre-scan above already filtered the batch to the first
-              // structured_output, so any other tool_use blocks the model
-              // emitted in this turn lack a matching tool_result — which is
-              // consistent with how other terminal paths (max-turns,
-              // cancellation) leave the stream. The break is after the
-              // responseParts/modelOverride capture above so future changes
-              // to SyntheticOutputTool can't silently drop those signals.
+              // The break is after the responseParts/modelOverride capture
+              // above so future changes to SyntheticOutputTool can't
+              // silently drop those signals.
               structuredSubmission = finalRequestInfo.args;
               break;
             }
           }
+
+          // Synthesise tool_result events + retry parts for any sibling
+          // tool calls suppressed by the pre-scan. Runs for both the
+          // success and retry paths so the emitted event log pairs every
+          // tool_use the model produced with a tool_result, AND the
+          // retry-turn payload (when reached) doesn't leave Anthropic /
+          // OpenAI staring at unpaired tool_use blocks.
+          if (suppressedCalls.length > 0) {
+            const suppressedOutput =
+              'Skipped: structured_output was also requested in this turn and takes precedence as the terminal output contract. Re-issue this call in a separate turn if needed.';
+            for (const call of suppressedCalls) {
+              const responseParts: Part[] = [
+                {
+                  functionResponse: {
+                    id: call.callId,
+                    name: call.name,
+                    response: { output: suppressedOutput },
+                  },
+                },
+              ];
+              adapter.emitToolResult(call, {
+                callId: call.callId,
+                responseParts,
+                resultDisplay: suppressedOutput,
+                error: undefined,
+                errorType: undefined,
+              });
+              toolResponseParts.push(...responseParts);
+            }
+          }
+
           if (structuredSubmission !== undefined) {
             // Abort any in-flight background agents so they don't race the
             // terminal emitResult; structured-output mode is a single-shot
             // contract and the caller expects a deterministic shutdown.
             registry.abortAll();
+            // Match the regular terminal path's holdback: drain queued
+            // task notifications to the SDK and finalise one-shot
+            // monitors before emitResult, so consumers always see a
+            // task_notification paired with every task_started and don't
+            // lose monitor lifecycle events when structured-output mode
+            // exits early.
+            flushQueuedNotificationsToSdk(localQueue);
+            finalizeOneShotMonitors();
             const metrics = uiTelemetryService.getMetrics();
             const usage = computeUsageFromMetrics(metrics);
             const stats =
@@ -615,26 +650,6 @@ export async function runNonInteractive(
               structuredResult: structuredSubmission,
             });
             return 0;
-          }
-          // Retry path: structured_output either wasn't called or its args
-          // failed validation. If the pre-scan suppressed sibling tool calls
-          // from this turn, the prior assistant message still contained
-          // their tool_use blocks — synthesize matching tool_result blocks
-          // now so the next-turn payload pairs every tool_use with a
-          // tool_result. Anthropic and OpenAI both reject batches with
-          // unpaired tool_use entries, which would otherwise turn the
-          // retry path into an opaque provider-side error.
-          for (const call of suppressedCalls) {
-            toolResponseParts.push({
-              functionResponse: {
-                id: call.callId,
-                name: call.name,
-                response: {
-                  output:
-                    'Skipped: structured_output was also requested in this turn and takes precedence as the terminal output contract. Re-issue this call in a separate turn if needed.',
-                },
-              },
-            });
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {

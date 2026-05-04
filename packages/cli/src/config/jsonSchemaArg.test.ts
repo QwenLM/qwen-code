@@ -181,4 +181,22 @@ describe('resolveJsonSchemaArg', () => {
     );
     expect(schema).toBeDefined();
   });
+
+  it('rejects a root `not` that directly forbids object', () => {
+    // `not:{type:"object"}` excludes every object value, so the schema is
+    // unsatisfiable for tool-call args. Best-effort check — only inspects
+    // `not.type`; deeper negated patterns fall through to Ajv at runtime.
+    expect(() => resolveJsonSchemaArg('{"not":{"type":"object"}}')).toThrow(
+      /must accept object-typed values/,
+    );
+    expect(() =>
+      resolveJsonSchemaArg('{"not":{"type":["object","null"]}}'),
+    ).toThrow(/must accept object-typed values/);
+  });
+
+  it('accepts a root `not` whose negated type does not exclude object', () => {
+    // `not:{type:"string"}` only forbids strings — objects are still fine.
+    const schema = resolveJsonSchemaArg('{"not":{"type":"string"}}');
+    expect(schema).toBeDefined();
+  });
 });
