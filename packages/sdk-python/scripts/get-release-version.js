@@ -10,6 +10,11 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  getArgs,
+  isExpectedMissingGitHubRelease,
+  validateVersion,
+} from '../../../scripts/lib/release-helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -25,18 +30,6 @@ function readPyprojectVersion() {
     throw new Error(`Could not find version in ${pyprojectPath}`);
   }
   return match[1];
-}
-
-function getArgs() {
-  const args = {};
-  for (const arg of process.argv.slice(2)) {
-    if (!arg.startsWith('--')) {
-      continue;
-    }
-    const [key, value] = arg.slice(2).split('=');
-    args[key] = value === undefined ? true : value;
-  }
-  return args;
 }
 
 function parseVersion(version) {
@@ -249,26 +242,6 @@ function getUtcTimestamp() {
 
 function getGitShortHash() {
   return execSync('git rev-parse --short HEAD').toString().trim();
-}
-
-function validateVersion(version, format, name) {
-  const versionRegex = {
-    'X.Y.Z': /^\d+\.\d+\.\d+$/,
-    'X.Y.Z-preview.N': /^\d+\.\d+\.\d+-preview\.\d+$/,
-  };
-
-  if (!versionRegex[format]?.test(version)) {
-    throw new Error(
-      `Invalid ${name}: ${version}. Must be in ${format} format.`,
-    );
-  }
-}
-
-function isExpectedMissingGitHubRelease(error) {
-  const stderr = error.stderr?.toString() ?? '';
-  const stdout = error.stdout?.toString() ?? '';
-  const message = `${error.message}\n${stderr}\n${stdout}`;
-  return message.includes('release not found') || message.includes('Not Found');
 }
 
 async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
