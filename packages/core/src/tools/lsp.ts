@@ -1171,7 +1171,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
     }
 
     if (FILE_REQUIRED_OPERATIONS.has(operation)) {
-      if (!params.filePath || params.filePath.trim() === '') {
+      if (!params.filePath) {
         return `filePath is required for ${operation}.`;
       }
     }
@@ -1189,7 +1189,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
     }
 
     if (RANGE_REQUIRED_OPERATIONS.has(operation)) {
-      if (!params.filePath || params.filePath.trim() === '') {
+      if (!params.filePath) {
         return `filePath is required for ${operation}.`;
       }
       if (typeof params.line !== 'number') {

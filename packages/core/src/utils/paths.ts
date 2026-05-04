@@ -10,7 +10,6 @@ import os from 'node:os';
 import * as crypto from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { isNodeError } from './errors.js';
-import { createDebugLogger } from './debugLogger.js';
 
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -46,8 +45,6 @@ export function _resetValidatePathCacheForTest(): void {
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
  */
 export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~]/;
-
-const debugLogger = createDebugLogger('PATHS');
 
 // Single shared list of path-argument keys used across file tools.
 // file_path (Edit, ReadFile, WriteFile), path (Glob, Grep, Ls, RipGrep),
@@ -234,9 +231,6 @@ export function unescapePath(filePath: string): string {
     return filePath;
   }
   const unescaped = filePath.replace(UNESCAPE_REGEX, '$1');
-  if (unescaped !== filePath) {
-    debugLogger.debug(`unescapePath: "${filePath}" → "${unescaped}"`);
-  }
   return unescaped;
 }
 
