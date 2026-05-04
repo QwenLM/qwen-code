@@ -314,7 +314,12 @@ function getResponseHeaderValue(
 function hasHeaders(error: unknown): error is {
   headers: { get?: (name: string) => unknown } | Record<string, unknown>;
 } {
-  return typeof error === 'object' && error !== null && 'headers' in error;
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'headers' in error &&
+    error.headers !== null
+  );
 }
 
 function hasResponseHeaders(error: unknown): error is {
@@ -328,6 +333,7 @@ function hasResponseHeaders(error: unknown): error is {
     'response' in error &&
     typeof error.response === 'object' &&
     error.response !== null &&
-    'headers' in error.response
+    'headers' in error.response &&
+    error.response.headers !== null
   );
 }

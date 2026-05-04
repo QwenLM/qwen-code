@@ -283,4 +283,36 @@ describe('rate-limit retry diagnostics', () => {
       }),
     ).toBe(180_000);
   });
+
+  it('should ignore null direct headers', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      headers: null,
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(60_000);
+  });
+
+  it('should ignore null response headers', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      response: {
+        headers: null,
+      },
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(60_000);
+  });
 });
