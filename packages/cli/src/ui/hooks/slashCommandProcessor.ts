@@ -81,7 +81,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'btw',
 ]);
 
-interface SlashCommandProcessorActions {
+export interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
   openArenaDialog?: (type: Exclude<ArenaDialogType, null>) => void;
   openThemeDialog: () => void;

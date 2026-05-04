@@ -6,7 +6,10 @@
 
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { useSlashCommandProcessor } from './slashCommandProcessor.js';
+import {
+  useSlashCommandProcessor,
+  type SlashCommandProcessorActions,
+} from './slashCommandProcessor.js';
 import type {
   CommandContext,
   ConfirmShellCommandsActionReturn,
@@ -121,6 +124,33 @@ describe('useSlashCommandProcessor', () => {
   });
   const mockSettings = {} as LoadedSettings;
 
+  const createMockActions = (): SlashCommandProcessorActions => ({
+    openAuthDialog: mockOpenAuthDialog,
+    openArenaDialog: vi.fn(),
+    openThemeDialog: mockOpenThemeDialog,
+    openEditorDialog: vi.fn(),
+    openMemoryDialog: mockOpenMemoryDialog,
+    openSettingsDialog: vi.fn(),
+    openModelDialog: mockOpenModelDialog,
+    openManageModelsDialog: vi.fn(),
+    openTrustDialog: vi.fn(),
+    openPermissionsDialog: vi.fn(),
+    openApprovalModeDialog: vi.fn(),
+    openResumeDialog: vi.fn(),
+    handleResume: vi.fn(),
+    openDeleteDialog: vi.fn(),
+    quit: mockSetQuittingMessages,
+    setDebugMessage: vi.fn(),
+    dispatchExtensionStateUpdate: vi.fn(),
+    addConfirmUpdateExtensionRequest: vi.fn(),
+    openSubagentCreateDialog: vi.fn(),
+    openAgentsManagerDialog: vi.fn(),
+    openExtensionsManagerDialog: vi.fn(),
+    openMcpDialog: vi.fn(),
+    openHooksDialog: vi.fn(),
+    openRewindSelector: vi.fn(),
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(BuiltinCommandLoader).mockClear();
@@ -154,24 +184,7 @@ describe('useSlashCommandProcessor', () => {
         setIsProcessing,
         { current: true }, // isIdleRef
         vi.fn(), // setGeminiMdFileCount
-        {
-          openAuthDialog: mockOpenAuthDialog,
-          openThemeDialog: mockOpenThemeDialog,
-          openEditorDialog: vi.fn(),
-          openMemoryDialog: mockOpenMemoryDialog,
-          openSettingsDialog: vi.fn(),
-          openModelDialog: mockOpenModelDialog,
-          openTrustDialog: vi.fn(),
-          openPermissionsDialog: vi.fn(),
-          openApprovalModeDialog: vi.fn(),
-          openResumeDialog: vi.fn(),
-          quit: mockSetQuittingMessages,
-          setDebugMessage: vi.fn(),
-          dispatchExtensionStateUpdate: vi.fn(),
-          addConfirmUpdateExtensionRequest: vi.fn(),
-          openSubagentCreateDialog: vi.fn(),
-          openAgentsManagerDialog: vi.fn(),
-        },
+        createMockActions(),
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
         null, // logger
@@ -983,24 +996,7 @@ describe('useSlashCommandProcessor', () => {
           vi.fn(), // setIsProcessing
           { current: true }, // isIdleRef
           vi.fn(), // setGeminiMdFileCount
-          {
-            openAuthDialog: mockOpenAuthDialog,
-            openThemeDialog: mockOpenThemeDialog,
-            openEditorDialog: vi.fn(),
-            openMemoryDialog: mockOpenMemoryDialog,
-            openSettingsDialog: vi.fn(),
-            openModelDialog: vi.fn(),
-            openTrustDialog: vi.fn(),
-            openPermissionsDialog: vi.fn(),
-            openApprovalModeDialog: vi.fn(),
-            openResumeDialog: vi.fn(),
-            quit: mockSetQuittingMessages,
-            setDebugMessage: vi.fn(),
-            dispatchExtensionStateUpdate: vi.fn(),
-            addConfirmUpdateExtensionRequest: vi.fn(),
-            openSubagentCreateDialog: vi.fn(),
-            openAgentsManagerDialog: vi.fn(),
-          },
+          createMockActions(),
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized
           null, // logger
