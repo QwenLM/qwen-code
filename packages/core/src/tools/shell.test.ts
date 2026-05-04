@@ -820,9 +820,36 @@ describe('ShellTool', () => {
         await vi.advanceTimersByTimeAsync(60_000);
         resolveShellExecution({ output: 'all green', exitCode: 0 });
         const result = await promise;
-        expect(result.llmContent).toContain('this foreground command ran for 60s');
+        expect(result.llmContent).toContain(
+          'this foreground command ran for 60s',
+        );
         expect(result.llmContent).toContain('is_background: true');
         expect(result.llmContent).toContain('/tasks');
+      });
+
+      it('appends the hint when a successful foreground command with empty output runs ≥ 60s', async () => {
+        // Empty-output success: write-only commands (e.g. `tar czf …`,
+        // `cp -r large-dir/`, `dd if=…`) frequently produce no stdout
+        // and exit 0. The non-debug `returnDisplayMessage` build leaves
+        // the message as `''` in this branch (output empty, exitCode 0,
+        // no abort/signal/error), so the hint append is the only thing
+        // that ever populates the user-facing TUI line. Pin both that
+        // the hint reaches the LLM AND that it surfaces in the user's
+        // returnDisplay even when the command produced nothing else to
+        // show — the user is the one who waited 60s, they should see
+        // the same advisory the agent does.
+        const invocation = shellTool.build({
+          command: 'write-to-disk.sh',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(65_000);
+        resolveShellExecution({ output: '', exitCode: 0 });
+        const result = await promise;
+        expect(result.llmContent).toContain('foreground command ran for 65s');
+        expect(result.returnDisplay).toContain(
+          'foreground command ran for 65s',
+        );
       });
 
       it('omits the hint when a foreground command finishes under threshold', async () => {
@@ -859,7 +886,9 @@ describe('ShellTool', () => {
         });
         const result = await promise;
         expect(result.llmContent).toContain('Exit Code: 1');
-        expect(result.llmContent).toContain('this foreground command ran for 75s');
+        expect(result.llmContent).toContain(
+          'this foreground command ran for 75s',
+        );
       });
 
       it('omits the hint on aborted commands (timeout / user-cancel paths surface their own messaging)', async () => {
@@ -1165,9 +1194,7 @@ describe('ShellTool', () => {
         // remote-fs exec syscalls, security scanners interposing) and
         // a future regression that drops the error-path hint
         // preservation would silently break those edge cases.
-        const slowSpawnError = new Error(
-          'PTY initialization failed after 75s',
-        );
+        const slowSpawnError = new Error('PTY initialization failed after 75s');
         const invocation = shellTool.build({
           command: 'cmd-that-fails-to-spawn',
           is_background: false,
@@ -1197,6 +1224,29 @@ describe('ShellTool', () => {
         expect(result.error?.message).toMatch(
           /PTY initialization failed after 75s\n\n---\n/,
         );
+      });
+
+      it('never appends the long-run hint on background commands', async () => {
+        // Background path returns immediately with `Background shell
+        // started.` and a different result shape — by construction the
+        // hint logic only lives in `executeForeground`, so this can't
+        // fail today. Defensive pin: a future refactor that hoists the
+        // long-run advisory into a shared post-execute path would
+        // accidentally tag every background launch with a "ran for 0s,
+        // consider is_background: true" suggestion (nonsense — it's
+        // already backgrounded). This test fails loudly on that
+        // regression.
+        const invocation = shellTool.build({
+          command: 'pytest -q',
+          is_background: true,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        expect(result.llmContent).toContain('Background shell started');
+        expect(result.llmContent).not.toContain('foreground command ran for');
+        // The hint text contains the literal `is_background: true` —
+        // the background path's own llmContent doesn't, so this guards
+        // against the hint leaking in via a shared code path.
+        expect(result.llmContent).not.toContain('is_background: true');
       });
     });
 
