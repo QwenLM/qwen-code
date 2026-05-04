@@ -1533,10 +1533,23 @@ export class CoreToolScheduler {
           isModifying: true,
         } as ToolCallConfirmationDetails);
 
+        // Normalize shell-escaped paths so the editor receives actual
+        // filesystem paths (request.args may still hold escaped values
+        // since buildInvocation normalizes a structuredClone).
+        const normalizedArgs = {
+          ...waitingToolCall.request.args,
+        } as typeof waitingToolCall.request.args;
+        for (const key of ['file_path', 'path', 'filePath']) {
+          if (typeof normalizedArgs[key] === 'string') {
+            (normalizedArgs as Record<string, unknown>)[key] = unescapePath(
+              String(normalizedArgs[key]).trim(),
+            );
+          }
+        }
         const { updatedParams, updatedDiff } = await modifyWithEditor<
           typeof waitingToolCall.request.args
         >(
-          waitingToolCall.request.args,
+          normalizedArgs,
           modifyContext as ModifyContext<typeof waitingToolCall.request.args>,
           editorType,
           signal,
@@ -1749,13 +1762,14 @@ export class CoreToolScheduler {
 
     // Normalize shell-escaped path params so hooks operate on actual filesystem
     // paths, matching the normalization done in tool validation.
-    if (typeof toolInput['file_path'] === 'string') {
-      toolInput['file_path'] = unescapePath(
-        String(toolInput['file_path']).trim(),
-      );
-    }
-    if (typeof toolInput['path'] === 'string') {
-      toolInput['path'] = unescapePath(String(toolInput['path']).trim());
+    // Covers all path arg keys used across tools:
+    //   file_path (Edit, ReadFile, WriteFile), path (Glob, Grep, Ls, RipGrep),
+    //   filePath (Lsp), notebook_path.
+    const PATH_KEYS = ['file_path', 'path', 'filePath', 'notebook_path'];
+    for (const key of PATH_KEYS) {
+      if (typeof toolInput[key] === 'string') {
+        toolInput[key] = unescapePath(String(toolInput[key]).trim());
+      }
     }
 
     // Generate unique tool_use_id for hook tracking

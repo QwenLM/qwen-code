@@ -443,16 +443,14 @@ export class WriteFileTool
     _abortSignal: AbortSignal,
   ): ModifyContext<WriteFileToolParams> {
     return {
-      getFilePath: (params: WriteFileToolParams) =>
-        unescapePath(params.file_path),
+      getFilePath: (params: WriteFileToolParams) => params.file_path,
       getCurrentContent: async (params: WriteFileToolParams) => {
-        const filePath = unescapePath(params.file_path);
-        const fileExists = await isFilefileExists(filePath);
+        const fileExists = await isFilefileExists(params.file_path);
         if (fileExists) {
           try {
             const { content } = await this.config
               .getFileSystemService()
-              .readTextFile({ path: filePath });
+              .readTextFile({ path: params.file_path });
             return content;
           } catch (err) {
             if (!isNodeError(err) || err.code !== 'ENOENT') throw err;

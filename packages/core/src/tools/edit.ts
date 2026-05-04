@@ -614,15 +614,14 @@ Expectation for required parameters:
 
   getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {
     return {
-      getFilePath: (params: EditToolParams) => unescapePath(params.file_path),
+      getFilePath: (params: EditToolParams) => params.file_path,
       getCurrentContent: async (params: EditToolParams): Promise<string> => {
-        const filePath = unescapePath(params.file_path);
-        const fileExists = await isFilefileExists(filePath);
+        const fileExists = await isFilefileExists(params.file_path);
         if (fileExists) {
           try {
             const { content } = await this.config
               .getFileSystemService()
-              .readTextFile({ path: filePath });
+              .readTextFile({ path: params.file_path });
             return content;
           } catch (err) {
             if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
@@ -633,12 +632,11 @@ Expectation for required parameters:
         }
       },
       getProposedContent: async (params: EditToolParams): Promise<string> => {
-        const filePath = unescapePath(params.file_path);
-        if (fs.existsSync(filePath)) {
+        if (fs.existsSync(params.file_path)) {
           try {
             const { content: currentContent } = await this.config
               .getFileSystemService()
-              .readTextFile({ path: filePath });
+              .readTextFile({ path: params.file_path });
             return applyReplacement(
               currentContent,
               params.old_string,

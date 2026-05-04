@@ -121,7 +121,9 @@ async function resolveReadPaths(
   const pathKeys = ['file_path', 'filePath', 'path', 'notebook_path'];
   for (const key of pathKeys) {
     if (typeof args[key] === 'string') {
-      args[key] = overlayFs.resolveReadPath(unescapePath(args[key] as string));
+      args[key] = overlayFs.resolveReadPath(
+        unescapePath(String(args[key]).trim()),
+      );
       return;
     }
   }
@@ -140,7 +142,7 @@ export async function rewritePathArgs(
   for (const key of pathKeys) {
     if (typeof args[key] === 'string') {
       args[key] = await overlayFs.redirectWrite(
-        unescapePath(args[key] as string),
+        unescapePath(String(args[key]).trim()),
       );
       return;
     }

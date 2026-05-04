@@ -355,7 +355,9 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: LSToolParams,
   ): string | null {
-    if (!path.isAbsolute(unescapePath(params.path))) {
+    params.path = unescapePath(params.path.trim());
+
+    if (!path.isAbsolute(params.path)) {
       return `Path must be absolute: ${params.path}`;
     }
 

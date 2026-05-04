@@ -352,8 +352,9 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
 
     // Only validate path if one is provided
     if (params.path) {
+      params.path = unescapePath(params.path.trim());
       try {
-        resolveAndValidatePath(this.config, unescapePath(params.path), {
+        resolveAndValidatePath(this.config, params.path, {
           allowExternalPaths: true,
         });
       } catch (error) {
