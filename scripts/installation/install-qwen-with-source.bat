@@ -260,14 +260,11 @@ exit /b %ERRORLEVEL%
 
 :ValidateSafeCurrentValue
 if "!SAFE_VALUE!"=="" exit /b 0
-if not "!SAFE_VALUE:"=!"=="!SAFE_VALUE!" goto unsafe_value
-if not "!SAFE_VALUE:&=!"=="!SAFE_VALUE!" goto unsafe_value
-if not "!SAFE_VALUE:|=!"=="!SAFE_VALUE!" goto unsafe_value
-if not "!SAFE_VALUE:<=!"=="!SAFE_VALUE!" goto unsafe_value
-if not "!SAFE_VALUE:>=!"=="!SAFE_VALUE!" goto unsafe_value
-if not "!SAFE_VALUE:^^=!"=="!SAFE_VALUE!" goto unsafe_value
-if not "!SAFE_VALUE:%%=!"=="!SAFE_VALUE!" goto unsafe_value
-if not "!SAFE_VALUE:`=!"=="!SAFE_VALUE!" goto unsafe_value
+set "QWEN_VALIDATE_VALUE=!SAFE_VALUE!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_VALIDATE_VALUE; if ($null -eq $value) { exit 0 }; $unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); if ($value.IndexOfAny($unsafe) -ge 0) { exit 1 }"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_VALIDATE_VALUE="
+if %PS_STATUS% NEQ 0 goto unsafe_value
 exit /b 0
 
 :unsafe_value
