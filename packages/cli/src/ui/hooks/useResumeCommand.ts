@@ -14,7 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import { MessageType, type HistoryItem } from '../types.js';
+import { MessageType, type HistoryItemWithoutId } from '../types.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -96,13 +96,11 @@ export function useResumeCommand(
 
       if (hasBlockingBackgroundWork(config)) {
         closeResumeDialog();
-        addItem?.(
-          {
-            type: MessageType.ERROR,
-            text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
-          } as Omit<HistoryItem, 'id'>,
-          Date.now(),
-        );
+        const blockedMessage: HistoryItemWithoutId = {
+          type: MessageType.ERROR,
+          text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+        };
+        addItem?.(blockedMessage, Date.now());
         return;
       }
 
@@ -140,15 +138,13 @@ export function useResumeCommand(
 
       const recovered = await config.loadPausedBackgroundAgents(sessionId);
       if (recovered.length > 0) {
-        addItem?.(
-          {
-            type: MessageType.INFO,
-            text: config
-              .getBackgroundAgentResumeService()
-              .buildRecoveredBackgroundAgentsNotice(recovered.length),
-          } as Omit<HistoryItem, 'id'>,
-          Date.now(),
-        );
+        const recoveredMessage: HistoryItemWithoutId = {
+          type: MessageType.INFO,
+          text: config
+            .getBackgroundAgentResumeService()
+            .buildRecoveredBackgroundAgentsNotice(recovered.length),
+        };
+        addItem?.(recoveredMessage, Date.now());
       }
 
       // Fire SessionStart event after resuming session
