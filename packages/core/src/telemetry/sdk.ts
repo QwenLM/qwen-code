@@ -323,6 +323,7 @@ export async function shutdownTelemetry(): Promise<void> {
       }
     } catch (error) {
       clearTimeout(timer);
+      diag.error('Error shutting down SDK:', error);
       debugLogger.error('Error shutting down SDK:', error);
     } finally {
       telemetryInitialized = false;
