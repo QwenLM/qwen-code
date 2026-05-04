@@ -1407,13 +1407,7 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      vi.mocked(fs.realpath).mockImplementation((p) =>
-        Promise.resolve(
-          String(p).endsWith('/escape-symlink')
-            ? '/etc/cron.d/payload'
-            : String(p),
-        ),
-      );
+      vi.mocked(fs.realpath).mockResolvedValue('/etc/cron.d/payload');
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
       } as Awaited<ReturnType<typeof fs.stat>>);

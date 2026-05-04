@@ -32,7 +32,6 @@ import {
   SkillActivationRegistry,
   splitConditionalSkills,
 } from './skill-activation.js';
-import { isResolvedPathInsideBase } from './symlink-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { SKILL_PROVIDER_CONFIG_DIRS } from '../config/storage.js';
@@ -131,28 +130,20 @@ export class SkillManager {
     // best-effort behavior — the listener can still finish later, it
     // just no longer holds up the activation reminder.
     const TIMEOUT_MS = 30_000;
-    const withTimeout = (p: Promise<unknown>): Promise<unknown> => {
-      let timeoutId: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise((_, reject) => {
-        timeoutId = setTimeout(
-          () => reject(new Error(`listener timeout after ${TIMEOUT_MS}ms`)),
-          TIMEOUT_MS,
-        );
-        // Don't keep the event loop alive solely for this timer.
-        if (
-          typeof timeoutId === 'object' &&
-          timeoutId !== null &&
-          'unref' in timeoutId
-        ) {
-          (timeoutId as { unref: () => void }).unref();
-        }
-      });
-      return Promise.race([p, timeout]).finally(() => {
-        if (timeoutId !== undefined) {
-          clearTimeout(timeoutId);
-        }
-      });
-    };
+    const withTimeout = (p: Promise<unknown>): Promise<unknown> =>
+      Promise.race([
+        p,
+        new Promise((_, reject) => {
+          const id = setTimeout(
+            () => reject(new Error(`listener timeout after ${TIMEOUT_MS}ms`)),
+            TIMEOUT_MS,
+          );
+          // Don't keep the event loop alive solely for this timer.
+          if (typeof id === 'object' && id !== null && 'unref' in id) {
+            (id as { unref: () => void }).unref();
+          }
+        }),
+      ]);
     const results = await Promise.allSettled(
       Array.from(this.changeListeners).map((listener) =>
         withTimeout(Promise.resolve().then(listener)),
@@ -935,11 +926,6 @@ export class SkillManager {
     debugLogger.debug(`Loading skills from directory: ${baseDir}`);
     try {
       const entries = await fs.readdir(baseDir, { withFileTypes: true });
-      let baseRealPathPromise: Promise<string> | undefined;
-      const getBaseRealPath = (): Promise<string> => {
-        baseRealPathPromise ??= fs.realpath(baseDir);
-        return baseRealPathPromise;
-      };
       debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
       // The returned `loaded` array preserves entries order via Promise.all,
@@ -969,8 +955,11 @@ export class SkillManager {
           if (isSymlink) {
             try {
               const realPath = await fs.realpath(skillDir);
-              const baseRealPath = await getBaseRealPath();
-              if (!isResolvedPathInsideBase(realPath, baseRealPath)) {
+              const resolvedBase = path.resolve(baseDir);
+              if (
+                realPath !== resolvedBase &&
+                !realPath.startsWith(resolvedBase + path.sep)
+              ) {
                 debugLogger.warn(
                   `Skipping symlink ${entry.name} that escapes ${baseDir}`,
                 );
