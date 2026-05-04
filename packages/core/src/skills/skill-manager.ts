@@ -28,6 +28,7 @@ import {
 } from './types.js';
 import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
+import { validateSymlinkScope } from './symlinkScope.js';
 import {
   SkillActivationRegistry,
   splitConditionalSkills,
@@ -130,20 +131,27 @@ export class SkillManager {
     // best-effort behavior — the listener can still finish later, it
     // just no longer holds up the activation reminder.
     const TIMEOUT_MS = 30_000;
-    const withTimeout = (p: Promise<unknown>): Promise<unknown> =>
-      Promise.race([
-        p,
-        new Promise((_, reject) => {
-          const id = setTimeout(
-            () => reject(new Error(`listener timeout after ${TIMEOUT_MS}ms`)),
-            TIMEOUT_MS,
-          );
-          // Don't keep the event loop alive solely for this timer.
-          if (typeof id === 'object' && id !== null && 'unref' in id) {
-            (id as { unref: () => void }).unref();
-          }
-        }),
-      ]);
+    const withTimeout = (p: Promise<unknown>): Promise<unknown> => {
+      // Capture the timer handle in the outer scope so the `.finally`
+      // can clear it once the race settles. Without the clear, every
+      // listener-wins-the-race case leaves a 30s pending timer behind:
+      // `unref()` keeps it from blocking process exit but vitest's
+      // open-handle diagnostic and any tooling that snapshots the active
+      // handle set still see the pile-up under high-frequency activation.
+      let timerId: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise((_, reject) => {
+        timerId = setTimeout(
+          () => reject(new Error(`listener timeout after ${TIMEOUT_MS}ms`)),
+          TIMEOUT_MS,
+        );
+        if (typeof timerId === 'object' && timerId !== null && 'unref' in timerId) {
+          (timerId as { unref: () => void }).unref();
+        }
+      });
+      return Promise.race([p, timeoutPromise]).finally(() => {
+        if (timerId !== undefined) clearTimeout(timerId);
+      });
+    };
     const results = await Promise.allSettled(
       Array.from(this.changeListeners).map((listener) =>
         withTimeout(Promise.resolve().then(listener)),
@@ -928,6 +936,25 @@ export class SkillManager {
       const entries = await fs.readdir(baseDir, { withFileTypes: true });
       debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
+      // Resolve baseDir once outside the parallel map. Symlink scope
+      // validation needs the canonical form to compare against; doing
+      // it per-entry would burn N realpath syscalls (one per entry) for
+      // the same answer. `fs.readdir` succeeded above so the directory
+      // exists; if realpath still throws (FS race / permissions), treat
+      // the whole directory as unreadable rather than letting the per-
+      // symlink check trip on every entry.
+      let baseRealPath: string;
+      try {
+        baseRealPath = await fs.realpath(baseDir);
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
+        debugLogger.debug(
+          `Cannot realpath skills baseDir ${baseDir}: ${errorMessage}`,
+        );
+        return [];
+      }
+
       // The returned `loaded` array preserves entries order via Promise.all,
       // but `parseSkillFileInternal` writes into `this.parseErrors` as each
       // promise settles, so the Map's insertion order reflects parse-finish
@@ -945,37 +972,27 @@ export class SkillManager {
 
           const skillDir = path.join(baseDir, entry.name);
 
-          // For symlinks, verify the target (a) resolves to a directory
-          // and (b) stays within `baseDir`. Without the scope check, a
-          // symlink anywhere in the skills tree could pull in arbitrary
-          // on-disk content as a "skill" — and skills can ship hooks
-          // that invoke shell commands, so this is a code-execution
-          // vector. Realpath resolution + prefix check kept in lockstep
-          // with the same guard in `skill-load.ts`.
+          // For symlinks, verify the target (a) resolves, (b) is a
+          // directory, and (c) stays within `baseDir`. Shared with
+          // `skill-load.ts` so the two parsers can't drift on this
+          // code-execution-vector gate (skills can ship hooks that run
+          // shell commands).
           if (isSymlink) {
-            try {
-              const realPath = await fs.realpath(skillDir);
-              const resolvedBase = path.resolve(baseDir);
-              if (
-                realPath !== resolvedBase &&
-                !realPath.startsWith(resolvedBase + path.sep)
-              ) {
+            const check = await validateSymlinkScope(skillDir, baseRealPath);
+            if (!check.ok) {
+              if (check.reason === 'escapes') {
                 debugLogger.warn(
                   `Skipping symlink ${entry.name} that escapes ${baseDir}`,
                 );
-                return null;
-              }
-              const targetStat = await fs.stat(realPath);
-              if (!targetStat.isDirectory()) {
+              } else if (check.reason === 'not-directory') {
                 debugLogger.warn(
                   `Skipping symlink ${entry.name} that does not point to a directory`,
                 );
-                return null;
+              } else {
+                debugLogger.warn(
+                  `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
+                );
               }
-            } catch (error) {
-              debugLogger.warn(
-                `Skipping invalid symlink ${entry.name}: ${error instanceof Error ? error.message : 'Unknown error'}`,
-              );
               return null;
             }
           }

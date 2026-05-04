@@ -5,6 +5,7 @@ import {
   parsePathsField,
   validateSkillName,
 } from './types.js';
+import { validateSymlinkScope } from './symlinkScope.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
@@ -24,6 +25,24 @@ export async function loadSkillsFromDir(
     const skills: SkillConfig[] = [];
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
+    // Resolve baseDir once outside the loop. Symlink scope validation
+    // (in `validateSymlinkScope`) needs the canonical form to compare
+    // against; doing it per-entry would burn a syscall per directory
+    // entry for the same answer. `fs.readdir` succeeded just above so
+    // the directory exists — realpath should not throw here, but if it
+    // does we treat the whole directory as unreadable.
+    let baseRealPath: string;
+    try {
+      baseRealPath = await fs.realpath(baseDir);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      debugLogger.debug(
+        `Cannot realpath skills baseDir ${baseDir}: ${errorMessage}`,
+      );
+      return [];
+    }
+
     for (const entry of entries) {
       // Process directories and symlinks that resolve to directories.
       // Plain files are silently skipped (each skill must be a directory).
@@ -37,37 +56,26 @@ export async function loadSkillsFromDir(
 
       const skillDir = path.join(baseDir, entry.name);
 
-      // For symlinks, verify the target (a) resolves to a directory and
-      // (b) stays within `baseDir`. Without the scope check, a symlink
-      // anywhere in the skills tree could pull in arbitrary on-disk
-      // content as a "skill" — and skills can ship hooks that invoke
-      // shell commands, so this is a code-execution vector. Realpath
-      // resolution + prefix check matches the same pattern used by
-      // SkillManager's parseSkillFileInternal.
+      // For symlinks, verify the target (a) resolves, (b) is a directory,
+      // and (c) stays within `baseDir`. Shared with `skill-manager.ts`
+      // so the two parsers can't drift on this code-execution-vector
+      // gate (skills can ship hooks that run shell commands).
       if (isSymlink) {
-        try {
-          const realPath = await fs.realpath(skillDir);
-          const resolvedBase = path.resolve(baseDir);
-          if (
-            realPath !== resolvedBase &&
-            !realPath.startsWith(resolvedBase + path.sep)
-          ) {
+        const check = await validateSymlinkScope(skillDir, baseRealPath);
+        if (!check.ok) {
+          if (check.reason === 'escapes') {
             debugLogger.warn(
               `Skipping symlink ${entry.name} that escapes ${baseDir}`,
             );
-            continue;
-          }
-          const targetStat = await fs.stat(realPath);
-          if (!targetStat.isDirectory()) {
+          } else if (check.reason === 'not-directory') {
             debugLogger.warn(
               `Skipping symlink ${entry.name} that does not point to a directory`,
             );
-            continue;
+          } else {
+            debugLogger.warn(
+              `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
+            );
           }
-        } catch (error) {
-          debugLogger.warn(
-            `Skipping invalid symlink ${entry.name}: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          );
           continue;
         }
       }

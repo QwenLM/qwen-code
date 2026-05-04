@@ -1012,6 +1012,44 @@ Review content`);
       expect(asyncRejector).toHaveBeenCalled();
       expect(sibling).toHaveBeenCalled();
     });
+
+    it('clears the per-listener timeout once the race settles', async () => {
+      // Regression: the 30s timeout was previously only `unref`d, leaving
+      // a pending timer on every fast-resolving listener. Under
+      // high-frequency activation, vitest's open-handle diagnostic and
+      // any tooling snapshotting the active-handle set saw the pile-up.
+      // The `.finally(clearTimeout)` wrapper makes the cleanup explicit.
+      const setSpy = vi.spyOn(global, 'setTimeout');
+      const clearSpy = vi.spyOn(global, 'clearTimeout');
+
+      const fastListener = vi.fn(() => Promise.resolve());
+      manager.addChangeListener(fastListener);
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      // Capture timer ids set during the refresh — only the listener
+      // timeouts use setTimeout in this code path. Other tests in this
+      // file can leak setTimeout calls (chokidar, etc.) so we diff
+      // before/after.
+      const setCallsBefore = setSpy.mock.calls.length;
+      const clearCallsBefore = clearSpy.mock.calls.length;
+
+      await manager.refreshCache();
+
+      const setCallsAfter = setSpy.mock.calls.length;
+      const clearCallsAfter = clearSpy.mock.calls.length;
+      // We expect at least one timer set (the listener wrapper's) and
+      // a matching clear. Equal deltas guarantees nothing was leaked.
+      const setDelta = setCallsAfter - setCallsBefore;
+      const clearDelta = clearCallsAfter - clearCallsBefore;
+      expect(setDelta).toBeGreaterThanOrEqual(1);
+      expect(clearDelta).toBeGreaterThanOrEqual(setDelta);
+
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+    });
   });
 
   describe('conditional skill activation', () => {
@@ -1382,10 +1420,20 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // realpath throws because the symlink target doesn't exist
-      vi.mocked(fs.realpath).mockRejectedValue(
-        new Error('ENOENT: no such file or directory'),
-      );
+      // realpath(baseDir) succeeds (the directory itself is fine);
+      // realpath(target) throws because the link is broken. Without
+      // discriminating, the new realpath-base step in loadSkillsFromDir
+      // would also throw and bail the whole directory before reaching
+      // the per-symlink check we want to test.
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s.endsWith('broken-symlink')) {
+          return Promise.reject(
+            new Error('ENOENT: no such file or directory'),
+          );
+        }
+        return Promise.resolve(s);
+      });
 
       const skills = await manager.listSkills({ force: true });
 
@@ -1396,7 +1444,7 @@ Symlink skill content`);
       // Regression: a symlink whose target falls outside the skills
       // tree (e.g. attacker pointing at /etc/cron.d) must be dropped
       // — skills can ship hooks that execute shell commands, so
-      // arbitrary-load is a code-execution vector. realpath + prefix
+      // arbitrary-load is a code-execution vector. realpath + scope
       // check guards this.
       vi.mocked(fs.readdir).mockResolvedValue([
         {
@@ -1407,7 +1455,17 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      vi.mocked(fs.realpath).mockResolvedValue('/etc/cron.d/payload');
+      // realpath(baseDir) returns the base canonical form; only the
+      // symlink target escapes. A bare `mockResolvedValue` would map
+      // both calls to the same value and accidentally let the attack
+      // through (path.relative(x, x) === '' which is in-scope).
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s.endsWith('escape-symlink')) {
+          return Promise.resolve('/etc/cron.d/payload');
+        }
+        return Promise.resolve(s);
+      });
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
       } as Awaited<ReturnType<typeof fs.stat>>);

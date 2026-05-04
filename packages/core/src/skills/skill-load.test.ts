@@ -298,9 +298,14 @@ Valid skill.
 
       // realpath stays within baseDir (in-tree symlink, e.g. user
       // symlinks one skill directory to another in the same tree).
-      vi.mocked(fs.realpath).mockResolvedValue(
-        `${testBaseDir}/symlinked-skill`,
-      );
+      // Use mockImplementation so realpath(baseDir) returns the base
+      // (canonicalization-of-base is now part of the scope check) and
+      // realpath(skillDir) returns the in-tree target.
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s === testBaseDir) return Promise.resolve(testBaseDir);
+        return Promise.resolve(`${testBaseDir}/symlinked-skill`);
+      });
       // stat resolves to a directory (symlink target)
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
@@ -331,7 +336,11 @@ Symlinked skill body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      vi.mocked(fs.realpath).mockResolvedValue(`${testBaseDir}/file-symlink`);
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s === testBaseDir) return Promise.resolve(testBaseDir);
+        return Promise.resolve(`${testBaseDir}/file-symlink`);
+      });
       // stat resolves to a file (not a directory)
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => false,
@@ -352,10 +361,13 @@ Symlinked skill body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // realpath throws because the symlink target doesn't exist
-      vi.mocked(fs.realpath).mockRejectedValue(
-        new Error('ENOENT: no such file or directory'),
-      );
+      // realpath(baseDir) succeeds (the directory itself is fine);
+      // realpath(symlink target) throws because the link is broken.
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s === testBaseDir) return Promise.resolve(testBaseDir);
+        return Promise.reject(new Error('ENOENT: no such file or directory'));
+      });
 
       const skills = await loadSkillsFromDir(testBaseDir);
 
@@ -377,8 +389,15 @@ Symlinked skill body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // realpath escapes the tree.
-      vi.mocked(fs.realpath).mockResolvedValue('/etc/cron.d/payload');
+      // realpath(baseDir) → baseDir; realpath(symlink) → outside-tree
+      // target. Both sides canonicalized so path.relative works as
+      // expected — substring/prefix checks would have an open ambiguity
+      // when baseDir happens to share a prefix with the escape target.
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s === testBaseDir) return Promise.resolve(testBaseDir);
+        return Promise.resolve('/etc/cron.d/payload');
+      });
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
       } as unknown as Awaited<ReturnType<typeof fs.stat>>);
@@ -393,6 +412,43 @@ malicious body
 
       const skills = await loadSkillsFromDir(testBaseDir);
       expect(skills).toHaveLength(0);
+    });
+
+    it('should accept in-tree symlinks where the target lives in a subdirectory of baseDir', async () => {
+      // Regression for shared-helper realpath-base check on Windows-ish
+      // canonicalization differences: realpath(base) and realpath(target)
+      // must compose via path.relative, so any in-tree target sitting
+      // under a subdirectory must still pass containment. Asserts on
+      // count + body presence rather than name because the YAML parser
+      // here is mocked to a fixed default (name: test-skill).
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'nested-symlink',
+          isDirectory: () => false,
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s === testBaseDir) return Promise.resolve(testBaseDir);
+        return Promise.resolve(`${testBaseDir}/inner/dir/nested-skill`);
+      });
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => true,
+      } as unknown as Awaited<ReturnType<typeof fs.stat>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: test-skill
+description: Nested in-tree symlink target
+---
+
+body
+`);
+
+      const skills = await loadSkillsFromDir(testBaseDir);
+      expect(skills).toHaveLength(1);
     });
   });
 
