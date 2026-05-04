@@ -173,22 +173,38 @@ export interface CliArgs {
  * Returns true if the root of the given schema can accept a JSON object.
  *
  * JSON Schema applies sibling keywords conjunctively, so `type`, `anyOf`,
- * and `oneOf` at the same level must EACH allow an object — they can't
- * rescue one another. For example, `{type:"object", anyOf:[{type:"string"}]}`
+ * `oneOf`, and `allOf` at the same level must EACH allow an object — they
+ * can't rescue one another. For example, `{type:"object", anyOf:[{type:"string"}]}`
  * is unsatisfiable for any value because `type` requires object while
- * `anyOf` requires string. Walk all three rather than returning on the
+ * `anyOf` requires string. Walk all four rather than returning on the
  * first hit.
  *
- * Leaves `allOf` alone — tight interactions between `allOf` branches with
- * contradictory types are rare for `--json-schema` input and we'd rather
- * let Ajv surface that at runtime than guess wrong here.
+ * For `anyOf` / `oneOf`, at least one branch must admit object (a value
+ * only has to match one branch). For `allOf`, every branch must admit
+ * object (a value has to match all of them). For root `$ref` we don't
+ * follow the reference ourselves — local-only `$ref` resolution would
+ * still need to handle remote/recursive refs, and getting it half-right
+ * is worse than rejecting. So we require an explicit sibling
+ * `type: "object"` to opt out of the check; otherwise the schema is
+ * rejected at parse time.
  */
 function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
   const rawType = schema['type'];
-  if (rawType !== undefined) {
-    const types = Array.isArray(rawType) ? rawType : [rawType];
-    if (!types.includes('object')) return false;
+  const typeIncludesObject =
+    rawType !== undefined &&
+    (Array.isArray(rawType) ? rawType : [rawType]).includes('object');
+
+  if (typeof schema['$ref'] === 'string' && !typeIncludesObject) {
+    // Bare root `$ref` with no anchoring `type:"object"` — we can't tell
+    // what it resolves to, so refuse to register a synthetic tool whose
+    // parameter contract is "whatever this $ref points to".
+    return false;
   }
+
+  if (rawType !== undefined && !typeIncludesObject) {
+    return false;
+  }
+
   for (const key of ['anyOf', 'oneOf'] as const) {
     const variants = schema[key];
     if (Array.isArray(variants) && variants.length > 0) {
@@ -202,6 +218,19 @@ function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
       if (!anyAcceptsObject) return false;
     }
   }
+
+  const allOf = schema['allOf'];
+  if (Array.isArray(allOf) && allOf.length > 0) {
+    const everyBranchAcceptsObject = allOf.every(
+      (v) =>
+        typeof v === 'object' &&
+        v !== null &&
+        !Array.isArray(v) &&
+        schemaRootAcceptsObject(v as Record<string, unknown>),
+    );
+    if (!everyBranchAcceptsObject) return false;
+  }
+
   // No narrowing at the root — lenient default, treated as object-compatible.
   return true;
 }

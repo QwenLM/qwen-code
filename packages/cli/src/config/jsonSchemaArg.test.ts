@@ -144,4 +144,41 @@ describe('resolveJsonSchemaArg', () => {
     );
     expect(schema).toBeDefined();
   });
+
+  it('rejects a bare root $ref without a sibling type:"object" anchor', () => {
+    // We don't follow $refs ourselves; without a sibling `type:"object"` we
+    // can't tell whether the resolved schema admits objects, so refuse to
+    // register a synthetic tool whose parameter contract is "whatever this
+    // $ref points to".
+    expect(() =>
+      resolveJsonSchemaArg(
+        '{"$ref":"#/$defs/Foo","$defs":{"Foo":{"type":"array"}}}',
+      ),
+    ).toThrow(/must accept object-typed values/);
+  });
+
+  it('accepts a root $ref when the user anchors it with type:"object"', () => {
+    // Sibling `type:"object"` is the explicit opt-out — the user is telling
+    // us the resolved schema describes an object. Trust that and let Ajv
+    // surface any deeper mismatch at runtime.
+    const schema = resolveJsonSchemaArg(
+      '{"type":"object","$ref":"#/$defs/Foo","$defs":{"Foo":{"type":"object","properties":{"a":{"type":"string"}}}}}',
+    );
+    expect(schema).toBeDefined();
+  });
+
+  it('rejects allOf where any branch forbids object at the root', () => {
+    // allOf is conjunctive — every branch must accept object. A schema
+    // like `allOf:[{type:"object"}, {type:"string"}]` is unsatisfiable.
+    expect(() =>
+      resolveJsonSchemaArg('{"allOf":[{"type":"object"},{"type":"string"}]}'),
+    ).toThrow(/must accept object-typed values/);
+  });
+
+  it('accepts allOf where every branch admits object', () => {
+    const schema = resolveJsonSchemaArg(
+      '{"allOf":[{"type":"object","properties":{"a":{"type":"string"}}},{"type":"object","required":["a"]}]}',
+    );
+    expect(schema).toBeDefined();
+  });
 });
