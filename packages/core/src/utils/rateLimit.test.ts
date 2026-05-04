@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   getRateLimitErrorDetails,
   getRateLimitRetryDelayMs,
@@ -195,6 +195,19 @@ describe('rate-limit retry diagnostics', () => {
     });
   });
 
+  it('should extract request id from top-level nested JSON error messages', () => {
+    const error = new Error(
+      '{"request_id":"req-123","error":{"code":"429","message":"Throttling: TPM limit reached"}}',
+    );
+
+    expect(getRateLimitErrorDetails(error)).toEqual({
+      providerCode: '429',
+      providerMessage: 'Throttling: TPM limit reached',
+      requestId: 'req-123',
+      transport: 'unknown',
+    });
+  });
+
   it('should increase retry delay by attempt and cap at the maximum', () => {
     expect(
       getRateLimitRetryDelayMs(0, {
@@ -284,10 +297,116 @@ describe('rate-limit retry diagnostics', () => {
     ).toBe(180_000);
   });
 
+  it('should read Retry-After from Headers-like objects', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      headers: {
+        get: (name: string) => (name === 'retry-after' ? '180' : null),
+      },
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(180_000);
+  });
+
+  it('should read Retry-After headers case-insensitively', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      headers: { 'Retry-After': '180' },
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(180_000);
+  });
+
+  it('should read HTTP-date Retry-After values', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+    try {
+      const error = Object.assign(new Error('Too many requests'), {
+        status: 429,
+        headers: { 'retry-after': 'Thu, 01 Jan 2026 00:03:00 GMT' },
+      });
+
+      expect(
+        getRateLimitRetryDelayMs(1, {
+          initialDelayMs: 60_000,
+          maxDelayMs: 300_000,
+          error,
+        }),
+      ).toBe(180_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('should ignore past HTTP-date Retry-After values', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:03:00.000Z'));
+
+    try {
+      const error = Object.assign(new Error('Too many requests'), {
+        status: 429,
+        headers: { 'retry-after': 'Thu, 01 Jan 2026 00:00:00 GMT' },
+      });
+
+      expect(
+        getRateLimitRetryDelayMs(1, {
+          initialDelayMs: 60_000,
+          maxDelayMs: 300_000,
+          error,
+        }),
+      ).toBe(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('should ignore malformed Retry-After values', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      headers: { 'retry-after': 'not a retry-after value' },
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(60_000);
+  });
+
   it('should ignore null direct headers', () => {
     const error = Object.assign(new Error('Too many requests'), {
       status: 429,
       headers: null,
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(60_000);
+  });
+
+  it('should ignore undefined direct headers', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      headers: undefined,
     });
 
     expect(
@@ -304,6 +423,23 @@ describe('rate-limit retry diagnostics', () => {
       status: 429,
       response: {
         headers: null,
+      },
+    });
+
+    expect(
+      getRateLimitRetryDelayMs(1, {
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        error,
+      }),
+    ).toBe(60_000);
+  });
+
+  it('should ignore undefined response headers', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      response: {
+        headers: undefined,
       },
     });
 

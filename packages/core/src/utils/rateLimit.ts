@@ -185,14 +185,16 @@ function getProviderErrorPayload(error: unknown): ProviderErrorPayload | null {
       request_id?: unknown;
       requestId?: unknown;
     };
-    const nested = (payload as { error?: unknown }).error as
-      | {
-          code?: unknown;
-          message?: unknown;
-          request_id?: unknown;
-          requestId?: unknown;
-        }
-      | undefined;
+    const nestedError = (payload as { error?: unknown }).error;
+    const nested =
+      typeof nestedError === 'object' && nestedError !== null
+        ? (nestedError as {
+            code?: unknown;
+            message?: unknown;
+            request_id?: unknown;
+            requestId?: unknown;
+          })
+        : undefined;
     const source = nested ?? direct;
     const code =
       typeof source.code === 'string' || typeof source.code === 'number'
@@ -205,7 +207,11 @@ function getProviderErrorPayload(error: unknown): ProviderErrorPayload | null {
         ? source.request_id
         : typeof source.requestId === 'string'
           ? source.requestId
-          : undefined;
+          : typeof direct.request_id === 'string'
+            ? direct.request_id
+            : typeof direct.requestId === 'string'
+              ? direct.requestId
+              : undefined;
 
     if (
       code !== undefined ||
@@ -318,7 +324,7 @@ function hasHeaders(error: unknown): error is {
     typeof error === 'object' &&
     error !== null &&
     'headers' in error &&
-    error.headers !== null
+    error.headers != null
   );
 }
 
@@ -334,6 +340,6 @@ function hasResponseHeaders(error: unknown): error is {
     typeof error.response === 'object' &&
     error.response !== null &&
     'headers' in error.response &&
-    error.response.headers !== null
+    error.response.headers != null
   );
 }
