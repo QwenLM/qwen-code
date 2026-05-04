@@ -164,6 +164,48 @@ ${reason.stack}`
   });
 }
 
+function getSignalExitCode(signal: NodeJS.Signals): number {
+  return signal === 'SIGINT' ? 130 : 143;
+}
+
+function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
+  let cleanupStarted = false;
+
+  const handleSignal = (signal: NodeJS.Signals) => {
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(wasRaw);
+    }
+
+    if (cleanupStarted) {
+      return;
+    }
+    cleanupStarted = true;
+
+    void runExitCleanup()
+      .catch((error) => {
+        debugLogger.error(`Error during ${signal} cleanup:`, error);
+      })
+      .finally(() => {
+        process.exit(getSignalExitCode(signal));
+      });
+  };
+
+  const handleSigterm = () => {
+    handleSignal('SIGTERM');
+  };
+  const handleSigint = () => {
+    handleSignal('SIGINT');
+  };
+
+  process.once('SIGTERM', handleSigterm);
+  process.once('SIGINT', handleSigint);
+
+  return () => {
+    process.removeListener('SIGTERM', handleSigterm);
+    process.removeListener('SIGINT', handleSigint);
+  };
+}
+
 export async function startInteractiveUI(
   config: Config,
   settings: LoadedSettings,
@@ -559,6 +601,9 @@ export async function main() {
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
     let themeAutoDetectionComplete: Promise<void> | undefined;
+    if (config.isInteractive()) {
+      registerCleanup(installInteractiveSignalHandlers(wasRaw));
+    }
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
@@ -568,14 +613,6 @@ export async function main() {
       startEarlyInputCapture();
       // Ensure the stdin listener is removed on any exit path (error, signal, etc.)
       registerCleanup(() => stopAndGetCapturedInput());
-
-      // This cleanup isn't strictly needed but may help in certain situations.
-      process.on('SIGTERM', () => {
-        process.stdin.setRawMode(wasRaw);
-      });
-      process.on('SIGINT', () => {
-        process.stdin.setRawMode(wasRaw);
-      });
 
       // Detect and enable Kitty keyboard protocol once at startup.
       kittyProtocolDetectionComplete = detectAndEnableKittyProtocol();

@@ -1737,9 +1737,13 @@ export class WebViewProvider {
    * The webview resolves the content and posts back a 'copyToClipboard' message.
    */
   sendCopyCommand(action: string): boolean {
-    if (WebViewProvider.lastContextMenuProvider !== this) return false;
+    if (WebViewProvider.lastContextMenuProvider !== this) {
+      return false;
+    }
     const webview = this.getActiveWebview();
-    if (!webview) return false;
+    if (!webview) {
+      return false;
+    }
     webview.postMessage({ type: 'copyCommand', data: { action } });
     return true;
   }

@@ -27,6 +27,7 @@ import {
   ToolDisplayNames,
   ToolNames,
   type BackgroundTaskEntry,
+  type MonitorEntry,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
@@ -103,14 +104,27 @@ function terminalStatusPresentation(
 }
 
 function rowLabel(entry: DialogEntry): string {
-  if (entry.kind === 'agent') {
-    return buildBackgroundEntryLabel(entry, { includePrefix: false });
+  switch (entry.kind) {
+    case 'agent':
+      return buildBackgroundEntryLabel(entry, { includePrefix: false });
+    case 'shell':
+      // Shell / monitor prefixes mirror the dialog's "section" visual hint
+      // without needing per-kind section headers (which would complicate
+      // the windowing math). Long commands / descriptions wrap (ListBody
+      // renders rows with plain `<Text>`, no truncation helper), which
+      // is acceptable for the dialog's information-density profile —
+      // adding `wrap="truncate-end"` here would hide context the user
+      // explicitly opened the dialog to see.
+      return `[shell] ${entry.command}`;
+    case 'monitor':
+      return `[monitor] ${entry.description}`;
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(
+        `rowLabel: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+      );
+    }
   }
-  // Shell row: `[shell] <command>`. Prefix mirrors the dialog's "section"
-  // visual hint without needing per-kind section headers (which would
-  // complicate the windowing math). The command itself is plain text and
-  // already truncated by the row renderer's MaxSizedBox.
-  return `[shell] ${entry.command}`;
 }
 
 function elapsedFor(entry: { startTime: number; endTime?: number }): string {
@@ -242,12 +256,40 @@ const DetailBody: React.FC<{
   entry: DialogEntry;
   maxHeight: number;
   maxWidth: number;
-}> = ({ entry, maxHeight, maxWidth }) =>
-  entry.kind === 'agent' ? (
-    <AgentDetailBody entry={entry} maxHeight={maxHeight} maxWidth={maxWidth} />
-  ) : (
-    <ShellDetailBody entry={entry} maxHeight={maxHeight} maxWidth={maxWidth} />
-  );
+}> = ({ entry, maxHeight, maxWidth }) => {
+  switch (entry.kind) {
+    case 'agent':
+      return (
+        <AgentDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'shell':
+      return (
+        <ShellDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'monitor':
+      return (
+        <MonitorDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(
+        `DetailBody: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+      );
+    }
+  }
+};
 
 const AgentDetailBody: React.FC<{
   entry: AgentDialogEntry;
@@ -473,6 +515,84 @@ const ShellDetailBody: React.FC<{
   );
 };
 
+const MonitorDetailBody: React.FC<{
+  entry: MonitorEntry;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = `Monitor › ${entry.description}`;
+
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.pid !== undefined) {
+    dimSubtitleParts.push(`pid ${entry.pid}`);
+  }
+  dimSubtitleParts.push(
+    `${entry.eventCount} event${entry.eventCount === 1 ? '' : 's'}`,
+  );
+  if (entry.droppedLines > 0) {
+    dimSubtitleParts.push(`${entry.droppedLines} dropped`);
+  }
+  if (entry.exitCode !== undefined) {
+    dimSubtitleParts.push(`exit ${entry.exitCode}`);
+  }
+
+  // `entry.error` is set on `failed` (spawn error) and on `completed`
+  // when the monitor was auto-stopped (max events / idle timeout). Worth
+  // surfacing whenever it exists, regardless of terminal status.
+  const hasError = Boolean(entry.error);
+  const errorIsFailure = entry.status === 'failed';
+  const errorColor = errorIsFailure ? theme.status.error : theme.status.warning;
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${STATUS_VERBS[entry.status]} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      <Box />
+      <Box>
+        <Text bold dimColor>
+          Command
+        </Text>
+      </Box>
+      <Box>
+        <Text wrap="truncate-end">{entry.command}</Text>
+      </Box>
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={errorColor}>
+              {errorIsFailure ? 'Error' : 'Stopped because'}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={errorColor} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
+};
+
 // ─── Dialog shell ──────────────────────────────────────────
 
 interface BackgroundTasksDialogProps {
@@ -522,15 +642,30 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
-    if (!fromSnapshot || fromSnapshot.kind !== 'agent') return fromSnapshot;
-    // Re-read the agent from the registry so detail-body fields the
-    // registry mutates between status transitions (recentActivities,
-    // stats) are fresh. The shallow spread inside useBackgroundTaskView
-    // captures `recentActivities` at refresh time, and `appendActivity`
-    // reassigns `entry.recentActivities = next` on the registry object —
-    // so the snapshot's reference is detached after the first activity.
-    const live = config.getBackgroundTaskRegistry().get(fromSnapshot.agentId);
-    return live ? { ...live, kind: 'agent' as const } : fromSnapshot;
+    if (!fromSnapshot) return fromSnapshot;
+    // Re-read the entry from the registry on each activityTick so
+    // detail-body fields the registry mutates between status transitions
+    // are fresh. The snapshot in useBackgroundTaskView only refreshes on
+    // statusChange (so the pill / AppContainer don't churn under heavy
+    // tool / event traffic), so for the detail view we have to re-resolve
+    // explicitly:
+    //   - agent: `recentActivities` is reassigned by `appendActivity`,
+    //     which fires `activityChange` (subscribed below).
+    //   - monitor: `eventCount` / `droppedLines` are mutated by
+    //     `emitEvent`, which intentionally does NOT fire `statusChange`
+    //     to avoid per-event refresh churn. The 1s wall-clock tick below
+    //     drives the recompute instead.
+    // Shells don't mutate detail-visible fields between statusChange
+    // events, so the snapshot stays correct for them.
+    if (fromSnapshot.kind === 'agent') {
+      const live = config.getBackgroundTaskRegistry().get(fromSnapshot.agentId);
+      return live ? { ...live, kind: 'agent' as const } : fromSnapshot;
+    }
+    if (fromSnapshot.kind === 'monitor') {
+      const live = config.getMonitorRegistry().get(fromSnapshot.monitorId);
+      return live ? { ...live, kind: 'monitor' as const } : fromSnapshot;
+    }
+    return fromSnapshot;
     // activityTick is a dep on purpose: the registry mutation is invisible
     // to useMemo otherwise and we need to recompute on each activity.
     // eslint-disable-next-line react-hooks/exhaustive-deps

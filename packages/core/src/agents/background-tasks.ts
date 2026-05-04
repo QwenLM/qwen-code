@@ -156,10 +156,6 @@ export interface BackgroundTaskEntry {
   >;
 }
 
-interface CancelOptions {
-  persistedStatus?: Extract<BackgroundTaskStatus, 'running' | 'cancelled'>;
-}
-
 export interface NotificationMeta {
   agentId: string;
   status: BackgroundTaskStatus;
@@ -174,6 +170,11 @@ export type BackgroundNotificationCallback = (
 ) => void;
 
 export type BackgroundRegisterCallback = (entry: BackgroundTaskEntry) => void;
+
+interface BackgroundTaskCancelOptions {
+  notify?: boolean;
+  persistedStatus?: Extract<BackgroundTaskStatus, 'running' | 'cancelled'>;
+}
 
 /**
  * Fires on entry status transitions — register, complete, fail, cancel.
@@ -265,7 +266,7 @@ export class BackgroundTaskRegistry {
   // case where a tool ignores AbortSignal and bgBody never settles — the
   // timeout lands on finalizeCancellationIfPending(), which is a no-op
   // once the natural handler has already emitted.
-  cancel(agentId: string, options: CancelOptions = {}): void {
+  cancel(agentId: string, options: BackgroundTaskCancelOptions = {}): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;
     const persistedStatus = options.persistedStatus ?? 'cancelled';
@@ -283,6 +284,13 @@ export class BackgroundTaskRegistry {
     }
     debugLogger.info(`Background agent cancelled: ${agentId}`);
     this.emitStatusChange(entry);
+
+    if (options.notify === false) {
+      // Session reset paths intentionally suppress the old task's terminal
+      // notification so it cannot leak into a new conversation.
+      entry.notified = true;
+      return;
+    }
 
     const timer = setTimeout(() => {
       this.finalizeCancellationIfPending(agentId);
@@ -458,9 +466,21 @@ export class BackgroundTaskRegistry {
     this.activityChangeCallback = cb;
   }
 
-  abortAll(): void {
+  abortAll(options: BackgroundTaskCancelOptions = {}): void {
+    const cancelOptions: BackgroundTaskCancelOptions = {
+      persistedStatus: 'running',
+      ...options,
+    };
     for (const entry of Array.from(this.agents.values())) {
-      this.cancel(entry.agentId, { persistedStatus: 'running' });
+      if (entry.status === 'running') {
+        this.cancel(entry.agentId, cancelOptions);
+      }
+
+      if (cancelOptions.notify === false) {
+        entry.notified = true;
+        continue;
+      }
+
       // Shutdown path: no natural handler will run, so emit the cancelled
       // notification here to honour the one-notification-per-agent contract.
       this.finalizeCancellationIfPending(entry.agentId);

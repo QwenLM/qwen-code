@@ -8,12 +8,14 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TaskStopTool } from './task-stop.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { MonitorRegistry } from '../services/monitorRegistry.js';
 import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
 
 describe('TaskStopTool', () => {
   let registry: BackgroundTaskRegistry;
   let shellRegistry: BackgroundShellRegistry;
+  let monitorRegistry: MonitorRegistry;
   let config: Config;
   let tool: TaskStopTool;
   let abandonBackgroundAgent: ReturnType<typeof vi.fn>;
@@ -22,10 +24,12 @@ describe('TaskStopTool', () => {
     registry = new BackgroundTaskRegistry();
     abandonBackgroundAgent = vi.fn();
     shellRegistry = new BackgroundShellRegistry();
+    monitorRegistry = new MonitorRegistry();
     config = {
       getBackgroundTaskRegistry: () => registry,
       abandonBackgroundAgent,
       getBackgroundShellRegistry: () => shellRegistry,
+      getMonitorRegistry: () => monitorRegistry,
     } as unknown as Config;
     tool = new TaskStopTool(config);
   });
@@ -205,6 +209,63 @@ describe('TaskStopTool', () => {
       expect(agentAc.signal.aborted).toBe(true);
       expect(shellAc.signal.aborted).toBe(false);
       expect(shellRegistry.get('shared-id')!.status).toBe('running');
+    });
+  });
+
+  describe('monitor support', () => {
+    it('cancels a running monitor', async () => {
+      const ac = new AbortController();
+      monitorRegistry.register({
+        monitorId: 'mon_123',
+        command: 'tail -f app.log',
+        description: 'watch app log',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: ac,
+        eventCount: 0,
+        lastEventTime: 0,
+        maxEvents: 100,
+        idleTimeoutMs: 300_000,
+        droppedLines: 0,
+      });
+
+      const result = await tool.validateBuildAndExecute(
+        { task_id: 'mon_123' },
+        new AbortController().signal,
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('monitor "mon_123"');
+      expect(result.llmContent).toContain('tail -f app.log');
+      expect(result.returnDisplay).toContain('watch app log');
+      expect(monitorRegistry.get('mon_123')!.status).toBe('cancelled');
+      expect(ac.signal.aborted).toBe(true);
+    });
+
+    it('returns NOT_RUNNING when the monitor already completed', async () => {
+      monitorRegistry.register({
+        monitorId: 'mon_done',
+        command: 'true',
+        description: 'completed monitor',
+        status: 'running',
+        startTime: Date.now() - 1000,
+        abortController: new AbortController(),
+        eventCount: 0,
+        lastEventTime: 0,
+        maxEvents: 100,
+        idleTimeoutMs: 300_000,
+        droppedLines: 0,
+      });
+      monitorRegistry.complete('mon_done', 0);
+
+      const result = await tool.validateBuildAndExecute(
+        { task_id: 'mon_done' },
+        new AbortController().signal,
+      );
+
+      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_RUNNING);
+      expect(result.llmContent).toContain('Background monitor "mon_done"');
+      expect(result.llmContent).toContain('completed');
     });
   });
 });

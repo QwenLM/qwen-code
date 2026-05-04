@@ -118,14 +118,19 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Lsp: 'lsp',
   LspTool: 'lsp',
 
+  // Monitor tool
+  monitor: 'monitor',
+  Monitor: 'monitor',
+  MonitorTool: 'monitor',
+
   // Legacy edit tool name
   replace: 'edit',
 };
 
 /**
- * Shell tool canonical names.
+ * Shell tool canonical names. These use command-style rule specifiers.
  */
-const SHELL_TOOL_NAMES = new Set(['run_shell_command']);
+const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'monitor']);
 
 /**
  * File-reading tools — "Read" rules apply to all of these (best-effort).
@@ -188,6 +193,8 @@ export function getSpecifierKind(canonicalToolName: string): SpecifierKind {
  *
  * "Read" → resolves to "read_file", but also covers grep_search, glob, list_directory
  * "Edit" → resolves to "edit", but also covers write_file
+ * "Bash" → resolves to "run_shell_command", but also covers monitor
+ * "Monitor" → resolves to "monitor" only; it does not cover shell
  */
 export function toolMatchesRuleToolName(
   ruleToolName: string,
@@ -202,6 +209,12 @@ export function toolMatchesRuleToolName(
   }
   // "Edit" → covers all EDIT_TOOLS
   if (ruleToolName === 'edit' && EDIT_TOOLS.has(contextToolName)) {
+    return true;
+  }
+  // "Bash" (run_shell_command) → also covers monitor so that existing
+  // `Bash(...)` allow rules are not silently bypassed by switching to
+  // the monitor tool.  Monitor-only rules do NOT cover shell.
+  if (ruleToolName === 'run_shell_command' && contextToolName === 'monitor') {
     return true;
   }
   return false;
@@ -305,6 +318,8 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   write_file: 'Edit',
   // Shell
   run_shell_command: 'Bash',
+  // Monitor
+  monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
   // Agent / Skill
@@ -419,6 +434,7 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Read: 'read files',
   Edit: 'edit files',
   Bash: 'run commands',
+  Monitor: 'monitor commands',
   WebFetch: 'fetch from',
   Agent: 'use agent',
   Skill: 'use skill',
@@ -494,9 +510,13 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
         parts.push(`${verb} in ${cleanPath}`);
         break;
       }
-      case 'command':
-        parts.push(`run '${specifier}' commands`);
+      case 'command': {
+        const cmdVerb = DISPLAY_NAME_TO_VERB[displayName] ?? 'run';
+        // Extract just the verb word (e.g. "run commands" → "run", "monitor commands" → "monitor")
+        const verbWord = cmdVerb.split(' ')[0]!;
+        parts.push(`${verbWord} '${specifier}' commands`);
         break;
+      }
       case 'domain':
         parts.push(`${verb} ${specifier}`);
         break;
