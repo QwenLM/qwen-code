@@ -199,4 +199,40 @@ describe('resolveJsonSchemaArg', () => {
     const schema = resolveJsonSchemaArg('{"not":{"type":"string"}}');
     expect(schema).toBeDefined();
   });
+
+  it('rejects a root `const` whose value is not an object', () => {
+    expect(() => resolveJsonSchemaArg('{"const":1}')).toThrow(
+      /must accept object-typed values/,
+    );
+    expect(() => resolveJsonSchemaArg('{"const":"hello"}')).toThrow(
+      /must accept object-typed values/,
+    );
+    expect(() => resolveJsonSchemaArg('{"const":[1,2]}')).toThrow(
+      /must accept object-typed values/,
+    );
+  });
+
+  it('accepts a root `const` whose value is an object', () => {
+    const schema = resolveJsonSchemaArg(
+      '{"const":{"summary":"hello","risk":"low"}}',
+    );
+    expect(schema).toBeDefined();
+  });
+
+  it('rejects a root `enum` with no object members', () => {
+    expect(() => resolveJsonSchemaArg('{"enum":[1,2,"three"]}')).toThrow(
+      /must accept object-typed values/,
+    );
+    // Empty enum admits nothing — also reject.
+    expect(() => resolveJsonSchemaArg('{"enum":[]}')).toThrow(
+      /must accept object-typed values/,
+    );
+  });
+
+  it('accepts a root `enum` when at least one member is an object', () => {
+    const schema = resolveJsonSchemaArg(
+      '{"enum":[{"summary":"a","risk":"low"},{"summary":"b","risk":"high"}]}',
+    );
+    expect(schema).toBeDefined();
+  });
 });

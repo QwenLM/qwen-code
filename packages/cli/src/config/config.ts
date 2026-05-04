@@ -205,6 +205,27 @@ function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
     return false;
   }
 
+  // Root `const` / `enum` pin the value to specific literals. If those
+  // literals can never be a JSON object (e.g. `{const: 1}` or
+  // `{enum: ["a", "b"]}`), no object satisfies the schema — reject.
+  if ('const' in schema) {
+    const constVal = schema['const'];
+    if (
+      typeof constVal !== 'object' ||
+      constVal === null ||
+      Array.isArray(constVal)
+    ) {
+      return false;
+    }
+  }
+  const enumVal = schema['enum'];
+  if (Array.isArray(enumVal)) {
+    const anyObjectMember = enumVal.some(
+      (v) => typeof v === 'object' && v !== null && !Array.isArray(v),
+    );
+    if (!anyObjectMember) return false;
+  }
+
   for (const key of ['anyOf', 'oneOf'] as const) {
     const variants = schema[key];
     if (Array.isArray(variants) && variants.length > 0) {
@@ -790,6 +811,16 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['jsonSchema']) {
             if (argv['promptInteractive']) {
               return '--json-schema cannot be used with --prompt-interactive (-i); structured output only terminates the non-interactive flow.';
+            }
+            if (argv['inputFormat'] === 'stream-json') {
+              // The "first valid structured_output call ends the session"
+              // contract assumes a single one-shot prompt. Stream-json
+              // input keeps the process open waiting for more protocol
+              // messages, so terminating on the first call would silently
+              // drop subsequent prompts. Refuse the combination here
+              // rather than letting the run race to whichever message
+              // wins.
+              return '--json-schema cannot be used with --input-format stream-json; the "first structured_output call ends the session" contract is incompatible with the long-lived stream-json input protocol.';
             }
             const hasPrompt = !!argv['prompt'];
             const query = argv['query'] as string | string[] | undefined;
