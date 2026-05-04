@@ -261,6 +261,210 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       };
       expect(assistant.reasoning_content).toBe('');
     });
+
+    // https://api-docs.deepseek.com/zh-cn/api/create-chat-completion —
+    // DeepSeek expects a flat `reasoning_effort` body parameter (high/max);
+    // the standard `reasoning: { effort }` shape from the OpenAI pipeline
+    // would otherwise be ignored.
+    it('translates `reasoning.effort` into top-level `reasoning_effort`', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning: { effort: 'max' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBe('max');
+      expect(r['reasoning']).toBeUndefined();
+    });
+
+    it('passes through `reasoning_effort: high` unchanged', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning: { effort: 'high' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBe('high');
+      expect(r['reasoning']).toBeUndefined();
+    });
+
+    it("maps backward-compat 'xhigh' effort to 'max' (DeepSeek doc behavior)", () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning: { effort: 'xhigh' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBe('max');
+    });
+
+    it('maps backward-compat `low`/`medium` effort to `high` (DeepSeek doc behavior)', () => {
+      for (const effort of ['low', 'medium'] as const) {
+        const originalRequest = {
+          model: 'deepseek-v4-pro',
+          messages: [{ role: 'user', content: 'hi' }],
+          reasoning: { effort },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+        const result = provider.buildRequest(originalRequest, userPromptId);
+        const r = result as unknown as Record<string, unknown>;
+        expect(r['reasoning_effort']).toBe('high');
+      }
+    });
+
+    it('preserves an explicitly set top-level `reasoning_effort` (no clobber)', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning_effort: 'max',
+        reasoning: { effort: 'high' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      // Top-level value wins; nested shape is stripped to avoid sending both.
+      expect(r['reasoning_effort']).toBe('max');
+      expect(r['reasoning']).toBeUndefined();
+    });
+
+    it('keeps the rest of the `reasoning` object when only `effort` is stripped', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        reasoning: { effort: 'max', budget_tokens: 50_000 },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBe('max');
+      expect(r['reasoning']).toEqual({ budget_tokens: 50_000 });
+    });
+
+    it('leaves a request without `reasoning.effort` untouched', () => {
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+      const r = result as unknown as Record<string, unknown>;
+
+      expect(r['reasoning_effort']).toBeUndefined();
+      expect(r['reasoning']).toBeUndefined();
+    });
+
+    it('does NOT translate reasoning_effort on a non-DeepSeek hostname (model-name fallback only)', () => {
+      // The provider class is selected by `isDeepSeekProvider`, which
+      // matches the broader hostname-OR-model rule (covers sglang/vllm
+      // self-hosting DeepSeek models). But the DeepSeek-specific
+      // `reasoning_effort` body shape only ships on actual DeepSeek
+      // hostnames; otherwise a strict OpenAI-compat backend would see
+      // an unexpected request shape change. Content flattening still
+      // runs (it's a model-format constraint, not a wire-shape one).
+      const selfHostedConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://my-sglang.example.com:8000/v1',
+        model: 'deepseek-v4-pro',
+      } as ContentGeneratorConfig;
+      const selfHostedProvider = new DeepSeekOpenAICompatibleProvider(
+        selfHostedConfig,
+        mockCliConfig,
+      );
+
+      const originalRequest = {
+        model: 'deepseek-v4-pro',
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'hi' }],
+          },
+        ],
+        reasoning: { effort: 'max' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = selfHostedProvider.buildRequest(
+        originalRequest,
+        userPromptId,
+      );
+      const r = result as unknown as Record<string, unknown>;
+
+      // reasoning_effort NOT injected, nested reasoning preserved verbatim.
+      expect(r['reasoning_effort']).toBeUndefined();
+      expect(r['reasoning']).toEqual({ effort: 'max' });
+      // Content flattening still ran.
+      expect((result.messages?.[0] as { content: unknown }).content).toBe('hi');
+    });
+  });
+
+  describe('isDeepSeekHostname', () => {
+    it('matches api.deepseek.com baseUrls', () => {
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: 'https://api.deepseek.com/v1',
+        } as ContentGeneratorConfig),
+      ).toBe(true);
+    });
+
+    it('does NOT match a self-hosted host even when model name is deepseek', () => {
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: 'https://my-sglang.example.com:8000/v1',
+          model: 'deepseek-v4-pro',
+        } as ContentGeneratorConfig),
+      ).toBe(false);
+    });
+
+    it('matches subdomains of api.deepseek.com', () => {
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: 'https://us.api.deepseek.com/v1',
+        } as ContentGeneratorConfig),
+      ).toBe(true);
+    });
+
+    it('rejects hostile hostnames that contain api.deepseek.com as a substring', () => {
+      // Naive substring matching would let an attacker route requests
+      // through e.g. `api.deepseek.com.evil.com` and inject the
+      // DeepSeek-only `reasoning_effort` body parameter into a
+      // non-DeepSeek backend. Parse with `new URL` and match the
+      // hostname exactly to block this.
+      for (const baseUrl of [
+        'https://api.deepseek.com.evil.com/v1',
+        'https://evil.com/api.deepseek.com/v1',
+        'https://api.deepseek.comevil.com/v1',
+        'https://api-deepseek-com.example.com/v1',
+      ]) {
+        expect(
+          DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+            baseUrl,
+          } as ContentGeneratorConfig),
+        ).toBe(false);
+      }
+    });
+
+    it('treats invalid URLs as non-DeepSeek', () => {
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: 'not-a-url',
+        } as ContentGeneratorConfig),
+      ).toBe(false);
+      expect(
+        DeepSeekOpenAICompatibleProvider.isDeepSeekHostname({
+          baseUrl: '',
+        } as ContentGeneratorConfig),
+      ).toBe(false);
+    });
   });
 
   describe('getDefaultGenerationConfig', () => {

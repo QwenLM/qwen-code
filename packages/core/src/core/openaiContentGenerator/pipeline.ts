@@ -12,6 +12,7 @@ import {
 } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
+import { isDeepSeekHostname } from './provider/deepseek.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
 
@@ -344,19 +345,41 @@ export class ContentGenerationPipeline {
       userPromptId,
     );
 
-    // When thinking is explicitly disabled (e.g., forked queries for suggestions),
-    // override thinking-related keys that may have been injected by extra_body.
-    // extra_body is spread last in provider.buildRequest, so it overrides
-    // buildReasoningConfig's decision — we must post-process here.
-    if (request.config?.thinkingConfig?.includeThoughts === false) {
+    // Reasoning is disabled when either:
+    //   - the per-request opt-out is set (forked queries for suggestions),
+    //   - the config-level opt-out is set (`reasoning: false`).
+    // In both cases we want the wire shape to actually disable thinking,
+    // not just remove the effort knob — otherwise providers whose default
+    // is "thinking enabled" (DeepSeek V4+, qwen3) keep paying thinking
+    // latency/cost.
+    const reasoningDisabled =
+      request.config?.thinkingConfig?.includeThoughts === false ||
+      this.contentGeneratorConfig.reasoning === false;
+    if (reasoningDisabled) {
       const typed = providerRequest as unknown as Record<string, unknown>;
       if ('enable_thinking' in typed) {
         typed['enable_thinking'] = false;
       }
-      // Also strip reasoning config — extra_body could inject it, overriding
+      // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
+      // The provider hook (e.g. DeepSeekOpenAICompatibleProvider.buildRequest
+      // → translateReasoningEffort) runs earlier in this same pass and may
+      // have flattened the nested `reasoning` into a top-level
+      // `reasoning_effort`, so we strip both shapes here.
       if ('reasoning' in typed) {
         delete typed['reasoning'];
+      }
+      if ('reasoning_effort' in typed) {
+        delete typed['reasoning_effort'];
+      }
+      // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
+      // the effort knob alone leaves thinking on. Emit the explicit
+      // `thinking: { type: 'disabled' }` shape from DeepSeek's API spec.
+      // Hostname-gated: self-hosted DeepSeek (sglang/vllm) or older
+      // DeepSeek versions may not accept the V4 thinking parameter, so
+      // we don't push it there. See https://api-docs.deepseek.com/.
+      if (isDeepSeekHostname(this.contentGeneratorConfig)) {
+        typed['thinking'] = { type: 'disabled' };
       }
     }
 
