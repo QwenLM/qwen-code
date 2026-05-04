@@ -153,8 +153,10 @@ describe('installation scripts', () => {
       'if defined QWEN_INSTALL_ROOT set "INSTALL_BASE=!QWEN_INSTALL_ROOT!"',
     );
     expect(script).not.toContain('%QWEN_INSTALL_ROOT%');
-    expect(script).toContain(':ValidateSafeVar');
-    expect(script).toContain('set "SAFE_VALUE=!%~1!"');
+    expect(script).toContain('set "QWEN_VALIDATE_INSTALL_BASE=!INSTALL_BASE!"');
+    expect(script).toContain(
+      'installer options contain unsafe command characters',
+    );
     expect(script).toContain(':ValidateVersion');
     expect(script).toContain(
       'call :ValidateHttpsUrlVar "NPM_REGISTRY" "--registry"',

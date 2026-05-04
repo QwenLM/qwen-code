@@ -208,24 +208,58 @@ exit /b 0
 :ValidateOptions
 if "!METHOD!"=="" set "METHOD=detect"
 
-call :ValidateSafeVar "METHOD" "--method"
-if %ERRORLEVEL% NEQ 0 exit /b 1
-call :ValidateSafeVar "MIRROR" "--mirror"
-if %ERRORLEVEL% NEQ 0 exit /b 1
-call :ValidateSafeVar "BASE_URL" "--base-url"
-if %ERRORLEVEL% NEQ 0 exit /b 1
-call :ValidateSafeVar "ARCHIVE_PATH" "--archive"
-if %ERRORLEVEL% NEQ 0 exit /b 1
-call :ValidateSafeVar "VERSION" "--version"
-if %ERRORLEVEL% NEQ 0 exit /b 1
-call :ValidateSafeVar "NPM_REGISTRY" "--registry"
-if %ERRORLEVEL% NEQ 0 exit /b 1
-call :ValidateSafePathVar "INSTALL_BASE" "QWEN_INSTALL_ROOT"
-if %ERRORLEVEL% NEQ 0 exit /b 1
-call :ValidateSafePathVar "INSTALL_DIR" "QWEN_INSTALL_LIB_DIR"
-if %ERRORLEVEL% NEQ 0 exit /b 1
-call :ValidateSafePathVar "INSTALL_BIN_DIR" "QWEN_INSTALL_BIN_DIR"
-if %ERRORLEVEL% NEQ 0 exit /b 1
+set "QWEN_VALIDATE_METHOD=!METHOD!"
+set "QWEN_VALIDATE_MIRROR=!MIRROR!"
+set "QWEN_VALIDATE_BASE_URL=!BASE_URL!"
+set "QWEN_VALIDATE_ARCHIVE_PATH=!ARCHIVE_PATH!"
+set "QWEN_VALIDATE_VERSION=!VERSION!"
+set "QWEN_VALIDATE_NPM_REGISTRY=!NPM_REGISTRY!"
+set "QWEN_VALIDATE_INSTALL_BASE=!INSTALL_BASE!"
+set "QWEN_VALIDATE_INSTALL_DIR=!INSTALL_DIR!"
+set "QWEN_VALIDATE_INSTALL_BIN_DIR=!INSTALL_BIN_DIR!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); foreach ($name in 'METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR') { $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_VALIDATE_METHOD="
+set "QWEN_VALIDATE_MIRROR="
+set "QWEN_VALIDATE_BASE_URL="
+set "QWEN_VALIDATE_ARCHIVE_PATH="
+set "QWEN_VALIDATE_VERSION="
+set "QWEN_VALIDATE_NPM_REGISTRY="
+set "QWEN_VALIDATE_INSTALL_BASE="
+set "QWEN_VALIDATE_INSTALL_DIR="
+set "QWEN_VALIDATE_INSTALL_BIN_DIR="
+if %PS_STATUS% NEQ 0 (
+    echo ERROR: installer options contain unsafe command characters.
+    exit /b 1
+)
+
+if "!INSTALL_BASE!"=="" (
+    echo ERROR: QWEN_INSTALL_ROOT must not be empty.
+    exit /b 1
+)
+if "!INSTALL_DIR!"=="" (
+    echo ERROR: QWEN_INSTALL_LIB_DIR must not be empty.
+    exit /b 1
+)
+if "!INSTALL_BIN_DIR!"=="" (
+    echo ERROR: QWEN_INSTALL_BIN_DIR must not be empty.
+    exit /b 1
+)
+if "!INSTALL_BASE:~1,2!"==":\" goto validate_install_base_ok
+if "!INSTALL_BASE:~0,2!"=="\\" goto validate_install_base_ok
+echo ERROR: QWEN_INSTALL_ROOT must be an absolute path.
+exit /b 1
+:validate_install_base_ok
+if "!INSTALL_DIR:~1,2!"==":\" goto validate_install_dir_ok
+if "!INSTALL_DIR:~0,2!"=="\\" goto validate_install_dir_ok
+echo ERROR: QWEN_INSTALL_LIB_DIR must be an absolute path.
+exit /b 1
+:validate_install_dir_ok
+if "!INSTALL_BIN_DIR:~1,2!"==":\" goto validate_install_bin_dir_ok
+if "!INSTALL_BIN_DIR:~0,2!"=="\\" goto validate_install_bin_dir_ok
+echo ERROR: QWEN_INSTALL_BIN_DIR must be an absolute path.
+exit /b 1
+:validate_install_bin_dir_ok
 
 if /i "!METHOD!"=="detect" goto validate_method_ok
 if /i "!METHOD!"=="standalone" goto validate_method_ok
@@ -251,41 +285,6 @@ if %ERRORLEVEL% NEQ 0 exit /b 1
 
 call :ValidateSource
 exit /b %ERRORLEVEL%
-
-:ValidateSafeVar
-set "SAFE_VALUE=!%~1!"
-set "SAFE_OPTION=%~2"
-call :ValidateSafeCurrentValue
-exit /b %ERRORLEVEL%
-
-:ValidateSafeCurrentValue
-if "!SAFE_VALUE!"=="" exit /b 0
-set "QWEN_VALIDATE_VALUE=!SAFE_VALUE!"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_VALIDATE_VALUE; if ($null -eq $value) { exit 0 }; $unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); if ($value.IndexOfAny($unsafe) -ge 0) { exit 1 }"
-set "PS_STATUS=%ERRORLEVEL%"
-set "QWEN_VALIDATE_VALUE="
-if %PS_STATUS% NEQ 0 goto unsafe_value
-exit /b 0
-
-:unsafe_value
-echo ERROR: !SAFE_OPTION! contains unsafe command characters.
-exit /b 1
-
-:ValidateSafePathVar
-set "PATH_VALUE=!%~1!"
-set "PATH_OPTION=%~2"
-set "SAFE_VALUE=!PATH_VALUE!"
-set "SAFE_OPTION=!PATH_OPTION!"
-call :ValidateSafeCurrentValue
-if %ERRORLEVEL% NEQ 0 exit /b 1
-if "!PATH_VALUE!"=="" (
-    echo ERROR: !PATH_OPTION! must not be empty.
-    exit /b 1
-)
-if "!PATH_VALUE:~1,2!"==":\" exit /b 0
-if "!PATH_VALUE:~0,2!"=="\\" exit /b 0
-echo ERROR: !PATH_OPTION! must be an absolute path.
-exit /b 1
 
 :ValidateHttpsUrlVar
 set "URL_VALUE=!%~1!"
