@@ -1033,6 +1033,7 @@ export function convertOpenAIChunkToGemini(
         ),
       );
     } else if (choice.finish_reason) {
+      // Flush any buffered tagged-thinking content on stream end
       parts.push(...convertOpenAITextToParts('', requestContext, true));
     }
 

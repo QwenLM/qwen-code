@@ -41,18 +41,33 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
       ).toBe(true);
     });
 
-    it('does not match unrelated MiniMax hosts', () => {
+    it('matches MiniMax subdomain hosts via wildcard suffix', () => {
       expect(
         MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
           createConfig('https://gateway.minimaxi.com/v1'),
         ),
-      ).toBe(false);
+      ).toBe(true);
+      expect(
+        MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+          createConfig('https://api.minimaxi.com/v1/chat/completions'),
+        ),
+      ).toBe(true);
+      expect(
+        MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+          createConfig('https://custom.api.minimax.io/v1'),
+        ),
+      ).toBe(true);
     });
 
     it('does not match unrelated or invalid URLs', () => {
       expect(
         MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
           createConfig('https://api.openai.com/v1'),
+        ),
+      ).toBe(false);
+      expect(
+        MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+          createConfig('https://minimaxi.com/v1'),
         ),
       ).toBe(false);
       expect(

@@ -8,10 +8,8 @@ import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
-const MINIMAX_OPENAI_COMPATIBLE_HOSTS = new Set([
-  'api.minimaxi.com',
-  'api.minimax.io',
-]);
+/** Suffix patterns for MiniMax OpenAI-compatible API hosts. */
+const MINIMAX_HOST_SUFFIXES = ['.minimaxi.com', '.minimax.io'] as const;
 
 export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   static isMiniMaxProvider(config: ContentGeneratorConfig): boolean {
@@ -19,7 +17,7 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
 
     try {
       const hostname = new URL(config.baseUrl).hostname.toLowerCase();
-      return MINIMAX_OPENAI_COMPATIBLE_HOSTS.has(hostname);
+      return MINIMAX_HOST_SUFFIXES.some((suffix) => hostname.endsWith(suffix));
     } catch {
       return false;
     }

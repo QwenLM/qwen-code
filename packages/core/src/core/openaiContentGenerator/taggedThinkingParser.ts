@@ -9,6 +9,12 @@ import type { Part } from '@google/genai';
 const OPEN_TAGS = ['<think>', '<thinking>'] as const;
 const CLOSE_TAGS = ['</think>', '</thinking>'] as const;
 
+/** Longest tag length across all open/close variants ('</thinking>' = 11). */
+const MAX_TAG_LENGTH = Math.max(
+  ...OPEN_TAGS.map((t) => t.length),
+  ...CLOSE_TAGS.map((t) => t.length),
+);
+
 type ParserMode = 'text' | 'thought';
 
 function appendPart(parts: Part[], text: string, mode: ParserMode): void {
@@ -16,19 +22,37 @@ function appendPart(parts: Part[], text: string, mode: ParserMode): void {
   parts.push(mode === 'thought' ? { text, thought: true } : { text });
 }
 
-function isPrefixOfAnyTag(input: string, tags: readonly string[]): boolean {
-  if (!input) return false;
-  const lowerInput = input.toLowerCase();
-  return tags.some((tag) => tag.startsWith(lowerInput));
+/**
+ * Check whether the suffix starting at `offset` in the pre-computed
+ * lowercase buffer is a prefix of any tag. The caller MUST pass a
+ * fully-lowercased buffer to avoid repeated `toLowerCase()` allocations.
+ */
+function isPrefixOfAnyTag(
+  lower: string,
+  offset: number,
+  tags: readonly string[],
+): boolean {
+  const remainingLen = lower.length - offset;
+  if (remainingLen <= 0) return false;
+  // If the remaining text is longer than the longest tag it cannot be a
+  // prefix of any tag, so we can bail early without slicing.
+  if (remainingLen > MAX_TAG_LENGTH) return false;
+  // Slice is bounded to MAX_TAG_LENGTH (≤ 11 chars) → O(1).
+  return tags.some((tag) =>
+    tag.startsWith(lower.slice(offset, offset + remainingLen)),
+  );
 }
 
+/**
+ * Find a tag that matches the text at `offset` in the pre-computed
+ * lowercase buffer. Returns the matched tag string or undefined.
+ */
 function findMatchingTag(
-  input: string,
+  lower: string,
   offset: number,
   tags: readonly string[],
 ): string | undefined {
-  const remaining = input.slice(offset).toLowerCase();
-  return tags.find((tag) => remaining.startsWith(tag));
+  return tags.find((tag) => lower.startsWith(tag, offset));
 }
 
 export class TaggedThinkingParser {
@@ -38,13 +62,17 @@ export class TaggedThinkingParser {
   parse(chunk: string, final = false): Part[] {
     this.buffer += chunk;
 
+    // Pre-compute a lowercase copy once per call to avoid repeated
+    // O(N) slice+toLowerCase allocations inside the character loop.
+    const lower = this.buffer.toLowerCase();
+
     const parts: Part[] = [];
     let segment = '';
     let index = 0;
 
     while (index < this.buffer.length) {
       const activeTags = this.mode === 'text' ? OPEN_TAGS : CLOSE_TAGS;
-      const matchedTag = findMatchingTag(this.buffer, index, activeTags);
+      const matchedTag = findMatchingTag(lower, index, activeTags);
 
       if (matchedTag) {
         appendPart(parts, segment, this.mode);
@@ -54,8 +82,7 @@ export class TaggedThinkingParser {
         continue;
       }
 
-      const remaining = this.buffer.slice(index);
-      if (!final && isPrefixOfAnyTag(remaining, activeTags)) {
+      if (!final && isPrefixOfAnyTag(lower, index, activeTags)) {
         break;
       }
 
