@@ -403,28 +403,22 @@ jobs:
             echo ""
           } > "${NOTES_FILE}"
 
+          NOTES_START_TAG_FLAG=""
+          GENERATE_NOTES_FLAG="--generate-notes"
           if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
-            PREVIOUS_NOTES=$(gh release view "sdk-python-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>&1) || {
-              ERR_MSG="${PREVIOUS_NOTES}"
-              case "${ERR_MSG}" in
-                *"release not found"*|*"Not Found"*|*"HTTP 404"*)
-                  PREVIOUS_NOTES='See commit history for changes.'
-                  ;;
-                *)
-                  echo "::warning::Failed to fetch previous release notes: ${ERR_MSG}"
-                  PREVIOUS_NOTES='See commit history for changes.'
-                  ;;
-              esac
-            }
-            printf '%s\n' "${PREVIOUS_NOTES}" >> "${NOTES_FILE}"
+            NOTES_START_TAG_FLAG="--notes-start-tag sdk-python-${PREVIOUS_RELEASE_TAG}"
           else
-            echo "See commit history for changes." >> "${NOTES_FILE}"
+            # No prior SDK tag — auto-generated notes would include non-SDK commits.
+            GENERATE_NOTES_FLAG=""
+            echo "Initial release. See commit history for changes." >> "${NOTES_FILE}"
           fi
 
           gh release create "${TAG_NAME}" \
             --target "${RELEASE_TARGET_SHA}" \
             --title "SDK Python Release ${RELEASE_TAG}" \
             --notes-file "${NOTES_FILE}" \
+            ${GENERATE_NOTES_FLAG} \
+            ${NOTES_START_TAG_FLAG} \
             ${PRERELEASE_FLAG}
 
           rm -f "${NOTES_FILE}"
