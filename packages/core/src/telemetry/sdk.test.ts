@@ -391,20 +391,14 @@ describe('Telemetry SDK', () => {
     const shutdownSpy = vi
       .spyOn(NodeSDK.prototype, 'shutdown')
       .mockReturnValue(Promise.reject(new Error('shutdown failed')));
-    const diagErrorSpy = vi.spyOn(diag, 'error').mockImplementation(() => {});
     try {
       initializeTelemetry(mockConfig);
 
       await shutdownTelemetry();
 
       expect(isTelemetrySdkInitialized()).toBe(false);
-      expect(diagErrorSpy).toHaveBeenCalledWith(
-        'Error shutting down SDK:',
-        expect.any(Error),
-      );
     } finally {
       shutdownSpy.mockRestore();
-      diagErrorSpy.mockRestore();
     }
   });
 

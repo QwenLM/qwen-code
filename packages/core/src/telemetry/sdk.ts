@@ -300,6 +300,8 @@ export async function shutdownTelemetry(): Promise<void> {
             err instanceof Error ? err.message : err,
           );
         }
+        // If not timed out, the rejection will be caught by the
+        // try/catch below via the Promise.race await.
       });
       const timeout = new Promise<'timeout'>((resolve) => {
         timer = setTimeout(() => {
@@ -319,7 +321,6 @@ export async function shutdownTelemetry(): Promise<void> {
       }
     } catch (error) {
       clearTimeout(timer);
-      diag.error('Error shutting down SDK:', error);
       debugLogger.error('Error shutting down SDK:', error);
     } finally {
       telemetryInitialized = false;
