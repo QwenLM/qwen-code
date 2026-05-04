@@ -16,13 +16,28 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 import {
   fetchWithTimeout,
   isPrivateIp,
-  formatFetchErrorForUser,
   createDebugLogger,
+  stripTerminalControlSequences,
+  AuthType,
 } from '@qwen-code/qwen-code-core';
-import { escapeAnsiCtrlCodes } from '../../ui/utils/textUtils.js';
 
 const debugLogger = createDebugLogger('MODEL_COMMAND');
 const FETCH_TIMEOUT_MS = 30_000;
+
+/**
+ * Sanitize a URL for logging by removing credentials and sensitive info.
+ */
+function sanitizeUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.password = '';
+    parsed.username = '';
+    parsed.search = '';
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
 
 export const modelCommand: SlashCommand = {
   name: 'model',
@@ -35,8 +50,8 @@ export const modelCommand: SlashCommand = {
   completion: async (_context, partialArg) => {
     const completions = [];
 
-    // Always offer --fast and list when no partial arg, or filter by match
-    if (!partialArg || '--fast'.startsWith(partialArg)) {
+    // Filter by match for flags and subcommands
+    if ('--fast'.startsWith(partialArg)) {
       completions.push({
         value: '--fast',
         description: t(
@@ -45,7 +60,7 @@ export const modelCommand: SlashCommand = {
       });
     }
 
-    if (!partialArg || 'list'.startsWith(partialArg)) {
+    if ('list'.startsWith(partialArg)) {
       completions.push({
         value: 'list',
         description: t(
@@ -82,7 +97,10 @@ export const modelCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'info',
-            content: `Current fast model: ${fastModel}\nUse "/model --fast <model-id>" to set fast model.`,
+            content: t(
+              'Current fast model: {{fastModel}}\nUse "/model --fast <model-id>" to set fast model.',
+              { fastModel },
+            ),
           };
         }
         return {
@@ -160,7 +178,10 @@ export const modelCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: `Current model: ${currentModel}\nUse "/model <model-id>" to switch models or "/model --fast <model-id>" to set the fast model.`,
+        content: t(
+          'Current model: {{currentModel}}\nUse "/model <model-id>" to switch models or "/model --fast <model-id>" to set the fast model.',
+          { currentModel },
+        ),
       };
     }
 
@@ -198,7 +219,8 @@ export const modelCommand: SlashCommand = {
           };
         }
 
-        const { baseUrl, apiKey } = contentGeneratorConfig;
+        const { baseUrl, apiKey, authType, customHeaders, proxy } =
+          contentGeneratorConfig;
 
         if (!baseUrl) {
           return {
@@ -211,7 +233,14 @@ export const modelCommand: SlashCommand = {
         }
 
         try {
-          const models = await fetchModels(baseUrl, apiKey);
+          const models = await fetchModels(
+            baseUrl,
+            apiKey,
+            authType,
+            customHeaders,
+            context.abortSignal,
+            proxy,
+          );
           if (models.length === 0) {
             return {
               type: 'message',
@@ -219,21 +248,20 @@ export const modelCommand: SlashCommand = {
               content: t('No models found from the configured endpoint.'),
             };
           }
-          // Sanitize model IDs to prevent terminal escape sequence injection
-          const output = escapeAnsiCtrlCodes(models.join('\n'));
+          const output = models.join('\n');
           return {
             type: 'message',
             messageType: 'info',
             content: output,
           };
         } catch (error) {
-          const errorMessage = formatFetchErrorForUser(error, {
-            url: `${baseUrl.replace(/\/+$/, '')}/models`,
-          });
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
           return {
             type: 'message',
             messageType: 'error',
-            content: t('Failed to fetch models: {{error}}', {
+            content: t('Failed to fetch models from {{url}}: {{error}}', {
+              url: baseUrl,
               error: errorMessage,
             }),
           };
@@ -251,62 +279,87 @@ export const modelCommand: SlashCommand = {
 export async function fetchModels(
   baseUrl: string,
   apiKey?: string,
+  authType?: AuthType,
+  customHeaders?: Record<string, string>,
+  signal?: AbortSignal,
+  proxy?: string,
 ): Promise<string[]> {
+  // Guard against non-compatible auth types
+  if (authType === AuthType.QWEN_OAUTH) {
+    throw new Error(
+      t(
+        'Model discovery is not supported for Qwen OAuth. Please switch to an OpenAI-compatible provider.',
+      ),
+    );
+  }
+
   // Validate URL
   let parsed: URL;
   try {
     parsed = new URL(baseUrl);
   } catch {
-    throw new Error('Invalid baseUrl: must be a valid URL');
+    throw new Error(t('Invalid baseUrl: must be a valid URL'));
   }
 
   // Enforce HTTPS
   if (parsed.protocol !== 'https:') {
-    throw new Error('baseUrl must use HTTPS');
+    throw new Error(t('baseUrl must use HTTPS'));
   }
 
   // SSRF protection: block private IPs and localhost.
-  // isPrivateIp() handles IPv4, IPv6 (including bracketed), and IPv4-mapped IPv6.
-  // The explicit localhost check covers the hostname string 'localhost' which
-  // isPrivateIp would miss (it's not an IP literal).
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
-  if (hostname === 'localhost') {
-    throw new Error(
-      'baseUrl points to a private or reserved IP address (SSRF check)',
-    );
-  }
-  if (isPrivateIp(baseUrl)) {
-    throw new Error(
-      'baseUrl points to a private or reserved IP address (SSRF check)',
-    );
+  // Parse hostname once, then classify — do NOT pass a URL string to isPrivateIp.
+  const hostname = parsed.hostname;
+  if (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '::1' ||
+    hostname.startsWith('[') || // IPv6 literal in Node 20+ includes brackets
+    isPrivateIp(hostname)
+  ) {
+    throw new Error(t('baseUrl points to a private IP address (SSRF check)'));
   }
 
-  // Normalize baseUrl to avoid double slash (e.g., "https://api.openai.com/v1/")
-  const normalizedUrl = baseUrl.replace(/\/+$/, '');
-  const url = `${normalizedUrl}/models`;
+  // Normalize baseUrl: strip trailing slashes and /models suffix, then append /models.
+  // Use URL object to correctly handle query strings and fragments.
+  const urlObj = new URL(baseUrl);
+  urlObj.pathname =
+    urlObj.pathname.replace(/\/+$/, '').replace(/\/models$/i, '') + '/models';
+  const url = urlObj.toString();
+  const headers: Record<string, string> = {};
 
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-  };
-
-  if (apiKey) {
-    headers['Authorization'] = `Bearer ${apiKey}`;
+  // Apply custom headers first (case-insensitive merge)
+  if (customHeaders) {
+    for (const [key, value] of Object.entries(customHeaders)) {
+      headers[key.toLowerCase()] = value;
+    }
   }
 
-  // Sanitize URL for debug logging — strip embedded credentials
-  const logSafeUrl = new URL(url);
-  logSafeUrl.username = '';
-  logSafeUrl.password = '';
-  debugLogger.debug('Fetching models from', logSafeUrl.toString());
+  // Set defaults if not overridden
+  if (!headers['accept']) {
+    headers['accept'] = 'application/json';
+  }
+
+  if (apiKey && !headers['authorization']) {
+    headers['authorization'] = `Bearer ${apiKey}`;
+  }
+
+  const sanitizedUrl = sanitizeUrl(url);
+  debugLogger.debug('Fetching models', {
+    url: sanitizedUrl,
+    proxy: proxy ?? 'none',
+  });
 
   const startTime = Date.now();
   let response: Response;
   try {
-    response = await fetchWithTimeout(url, FETCH_TIMEOUT_MS, headers, 'error');
+    response = await fetchWithTimeout(url, FETCH_TIMEOUT_MS, headers, signal, {
+      redirect: 'error',
+    });
   } catch (error) {
     debugLogger.debug('Models request failed', {
       error,
-      url: logSafeUrl.toString(),
+      url: sanitizedUrl,
+      proxy: proxy ?? 'none',
     });
     throw error;
   }
@@ -314,6 +367,7 @@ export async function fetchModels(
   debugLogger.debug('Models response', {
     status: response.status,
     duration: Date.now() - startTime,
+    proxy: proxy ?? 'none',
   });
 
   if (!response.ok) {
@@ -324,20 +378,50 @@ export async function fetchModels(
       ? truncated.replaceAll(apiKey, '[REDACTED]')
       : truncated;
     throw new Error(
-      `Request failed (HTTP_${response.status}): ${sanitized}`,
+      t('Request to {{url}} failed ({{status}}): {{sanitized}}', {
+        url,
+        status: String(response.status),
+        sanitized,
+      }),
     );
   }
 
-  const data = (await response.json()) as {
-    data?: Array<{ id?: unknown; [key: string]: unknown }>;
-  };
+  const json = (await response.json()) as unknown;
+  let modelList: unknown[] = [];
+  let foundValidStructure = false;
 
-  if (!Array.isArray(data.data)) {
-    throw new Error('Unexpected response format: missing data array');
+  // Normalize various response shapes (OpenAI, Ollama, DeepSeek, etc.)
+  if (Array.isArray(json)) {
+    // Bare array: [{id: "model-1"}, ...] or ["model-1", ...]
+    modelList = json;
+    foundValidStructure = true;
+  } else if (json && typeof json === 'object') {
+    const data = json as Record<string, unknown>;
+    if (Array.isArray(data['data'])) {
+      // Standard OpenAI: { data: [{id: "model-1"}, ...] }
+      modelList = data['data'] as unknown[];
+      foundValidStructure = true;
+    } else if (Array.isArray(data['models'])) {
+      // Some providers use 'models' instead of 'data'
+      modelList = data['models'] as unknown[];
+      foundValidStructure = true;
+    }
   }
 
-  // Type-check model IDs: only accept non-empty strings
-  return data.data
-    .map((model) => model.id)
-    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  if (!foundValidStructure) {
+    throw new Error(t('Unexpected response format: missing data array'));
+  }
+
+  // Type-check model IDs: only accept non-empty strings, and sanitize for terminal safety
+  return modelList
+    .map((model) => {
+      if (typeof model === 'string') return model;
+      if (model && typeof model === 'object' && 'id' in model) {
+        return (model as { id: unknown }).id;
+      }
+      return undefined;
+    })
+    .filter((id): id is string => typeof id === 'string' && id.length > 0)
+    .map((id) => stripTerminalControlSequences(id).trim())
+    .filter((id) => id.length > 0);
 }

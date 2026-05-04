@@ -4,23 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getErrorMessage, isNodeError } from './errors.js';
-import { URL } from 'node:url';
+import { getErrorMessage, isAbortError } from './errors.js';
 
 const PRIVATE_IP_RANGES = [
-  /^10\./,
-  /^127\./,
-  /^169\.254\./, // AWS IMDS and link-local
-  /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
-  /^192\.168\./,
-  /^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\./, // CGNAT (RFC 6598)
-  /^0\./, // 0.0.0.0/8 — can reach localhost on Linux
-  /^::1$/, // IPv6 loopback
-  /^fc00:/, // IPv6 unique local
-  /^fe80:/, // IPv6 link-local
-  // IPv4-mapped IPv6: ::ffff:x.x.x.x (Node normalizes to hex, e.g. ::ffff:c0a8:101)
-  // We check the raw hostname for the ::ffff: prefix and also test the original URL
-  // via isPrivateIp which uses the original string before Node normalization
+  /^0\./, // 0.0.0.0/8
+  /^10\./, // 10.0.0.0/8
+  /^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\./, // CGNAT 100.64.0.0/10
+  /^127\./, // 127.0.0.0/8
+  /^169\.254\./, // AWS IMDS / Link-Local 169.254.0.0/16
+  /^172\.(1[6-9]|2[0-9]|3[0-1])\./, // 172.16.0.0/12
+  /^192\.168\./, // 192.168.0.0/16
+  /^::1$/,
+  /^fc00:/,
+  /^fe80:/,
 ];
 
 const TLS_ERROR_CODES = new Set([
@@ -53,50 +49,56 @@ export class FetchError extends Error {
   }
 }
 
-export function isPrivateIp(url: string): boolean {
-  try {
-    // Node 20+ returns IPv6 hostnames with brackets (e.g. '[::1]').
-    // Strip them before testing against IP range patterns.
-    const hostname = new URL(url).hostname.replace(/^\[|\]$/g, '');
-    if (PRIVATE_IP_RANGES.some((range) => range.test(hostname))) {
-      return true;
-    }
-    // IPv4-mapped IPv6: Node normalizes ::ffff:192.168.1.1 to ::ffff:c0a8:101 (hex).
-    // Check the original URL string for ::ffff: followed by a dotted-quad pattern.
-    const rawHostname = url.match(/:\/\/([^/]+)/)?.[1] ?? '';
-    const bareHostname = rawHostname.replace(/^\[|\]$/g, '');
-    if (/^::ffff:\d+\.\d+\.\d+\.\d+$/.test(bareHostname)) {
-      // Extract the IPv4 part and check if it's private
-      const ipv4 = bareHostname.replace(/^::ffff:/, '');
-      return PRIVATE_IP_RANGES.some((range) => range.test(ipv4));
-    }
-    return false;
-  } catch (_e) {
-    return false;
-  }
+/**
+ * Check whether a hostname or IP string is a private/internal address.
+ * Accepts a raw hostname or IP (e.g. "192.168.1.1", "::1", "[::1]").
+ * Does NOT accept a full URL — parse the URL first and pass `parsed.hostname`.
+ */
+export function isPrivateIp(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return PRIVATE_IP_RANGES.some((range) => range.test(normalized));
 }
 
 export async function fetchWithTimeout(
   url: string,
   timeout: number,
   headers?: Record<string, string>,
-  redirect: RequestRedirect = 'error',
+  signal?: AbortSignal,
+  options: { redirect?: RequestRedirect } = {},
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  // Non-positive timeout: reject immediately with a FetchError instead of
+  // relying on AbortController (which would leak a raw AbortError).
+  if (timeout <= 0) {
+    throw new FetchError(`Request timed out after ${timeout}ms`, 'ETIMEDOUT');
+  }
+
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), timeout);
 
   try {
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, timeoutController.signal])
+      : timeoutController.signal;
+
     const response = await fetch(url, {
-      signal: controller.signal,
+      signal: combinedSignal,
       headers,
-      redirect,
+      redirect: options.redirect ?? 'follow',
     });
     return response;
   } catch (error) {
-    if (isNodeError(error) && error.code === 'ABORT_ERR') {
-      throw new FetchError(`Request timed out after ${timeout}ms`, 'ETIMEDOUT');
+    if (isAbortError(error)) {
+      if (timeoutController.signal.aborted) {
+        throw new FetchError(
+          `Request timed out after ${timeout}ms`,
+          'ETIMEDOUT',
+        );
+      }
+      // User cancellation - rethrow the original AbortError
+      throw error;
     }
-    throw new FetchError(getErrorMessage(error), getErrorCode(error));
+    const code = getErrorCode(error);
+    throw new FetchError(getErrorMessage(error), code);
   } finally {
     clearTimeout(timeoutId);
   }

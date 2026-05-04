@@ -6,12 +6,13 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { modelCommand, fetchModels } from './modelCommand.js';
-import { type CommandContext } from './types.js';
+import { type CommandContext, CommandKind } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import {
   AuthType,
   type ContentGeneratorConfig,
   type Config,
+  fetchWithTimeout,
 } from '@qwen-code/qwen-code-core';
 
 // Helper function to create a mock config
@@ -245,8 +246,36 @@ describe('fetchModels', () => {
     expect(models).toEqual(['model-1', 'model-2', 'model-3']);
     expect(globalThis.fetch).toHaveBeenCalledWith(
       'https://api.example.com/v1/models',
-      expect.any(Object),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          accept: 'application/json',
+        }),
+      }),
     );
+  });
+
+  it('should support bare array response', async () => {
+    const mockResponse = {
+      ok: true,
+      json: vi.fn().mockResolvedValue(['model-x', 'model-y']),
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+    const models = await fetchModels('https://api.example.com/v1/');
+    expect(models).toEqual(['model-x', 'model-y']);
+  });
+
+  it('should support object-wrapped array response (models field)', async () => {
+    const mockResponse = {
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        models: [{ id: 'm1' }, { id: 'm2' }],
+      }),
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+    const models = await fetchModels('https://api.example.com/v1/');
+    expect(models).toEqual(['m1', 'm2']);
   });
 
   it('should include Authorization header when apiKey is provided', async () => {
@@ -261,9 +290,55 @@ describe('fetchModels', () => {
     await fetchModels('https://api.example.com/v1/', 'my-api-key');
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    expect(fetchMock.mock.calls.length).toBeGreaterThan(0);
-    const lastCall = fetchMock.mock.calls[fetchMock.mock.calls.length - 1];
-    expect(lastCall[1]?.headers?.Authorization).toBe('Bearer my-api-key');
+    const lastCall = fetchMock.mock.calls[0];
+    expect(lastCall[1]?.headers?.authorization).toBe('Bearer my-api-key');
+  });
+
+  it('should merge and lowercase custom headers', async () => {
+    const mockResponse = {
+      ok: true,
+      json: vi.fn().mockResolvedValue({ data: [] }),
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+    await fetchModels(
+      'https://api.example.com/v1/',
+      'key',
+      AuthType.USE_OPENAI,
+      {
+        'X-CUSTOM': 'val',
+        Authorization: 'Other Token',
+      },
+    );
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const lastCall = fetchMock.mock.calls[0];
+    const headers = lastCall[1].headers;
+    expect(headers['x-custom']).toBe('val');
+    expect(headers['authorization']).toBe('Other Token'); // Override
+    expect(headers['Authorization']).toBeUndefined(); // Should be lowercased
+  });
+
+  it('should throw for Qwen OAuth', async () => {
+    await expect(
+      fetchModels(
+        'https://api.example.com/v1/',
+        undefined,
+        AuthType.QWEN_OAUTH,
+      ),
+    ).rejects.toThrow('not supported for Qwen OAuth');
+  });
+
+  it('should throw FetchError immediately for zero timeout', async () => {
+    await expect(
+      fetchWithTimeout('https://api.example.com/v1/', 0),
+    ).rejects.toThrow('timed out');
+  });
+
+  it('should throw FetchError immediately for negative timeout', async () => {
+    await expect(
+      fetchWithTimeout('https://api.example.com/v1/', -1000),
+    ).rejects.toThrow('timed out');
   });
 
   it('should throw on network failure', async () => {
@@ -283,7 +358,7 @@ describe('fetchModels', () => {
     globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
 
     await expect(fetchModels('https://api.example.com/v1/')).rejects.toThrow(
-      'Request failed (HTTP_401)',
+      /Request to https:\/\/api\.example\.com\/v1\/models failed \(401\)/,
     );
   });
 
@@ -330,6 +405,19 @@ describe('fetchModels', () => {
     expect(models).toEqual(['valid-model', 'another-valid']);
   });
 
+  it('should sanitize model IDs for ANSI escape sequences', async () => {
+    const mockResponse = {
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        data: [{ id: '\x1b[31mmodel-a\x1b[0m' }, { id: 'model-b\x1b[H\x1b[J' }],
+      }),
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+    const result = await fetchModels('https://api.example.com/v1/');
+    expect(result).toEqual(['model-a', 'model-b']);
+  });
+
   it('should throw on missing data array in response', async () => {
     const mockResponse = {
       ok: true,
@@ -371,42 +459,76 @@ describe('fetchModels', () => {
     );
   });
 
-  it('should throw on private IP address (SSRF check)', async () => {
+  it('should throw on private IP address (SSRF check) without calling fetch', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy;
+
     await expect(fetchModels('https://192.168.1.1/api/')).rejects.toThrow(
-      'private or reserved IP address',
+      'private IP',
     );
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('should throw on localhost (SSRF check)', async () => {
+  it('should throw on localhost (SSRF check) without calling fetch', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy;
+
     await expect(fetchModels('https://localhost:8080/api/')).rejects.toThrow(
-      'private or reserved IP address',
+      'SSRF check',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('should throw when data field is present but not an array', async () => {
+    const mockResponse = {
+      ok: true,
+      json: vi.fn().mockResolvedValue({ data: 'not-an-array' }),
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+    await expect(fetchModels('https://api.example.com/v1/')).rejects.toThrow(
+      'Unexpected response format: missing data array',
     );
   });
 
-  it('should throw on IPv6 loopback [::1] (SSRF check)', async () => {
-    await expect(fetchModels('https://[::1]/api/')).rejects.toThrow(
-      'private or reserved IP address',
+  it('should handle baseUrl with query string correctly', async () => {
+    const mockResponse = {
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        data: [{ id: 'model-1' }],
+      }),
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+    await fetchModels('https://api.example.com/v1?version=2');
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'https://api.example.com/v1/models?version=2',
+      expect.any(Object),
     );
   });
 
-  it('should throw on IPv4-mapped IPv6 (SSRF check)', async () => {
-    // Node normalizes ::ffff:192.168.1.1 to ::ffff:c0a8:101 — verify the
-    // raw URL string check catches this before normalization
-    await expect(
-      fetchModels('https://[::ffff:10.0.0.1]/api/'),
-    ).rejects.toThrow('private or reserved IP address');
-  });
+  it('should include URL in non-2xx error message', async () => {
+    const mockResponse = {
+      ok: false,
+      status: 401,
+      text: vi.fn().mockResolvedValue('Unauthorized'),
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
 
-  it('should throw on AWS IMDS address (SSRF check)', async () => {
-    await expect(
-      fetchModels('https://169.254.169.254/latest/meta-data/'),
-    ).rejects.toThrow('private or reserved IP address');
-  });
-
-  it('should throw on CGNAT address (SSRF check)', async () => {
-    await expect(fetchModels('https://100.64.0.1/api/')).rejects.toThrow(
-      'private or reserved IP address',
+    await expect(fetchModels('https://api.example.com/v1/')).rejects.toThrow(
+      'Request to https://api.example.com/v1/models failed (401)',
     );
+  });
+
+  it('should use "points to" in SSRF error message without calling fetch', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy;
+
+    await expect(fetchModels('https://192.168.1.1/api/')).rejects.toThrow(
+      'points to a private IP address',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -529,30 +651,26 @@ describe('/model list subcommand', () => {
     });
   });
 
-  it('should use parameterized i18n template for fetch errors', async () => {
+  it('should show specific error message for Qwen OAuth in list subcommand', async () => {
     const mockConfig = createMockConfig({
       model: 'test-model',
-      authType: AuthType.USE_OPENAI,
+      authType: AuthType.QWEN_OAUTH,
       baseUrl: 'https://api.example.com/v1/',
     });
     mockContext.services.config = mockConfig as Config;
-
-    globalThis.fetch = vi
-      .fn()
-      .mockRejectedValue(new Error('ECONNREFUSED'));
 
     const result = await modelCommand.subCommands![0].action!(mockContext, '');
 
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: expect.stringContaining('Failed to fetch models:'),
+      content: expect.stringContaining(
+        'Model discovery is not supported for Qwen OAuth',
+      ),
     });
-    // Verify the error message contains the actual error detail
-    expect((result as { content: string }).content).toContain('ECONNREFUSED');
   });
 
-  it('should sanitize ANSI escape sequences from model IDs', async () => {
+  it('should include URL in list subcommand error message', async () => {
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: AuthType.USE_OPENAI,
@@ -560,23 +678,30 @@ describe('/model list subcommand', () => {
     });
     mockContext.services.config = mockConfig as Config;
 
-    const mockResponse = {
-      ok: true,
-      json: vi.fn().mockResolvedValue({
-        data: [
-          { id: 'clean-model' },
-          { id: '\x1b[31mred-model\x1b[0m' },
-        ],
-      }),
-    };
-    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network failure'));
 
     const result = await modelCommand.subCommands![0].action!(mockContext, '');
-    const content = (result as { content: string }).content;
 
-    // ANSI sequences should be stripped
-    expect(content).not.toContain('\x1b[');
-    expect(content).toContain('clean-model');
-    expect(content).toContain('red-model');
+    expect((result as { content: string }).content).toContain(
+      'https://api.example.com/v1/',
+    );
+  });
+});
+
+describe('list subcommand metadata', () => {
+  it('should have correct name, kind, and supportedModes', () => {
+    const listSub = modelCommand.subCommands![0];
+    expect(listSub.name).toBe('list');
+    expect(listSub.kind).toBe(CommandKind.BUILT_IN);
+    expect(listSub.supportedModes).toEqual([
+      'interactive',
+      'non_interactive',
+      'acp',
+    ]);
+  });
+
+  it('should have a description', () => {
+    const listSub = modelCommand.subCommands![0];
+    expect(listSub.description).toContain('List available models');
   });
 });

@@ -1039,7 +1039,24 @@ export default {
     'List available models from the configured API endpoint',
   'No baseUrl configured. Please configure modelProviders or set the API endpoint.':
     'No baseUrl configured. Please configure modelProviders or set the API endpoint.',
-  'Failed to fetch models: ': 'Failed to fetch models: ',
+  'Failed to fetch models from {{url}}: {{error}}': 'Failed to fetch models: ',
+  'No models found from the configured endpoint.':
+    'No models found from the configured endpoint.',
+  'Current fast model: {{fastModel}}\nUse "/model --fast <model-id>" to set fast model.':
+    'Current fast model: {{fastModel}}\nUse "/model --fast <model-id>" to set fast model.',
+  'Current model: {{currentModel}}\nUse "/model <model-id>" to switch models or "/model --fast <model-id>" to set the fast model.':
+    'Current model: {{currentModel}}\nUse "/model <model-id>" to switch models or "/model --fast <model-id>" to set the fast model.',
+  'Invalid baseUrl: must be a valid URL':
+    'Invalid baseUrl: must be a valid URL',
+  'baseUrl must use HTTPS': 'baseUrl must use HTTPS',
+  'baseUrl points to a private IP address (SSRF check)':
+    'baseUrl points to a private IP address (SSRF check)',
+  'Request to {{url}} failed ({{status}}): {{sanitized}}':
+    'Request to {{url}} failed ({{status}}): {{sanitized}}',
+  'Unexpected response format: missing data array':
+    'Unexpected response format: missing data array',
+  'Model discovery is not supported for Qwen OAuth. Please switch to an OpenAI-compatible provider.':
+    'Model discovery is not supported for Qwen OAuth. Please switch to an OpenAI-compatible provider.',
   'Starting a new session, resetting chat, and clearing terminal.':
     '正在開始新會話，重置聊天並清屏。',
   'Starting a new session and clearing.': '正在開始新會話並清屏。',

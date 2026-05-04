@@ -238,7 +238,8 @@ ${textContent}
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
     // Check if URL is private/localhost
-    const isPrivate = isPrivateIp(this.params.url);
+    const hostname = new URL(this.params.url).hostname;
+    const isPrivate = isPrivateIp(hostname);
 
     if (isPrivate) {
       this.debugLogger.debug(

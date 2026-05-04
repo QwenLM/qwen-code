@@ -1151,10 +1151,26 @@ export default {
   'No models available for the current authentication type ({{authType}}).':
     '当前认证类型 ({{authType}}) 没有可用的模型',
   'List available models from the configured API endpoint':
-    'List available models from the configured API endpoint',
+    '从配置的 API 端点列出可用模型',
   'No baseUrl configured. Please configure modelProviders or set the API endpoint.':
-    'No baseUrl configured. Please configure modelProviders or set the API endpoint.',
-  'Failed to fetch models: ': 'Failed to fetch models: ',
+    '未配置 baseUrl。请配置 modelProviders 或设置 API 端点。',
+  'Failed to fetch models from {{url}}: {{error}}': '获取模型失败：',
+  'No models found from the configured endpoint.': '从配置的端点未找到模型。',
+  'Current fast model: {{fastModel}}\nUse "/model --fast <model-id>" to set fast model.':
+    '当前快速模型：{{fastModel}}\n使用 "/model --fast <model-id>" 设置快速模型。',
+  'Current model: {{currentModel}}\nUse "/model <model-id>" to switch models or "/model --fast <model-id>" to set the fast model.':
+    '当前模型：{{currentModel}}\n使用 "/model <model-id>" 切换模型，或使用 "/model --fast <model-id>" 设置快速模型。',
+  'Invalid baseUrl: must be a valid URL':
+    '无效的 baseUrl：必须是一个有效的 URL',
+  'baseUrl must use HTTPS': 'baseUrl 必须使用 HTTPS',
+  'baseUrl points to a private IP address (SSRF check)':
+    'baseUrl 指向私有 IP 地址（SSRF 检查）',
+  'Request to {{url}} failed ({{status}}): {{sanitized}}':
+    '请求失败 ({{status}}): {{sanitized}}',
+  'Unexpected response format: missing data array':
+    '非预期的响应格式：缺少 data 数组',
+  'Model discovery is not supported for Qwen OAuth. Please switch to an OpenAI-compatible provider.':
+    'Qwen OAuth 不支持模型发现。请切换到 OpenAI 兼容的提供商。',
 
   // ============================================================================
   // Commands - Clear
