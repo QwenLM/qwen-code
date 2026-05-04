@@ -111,6 +111,7 @@ interface Harness {
   resume: ReturnType<typeof vi.fn>;
   abandon: ReturnType<typeof vi.fn>;
   monitorCancel: ReturnType<typeof vi.fn>;
+  dreamCancelTask: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string }) => void;
   call: (fn: () => void) => void;
@@ -129,6 +130,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
   const resume = vi.fn();
   const abandon = vi.fn();
   const monitorCancel = vi.fn();
+  const dreamCancelTask = vi.fn();
   // Stub registry that resolves `.get(agentId)` against the current entries
   // snapshot — the dialog now re-reads agent entries via `.get()` to pick up
   // live activity/stats mutations the snapshot misses.
@@ -154,6 +156,9 @@ function setup(initial: readonly DialogEntry[]): Harness {
         );
         return match;
       },
+    }),
+    getMemoryManager: () => ({
+      cancelTask: dreamCancelTask,
     }),
     resumeBackgroundAgent: resume,
     abandonBackgroundAgent: abandon,
@@ -199,6 +204,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
     resume,
     abandon,
     monitorCancel,
+    dreamCancelTask,
     setEntries(next) {
       handlers.length = 0;
       currentEntries = next;
@@ -504,25 +510,25 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('feedback');
     });
 
-    it('suppresses the "x stop" hint for a running dream entry', () => {
-      // Dream cancellation lands in the PR-2 follow-up. Until then the
-      // hint footer must not advertise an action that would no-op,
-      // otherwise the user sees the hint and concludes the keystroke is
-      // broken.
+    it('shows the "x stop" hint for a running dream entry', () => {
       const h = setup([dreamEntry({ status: 'running' })]);
       h.call(() => h.probe.current!.actions.openDialog());
       const f = h.lastFrame() ?? '';
-      expect(f).not.toContain('x stop');
+      expect(f).toContain('x stop');
     });
 
-    it("does not invoke any registry's cancel when 'x' is pressed on a dream entry", () => {
-      // Belt-and-braces complement to the hint suppression — even if a
-      // future change re-adds the hint, the dispatch must not leak into
-      // an unrelated registry. The dream branch in cancelSelected is a
-      // deliberate no-op until PR-2.
-      const h = setup([dreamEntry({ status: 'running' })]);
+    it("routes 'x' on a running dream to MemoryManager.cancelTask(dreamId)", () => {
+      // Pin the dream-cancel branch in `cancelSelected` — flipping it
+      // to anything else (e.g. shell's `requestCancel`) would silently
+      // break the only path the user has to stop a runaway dream
+      // consolidation, since the hint already advertises the action.
+      const h = setup([dreamEntry({ dreamId: 'd-zzz', status: 'running' })]);
       h.call(() => h.probe.current!.actions.openDialog());
       h.pressKey({ sequence: 'x' });
+      expect(h.dreamCancelTask).toHaveBeenCalledWith('d-zzz');
+      // Belt-and-braces — the registry-side cancel paths must not fire
+      // for a dream entry, otherwise the wrong AbortController gets
+      // signalled.
       expect(h.cancel).not.toHaveBeenCalled();
       expect(h.monitorCancel).not.toHaveBeenCalled();
     });

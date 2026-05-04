@@ -49,18 +49,14 @@ export type AgentDialogEntry = BackgroundTaskEntry & {
  * Dream-task adapter. MemoryManager owns its own task records
  * (MemoryTaskRecord) and intentionally lives outside the registry trio;
  * this view-model wraps the subset of fields the dialog needs and
- * narrows status to the three values that ever appear in the dialog
+ * narrows status to the four values that ever appear in the dialog
  * (skipped/pending records are filtered out at the source).
- *
- * Cancellation is not yet wired (lands in the PR-2 follow-up that adds
- * MemoryManager.cancelTask + task_stop integration). The dialog must
- * suppress the "x stop" hint for dream entries until then.
  */
 export type DreamDialogEntry = {
   kind: 'dream';
   /** MemoryTaskRecord.id — used as React key + lookup. */
   dreamId: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
   startTime: number;
   endTime?: number;
   progressText?: string;
@@ -147,7 +143,12 @@ export function useBackgroundTaskView(
       const allDreams = memoryManager.listTasksByType('dream', projectRoot);
       const runningDreams = allDreams.filter((t) => t.status === 'running');
       const terminalDreams = allDreams
-        .filter((t) => t.status === 'completed' || t.status === 'failed')
+        .filter(
+          (t) =>
+            t.status === 'completed' ||
+            t.status === 'failed' ||
+            t.status === 'cancelled',
+        )
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, MAX_RETAINED_TERMINAL_DREAMS);
       const dreamEntries: DialogEntry[] = [
@@ -159,7 +160,7 @@ export function useBackgroundTaskView(
         return {
           kind: 'dream' as const,
           dreamId: t.id,
-          status: t.status as 'running' | 'completed' | 'failed',
+          status: t.status as 'running' | 'completed' | 'failed' | 'cancelled',
           startTime: Date.parse(t.createdAt),
           endTime: t.status === 'running' ? undefined : Date.parse(t.updatedAt),
           progressText: t.progressText,

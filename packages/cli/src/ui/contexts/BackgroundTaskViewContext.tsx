@@ -195,11 +195,12 @@ export function BackgroundTaskViewProvider({
         config.getMonitorRegistry().cancel(target.monitorId);
         break;
       case 'dream':
-        // Cancellation lands in the PR-2 follow-up (MemoryManager.cancelTask
-        // + dream-fork abort + lock rollback). The dialog suppresses the
-        // 'x stop' hint for dream entries until then, so this branch
-        // shouldn't be reachable through normal flow — keeping it explicit
-        // for exhaustiveness and to avoid an exhaustive-check throw.
+        // Aborts the dream fork-agent via MemoryManager.cancelTask;
+        // the manager flips status to 'cancelled' before aborting, and
+        // the runDream finally block releases the consolidation lock as
+        // the agent unwinds. Same one-shot fire-and-forget shape as
+        // shell.requestCancel above.
+        config.getMemoryManager().cancelTask(target.dreamId);
         break;
       default: {
         const _exhaustive: never = target;

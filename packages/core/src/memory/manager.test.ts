@@ -425,6 +425,134 @@ describe('MemoryManager', () => {
     });
   });
 
+  // ─── cancelTask() ────────────────────────────────────────────────────────
+
+  describe('cancelTask()', () => {
+    let tempDir: string;
+    let projectRoot: string;
+
+    beforeEach(async () => {
+      vi.resetAllMocks();
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      clearAutoMemoryRootCache();
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-cancel-'));
+      projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      await ensureAutoMemoryScaffold(
+        projectRoot,
+        new Date('2026-04-01T00:00:00.000Z'),
+      );
+    });
+
+    afterEach(async () => {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('aborts the dream fork agent and marks the record cancelled', async () => {
+      // The fork's abort signal is captured here so the test can assert
+      // both the status flip AND the actual signal propagation — only
+      // the latter guarantees runForkedAgent will unwind.
+      let capturedSignal: AbortSignal | undefined;
+      let resolveDreamStarted!: () => void;
+      const dreamStarted = new Promise<void>((r) => {
+        resolveDreamStarted = r;
+      });
+      vi.mocked(runManagedAutoMemoryDream).mockImplementation(
+        async (_root, _now, _config, signal) => {
+          capturedSignal = signal;
+          resolveDreamStarted();
+          // Simulate a long-running dream that respects the signal.
+          await new Promise<void>((_, reject) => {
+            signal?.addEventListener('abort', () =>
+              reject(new Error('aborted')),
+            );
+          });
+          return {
+            touchedTopics: [],
+            dedupedEntries: 0,
+            systemMessage: undefined,
+          };
+        },
+      );
+
+      const mgr = new MemoryManager(async () => [
+        'sess-0',
+        'sess-1',
+        'sess-2',
+        'sess-3',
+        'sess-4',
+      ]);
+      const config = makeMockConfig();
+      const result = await mgr.scheduleDream({
+        projectRoot,
+        sessionId: 'sess-x',
+        config,
+        now: new Date('2026-04-02T10:00:00.000Z'),
+      });
+      expect(result.status).toBe('scheduled');
+      const taskId = result.taskId!;
+
+      // Wait for the fork to actually enter — scheduleDream returns
+      // before lock acquisition + the fork-agent invocation actually
+      // run. Cancelling before the fork enters would race the abort
+      // signal capture and produce a flaky undefined.
+      await dreamStarted;
+
+      // Cancel must succeed and synchronously flip status; the fork's
+      // unwind happens later via the abort signal.
+      const cancelled = mgr.cancelTask(taskId);
+      expect(cancelled).toBe(true);
+      expect(mgr.getTask(taskId)?.status).toBe('cancelled');
+      expect(capturedSignal?.aborted).toBe(true);
+
+      // Drain so the fork-agent rejection lands and runDream's catch
+      // path runs — the user-cancel guard must NOT overwrite to
+      // 'failed'. (Without the guard, the rejected promise sets the
+      // record to failed with error="aborted".)
+      await mgr.drain({ timeoutMs: 1000 });
+      expect(mgr.getTask(taskId)?.status).toBe('cancelled');
+    });
+
+    it('returns false for unknown task ids', async () => {
+      const mgr = new MemoryManager();
+      expect(mgr.cancelTask('does-not-exist')).toBe(false);
+    });
+
+    it('returns false for an already-completed dream', async () => {
+      // The dream's natural completion path runs first, marks the
+      // record terminal; a subsequent cancel attempt must no-op rather
+      // than overwrite the recorded outcome (would erase touchedTopics
+      // metadata the user just saw via memory_saved toast).
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
+        touchedTopics: [],
+        dedupedEntries: 0,
+        systemMessage: undefined,
+      });
+      const mgr = new MemoryManager(async () => [
+        'sess-0',
+        'sess-1',
+        'sess-2',
+        'sess-3',
+        'sess-4',
+      ]);
+      const config = makeMockConfig();
+      const result = await mgr.scheduleDream({
+        projectRoot,
+        sessionId: 'sess-x',
+        config,
+        now: new Date('2026-04-02T10:00:00.000Z'),
+      });
+      const taskId = result.taskId!;
+      // Drain so the dream completes naturally.
+      await mgr.drain({ timeoutMs: 1000 });
+      expect(mgr.getTask(taskId)?.status).toBe('completed');
+      expect(mgr.cancelTask(taskId)).toBe(false);
+      expect(mgr.getTask(taskId)?.status).toBe('completed');
+    });
+  });
+
   // ─── resetExtractStateForTests() ─────────────────────────────────────────
 
   describe('resetExtractStateForTests()', () => {

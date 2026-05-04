@@ -87,6 +87,7 @@ export type MemoryTaskStatus =
   | 'running'
   | 'completed'
   | 'failed'
+  | 'cancelled'
   | 'skipped';
 
 export interface MemoryTaskRecord {
@@ -361,6 +362,11 @@ export class MemoryManager {
   // ── Dream scheduling state ───────────────────────────────────────────────────
   private readonly dreamInFlightByKey = new Map<string, string>();
   private readonly dreamLastSessionScanAt = new Map<string, number>();
+  // AbortControllers for in-flight dream tasks, keyed by record id.
+  // cancelTask() looks up the controller, aborts it (the abort signal
+  // propagates into runForkedAgent), and marks the record cancelled.
+  // The runDream finally block clears the entry on settle.
+  private readonly dreamAbortControllers = new Map<string, AbortController>();
   private readonly sessionScanner: SessionScannerFn;
 
   constructor(sessionScanner: SessionScannerFn = defaultSessionScanner) {
@@ -725,13 +731,54 @@ export class MemoryManager {
       metadata: { sessionCount: sessionIds.length },
     });
     this.dreamInFlightByKey.set(dedupeKey, record.id);
+    const abortController = new AbortController();
+    this.dreamAbortControllers.set(record.id, abortController);
 
     const promise = this.track(
       record.id,
-      this.runDream(record, dedupeKey, params, now),
+      this.runDream(record, dedupeKey, params, now, abortController.signal),
     );
 
     return { status: 'scheduled', taskId: record.id, promise };
+  }
+
+  /**
+   * Look up a single task record by id. Used by `task_stop` and other
+   * cross-cutting consumers that have a task id but no project root.
+   */
+  getTask(taskId: string): MemoryTaskRecord | undefined {
+    return this.tasks.get(taskId);
+  }
+
+  /**
+   * Cancel a running dream task. Aborts the dream's fork agent (the
+   * abort signal threads through `runForkedAgent`), marks the record
+   * cancelled immediately so the UI reflects user intent, and lets the
+   * existing `runDream` finally block release the consolidation lock
+   * via the natural error propagation path.
+   *
+   * Returns true if a running task was aborted, false if the task is
+   * unknown / already terminal / not a dream. Currently only dream
+   * tasks support cancellation — extract is short-lived and runs
+   * synchronously through the request loop; cancelling it would
+   * interfere with the user's own turn.
+   */
+  cancelTask(taskId: string): boolean {
+    const record = this.tasks.get(taskId);
+    if (!record) return false;
+    if (record.taskType !== 'dream') return false;
+    if (record.status !== 'running') return false;
+
+    const ac = this.dreamAbortControllers.get(taskId);
+    // Mark cancelled BEFORE aborting so the runDream catch path can
+    // detect the user-cancel intent (signal.aborted + status already
+    // 'cancelled') and avoid overwriting with a generic 'failed'.
+    this.update(record, {
+      status: 'cancelled',
+      progressText: 'Cancelled by user.',
+    });
+    ac?.abort();
+    return true;
   }
 
   private async runDream(
@@ -739,6 +786,7 @@ export class MemoryManager {
     dedupeKey: string,
     params: ScheduleDreamParams,
     now: Date,
+    abortSignal: AbortSignal,
   ): Promise<MemoryTaskRecord> {
     try {
       try {
@@ -761,6 +809,7 @@ export class MemoryManager {
           params.projectRoot,
           now,
           params.config,
+          abortSignal,
         );
         const nextMetadata = await readDreamMetadata(params.projectRoot);
         nextMetadata.lastDreamAt = now.toISOString();
@@ -782,12 +831,19 @@ export class MemoryManager {
         await releaseDreamLock(params.projectRoot);
       }
     } catch (error) {
+      // User-cancel path: cancelTask already aborted the signal AND
+      // marked the record cancelled. The fork agent throws an abort
+      // error which lands here; don't overwrite with 'failed'.
+      if (abortSignal.aborted && record.status === 'cancelled') {
+        return record;
+      }
       this.update(record, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
       this.dreamInFlightByKey.delete(dedupeKey);
+      this.dreamAbortControllers.delete(record.id);
     }
     return record;
   }

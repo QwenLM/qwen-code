@@ -962,16 +962,11 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     selectedEntry.status === 'paused' &&
     !selectedEntry.resumeBlockedReason;
 
-  // Hint footer — context-sensitive. Dream entries are read-only in PR-1
-  // (cancellation arrives in the PR-2 follow-up that adds
-  // MemoryManager.cancelTask + task_stop integration), so suppress
-  // 'x stop' for them; otherwise the keystroke would silently no-op.
-  const selectedEntryAllowsCancel =
-    selectedEntry?.status === 'running' && selectedEntry.kind !== 'dream';
+  // Hint footer — context-sensitive.
   const hints: string[] = [];
   if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
-    if (selectedEntryAllowsCancel) hints.push('x stop');
+    if (selectedEntry?.status === 'running') hints.push('x stop');
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');
@@ -979,7 +974,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 go back', 'Esc/Enter/Space close');
-    if (selectedEntryAllowsCancel) hints.push('x stop');
+    if (selectedEntry?.status === 'running') hints.push('x stop');
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');

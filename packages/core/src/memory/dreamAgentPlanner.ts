@@ -227,6 +227,7 @@ export function buildConsolidationTaskPrompt(
 export async function planManagedAutoMemoryDreamByAgent(
   config: Config,
   projectRoot: string,
+  abortSignal?: AbortSignal,
 ): Promise<ForkedAgentResult> {
   const memoryRoot = getAutoMemoryRoot(projectRoot);
   const transcriptDir = getTranscriptDir(projectRoot);
@@ -247,6 +248,7 @@ export async function planManagedAutoMemoryDreamByAgent(
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
     ],
+    abortSignal,
   });
 
   if (result.status === 'failed') {

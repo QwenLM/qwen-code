@@ -136,6 +136,40 @@ class TaskStopInvocation extends BaseToolInvocation<
       };
     }
 
+    // MemoryManager dream tasks. Memory tasks live outside the registry
+    // trio (MemoryManager owns its own task map); only `dream` is
+    // cancellable — extract is short-lived and runs on the request
+    // path, so cancelling it would interfere with the user's own turn.
+    const memoryManager = this.config.getMemoryManager();
+    const memoryRecord = memoryManager.getTask(taskId);
+    if (memoryRecord && memoryRecord.taskType === 'dream') {
+      if (memoryRecord.status !== 'running') {
+        return notRunningError('dream', taskId, memoryRecord.status);
+      }
+      const aborted = memoryManager.cancelTask(taskId);
+      if (!aborted) {
+        return {
+          llmContent:
+            `Error: Dream task "${taskId}" could not be cancelled ` +
+            `(record state changed before abort landed).`,
+          returnDisplay: 'Task could not be cancelled.',
+          error: {
+            message: `Task could not be cancelled: ${taskId}`,
+            type: ToolErrorType.TASK_STOP_NOT_RUNNING,
+          },
+        };
+      }
+      return {
+        llmContent:
+          `Cancellation requested for dream task "${taskId}". ` +
+          `The fork agent is being aborted; the consolidation lock will ` +
+          `be released as the agent unwinds. Status is visible via the ` +
+          `interactive Background tasks dialog (focus the footer Background ` +
+          `tasks pill, then Enter).`,
+        returnDisplay: `Cancelled dream: ${taskId}`,
+      };
+    }
+
     return {
       llmContent: `Error: No background task found with ID "${taskId}".`,
       returnDisplay: 'Task not found.',
@@ -148,7 +182,7 @@ class TaskStopInvocation extends BaseToolInvocation<
 }
 
 function notRunningError(
-  kind: 'agent' | 'shell' | 'monitor',
+  kind: 'agent' | 'shell' | 'monitor' | 'dream',
   taskId: string,
   status: string,
 ): ToolResult {

@@ -43,8 +43,13 @@ async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
 async function runDreamByAgent(
   projectRoot: string,
   config: Config,
+  abortSignal?: AbortSignal,
 ): Promise<AutoMemoryDreamResult> {
-  const result = await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+  const result = await planManagedAutoMemoryDreamByAgent(
+    config,
+    projectRoot,
+    abortSignal,
+  );
 
   // Infer which topics were touched from the file paths
   const touchedTopics = new Set<AutoMemoryType>();
@@ -72,6 +77,7 @@ export async function runManagedAutoMemoryDream(
   projectRoot: string,
   now = new Date(),
   config?: Config,
+  abortSignal?: AbortSignal,
 ): Promise<AutoMemoryDreamResult> {
   await ensureAutoMemoryScaffold(projectRoot, now);
   const t0 = Date.now();
@@ -82,7 +88,7 @@ export async function runManagedAutoMemoryDream(
     );
   }
 
-  const agentResult = await runDreamByAgent(projectRoot, config);
+  const agentResult = await runDreamByAgent(projectRoot, config, abortSignal);
   if (agentResult.touchedTopics.length > 0) {
     await bumpMetadata(projectRoot, now);
     await rebuildManagedAutoMemoryIndex(projectRoot);
