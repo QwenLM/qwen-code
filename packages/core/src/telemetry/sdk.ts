@@ -139,7 +139,7 @@ export function initializeTelemetry(config: Config): void {
   const resource = resourceFromAttributes({
     [SemanticResourceAttributes.SERVICE_NAME]: SERVICE_NAME,
     [SemanticResourceAttributes.SERVICE_VERSION]:
-      config.getCliVersion() ?? 'unknown',
+      config.getCliVersion() || 'unknown',
     'session.id': config.getSessionId(),
   });
 
@@ -288,6 +288,8 @@ export async function shutdownTelemetry(): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     try {
+      // Wrap in Promise.resolve for safety — auto-mocked shutdown()
+      // may return undefined in test environments.
       const sdkShutdown = Promise.resolve(currentSdk.shutdown());
       // Prevent unhandled rejection if sdk.shutdown() rejects after the
       // timeout wins the race — the process is exiting anyway.
