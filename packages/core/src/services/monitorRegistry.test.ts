@@ -585,6 +585,21 @@ describe('MonitorRegistry', () => {
     ).not.toThrow();
   });
 
+  it('includes droppedLines count in terminal notification text', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    const entry = createEntry();
+    registry.register(entry);
+
+    // Simulate throttle drops (droppedLines is incremented by Monitor tool)
+    entry.droppedLines = 5;
+    registry.complete('mon-1', 0);
+
+    const [displayText, modelText] = callback.mock.calls[0] as [string, string];
+    expect(displayText).toContain('5 lines dropped due to throttling');
+    expect(modelText).toContain('5 lines dropped due to throttling');
+  });
+
   describe('setStatusChangeCallback', () => {
     it('fires once on register (nothing → running)', () => {
       const cb = vi.fn();

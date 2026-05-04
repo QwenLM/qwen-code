@@ -165,6 +165,7 @@ export {
   ReadToolCall,
   WebFetchToolCall,
   CheckboxDisplay,
+  getToolCallComponent,
 } from './components/toolcalls';
 export type {
   ToolCallContainerProps,

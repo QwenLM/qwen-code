@@ -29,7 +29,10 @@ import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
-import { AlreadyReportedError, _resetExitLatchForTest } from './utils/errors.js';
+import {
+  AlreadyReportedError,
+  _resetExitLatchForTest,
+} from './utils/errors.js';
 
 // Mock core modules
 vi.mock('./ui/hooks/atCommandProcessor.js');
