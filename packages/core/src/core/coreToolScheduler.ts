@@ -50,6 +50,7 @@ import type {
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { escapeXml } from '../utils/xml.js';
+import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
@@ -1532,10 +1533,23 @@ export class CoreToolScheduler {
           isModifying: true,
         } as ToolCallConfirmationDetails);
 
+        // Normalize shell-escaped paths so the editor receives actual
+        // filesystem paths (request.args may still hold escaped values
+        // since buildInvocation normalizes a structuredClone).
+        const normalizedArgs = {
+          ...waitingToolCall.request.args,
+        } as typeof waitingToolCall.request.args;
+        for (const key of PATH_ARG_KEYS) {
+          if (typeof normalizedArgs[key] === 'string') {
+            (normalizedArgs as Record<string, unknown>)[key] = unescapePath(
+              String(normalizedArgs[key]).trim(),
+            );
+          }
+        }
         const { updatedParams, updatedDiff } = await modifyWithEditor<
           typeof waitingToolCall.request.args
         >(
-          waitingToolCall.request.args,
+          normalizedArgs,
           modifyContext as ModifyContext<typeof waitingToolCall.request.args>,
           editorType,
           signal,
@@ -1746,6 +1760,14 @@ export class CoreToolScheduler {
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
+    // Normalize shell-escaped path params so hooks operate on actual filesystem
+    // paths, matching the normalization done in tool validation.
+    for (const key of PATH_ARG_KEYS) {
+      if (typeof toolInput[key] === 'string') {
+        toolInput[key] = unescapePath(String(toolInput[key]).trim());
+      }
+    }
+
     // Generate unique tool_use_id for hook tracking
     const toolUseId = generateToolUseId();
 
@@ -1908,7 +1930,9 @@ export class CoreToolScheduler {
         // FS_PATH_TOOL_NAMES) so MCP / non-FS tools that reuse those
         // parameter names with different semantics never enter the
         // activation pipeline.
-        const candidatePaths = extractToolFilePaths(toolName, toolInput);
+        const candidatePaths = extractToolFilePaths(toolName, toolInput).map(
+          (p) => unescapePath(p),
+        );
 
         if (candidatePaths.length > 0) {
           const rulesRegistry = this.config.getConditionalRulesRegistry();
