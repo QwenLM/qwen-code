@@ -19,18 +19,27 @@ import { GeminiClient, SendMessageType } from './client.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
 import {
   AuthType,
+  createContentGenerator,
   type ContentGenerator,
   type ContentGeneratorConfig,
 } from './contentGenerator.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { type GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import type { ModelsConfig } from '../models/modelsConfig.js';
+import { retryWithBackoff } from '../utils/retry.js';
 import {
   CompressionStatus,
   GeminiEventType,
   Turn,
   type ChatCompressionInfo,
 } from './turn.js';
+
+vi.mock('../utils/retry.js', () => ({
+  retryWithBackoff: vi.fn(async (fn) => await fn()),
+  isUnattendedMode: vi.fn(() => false),
+}));
 import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -90,6 +99,25 @@ vi.mock('./turn', async (importOriginal) => {
 
 vi.mock('../config/config.js');
 vi.mock('./prompts');
+vi.mock('../models/content-generator-config.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../models/content-generator-config.js')
+    >();
+  return {
+    ...actual,
+    buildAgentContentGeneratorConfig: vi
+      .fn()
+      .mockImplementation(actual.buildAgentContentGeneratorConfig),
+  };
+});
+vi.mock('./contentGenerator.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./contentGenerator.js')>();
+  return {
+    ...actual,
+    createContentGenerator: vi.fn(),
+  };
+});
 vi.mock('../utils/getFolderStructure', () => ({
   getFolderStructure: vi.fn().mockResolvedValue('Mock Folder Structure'),
 }));
@@ -151,6 +179,7 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
 vi.mock('../telemetry/loggers.js', () => ({
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
+  logApiRequest: vi.fn(),
 }));
 
 // Mock RequestTokenizer to use simple character-based estimation
@@ -277,6 +306,12 @@ describe('Gemini Client (client.ts)', () => {
     vi.resetAllMocks();
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
 
+    // Default: createContentGenerator rejects (simulates test env without auth).
+    // Individual tests can override with mockResolvedValue for success path.
+    vi.mocked(createContentGenerator).mockRejectedValue(
+      new Error('no auth in test env'),
+    );
+
     mockMemoryManager = {
       scheduleExtract: vi.fn().mockResolvedValue({
         touchedTopics: [],
@@ -389,6 +424,9 @@ describe('Gemini Client (client.ts)', () => {
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getResolvedModel: vi.fn().mockReturnValue(undefined),
+      }),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -3149,5 +3187,369 @@ Other open files:
 
     // Note: there is currently no "fallback mode" model routing; the model used
     // is always the one explicitly requested by the caller.
+  });
+
+  describe('generateContent with fast model', () => {
+    it('should resolve per-model config and fall back when createContentGenerator fails', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      // Set up a resolved model for the fast model, but createContentGenerator
+      // will fail in the test env (no auth), so it falls back to the main
+      // content generator. Verify the resolution was attempted.
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {
+          extra_body: { enable_thinking: false },
+          samplingParams: { temperature: 0.1 },
+        },
+        capabilities: {},
+      };
+
+      const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      await client.generateContent(
+        contents,
+        { temperature: 0.5 },
+        abortSignal,
+        'fast-model',
+      );
+
+      // Verify that getResolvedModel was called with the fast model ID
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        expect.any(String),
+        'fast-model',
+      );
+
+      // The main content generator is used as fallback (since creating a new
+      // one fails in test env without auth). In production, a dedicated
+      // content generator with the fast model's settings would be created.
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'fast-model',
+        }),
+        expect.any(String),
+      );
+    });
+
+    it('should use a dedicated content generator for the fast model on success', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      // Create a mock dedicated content generator
+      const mockFastContentGenerator = {
+        generateContent: vi.fn().mockResolvedValue({
+          text: 'fast response',
+        }),
+      } as unknown as ContentGenerator;
+
+      // Set up a resolved model for the fast model
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        envKey: 'FAST_API_KEY',
+        generationConfig: {
+          extra_body: { enable_thinking: false },
+          samplingParams: { temperature: 0.1 },
+        },
+        capabilities: {},
+      };
+
+      const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      // Override createContentGenerator to return our test double (success path)
+      vi.mocked(createContentGenerator).mockResolvedValue(
+        mockFastContentGenerator,
+      );
+
+      await client.generateContent(
+        contents,
+        { temperature: 0.5 },
+        abortSignal,
+        'fast-model',
+      );
+
+      // Verify buildAgentContentGeneratorConfig was called with correct args
+      expect(buildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        mockConfig,
+        'fast-model',
+        expect.objectContaining({
+          baseUrl: 'https://fast-api.example.com',
+        }),
+      );
+
+      // The dedicated fast content generator should be used
+      expect(mockFastContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'fast-model',
+        }),
+        expect.any(String),
+      );
+
+      // The original main content generator should NOT have been called
+      expect(mockContentGenerator.generateContent).not.toHaveBeenCalled();
+    });
+
+    it('should use the main content generator when the requested model matches the main model', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      const getResolvedModel = vi.fn();
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        'test-model', // same as getModel() return value
+      );
+
+      // getResolvedModel should NOT be called when model matches main
+      expect(getResolvedModel).not.toHaveBeenCalled();
+
+      // The main content generator should be used directly
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'test-model',
+        }),
+        expect.any(String),
+      );
+    });
+
+    it('should fall back to main generator when model is not in registry', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      // getResolvedModel returns undefined — model not found in registry
+      const getResolvedModel = vi.fn().mockReturnValue(undefined);
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      // Should not throw — falls back to main generator
+      await expect(
+        client.generateContent(
+          contents,
+          { temperature: 0.5 },
+          abortSignal,
+          'unknown-model',
+        ),
+      ).resolves.toBeDefined();
+
+      // getResolvedModel was called to look up the model
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        expect.any(String),
+        'unknown-model',
+      );
+
+      // The main content generator is used as fallback
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'unknown-model',
+        }),
+        expect.any(String),
+      );
+
+      // buildAgentContentGeneratorConfig must NOT be called when the model is
+      // not in the registry — the fallback path skips config construction.
+      expect(buildAgentContentGeneratorConfig).not.toHaveBeenCalled();
+    });
+
+    it('should use fast model authType for retry, not main model authType', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+      };
+
+      const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      // Main config uses a different authType
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.QWEN_OAUTH,
+        apiKey: 'test-key',
+        apiModel: 'test-model',
+      } as unknown as ContentGeneratorConfig);
+
+      // Success path for createContentGenerator
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      await client.generateContent(
+        contents,
+        { temperature: 0.5 },
+        abortSignal,
+        'fast-model',
+      );
+
+      // VERIFY: retryWithBackoff was called with the fast model's authType ('openai'),
+      // not the main model's authType ('QWEN_OAUTH').
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({
+          authType: 'openai',
+        }),
+      );
+    });
+
+    it('should cache per-model content generators', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortController = new AbortController();
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+      };
+
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
+      } as unknown as ModelsConfig);
+
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      // First call
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(1);
+
+      // Second call - should use cache
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('should resolve model across authTypes when main authType misses', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+        envKey: undefined,
+      };
+
+      // resolveModelAcrossAuthTypes calls getResolvedModel multiple times:
+      // 1. main authType (QWEN_OAUTH) → undefined (miss)
+      // 2. secondary authType (USE_OPENAI) → mockResolvedModel (hit)
+      // 3. buildAgentContentGeneratorConfig calls getResolvedModel again
+      //    with the resolved authType → mockResolvedModel (hit)
+      const getResolvedModel = vi
+        .fn()
+        .mockReturnValueOnce(undefined)
+        .mockReturnValue(mockResolvedModel);
+
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      // Main config uses QWEN_OAUTH — fast model registered under USE_OPENAI
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.QWEN_OAUTH,
+        apiKey: 'test-key',
+        apiModel: 'test-model',
+      } as unknown as ContentGeneratorConfig);
+
+      // Mock createContentGenerator to succeed so the cross-authType
+      // resolution path completes without falling back
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      await client.generateContent(
+        contents,
+        { temperature: 0.5 },
+        abortSignal,
+        'fast-model',
+      );
+
+      // First call uses main authType (QWEN_OAUTH) — misses
+      expect(getResolvedModel).toHaveBeenNthCalledWith(
+        1,
+        AuthType.QWEN_OAUTH,
+        'fast-model',
+      );
+      // Second call falls through to secondary authType — hits
+      expect(getResolvedModel).toHaveBeenNthCalledWith(
+        2,
+        AuthType.USE_OPENAI,
+        'fast-model',
+      );
+      // Generator was created using the resolved model's config
+      expect(createContentGenerator).toHaveBeenCalled();
+    });
+
+    it('should clear per-model generator cache on resetChat', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortController = new AbortController();
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+      };
+
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
+      } as unknown as ModelsConfig);
+
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      // First call — populates cache
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(1);
+
+      // Reset chat should clear the cache
+      await client.resetChat();
+
+      // Second call after reset — cache should be cleared, generator recreated
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(2);
+    });
   });
 });
