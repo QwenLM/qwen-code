@@ -104,6 +104,23 @@ All three settings live under `ui` in `settings.json`. Both user-level
 the project root) are supported with the standard merge precedence
 (workspace overrides user, system overrides workspace).
 
+`customAsciiArt` is special-cased: rather than treating the whole object
+as one value that the higher-precedence scope replaces, the resolver
+walks scopes per-tier. If user settings define `{ small }` and workspace
+settings define `{ large }`, both contribute — `small` from user,
+`large` from workspace. This keeps two things working at once:
+
+1. Each `{ path }` entry resolves against the file that declared it
+   (workspace `.qwen/` vs. user `~/.qwen/`); the merged view alone would
+   lose that scope information.
+2. Users can keep a default `large` tier in their personal settings and
+   override only `small` per-workspace, without restating the whole
+   object.
+
+When the same tier is defined in multiple scopes, normal precedence
+applies (system > workspace > user). Setting `customAsciiArt` to a bare
+string or `{ path }` in any scope still fills both tiers in that scope.
+
 ### Hide the banner entirely
 
 ```jsonc
@@ -262,21 +279,28 @@ and again only on settings reload events:
      settings file's directory_ — workspace settings against the
      workspace `.qwen/`, user settings against `~/.qwen/`. Read failure
      logs `[BANNER]` warn and falls back to default for that tier.
-3. **Sanitize**. Pass each resolved string through
-   `stripTerminalControlSequences` (shared with the session-title
-   feature), trim trailing whitespace, then cap at 200 lines × 200
-   columns. Anything beyond the cap is truncated and a `[BANNER]` warn
-   is logged.
+3. **Sanitize**. A banner-specific stripper drops OSC / CSI / SS2 / SS3
+   leaders and replaces every other C0 / C1 control byte (and DEL) with
+   a space, while preserving `\n` so multi-line art survives. Trim
+   trailing whitespace per line, then cap at 200 lines × 200 columns.
+   Anything beyond the cap is truncated and a `[BANNER]` warn is logged.
 4. **Render-time tier selection**. In `Header.tsx`, given the resolved
    `small` and `large`, evaluate the existing width budget
    (`availableTerminalWidth ≥ logoWidth + logoGap + minInfoPanelWidth`):
    - Prefer `large` if it fits.
    - Else fall back to `small` if it fits.
-   - Else hide the logo column entirely (the existing
-     `showLogo = false` branch). The info panel still renders.
-5. **Fallback**. If both tiers end up empty or invalid, render
-   `shortAsciiLogo` as if no customization had been set. The CLI must
-   never crash on a banner config error.
+   - Else, **if the user supplied any custom art**, hide the logo column
+     entirely (the existing `showLogo = false` branch) — falling back to
+     the bundled QWEN logo here would silently undo a white-label
+     deployment on narrow terminals. The info panel still renders.
+   - Else (no custom art was supplied at all) fall through to
+     `shortAsciiLogo` and let the existing width gate decide whether to
+     show or hide the default logo.
+5. **Fallback**. If both tiers end up empty or invalid because of soft
+   failures (missing file, sanitization rejected everything, malformed
+   config), behave as if no customization had been set: render
+   `shortAsciiLogo` and follow the default-logo width gate. The CLI
+   must never crash on a banner config error.
 
 Pseudocode for tier selection:
 
