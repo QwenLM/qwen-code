@@ -12,6 +12,7 @@ const RELATED_ISSUE_LIMIT = 3;
 const GITHUB_API_BASE = 'https://api.github.com';
 const MAX_GITHUB_REQUEST_ATTEMPTS = 3;
 const MAX_COMMENT_PAGES = 5;
+const NEEDS_TRIAGE_LABEL = 'status/needs-triage';
 
 const STOP_WORDS = new Set([
   'about',
@@ -516,6 +517,16 @@ function isAutomationComment(comment) {
   );
 }
 
+function hasAutomationMarker(comments) {
+  return comments.some((comment) =>
+    [
+      INVALID_COMMENT_MARKER,
+      NEEDS_INFO_COMMENT_MARKER,
+      RELATED_COMMENT_MARKER,
+    ].some((marker) => comment.body?.includes(marker)),
+  );
+}
+
 function findBotComment(comments, marker, fallbackPredicate) {
   return comments.find((comment) => {
     if (comment.body?.includes(marker)) {
@@ -532,6 +543,9 @@ function queueComment(result, comments, marker, body, fallbackPredicate) {
   const existing = findBotComment(comments, marker, fallbackPredicate);
 
   if (existing?.body?.includes(marker)) {
+    if (existing.body === body) {
+      return;
+    }
     result.commentsToUpdate.push({
       id: existing.id,
       body,
@@ -554,13 +568,18 @@ export function analyzeIssue({
 }) {
   const result = {
     labelsToAdd: [],
+    labelsToRemove: [],
     commentsToCreate: [],
     commentsToUpdate: [],
     closeIssue: false,
     closeReason: undefined,
   };
 
-  if (issue.pull_request || issue.state === 'closed') {
+  if (
+    issue.pull_request ||
+    issue.state === 'closed' ||
+    issue.assignees?.length > 0
+  ) {
     return result;
   }
 
@@ -598,6 +617,16 @@ export function analyzeIssue({
       RELATED_COMMENT_MARKER,
       buildRelatedIssueComment(strongRelatedIssues),
     );
+  }
+
+  if (
+    normalizeLabels(issue.labels).includes(NEEDS_TRIAGE_LABEL) &&
+    (result.labelsToAdd.length > 0 ||
+      result.commentsToCreate.length > 0 ||
+      result.commentsToUpdate.length > 0 ||
+      result.closeIssue)
+  ) {
+    result.labelsToRemove.push(NEEDS_TRIAGE_LABEL);
   }
 
   return result;
@@ -759,11 +788,6 @@ async function listComments(owner, repo, issueNumber) {
   return comments;
 }
 
-function dateDaysAgo(days) {
-  const date = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  return date.toISOString().slice(0, 10);
-}
-
 async function searchIssues(owner, repo, query, limit) {
   const data = await githubRequest(
     `/search/issues?q=${encodeURIComponent(query)}&per_page=${limit}`,
@@ -782,9 +806,8 @@ async function searchIssues(owner, repo, query, limit) {
 
 async function findScheduledIssues(owner, repo, limit) {
   const queries = [
-    `repo:${owner}/${repo} is:issue is:open no:label`,
-    `repo:${owner}/${repo} is:issue is:open label:"status/needs-triage"`,
-    `repo:${owner}/${repo} is:issue is:open label:"status/need-information" updated:>=${dateDaysAgo(14)}`,
+    `repo:${owner}/${repo} is:issue is:open no:label no:assignee`,
+    `repo:${owner}/${repo} is:issue is:open label:"${NEEDS_TRIAGE_LABEL}" no:assignee -label:"status/need-information" -label:"status/waiting-for-feedback"`,
   ];
   const issuesByNumber = new Map();
 
@@ -877,6 +900,15 @@ async function applyAnalysis(owner, repo, issue, analysis, dryRun) {
     );
   }
 
+  for (const label of analysis.labelsToRemove) {
+    await githubRequest(
+      `/repos/${owner}/${repo}/issues/${issue.number}/labels/${encodeURIComponent(label)}`,
+      {
+        method: 'DELETE',
+      },
+    );
+  }
+
   if (analysis.closeIssue) {
     await githubRequest(`/repos/${owner}/${repo}/issues/${issue.number}`, {
       method: 'PATCH',
@@ -888,7 +920,7 @@ async function applyAnalysis(owner, repo, issue, analysis, dryRun) {
   }
 
   console.log(
-    `Processed issue #${issue.number}: ${analysis.labelsToAdd.length} labels, ${analysis.commentsToCreate.length} new comments, ${analysis.commentsToUpdate.length} updated comments, close=${analysis.closeIssue}`,
+    `Processed issue #${issue.number}: ${analysis.labelsToAdd.length} labels, ${analysis.labelsToRemove.length} removed labels, ${analysis.commentsToCreate.length} new comments, ${analysis.commentsToUpdate.length} updated comments, close=${analysis.closeIssue}`,
   );
 }
 
@@ -898,8 +930,20 @@ async function processIssue(owner, repo, issueNumber, labelNames, dryRun) {
     console.log(`Skipping #${issueNumber}: pull request.`);
     return;
   }
+  if (issue.assignees?.length > 0) {
+    console.log(`Skipping #${issueNumber}: already assigned.`);
+    return;
+  }
 
   const comments = await listComments(owner, repo, issueNumber);
+  if (
+    hasAutomationMarker(comments) &&
+    !normalizeLabels(issue.labels).includes(NEEDS_TRIAGE_LABEL)
+  ) {
+    console.log(`Skipping #${issueNumber}: already handled by issue bot.`);
+    return;
+  }
+
   const relatedIssues = await findRelatedIssues(owner, repo, issue);
   const analysis = analyzeIssue({
     issue,

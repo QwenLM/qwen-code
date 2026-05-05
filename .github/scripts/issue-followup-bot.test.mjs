@@ -23,6 +23,7 @@ const labelNames = [
   'scope/vscode',
   'status/need-information',
   'status/waiting-for-feedback',
+  'status/needs-triage',
   'coding-plan',
 ];
 
@@ -211,6 +212,45 @@ dsas`,
     );
   });
 
+  it('does not update existing bot comments when the body is unchanged', () => {
+    const existingBody = buildRelatedIssueComment([
+      {
+        number: 3843,
+        title: 'settings.json overwritten after using qwen',
+        url: 'https://github.com/QwenLM/qwen-code/issues/3843',
+        state: 'open',
+      },
+    ]);
+    const result = analyzeIssue({
+      issue: {
+        number: 4000,
+        title: 'VS Code companion overwrites settings.json',
+        body: 'The VS Code companion overwrites my settings.json.',
+        labels: ['type/bug'],
+        state: 'open',
+      },
+      labelNames,
+      relatedIssues: [
+        {
+          number: 3843,
+          title: 'settings.json overwritten after using qwen',
+          url: 'https://github.com/QwenLM/qwen-code/issues/3843',
+          state: 'open',
+        },
+      ],
+      comments: [
+        {
+          id: 100,
+          body: existingBody,
+          user: { login: 'qwen-code-ci-bot', type: 'User' },
+        },
+      ],
+    });
+
+    assert.equal(result.commentsToCreate.length, 1);
+    assert.deepEqual(result.commentsToUpdate, []);
+  });
+
   it('updates marker comments from bot token accounts that are typed as users', () => {
     const result = analyzeIssue({
       issue: {
@@ -243,6 +283,46 @@ dsas`,
       result.commentsToUpdate.map((comment) => comment.id),
       [100],
     );
+  });
+
+  it('skips issues that already have assignees', () => {
+    const result = analyzeIssue({
+      issue: {
+        number: 4002,
+        title: 'settings.json is overwritten',
+        body: 'Qwen Code changed my settings file unexpectedly.',
+        labels: ['type/bug'],
+        state: 'open',
+        assignees: [{ login: 'maintainer' }],
+      },
+      labelNames,
+      relatedIssues: [],
+      comments: [],
+    });
+
+    assert.deepEqual(result.labelsToAdd, []);
+    assert.deepEqual(result.labelsToRemove, []);
+    assert.deepEqual(result.commentsToCreate, []);
+    assert.deepEqual(result.commentsToUpdate, []);
+    assert.equal(result.closeIssue, false);
+  });
+
+  it('removes needs-triage after adding bot follow-up actions', () => {
+    const result = analyzeIssue({
+      issue: {
+        number: 4003,
+        title: 'settings.json is overwritten',
+        body: 'Qwen Code changed my settings file unexpectedly.',
+        labels: ['type/bug', 'status/needs-triage'],
+        state: 'open',
+      },
+      labelNames,
+      relatedIssues: [],
+      comments: [],
+    });
+
+    assert.deepEqual(result.labelsToRemove, ['status/needs-triage']);
+    assert.equal(result.commentsToCreate.length, 1);
   });
 
   it('does not link weak body-only matches as related issues', () => {
