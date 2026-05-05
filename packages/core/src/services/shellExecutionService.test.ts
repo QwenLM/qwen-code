@@ -228,8 +228,12 @@ describe('ShellExecutionService', () => {
     };
     mockPtyProcess.pid = 12345;
     mockPtyProcess.kill = vi.fn();
-    mockPtyProcess.onData = vi.fn();
-    mockPtyProcess.onExit = vi.fn();
+    // node-pty's onData/onExit return IDisposable; the production
+    // background-promote path calls .dispose() on those handles to detach
+    // its listeners cleanly. Mock them to return a disposable stub so the
+    // promote path doesn't crash on `undefined.dispose()`.
+    mockPtyProcess.onData = vi.fn().mockReturnValue({ dispose: vi.fn() });
+    mockPtyProcess.onExit = vi.fn().mockReturnValue({ dispose: vi.fn() });
     mockPtyProcess.write = vi.fn();
     mockPtyProcess.resize = vi.fn();
 
@@ -663,6 +667,60 @@ describe('ShellExecutionService', () => {
         -mockPtyProcess.pid,
         'SIGKILL',
       );
+    });
+
+    it('post-promotion: PTY data is no longer routed to onOutputEvent (handoff boundary)', async () => {
+      // Pin the ownership contract: after background-promote, PTY data
+      // arriving on the still-running child must NOT surface through the
+      // foreground execute()'s onOutputEvent (the caller has its own
+      // listeners now). Without dataDisposable.dispose() in the abort
+      // handler, the listener-retention bug would let post-promote bytes
+      // leak into the foreground consumer.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (pty, abortController) => {
+          // Data BEFORE promote — fed via the live onData listener so it
+          // reaches the foreground onOutputEvent normally.
+          pty.onData.mock.calls[0][0]('pre-promote-data\n');
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+      expect(result.promoted).toBe(true);
+
+      // The disposable returned by mockPtyProcess.onData was disposed by
+      // the abort handler — verify by calling .dispose's mock.
+      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      expect(dataDisposableStub.dispose).toHaveBeenCalled();
+      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
+        .value as { dispose: Mock };
+      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+    });
+
+    it('post-promotion: PTY exit does NOT re-resolve the result (already resolved with promoted)', async () => {
+      // Pin: even if the still-running child later exits naturally and the
+      // caller's own exit listener fires, our foreground result Promise
+      // must NOT be re-resolved with a different shape (Promise can only
+      // resolve once). The exit disposable being disposed prevents our
+      // own onExit from firing at all in the first place — but verify the
+      // final resolved shape stays `promoted: true` regardless.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (_pty, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      // Resolved as promoted, with no exit info from a post-promote exit.
+      expect(result.promoted).toBe(true);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
     });
   });
 
@@ -1256,6 +1314,68 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(mockChildProcess.kill).not.toHaveBeenCalled();
     });
 
+    it('post-promotion: stdout / stderr data is no longer routed to onOutputEvent (handoff boundary)', async () => {
+      mockPlatform.mockReturnValue('linux');
+      // Pin the ownership contract: after background-promote, stdout/stderr
+      // arriving on the still-running child must NOT surface through the
+      // foreground execute()'s onOutputEvent. Without off()'ing the
+      // stdoutHandler / stderrHandler in the abort handler, post-promote
+      // bytes would re-enter handleOutput, which then calls
+      // decoder.decode() on a now-finalized decoder (cleanup() called
+      // .decode() without stream:true) → TypeError crash, OR routes to
+      // onOutputEvent → ownership leak / duplicated emit.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (cp, abortController) => {
+          cp.stdout?.emit('data', Buffer.from('pre-promote\n'));
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+          // Capture call count at the moment of promote, then emit more
+          // data on the still-live child stream and assert onOutputEvent
+          // was NOT called again. (Also verifies no TypeError from
+          // decoding through the finalized decoder.)
+          const eventCountAtPromote = onOutputEventMock.mock.calls.length;
+          cp.stdout?.emit('data', Buffer.from('post-promote-stdout\n'));
+          cp.stderr?.emit('data', Buffer.from('post-promote-stderr\n'));
+          expect(onOutputEventMock.mock.calls.length).toBe(eventCountAtPromote);
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      // Pre-promote data made it into the snapshot; post-promote did not.
+      expect(result.output).toContain('pre-promote');
+      expect(result.output).not.toContain('post-promote-stdout');
+      expect(result.output).not.toContain('post-promote-stderr');
+    });
+
+    it('post-promotion: child exit does NOT re-resolve the result with a non-promoted shape', async () => {
+      mockPlatform.mockReturnValue('linux');
+      // Pin: even if the still-running child later exits naturally and the
+      // caller's own exit listener fires, our foreground result Promise
+      // must NOT be re-resolved (Promise can only resolve once). The
+      // detached exit handler prevents our own handler from firing.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (cp, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+          // Simulate the still-running child exiting later; this should
+          // NOT route through our handleExit because the exit listener
+          // was off()'d in the background-promote branch.
+          cp.emit('exit', 42, null);
+          cp.emit('close', 42, null);
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+    });
+
     it('should gracefully attempt SIGKILL on linux if SIGTERM fails', async () => {
       mockPlatform.mockReturnValue('linux');
       vi.useFakeTimers();
@@ -1452,8 +1572,12 @@ describe('ShellExecutionService execution method selection', () => {
     };
     mockPtyProcess.pid = 12345;
     mockPtyProcess.kill = vi.fn();
-    mockPtyProcess.onData = vi.fn();
-    mockPtyProcess.onExit = vi.fn();
+    // node-pty's onData/onExit return IDisposable; the production
+    // background-promote path calls .dispose() on those handles to detach
+    // its listeners cleanly. Mock them to return a disposable stub so the
+    // promote path doesn't crash on `undefined.dispose()`.
+    mockPtyProcess.onData = vi.fn().mockReturnValue({ dispose: vi.fn() });
+    mockPtyProcess.onExit = vi.fn().mockReturnValue({ dispose: vi.fn() });
     mockPtyProcess.write = vi.fn();
     mockPtyProcess.resize = vi.fn();
 

@@ -535,22 +535,50 @@ export class ShellExecutionService {
           });
         };
 
-        child.stdout.on('data', (data) => handleOutput(data, 'stdout'));
-        child.stderr.on('data', (data) => handleOutput(data, 'stderr'));
-        child.on('error', (err) => {
+        // Named handler refs so the background-promote branch below can
+        // detach them all and hand ownership of the child cleanly to the
+        // caller. Anonymous arrows here would leak: the still-running child
+        // would keep firing into our handlers (using a finalized decoder →
+        // TypeError, or duplicating events the caller now also receives).
+        const stdoutHandler = (data: Buffer) => handleOutput(data, 'stdout');
+        const stderrHandler = (data: Buffer) => handleOutput(data, 'stderr');
+        const errorHandler = (err: Error) => {
           error = err;
           handleExit(1, null);
-        });
+        };
+        const exitHandler = (
+          code: number | null,
+          signal: NodeJS.Signals | null,
+        ) => {
+          if (child.pid) {
+            this.activeChildProcesses.delete(child.pid);
+          }
+          handleExit(code, signal);
+        };
+
+        child.stdout.on('data', stdoutHandler);
+        child.stderr.on('data', stderrHandler);
+        child.on('error', errorHandler);
+
+        const detachServiceListeners = () => {
+          child.stdout?.off('data', stdoutHandler);
+          child.stderr?.off('data', stderrHandler);
+          child.off('error', errorHandler);
+          child.off('exit', exitHandler);
+        };
 
         const abortHandler = async () => {
-          // Background-promote takeover: skip kill, drop the child from our
-          // active set (so cleanup() won't kill it later), flush our text
-          // buffers into a snapshot, and resolve immediately with
-          // `promoted: true` so the awaiting caller unblocks. The caller has
-          // attached its own listeners to the live child by this point.
+          // Background-promote takeover: skip kill, detach our listeners (so
+          // post-promote output doesn't leak into the foreground onOutputEvent
+          // or the now-finalized text decoder), drop the child from our active
+          // set (so cleanup() won't kill it later), flush our text buffers
+          // into a snapshot, and resolve immediately with `promoted: true` so
+          // the awaiting caller unblocks. The caller has attached its own
+          // listeners to the live child by this point and now owns the child.
           const reason = abortSignal.reason as ShellAbortReason | undefined;
           if (reason?.kind === 'background' && child.pid && !exited) {
             this.activeChildProcesses.delete(child.pid);
+            detachServiceListeners();
             const {
               stdout: snapStdout,
               stderr: snapStderr,
@@ -597,12 +625,7 @@ export class ShellExecutionService {
           this.activeChildProcesses.add(child.pid);
         }
 
-        child.on('exit', (code, signal) => {
-          if (child.pid) {
-            this.activeChildProcesses.delete(child.pid);
-          }
-          handleExit(code, signal);
-        });
+        child.on('exit', exitHandler);
 
         function cleanup() {
           exited = true;
@@ -717,11 +740,18 @@ export class ShellExecutionService {
         let isWriting = false;
         let hasStartedOutput = false;
         let renderTimeout: NodeJS.Timeout | null = null;
+        // Set to true by the background-promote branch so any in-flight
+        // processingChain callback or pending render short-circuits instead
+        // of emitting onOutputEvent / writing to the (now caller-owned)
+        // headlessTerminal. The PTY data disposable is also disposed in the
+        // same branch so no NEW work is enqueued — this guard handles the
+        // already-scheduled chain items.
+        let listenersDetached = false;
 
         const RENDER_THROTTLE_MS = 100;
 
         const renderFn = () => {
-          if (!isStreamingRawContent) {
+          if (!isStreamingRawContent || listenersDetached) {
             return;
           }
 
@@ -842,30 +872,46 @@ export class ShellExecutionService {
 
                   if (isBinary(sniffBuffer)) {
                     isStreamingRawContent = false;
-                    onOutputEvent({ type: 'binary_detected' });
+                    if (!listenersDetached) {
+                      onOutputEvent({ type: 'binary_detected' });
+                    }
                   }
                 }
 
                 if (isStreamingRawContent) {
                   const decodedChunk = decoder!.decode(data, { stream: true });
                   isWriting = true;
+                  // Allow in-flight writes to LAND in the headlessTerminal
+                  // even after a background promote — the snapshot we'll
+                  // serialize next reads from this buffer. The render()
+                  // callback (and renderFn) is already guarded by
+                  // listenersDetached, so no onOutputEvent fires.
                   headlessTerminal.write(decodedChunk, () => {
                     render();
                     isWriting = false;
                     resolve();
                   });
                 } else {
-                  onOutputEvent({
-                    type: 'binary_progress',
-                    bytesReceived,
-                  });
+                  if (!listenersDetached) {
+                    onOutputEvent({
+                      type: 'binary_progress',
+                      bytesReceived,
+                    });
+                  }
                   resolve();
                 }
               }),
           );
         };
 
-        ptyProcess.onData((data: string) => {
+        // Capture the IDisposables that node-pty returns so the
+        // background-promote branch below can hand the live PTY to the
+        // caller cleanly. Without dispose(), post-promote PTY data would
+        // continue calling our handleOutput → render → onOutputEvent (the
+        // foreground caller's downstream consumer that no longer owns this
+        // child) and post-promote PTY errors would `throw err` → process
+        // crash.
+        const dataDisposable = ptyProcess.onData((data: string) => {
           const bufferData = Buffer.from(data, 'utf-8');
           handleOutput(bufferData);
         });
@@ -874,7 +920,7 @@ export class ShellExecutionService {
         // due to race conditions between the exit event and read operations.
         // This is a normal behavior on macOS/Linux and should not crash the app.
         // See: https://github.com/microsoft/node-pty/issues/178
-        ptyProcess.on('error', (err: NodeJS.ErrnoException) => {
+        const ptyErrorHandler = (err: NodeJS.ErrnoException) => {
           if (isExpectedPtyReadExitError(err)) {
             // EIO is expected when the PTY process exits - ignore it
             return;
@@ -882,9 +928,10 @@ export class ShellExecutionService {
 
           // Surface unexpected PTY errors to preserve existing crash behavior.
           throw err;
-        });
+        };
+        ptyProcess.on('error', ptyErrorHandler);
 
-        ptyProcess.onExit(
+        const exitDisposable = ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
             exited = true;
             abortSignal.removeEventListener('abort', abortHandler);
@@ -954,17 +1001,46 @@ export class ShellExecutionService {
         );
 
         const abortHandler = async () => {
-          // Background-promote takeover: skip kill, drop the PTY from the
-          // active set (so cleanup() won't kill it later), flush a snapshot
-          // of the output buffer captured so far, and resolve immediately
-          // with `promoted: true` so the awaiting caller unblocks. The
-          // caller has attached its own listeners to the live PTY by this
-          // point and owns its lifecycle from here on.
+          // Background-promote takeover: skip kill, dispose all our
+          // listeners on the live PTY (so post-promote data/exit/error don't
+          // leak into our foreground onOutputEvent or crash via the error
+          // handler's `throw err`), set the listenersDetached guard so any
+          // already-enqueued processingChain callback's onOutputEvent emits
+          // are suppressed (in-flight writes still LAND in headlessTerminal
+          // so the snapshot below reflects them), drain pending chain work,
+          // drop the PTY from the active set (so cleanup() won't kill it
+          // later), serialize the terminal as the snapshot, and resolve
+          // immediately with `promoted: true` so the awaiting caller
+          // unblocks. The caller has attached its own listeners to the live
+          // PTY by this point and owns its lifecycle from here on.
           const reason = abortSignal.reason as ShellAbortReason | undefined;
           if (reason?.kind === 'background' && ptyProcess.pid && !exited) {
             exited = true;
+            listenersDetached = true;
             abortSignal.removeEventListener('abort', abortHandler);
+            dataDisposable.dispose();
+            exitDisposable.dispose();
+            ptyProcess.off('error', ptyErrorHandler);
+            if (renderTimeout) {
+              clearTimeout(renderTimeout);
+              renderTimeout = null;
+            }
             this.activePtys.delete(ptyProcess.pid);
+
+            // Drain in-flight chain work (already-enqueued
+            // headlessTerminal.write callbacks) so the snapshot reflects
+            // the last batch of bytes the PTY emitted before promote.
+            // Bounded by SIGKILL_TIMEOUT_MS so the caller's await never
+            // blocks indefinitely if a write callback is stuck.
+            const drain = () =>
+              new Promise<void>((res) => setImmediate(res)).then(
+                () => processingChain,
+              );
+            await Promise.race([
+              processingChain.then(drain).then(drain),
+              new Promise<void>((res) => setTimeout(res, SIGKILL_TIMEOUT_MS)),
+            ]);
+
             const finalBuffer = Buffer.concat(outputChunks);
             let snapshot = '';
             try {
