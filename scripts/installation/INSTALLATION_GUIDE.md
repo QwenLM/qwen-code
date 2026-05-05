@@ -38,19 +38,22 @@ GitHub releases publish these standalone archives:
 - `install-qwen.bat`
 - `SHA256SUMS`
 
-The installer scripts are published as release assets so the default install
-entrypoint can be distributed alongside the standalone archives:
+The installer scripts are published as release assets so version-specific
+install entrypoints can be distributed alongside the standalone archives after
+that release is created:
 
 ```bash
-curl -fsSL https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.sh | bash
+curl -fsSL https://github.com/QwenLM/qwen-code/releases/download/vX.Y.Z/install-qwen.sh | bash
 ```
 
 ```bat
-powershell -Command "Invoke-WebRequest 'https://github.com/QwenLM/qwen-code/releases/latest/download/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+powershell -Command "Invoke-WebRequest 'https://github.com/QwenLM/qwen-code/releases/download/vX.Y.Z/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
 ```
 
-The installer defaults to `latest`. Pass `--version vX.Y.Z` to pin the
-standalone archive version.
+Public quick-install docs should switch to release asset URLs only after at
+least one published release includes `install-qwen.sh` and `install-qwen.bat`.
+Until then, keep public quick-install examples on the hosted installation URLs
+used in the README and user docs.
 
 Archive layout:
 

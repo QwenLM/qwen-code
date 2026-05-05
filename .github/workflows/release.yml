@@ -384,6 +384,8 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
 
+      # Rewrites SHA256SUMS after copying installer scripts so the release
+      # checksum file covers both standalone archives and installer assets.
       - name: 'Build Installation Assets'
         run: 'npm run package:installation-assets -- --out-dir dist/standalone'
 
