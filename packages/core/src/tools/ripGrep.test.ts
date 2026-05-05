@@ -203,6 +203,39 @@ describe('RipGrepTool', () => {
       expect(result.returnDisplay).toBe('No matches found');
     });
 
+    it('parses JSON match events and records result paths', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${JSON.stringify({ type: 'match', data: { path: { text: 'src/foo.ts' }, lines: { text: 'content\n' }, line_number: 5 } })}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'content' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('src/foo.ts:5:content');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'src/foo.ts'),
+      ]);
+    });
+
+    it('parses JSON match events with byte-encoded paths', async () => {
+      const bytePath = 'src/byte-path.ts';
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${JSON.stringify({ type: 'match', data: { path: { bytes: Buffer.from(bytePath, 'utf8').toString('base64') }, lines: { text: 'content\n' }, line_number: 3 } })}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'content' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('src/byte-path.ts:3:content');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, bytePath),
+      ]);
+    });
+
     it('handles JSON match events without a lines field', async () => {
       (runRipgrep as Mock).mockResolvedValue({
         stdout: `${JSON.stringify({ type: 'match', data: { path: { text: 'fileA.txt' }, line_number: 1 } })}${EOL}`,
@@ -272,7 +305,28 @@ describe('RipGrepTool', () => {
       expect(result.resultFilePaths).toEqual([absoluteMatchPath]);
     });
 
-    it('only reports result paths for lines visible before character truncation', async () => {
+    it('includes result paths for partially rendered long file paths', async () => {
+      Object.assign(mockConfig, {
+        getTruncateToolOutputThreshold: () => 30,
+      });
+      const longPath = 'packages/core/src/skills/very-long-named-file.ts';
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${longPath}${sep}1${sep}visible marker${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'marker', glob: '**/*.ts' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.llmContent).toContain('packages/core/src/skills/very');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, longPath),
+      ]);
+    });
+
+    it('only reports result paths for lines reached before character truncation', async () => {
       Object.assign(mockConfig, {
         getTruncateToolOutputThreshold: () => 25,
       });
@@ -290,6 +344,7 @@ describe('RipGrepTool', () => {
       expect(result.returnDisplay).toContain('truncated');
       expect(result.resultFilePaths).toEqual([
         path.join(tempRootDir, visiblePath),
+        path.join(tempRootDir, hiddenPath),
       ]);
     });
 
@@ -595,10 +650,19 @@ describe('RipGrepTool', () => {
 
       expect(result.llmContent).toContain('across 2 workspace directories');
       expect(result.llmContent).toContain('Found 2 matches');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileA.txt'),
+        path.join(secondDir, 'extra.txt'),
+      ]);
 
       // Verify both paths were passed to runRipgrep
       expect(runRipgrep).toHaveBeenCalledWith(
-        expect.arrayContaining([tempRootDir, secondDir]),
+        expect.arrayContaining([
+          '--json',
+          '--no-messages',
+          tempRootDir,
+          secondDir,
+        ]),
         expect.anything(),
       );
 

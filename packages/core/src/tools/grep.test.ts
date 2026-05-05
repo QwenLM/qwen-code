@@ -248,6 +248,46 @@ describe('GrepTool', () => {
       readSpy.mockRestore();
     });
 
+    it('validates CRLF fallback grep output without dropping result paths', async () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+          includeResultFilePaths: boolean,
+        ) => Array<{ absoluteFilePath: string }>;
+      };
+      const filePath = path.join(tempRootDir, 'crlf.txt');
+      await fs.writeFile(filePath, 'hello world\r\nsecond line\r\n');
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `crlf.txt:1:hello world\r${os.EOL}`,
+        tempRootDir,
+        true,
+      );
+
+      expect(matches[0]?.absoluteFilePath).toBe(filePath);
+    });
+
+    it('includes result paths for partially rendered match lines', async () => {
+      Object.assign(mockConfig, {
+        getTruncateToolOutputThreshold: () => 22,
+      });
+      await fs.writeFile(
+        path.join(tempRootDir, 'partial.ts'),
+        'partial marker',
+      );
+
+      const invocation = grepTool.build({ pattern: 'marker', glob: '*.ts' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'partial.ts'),
+      ]);
+    });
+
     it('only reports result paths for matches visible before character truncation', async () => {
       Object.assign(mockConfig, {
         getTruncateToolOutputThreshold: () => 30,

@@ -25,7 +25,7 @@ const RIPGREP_FIELD_SEPARATOR = '';
 interface RipgrepJsonMatch {
   type: 'match';
   data: {
-    path: { text?: string };
+    path: { text?: string; bytes?: string };
     lines?: { text?: string };
     line_number: number;
   };
@@ -36,16 +36,27 @@ function isRipgrepJsonMatch(value: unknown): value is RipgrepJsonMatch {
   const candidate = value as {
     type?: unknown;
     data?: {
-      path?: { text?: unknown };
+      path?: { text?: unknown; bytes?: unknown };
       lines?: { text?: unknown };
       line_number?: unknown;
     };
   };
   return (
     candidate.type === 'match' &&
-    typeof candidate.data?.path?.text === 'string' &&
+    (typeof candidate.data?.path?.text === 'string' ||
+      typeof candidate.data?.path?.bytes === 'string') &&
     typeof candidate.data?.line_number === 'number'
   );
+}
+
+function getRipgrepJsonPath(match: RipgrepJsonMatch): string | undefined {
+  if (match.data.path.text !== undefined) {
+    return match.data.path.text;
+  }
+  if (match.data.path.bytes !== undefined) {
+    return Buffer.from(match.data.path.bytes, 'base64').toString('utf8');
+  }
+  return undefined;
 }
 
 /**
@@ -71,11 +82,17 @@ function trimCache<K, V>(m: Map<K, V>): void {
   if (oldest !== undefined) m.delete(oldest as K);
 }
 
-function toAbsoluteResultPath(filePath: string, searchRoot: string): string {
+function toAbsoluteResultPath(filePath: string, searchPaths: string[]): string {
   if (path.isAbsolute(filePath) || path.win32.isAbsolute(filePath)) {
     return filePath;
   }
-  return path.resolve(searchRoot, filePath);
+  for (const searchPath of searchPaths) {
+    const candidate = path.resolve(searchPath, filePath);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return path.resolve(searchPaths[0], filePath);
 }
 
 /**
@@ -201,10 +218,12 @@ class GrepToolInvocation extends BaseToolInvocation<
         .split('\n')
         .filter((line) => line.trim())
         .flatMap((line): RipgrepMatchLine[] => {
-          try {
-            const parsed = JSON.parse(line) as unknown;
-            if (isRipgrepJsonMatch(parsed)) {
-              const filePath = parsed.data.path.text;
+          if (line.startsWith('{')) {
+            if (!line.startsWith('{"type":"match"')) return [];
+            try {
+              const parsed = JSON.parse(line) as unknown;
+              if (!isRipgrepJsonMatch(parsed)) return [];
+              const filePath = getRipgrepJsonPath(parsed);
               if (filePath === undefined) return [];
               const lineNumber = String(parsed.data.line_number);
               const content = parsed.data.lines?.text ?? '';
@@ -215,12 +234,9 @@ class GrepToolInvocation extends BaseToolInvocation<
                   key: `${filePath}:${lineNumber}`,
                 },
               ];
-            }
-            if (typeof parsed === 'object' && parsed !== null) {
+            } catch {
               return [];
             }
-          } catch {
-            // Fall through to legacy/mock text parsing below.
           }
 
           const fields = line.split(RIPGREP_FIELD_SEPARATOR);
@@ -307,9 +323,7 @@ class GrepToolInvocation extends BaseToolInvocation<
             const remaining = Math.max(charLimit - currentLength - sep, 10);
             const partialLine = line.rawLine.slice(0, remaining);
             parts.push(partialLine + '...');
-            if (partialLine.startsWith(`${line.filePath}:`)) {
-              visibleLines.push(line);
-            }
+            visibleLines.push(line);
             truncatedByCharLimit = true;
             break;
           }
@@ -348,7 +362,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       const resultFilePaths = Array.from(
         new Set(
           visibleLines.map((line) =>
-            toAbsoluteResultPath(line.filePath, searchPaths[0]),
+            toAbsoluteResultPath(line.filePath, searchPaths),
           ),
         ),
       );
@@ -378,6 +392,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
     const rgArgs: string[] = [
       '--json',
+      '--no-messages',
       '--path-separator',
       '/',
       '--ignore-case',

@@ -223,6 +223,7 @@ class GrepToolInvocation extends BaseToolInvocation<
             Math.max(charLimit - grepOutput.length, 0),
           );
           grepOutput += '...';
+          if (match) visibleMatches.push(match);
           truncatedByCharLimit = true;
           return false;
         }
@@ -316,7 +317,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         const reads = lineCacheStats?.reads;
         reads?.set(absoluteFilePath, (reads.get(absoluteFilePath) ?? 0) + 1);
       }
-      return lines[lineNumber - 1] === lineContent;
+      return lines[lineNumber - 1] === lineContent.replace(/\r$/, '');
     } catch {
       return false;
     }
