@@ -88,7 +88,7 @@ const EXPORT_FORMAT_COMPLETIONS = ['html', 'md', 'json', 'jsonl'] as const;
  *   1. No escaping concerns when format names contain regex metacharacters.
  *   2. O(1) cost after the cheap startsWith prefix guard.
  */
-export const getExportFormatFromInput = (
+const getExportFormatFromInput = (
   input: string,
   validFormats: readonly string[],
 ): string | null => {
@@ -281,9 +281,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   // Derive the canonical export format list from slashCommands so adding a new
   // "/export <fmt>" sub-command does not silently break the arrow/Tab cycle.
-  // EXPORT_FORMAT_COMPLETIONS is kept only as a fallback for early renders
-  // before slashCommands are wired up; runtime display, cycling, and format
-  // parsing all follow whatever the export command declares.
+  // EXPORT_FORMAT_COMPLETIONS is kept only as a static fallback for early
+  // renders before slashCommands are wired up.  All runtime logic (display,
+  // cycling, parsing) follows the dynamic list derived from slashCommands.
+  // IMPORTANT: if a format is removed from the /export command definition
+  // (slashCommands.subCommands), also remove it here — otherwise the
+  // fallback will silently re-introduce it during early renders.
   const exportFormatSuggestions = useMemo<Suggestion[]>(() => {
     const exportCommand = slashCommands.find(
       (command) => command.name === EXPORT_COMMAND_INPUT.slice(1),
@@ -311,6 +314,21 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     () => exportFormatSuggestions.map((suggestion) => suggestion.value),
     [exportFormatSuggestions],
   );
+
+  // Seed exportCompletionSelectionIndexRef when the user manually types
+  // "/export <fmt>" without going through the Phase-1 popup (UX symmetry).
+  // ESC/Ctrl+C/Ctrl+U clear the ref; this effect re-seeds it when the
+  // buffer changes afterward — React only re-runs on buffer.text changes,
+  // so ESC alone (which doesn't change buffer.text) won't cause immediate
+  // re-seeding.  During Phase 1/2, setExportCompletionInput writes the ref
+  // first, so this effect is a no-op (ref.current !== null).
+  useEffect(() => {
+    const fmt = getExportFormatFromInput(buffer.text, exportCycleFormats);
+    if (fmt !== null && exportCompletionSelectionIndexRef.current === null) {
+      exportCompletionSelectionIndexRef.current =
+        exportCycleFormats.indexOf(fmt);
+    }
+  }, [buffer.text, exportCycleFormats]);
 
   const reverseSearchCompletion = useReverseSearchCompletion(
     buffer,
@@ -1347,6 +1365,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
         }
         // No placeholder matched — fall through to BaseTextInput's default backspace
+      }
+
+      // Ctrl+U (clear-line) — reset export cycling state so a subsequent
+      // manual typing of "/export <fmt>" doesn't mistakenly show the
+      // persistent suggestion panel as if the user had cycled.
+      if (key.ctrl && key.name === 'u') {
+        exportCompletionSelectionIndexRef.current = null;
       }
 
       // Ctrl+C with completion active — also reset completion state

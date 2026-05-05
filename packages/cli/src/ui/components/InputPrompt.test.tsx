@@ -985,6 +985,10 @@ describe('InputPrompt', () => {
     // User clears buffer and types a different command manually.
     stdin.write('\u0015'); // Ctrl+U: clear line
     await wait();
+    // Pin the intermediate state: Ctrl+U must actually clear the buffer
+    // before we type the new command, so a future useTextBuffer/hook change
+    // can't make this test pass for the wrong reason.
+    expect(stripAnsi(lastFrame() ?? '')).not.toContain('/export');
     stdin.write('/help');
     await wait();
     const afterEditFrame = stripAnsi(lastFrame() ?? '');
@@ -1231,6 +1235,38 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should cycle export format on Down when /export <fmt> was typed manually (not via popup)', async () => {
+    // Regression for PR #3701 fifth-round review: users who type
+    // "/export md" directly (without going through the Phase-1 popup)
+    // must still get Phase-2 cycling on arrow keys — the ref-seeding
+    // asymmetry previously required arriving via the popup.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: false, // popup is closed for direct input
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    // Simulate a user typing "/export md" manually.
+    props.buffer.setText('/export md');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    (props.buffer.setText as ReturnType<typeof vi.fn>).mockClear();
+
+    // Pressing Down must cycle to the NEXT format (json).
+    stdin.write('\u001B[B');
+    await wait();
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export json');
+    unmount();
+  });
+
   it('should trigger export-specific arrow navigation even when completion suggestions are a superset', async () => {
     // Regression for PR #3701 review (hasExportFormatSuggestions superset
     // matching): when extra non-export items appear alongside all export
@@ -1254,7 +1290,7 @@ describe('InputPrompt', () => {
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
-    stdin.write('\u001B[B]'); // Down
+    stdin.write('\u001B[B'); // Down
     await wait();
 
     expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md');
@@ -1316,7 +1352,7 @@ describe('InputPrompt', () => {
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
-    stdin.write('\u001B[B]'); // Down
+    stdin.write('\u001B[B'); // Down
     await wait();
 
     expect(mockCommandCompletion.navigateDown).toHaveBeenCalled();
@@ -1346,7 +1382,7 @@ describe('InputPrompt', () => {
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
-    stdin.write('\u001B[B]'); // Down
+    stdin.write('\u001B[B'); // Down
     await wait();
 
     expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md');
