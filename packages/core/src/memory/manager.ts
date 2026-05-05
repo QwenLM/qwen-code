@@ -907,6 +907,7 @@ export class MemoryManager {
     now: Date,
     abortSignal: AbortSignal,
   ): Promise<MemoryTaskRecord> {
+    const dreamStartMs = Date.now();
     try {
       try {
         await acquireDreamLock(params.projectRoot);
@@ -1055,7 +1056,11 @@ export class MemoryManager {
               status: 'cancelled',
               deduped_entries: 0,
               touched_topics: [],
-              duration_ms: 0,
+              // Real elapsed time the cancelled dream consumed before
+              // the user stopped it — without this, latency histograms
+              // / p95 metrics would silently treat cancelled dreams as
+              // 0ms and skew toward the success path.
+              duration_ms: Date.now() - dreamStartMs,
             }),
           );
         }
