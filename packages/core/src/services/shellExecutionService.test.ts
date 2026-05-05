@@ -17,7 +17,10 @@ import EventEmitter from 'node:events';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
 import pkg from '@xterm/headless';
-import type { ShellOutputEvent } from './shellExecutionService.js';
+import type {
+  ShellAbortReason,
+  ShellOutputEvent,
+} from './shellExecutionService.js';
 import { ShellExecutionService } from './shellExecutionService.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
@@ -608,6 +611,59 @@ describe('ShellExecutionService', () => {
       expect(result.aborted).toBe(true);
       // The process kill is mocked, so we just check that the flag is set.
     });
+
+    it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (pty, abortController) => {
+          abortController.abort({ kind: 'cancel' } satisfies ShellAbortReason);
+          pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.promoted).toBeUndefined();
+      // The default kill path runs: SIGTERM via process.kill on the
+      // process-group pid. Pinning that we DID try to kill — i.e., reason
+      // === 'cancel' is NOT mistakenly routed through the background branch.
+      expect(mockProcessKill).toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGTERM',
+      );
+    });
+
+    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true', async () => {
+      // Critical: do NOT fire onExit — the child is still alive after the
+      // background-promote abort. The result Promise must resolve via the
+      // abort handler's own immediate resolve, not via the exit handler.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (_pty, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.promoted).toBe(true);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.error).toBeNull();
+      expect(result.pid).toBe(mockPtyProcess.pid);
+      // Verify the kill path did NOT run: neither the PTY's own kill() nor
+      // process.kill on the group pid. Caller now owns the child.
+      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+      expect(mockProcessKill).not.toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGTERM',
+      );
+      expect(mockProcessKill).not.toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGKILL',
+      );
+    });
   });
 
   describe('Binary Output', () => {
@@ -1138,6 +1194,67 @@ describe('ShellExecutionService child_process fallback', () => {
         });
       },
     );
+
+    it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
+      mockPlatform.mockReturnValue('linux');
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (cp, abortController) => {
+          abortController.abort({ kind: 'cancel' } satisfies ShellAbortReason);
+          cp.emit('exit', null, 'SIGKILL');
+          cp.emit('close', null, 'SIGKILL');
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.promoted).toBeUndefined();
+      // Default kill path ran — pin that reason === 'cancel' is NOT
+      // mistakenly routed through the background branch.
+      expect(mockProcessKill).toHaveBeenCalledWith(
+        -mockChildProcess.pid!,
+        'SIGTERM',
+      );
+    });
+
+    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true', async () => {
+      mockPlatform.mockReturnValue('linux');
+      // Critical: do NOT fire 'exit' — the child is still alive after the
+      // background-promote abort. The result Promise must resolve via the
+      // abort handler's own immediate resolve.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (cp, abortController) => {
+          // Emit some output first so the snapshot has content.
+          cp.stdout?.emit('data', Buffer.from('line1\nline2\n'));
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.promoted).toBe(true);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.error).toBeNull();
+      expect(result.pid).toBe(mockChildProcess.pid);
+      // Output captured up to the promote moment is preserved as the
+      // snapshot for the caller to seed the BackgroundShellEntry's output
+      // file from.
+      expect(result.output).toContain('line1');
+      expect(result.output).toContain('line2');
+      // Verify the kill path did NOT run.
+      expect(mockProcessKill).not.toHaveBeenCalledWith(
+        -mockChildProcess.pid!,
+        'SIGTERM',
+      );
+      expect(mockProcessKill).not.toHaveBeenCalledWith(
+        -mockChildProcess.pid!,
+        'SIGKILL',
+      );
+      expect(mockChildProcess.kill).not.toHaveBeenCalled();
+    });
 
     it('should gracefully attempt SIGKILL on linux if SIGTERM fails', async () => {
       mockPlatform.mockReturnValue('linux');

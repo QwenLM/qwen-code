@@ -37,6 +37,23 @@ function applyPowerShellUtf8Prefix(command: string, shell: string): string {
   return command;
 }
 
+/**
+ * Discriminated reason attached to the AbortSignal that drives execute().
+ * Default behavior (no reason set, or `{ kind: 'cancel' }`) is the historical
+ * tree-kill on abort. `{ kind: 'background' }` is a takeover signal: the
+ * caller has accepted ownership of the child process and wants execute() to
+ * relinquish it without killing — used by the foreground-shell → background
+ * promote path so the in-flight child keeps running.
+ *
+ * Callers MUST attach their own listeners (data / exit / error) to the live
+ * child *before* calling `abortController.abort({ kind: 'background', ... })`,
+ * since execute() drops the child from its active set on background-abort and
+ * will no longer route events to its own handlers' downstream consumers.
+ */
+export type ShellAbortReason =
+  | { kind: 'cancel' }
+  | { kind: 'background'; shellId?: string };
+
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
   /** The raw, unprocessed output buffer. */
@@ -51,6 +68,14 @@ export interface ShellExecutionResult {
   error: Error | null;
   /** A boolean indicating if the command was aborted by the user. */
   aborted: boolean;
+  /**
+   * True iff execute() returned because of a background-promote abort
+   * (`signal.reason.kind === 'background'`) — the child process is still
+   * alive and the caller has taken over its lifecycle. Callers receiving
+   * `promoted: true` must NOT treat exitCode/signal as terminal — the
+   * underlying process has not exited.
+   */
+  promoted?: boolean;
   /** The process ID of the spawned shell. */
   pid: number | undefined;
   /** The method used to execute the shell command. */
@@ -518,6 +543,37 @@ export class ShellExecutionService {
         });
 
         const abortHandler = async () => {
+          // Background-promote takeover: skip kill, drop the child from our
+          // active set (so cleanup() won't kill it later), flush our text
+          // buffers into a snapshot, and resolve immediately with
+          // `promoted: true` so the awaiting caller unblocks. The caller has
+          // attached its own listeners to the live child by this point.
+          const reason = abortSignal.reason as ShellAbortReason | undefined;
+          if (reason?.kind === 'background' && child.pid && !exited) {
+            this.activeChildProcesses.delete(child.pid);
+            const {
+              stdout: snapStdout,
+              stderr: snapStderr,
+              finalBuffer,
+            } = cleanup();
+            const separator = snapStdout.endsWith('\n') ? '' : '\n';
+            const combined =
+              snapStdout +
+              (snapStderr ? (snapStdout ? separator : '') + snapStderr : '');
+            resolve({
+              rawOutput: finalBuffer,
+              output: stripAnsi(combined).trim(),
+              exitCode: null,
+              signal: null,
+              error: null,
+              aborted: true,
+              promoted: true,
+              pid: child.pid,
+              executionMethod: 'child_process',
+            });
+            return;
+          }
+
           if (child.pid && !exited) {
             if (isWindows) {
               cpSpawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
@@ -898,6 +954,41 @@ export class ShellExecutionService {
         );
 
         const abortHandler = async () => {
+          // Background-promote takeover: skip kill, drop the PTY from the
+          // active set (so cleanup() won't kill it later), flush a snapshot
+          // of the output buffer captured so far, and resolve immediately
+          // with `promoted: true` so the awaiting caller unblocks. The
+          // caller has attached its own listeners to the live PTY by this
+          // point and owns its lifecycle from here on.
+          const reason = abortSignal.reason as ShellAbortReason | undefined;
+          if (reason?.kind === 'background' && ptyProcess.pid && !exited) {
+            exited = true;
+            abortSignal.removeEventListener('abort', abortHandler);
+            this.activePtys.delete(ptyProcess.pid);
+            const finalBuffer = Buffer.concat(outputChunks);
+            let snapshot = '';
+            try {
+              snapshot = serializeTerminalToText(headlessTerminal) ?? '';
+            } catch {
+              // Best-effort snapshot — terminal serialization may fail if the
+              // PTY is mid-render; an empty snapshot is acceptable since the
+              // caller already has the rawOutput buffer below.
+            }
+            resolve({
+              rawOutput: finalBuffer,
+              output: snapshot,
+              exitCode: null,
+              signal: null,
+              error,
+              aborted: true,
+              promoted: true,
+              pid: ptyProcess.pid,
+              executionMethod:
+                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+            });
+            return;
+          }
+
           if (ptyProcess.pid && !exited) {
             if (os.platform() === 'win32') {
               ptyProcess.kill();
