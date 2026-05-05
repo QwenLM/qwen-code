@@ -4586,16 +4586,19 @@ describe('CoreToolScheduler activation wiring', () => {
   function buildSchedulerWithSkillManager(opts: {
     matchAndActivateByPaths: ReturnType<typeof vi.fn>;
     skillToolPresent: boolean;
+    toolResult?: ToolResult;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
   } {
     const fsTool = new MockTool({
       name: ToolNames.READ_FILE,
-      execute: vi.fn().mockResolvedValue({
-        llmContent: 'file contents',
-        returnDisplay: 'file contents',
-      }),
+      execute: vi.fn().mockResolvedValue(
+        opts.toolResult ?? {
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        },
+      ),
     });
     const mockToolRegistry = {
       // Return the fs tool when asked by name; for SkillTool, mirror the
@@ -4696,6 +4699,174 @@ describe('CoreToolScheduler activation wiring', () => {
     const responseText = getResponseText(completed[0]);
     expect(responseText).toContain('tsx-helper');
     expect(responseText).toContain('now available via the Skill tool');
+  });
+
+  it('includes concrete result paths in skill activation candidates', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['core-helper']);
+    const { scheduler } = buildSchedulerWithSkillManager({
+      matchAndActivateByPaths,
+      skillToolPresent: true,
+      toolResult: {
+        llmContent: 'glob results',
+        returnDisplay: 'glob results',
+        resultFilePaths: [
+          '/proj/packages/core/src/skills/target.ts',
+          '/proj/packages/cli/src/other.ts',
+        ],
+      },
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.GLOB,
+          args: { pattern: '**/*.ts' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(matchAndActivateByPaths).toHaveBeenCalledWith([
+      '**/*.ts',
+      '/proj/packages/core/src/skills/target.ts',
+      '/proj/packages/cli/src/other.ts',
+    ]);
+  });
+
+  it('deduplicates overlapping input and result paths before activation', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue([]);
+    const { scheduler } = buildSchedulerWithSkillManager({
+      matchAndActivateByPaths,
+      skillToolPresent: true,
+      toolResult: {
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+        resultFilePaths: ['/proj/src/App.tsx'],
+      },
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(matchAndActivateByPaths).toHaveBeenCalledWith(['/proj/src/App.tsx']);
+  });
+
+  it('does not unescape concrete result paths before activation', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue([]);
+    const { scheduler } = buildSchedulerWithSkillManager({
+      matchAndActivateByPaths,
+      skillToolPresent: true,
+      toolResult: {
+        llmContent: 'glob results',
+        returnDisplay: 'glob results',
+        resultFilePaths: ['/proj/src/foo\\ bar.ts'],
+      },
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.GLOB,
+          args: { pattern: '**/*.ts' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(matchAndActivateByPaths).toHaveBeenCalledWith([
+      '**/*.ts',
+      '/proj/src/foo\\ bar.ts',
+    ]);
+  });
+
+  it('ignores result path metadata from non-filesystem tools', async () => {
+    const nonFsTool = new MockTool({
+      name: 'web_fetch',
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'web results',
+        returnDisplay: 'web results',
+        resultFilePaths: ['/proj/src/App.tsx'],
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: () => nonFsTool,
+      ensureTool: async () => nonFsTool,
+      getToolByName: () => nonFsTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => nonFsTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue([]);
+    const scheduler = new CoreToolScheduler({
+      config: {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getApprovalMode: () => ApprovalMode.YOLO,
+        getPermissionsAllow: () => [],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'gemini',
+        }),
+        getShellExecutionConfig: () => ({
+          terminalWidth: 90,
+          terminalHeight: 30,
+        }),
+        storage: { getProjectTempDir: () => '/tmp' },
+        getTruncateToolOutputThreshold: () =>
+          DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+        getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getChatRecordingService: () => undefined,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getConditionalRulesRegistry: () => undefined,
+        getSkillManager: () => ({ matchAndActivateByPaths }),
+      } as unknown as Config,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'web_fetch',
+          args: { url: 'https://example.com' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(matchAndActivateByPaths).not.toHaveBeenCalled();
   });
 
   it('suppresses the activation reminder when SkillTool is absent (subagent without skill in toolslist)', async () => {
