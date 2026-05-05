@@ -23,32 +23,6 @@ export interface AutoMemoryDreamResult {
   systemMessage?: string;
 }
 
-async function bumpMetadata(
-  projectRoot: string,
-  now: Date,
-  abortSignal?: AbortSignal,
-): Promise<void> {
-  const metadataPath = getAutoMemoryMetadataPath(projectRoot);
-  try {
-    const content = await fs.readFile(metadataPath, 'utf-8');
-    // Re-check between the read and the write — the user can press 'x'
-    // (or model can call task_stop) during the disk read, and we don't
-    // want to persist `lastDreamAt` for a cancelled run (would suppress
-    // the next legitimate dream cycle).
-    if (abortSignal?.aborted) return;
-    const metadata = JSON.parse(content) as AutoMemoryMetadata;
-    metadata.updatedAt = now.toISOString();
-    metadata.lastDreamAt = now.toISOString();
-    await fs.writeFile(
-      metadataPath,
-      `${JSON.stringify(metadata, null, 2)}\n`,
-      'utf-8',
-    );
-  } catch {
-    // Best-effort metadata bump.
-  }
-}
-
 async function runDreamByAgent(
   projectRoot: string,
   config: Config,
@@ -98,28 +72,20 @@ export async function runManagedAutoMemoryDream(
   }
 
   const agentResult = await runDreamByAgent(projectRoot, config, abortSignal);
-  // Re-check the abort signal between each metadata write step. The
-  // fork agent may complete successfully right before the user
-  // presses 'x' / model calls task_stop; without these checks the
-  // post-fork writes would persist `lastDreamAt` while manager.ts
-  // marks the record `'cancelled'`. The visible UI state (Stopped)
-  // and the scheduler gate (sees a recent dream) would then disagree,
-  // suppressing the next legitimate dream cycle.
+  // Index rebuild is informational (powers recall) and cheap to repeat
+  // on the next dream cycle if a cancel cuts it short, so we still do
+  // it before returning when topics were touched. Scheduler-gating
+  // metadata (`lastDreamAt`, `lastDreamSessionId`,
+  // `lastDreamTouchedTopics`, `lastDreamStatus`) is intentionally NOT
+  // written here — `MemoryManager.runDream` owns the atomic
+  // status-flip + metadata-write sequence to close the cancel race
+  // window where a writeFile finishing concurrently with a cancel
+  // could persist gating metadata for a record the manager is about
+  // to mark `'cancelled'`.
   if (abortSignal?.aborted) return agentResult;
   if (agentResult.touchedTopics.length > 0) {
-    await bumpMetadata(projectRoot, now, abortSignal);
-    if (abortSignal?.aborted) return agentResult;
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
-  if (abortSignal?.aborted) return agentResult;
-
-  await updateDreamMetadataResult(
-    projectRoot,
-    now,
-    agentResult.touchedTopics,
-    undefined,
-    abortSignal,
-  );
 
   logMemoryDream(
     config,

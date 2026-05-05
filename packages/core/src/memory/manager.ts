@@ -901,27 +901,14 @@ export class MemoryManager {
         if (abortSignal.aborted) {
           return record;
         }
-        const nextMetadata = await readDreamMetadata(params.projectRoot);
-        // Re-check the abort signal between awaits in the success
-        // path. The metadata read/write straddle ~tens of milliseconds
-        // of disk I/O during which the user can press `x` in the
-        // dialog (or the model can call task_stop). Without this
-        // re-check, a "user cancelled too late" abort would silently
-        // lose: cancelTask flips status to 'cancelled', the success
-        // continuation overwrites it with 'completed', and the dream
-        // metadata gets bumped for what the user thinks is an aborted
-        // run.
-        if (abortSignal.aborted) {
-          return record;
-        }
-        nextMetadata.lastDreamAt = now.toISOString();
-        nextMetadata.lastDreamSessionId = params.sessionId;
-        nextMetadata.updatedAt = now.toISOString();
-        await writeDreamMetadata(params.projectRoot, nextMetadata);
-        if (abortSignal.aborted) {
-          return record;
-        }
 
+        // Atomic-from-cancel sequence: flip status='completed' BEFORE
+        // any scheduler-gating metadata write. Once status is no
+        // longer 'running', cancelTask refuses, so the writeFile that
+        // follows can't race a flip-to-cancelled. The cancel-raced-
+        // status-update branch below covers the remaining window
+        // (cancel landed between the pre-update check and the
+        // synchronous update).
         this.update(record, {
           status: 'completed',
           progressText:
@@ -932,19 +919,49 @@ export class MemoryManager {
             lastDreamAt: now.toISOString(),
           },
         });
+        if (abortSignal.aborted) {
+          // cancelTask flipped status to 'cancelled' between our
+          // pre-update check and the synchronous update above; our
+          // update overwrote. Restore cancelled state and skip the
+          // gating-metadata write so the next legitimate dream cycle
+          // isn't suppressed by a bumped lastDreamAt.
+          this.update(record, {
+            status: 'cancelled',
+            progressText: 'Cancelled by user.',
+          });
+          return record;
+        }
+        // Status is now 'completed'; cancelTask will refuse from
+        // here on out. Safe to write scheduler-gating metadata
+        // without a race window.
+        const nextMetadata = await readDreamMetadata(params.projectRoot);
+        nextMetadata.lastDreamAt = now.toISOString();
+        nextMetadata.lastDreamSessionId = params.sessionId;
+        nextMetadata.updatedAt = now.toISOString();
+        nextMetadata.lastDreamTouchedTopics = result.touchedTopics;
+        nextMetadata.lastDreamStatus =
+          result.touchedTopics.length > 0 ? 'updated' : 'noop';
+        await writeDreamMetadata(params.projectRoot, nextMetadata);
       } finally {
-        // Lock release errors are logged but swallowed: if releasing
-        // throws (e.g., filesystem error), letting it propagate to
-        // the outer catch would overwrite a successfully-completed
-        // dream with 'failed'. The on-disk lock will be cleaned up
-        // on the next session start anyway via the staleness sweep.
+        // Lock release errors are logged AND surfaced on the record's
+        // metadata so the user can see why subsequent dreams may be
+        // skipped as 'locked'. If releasing throws (e.g., EPERM on
+        // Windows, ENOENT race), letting it propagate to the outer
+        // catch would overwrite a successfully-completed dream with
+        // 'failed'. The on-disk lock will be cleaned up on the next
+        // session start via the staleness sweep, so swallowing the
+        // error here doesn't risk a permanently-stuck lock.
         try {
           await releaseDreamLock(params.projectRoot);
         } catch (lockError) {
+          const message =
+            lockError instanceof Error ? lockError.message : String(lockError);
           debugLogger.warn(
-            `Failed to release dream lock for task ${record.id}: ` +
-              `${lockError instanceof Error ? lockError.message : String(lockError)}`,
+            `Failed to release dream lock for task ${record.id}: ${message}`,
           );
+          this.update(record, {
+            metadata: { lockReleaseError: message },
+          });
         }
       }
     } catch (error) {
