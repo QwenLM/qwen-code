@@ -10,6 +10,7 @@ import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
 import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
+import { classifyRetryError } from './retryErrorClassification.js';
 
 const debugLogger = createDebugLogger('RETRY');
 
@@ -201,6 +202,7 @@ export async function retryWithBackoff<T>(
       return result;
     } catch (error) {
       const errorStatus = getErrorStatus(error);
+      const retryClassification = classifyRetryError(error, { authType });
 
       // Check for Qwen OAuth quota exceeded error - throw immediately without retry
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
@@ -262,7 +264,7 @@ export async function retryWithBackoff<T>(
         debugLogger.warn(
           `[Persistent] Attempt ${reportedAttempt} failed with status ${errorStatus ?? 'unknown'}. ` +
             `Retrying in ${Math.ceil(delayMs / 1000)}s...`,
-          error,
+          { ...retryClassification, error },
         );
 
         // Heartbeat sleep — chunked to keep CI alive
@@ -294,12 +296,12 @@ export async function retryWithBackoff<T>(
           });
           debugLogger.warn(
             `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${delayMs}ms...`,
-            error,
+            { ...retryClassification, error },
           );
           await delay(delayMs);
           currentDelay = initialDelayMs;
         } else {
-          logRetryAttempt(attempt, error, errorStatus);
+          logRetryAttempt(attempt, error, retryClassification, errorStatus);
           const delayMs = getRetryDelayMs({
             attempt: 1,
             initialDelayMs: currentDelay,
@@ -326,6 +328,7 @@ export async function retryWithBackoff<T>(
 function logRetryAttempt(
   attempt: number,
   error: unknown,
+  retryClassification: ReturnType<typeof classifyRetryError>,
   errorStatus?: number,
 ): void {
   const message = errorStatus
@@ -333,10 +336,10 @@ function logRetryAttempt(
     : `Attempt ${attempt} failed. Retrying with backoff...`;
 
   if (errorStatus === 429) {
-    debugLogger.warn(message, error);
+    debugLogger.warn(message, { ...retryClassification, error });
   } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
-    debugLogger.error(message, error);
+    debugLogger.error(message, { ...retryClassification, error });
   } else {
-    debugLogger.warn(message, error);
+    debugLogger.warn(message, { ...retryClassification, error });
   }
 }

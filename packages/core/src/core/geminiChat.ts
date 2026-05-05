@@ -27,6 +27,7 @@ import {
   isRateLimitError,
   type RetryInfo,
 } from '../utils/rateLimit.js';
+import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
 import { ESCALATED_MAX_TOKENS, tokenLimit } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
@@ -446,9 +447,15 @@ export class GeminiChat {
                 error instanceof Error ? error.message : String(error),
               );
               const details = getRateLimitErrorDetails(error);
+              const classification = classifyRetryError(error, {
+                authType: cgConfig?.authType,
+              });
               debugLogger.warn('Rate limit retry scheduled', {
                 retryPath: 'stream',
                 retryDecision: 'retry',
+                classificationDecision: classification.decision,
+                errorKind: classification.kind,
+                classificationReason: classification.reason,
                 attempt: rateLimitRetryCount,
                 maxRetries: maxRateLimitRetries,
                 retryDelayMs: delayMs,
@@ -474,9 +481,15 @@ export class GeminiChat {
               continue;
             }
             if (isRateLimit) {
+              const classification = classifyRetryError(error, {
+                authType: cgConfig?.authType,
+              });
               debugLogger.warn('Rate limit retry exhausted', {
                 retryPath: 'stream',
                 retryDecision: 'exhausted',
+                classificationDecision: classification.decision,
+                errorKind: classification.kind,
+                classificationReason: classification.reason,
                 attempts: rateLimitRetryCount,
                 maxRetries: maxRateLimitRetries,
                 ...getRateLimitErrorDetails(error),
