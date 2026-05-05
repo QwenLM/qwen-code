@@ -1,0 +1,120 @@
+name: 'Qwen Issue Follow-up Bot'
+
+on:
+  issues:
+    types:
+      - 'opened'
+      - 'edited'
+      - 'reopened'
+  issue_comment:
+    types:
+      - 'created'
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Optional issue number. Leave empty to run the scheduled candidate scan.'
+        required: false
+        type: 'string'
+      dry_run:
+        description: 'Print planned actions without modifying issues.'
+        required: false
+        default: true
+        type: 'boolean'
+      scheduled_limit:
+        description: 'Maximum number of candidate issues to process during a scheduled scan.'
+        required: false
+        default: '50'
+        type: 'string'
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.inputs.issue_number || github.event_name }}'
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: 'bash'
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+
+env:
+  BOT_GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
+
+jobs:
+  single-issue:
+    timeout-minutes: 5
+    if: |-
+      ${{
+        github.repository == 'QwenLM/qwen-code' &&
+        (
+          github.event_name == 'issues' ||
+          github.event_name == 'issue_comment' ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.issue_number != '')
+        ) &&
+        (github.event_name != 'issues' || github.event.issue.pull_request == null) &&
+        (github.event_name != 'issue_comment' || (github.event.issue.pull_request == null && github.event.comment.user.type != 'Bot'))
+      }}
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 'Run issue follow-up bot'
+        env:
+          GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
+          GITHUB_REPOSITORY: '${{ github.repository }}'
+          ISSUE_NUMBER: '${{ github.event.issue.number || github.event.inputs.issue_number }}'
+          DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' && 'true' || 'false' }}"
+        run: |-
+          set -euo pipefail
+
+          args=(--mode single --issue "${ISSUE_NUMBER}")
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+
+          node .github/scripts/issue-followup-bot.mjs "${args[@]}"
+
+  scheduled-candidates:
+    timeout-minutes: 10
+    if: |-
+      ${{
+        github.repository == 'QwenLM/qwen-code' &&
+        (
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.issue_number == '')
+        )
+      }}
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 'Run scheduled candidate follow-up'
+        env:
+          GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
+          GITHUB_REPOSITORY: '${{ github.repository }}'
+          DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' && 'true' || 'false' }}"
+          SCHEDULED_LIMIT: "${{ github.event.inputs.scheduled_limit || '50' }}"
+        run: |-
+          set -euo pipefail
+
+          args=(--mode scheduled --limit "${SCHEDULED_LIMIT}")
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+
+          node .github/scripts/issue-followup-bot.mjs "${args[@]}"
