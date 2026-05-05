@@ -41,7 +41,7 @@ permissions:
   issues: 'write'
 
 env:
-  BOT_GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
+  BOT_GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
 
 jobs:
   single-issue:
@@ -49,6 +49,7 @@ jobs:
     if: |-
       ${{
         github.repository == 'QwenLM/qwen-code' &&
+        (github.event_name == 'workflow_dispatch' || vars.QWEN_ISSUE_FOLLOWUP_BOT_ENABLED == 'true') &&
         (
           github.event_name == 'issues' ||
           github.event_name == 'issue_comment' ||
@@ -88,6 +89,7 @@ jobs:
     if: |-
       ${{
         github.repository == 'QwenLM/qwen-code' &&
+        (github.event_name == 'workflow_dispatch' || vars.QWEN_ISSUE_FOLLOWUP_BOT_ENABLED == 'true') &&
         (
           github.event_name == 'schedule' ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.issue_number == '')
