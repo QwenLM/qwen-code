@@ -29,6 +29,8 @@ import {
 } from './file-exporters.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
+import { createSessionRootContext } from './tracer.js';
+import { setSessionContext } from './session-context.js';
 
 // For troubleshooting, set the log level to DiagLogLevel.DEBUG
 diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.WARN);
@@ -269,6 +271,7 @@ export function initializeTelemetry(config: Config): void {
     sdk.start();
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
+    setSessionContext(createSessionRootContext(config.getSessionId()));
     initializeMetrics(config);
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
@@ -329,6 +332,7 @@ export async function shutdownTelemetry(): Promise<void> {
       telemetryInitialized = false;
       sdk = undefined;
       telemetryShutdownPromise = undefined;
+      setSessionContext(undefined);
     }
   })();
   return telemetryShutdownPromise;

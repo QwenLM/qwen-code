@@ -8,8 +8,10 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import util from 'node:util';
+import { trace } from '@opentelemetry/api';
 import { Storage } from '../config/storage.js';
 import { updateSymlink } from './symlink.js';
+import { deriveTraceId, randomSpanId } from '../telemetry/trace-id-utils.js';
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -29,6 +31,14 @@ let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
 const sessionContext = new AsyncLocalStorage<DebugLogSession>();
+let cachedSessionId: string | null = null;
+let cachedTraceId: string | null = null;
+let cachedSessionSpanId: string | null = null;
+
+interface TraceContext {
+  traceId: string;
+  spanId: string;
+}
 
 function isDebugLogFileEnabled(): boolean {
   const value = process.env['QWEN_DEBUG_LOG_FILE'];
@@ -69,17 +79,46 @@ function formatArgs(args: unknown[]): string {
     .join(' ');
 }
 
+const ZERO_TRACE_ID = '00000000000000000000000000000000';
+
+function getTraceContext(session: DebugLogSession | null): TraceContext | null {
+  const activeSpan = trace.getActiveSpan();
+  if (activeSpan) {
+    const ctx = activeSpan.spanContext();
+    if (ctx.traceId !== ZERO_TRACE_ID) {
+      return { traceId: ctx.traceId, spanId: ctx.spanId };
+    }
+  }
+  if (session) {
+    const sessionId = session.getSessionId();
+    if (cachedSessionId !== sessionId) {
+      cachedSessionId = sessionId;
+      cachedTraceId = deriveTraceId(sessionId);
+      cachedSessionSpanId = randomSpanId();
+    }
+    return { traceId: cachedTraceId!, spanId: cachedSessionSpanId! };
+  }
+  return null;
+}
+
 /**
  * Builds a log line in the format:
- * `2026-01-23T06:58:02.011Z [DEBUG] [TAG] message`
+ * `2026-01-23T06:58:02.011Z [DEBUG] [TAG] [trace_id=xxx span_id=yyy] message`
  *
- * Tag is optional. If not provided, format is:
- * `2026-01-23T06:58:02.011Z [DEBUG] message`
+ * Tag and trace context are optional.
  */
-function buildLogLine(level: LogLevel, message: string, tag?: string): string {
+function buildLogLine(
+  level: LogLevel,
+  message: string,
+  tag?: string,
+  traceCtx?: TraceContext | null,
+): string {
   const timestamp = new Date().toISOString();
   const tagPart = tag ? ` [${tag}]` : '';
-  return `${timestamp} [${level}]${tagPart} ${message}\n`;
+  const tracePart = traceCtx
+    ? ` [trace_id=${traceCtx.traceId} span_id=${traceCtx.spanId}]`
+    : '';
+  return `${timestamp} [${level}]${tagPart}${tracePart} ${message}\n`;
 }
 
 function writeLog(
@@ -95,7 +134,8 @@ function writeLog(
   const sessionId = session.getSessionId();
   const logFilePath = Storage.getDebugLogPath(sessionId);
   const message = formatArgs(args);
-  const line = buildLogLine(level, message, tag);
+  const traceCtx = getTraceContext(session);
+  const line = buildLogLine(level, message, tag, traceCtx);
 
   void ensureDebugDirExists()
     .then(() => fs.appendFile(logFilePath, line, 'utf8'))
@@ -120,6 +160,9 @@ export function resetDebugLoggingState(): void {
   hasWriteFailure = false;
   ensureDebugDirPromise = null;
   ensuredDebugDirPath = null;
+  cachedSessionId = null;
+  cachedTraceId = null;
+  cachedSessionSpanId = null;
 }
 
 const DEBUG_LATEST_ALIAS = 'latest';

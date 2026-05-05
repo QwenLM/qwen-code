@@ -15,6 +15,7 @@ import {
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Storage } from '../config/storage.js';
+import { trace, type Span } from '@opentelemetry/api';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -31,6 +32,17 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+vi.mock('@opentelemetry/api', () => ({
+  trace: {
+    getActiveSpan: vi.fn().mockReturnValue(undefined),
+  },
+}));
+
+vi.mock('../telemetry/trace-id-utils.js', () => ({
+  deriveTraceId: vi.fn().mockReturnValue('aabbccddeeff00112233445566778899'),
+  randomSpanId: vi.fn().mockReturnValue('1122334455667788'),
+}));
+
 describe('debugLogger', () => {
   const mockSession: DebugLogSession = {
     getSessionId: () => 'test-session-123',
@@ -46,6 +58,8 @@ describe('debugLogger', () => {
     vi.setSystemTime(new Date('2026-01-24T10:30:00.000Z'));
     resetDebugLoggingState();
     setDebugLogSession(mockSession);
+    // Default: no active OTel span
+    vi.mocked(trace.getActiveSpan).mockReturnValue(undefined);
   });
 
   afterEach(() => {
@@ -63,7 +77,6 @@ describe('debugLogger', () => {
     it('returns no-op logger when session is unset', () => {
       setDebugLogSession(null);
       const logger = createDebugLogger();
-      // Should not throw
       logger.debug('test');
       logger.info('test');
       logger.warn('test');
@@ -71,7 +84,7 @@ describe('debugLogger', () => {
       expect(fs.appendFile).not.toHaveBeenCalled();
     });
 
-    it('writes debug log with correct format', async () => {
+    it('writes debug log with trace context when session is set', async () => {
       const logger = createDebugLogger();
       logger.debug('Hello world');
 
@@ -82,7 +95,7 @@ describe('debugLogger', () => {
       });
       expect(fs.appendFile).toHaveBeenCalledWith(
         Storage.getDebugLogPath('test-session-123'),
-        '2026-01-24T10:30:00.000Z [DEBUG] Hello world\n',
+        '2026-01-24T10:30:00.000Z [DEBUG] [trace_id=aabbccddeeff00112233445566778899 span_id=1122334455667788] Hello world\n',
         'utf8',
       );
     });
@@ -95,7 +108,7 @@ describe('debugLogger', () => {
 
       expect(fs.appendFile).toHaveBeenCalledWith(
         Storage.getDebugLogPath('test-session-123'),
-        '2026-01-24T10:30:00.000Z [INFO] [STARTUP] Server started\n',
+        '2026-01-24T10:30:00.000Z [INFO] [STARTUP] [trace_id=aabbccddeeff00112233445566778899 span_id=1122334455667788] Server started\n',
         'utf8',
       );
     });
@@ -115,6 +128,71 @@ describe('debugLogger', () => {
       expect(calls[1]?.[1]).toContain('[INFO]');
       expect(calls[2]?.[1]).toContain('[WARN]');
       expect(calls[3]?.[1]).toContain('[ERROR]');
+    });
+
+    it('uses real OTel span context when an active span exists', async () => {
+      vi.mocked(trace.getActiveSpan).mockReturnValue({
+        spanContext: () => ({
+          traceId: 'realtraceidddddddddddddddddddddd',
+          spanId: 'realspanid111111',
+          traceFlags: 1,
+        }),
+      } as unknown as Span);
+
+      const logger = createDebugLogger();
+      logger.debug('with real span');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining(
+          '[trace_id=realtraceidddddddddddddddddddddd span_id=realspanid111111]',
+        ),
+        'utf8',
+      );
+    });
+
+    it('falls back to session-derived trace when active span has zero traceId', async () => {
+      vi.mocked(trace.getActiveSpan).mockReturnValue({
+        spanContext: () => ({
+          traceId: '00000000000000000000000000000000',
+          spanId: 'deadbeefdeadbeef',
+          traceFlags: 0,
+        }),
+      } as unknown as Span);
+
+      const logger = createDebugLogger();
+      logger.debug('noop span');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('trace_id=aabbccddeeff00112233445566778899'),
+        'utf8',
+      );
+    });
+
+    it('uses the same fallback spanId for all log lines in the same session', async () => {
+      const logger = createDebugLogger();
+      logger.debug('first line');
+      logger.debug('second line');
+
+      await vi.runAllTimersAsync();
+
+      const calls = vi.mocked(fs.appendFile).mock.calls;
+      expect(calls).toHaveLength(2);
+
+      const extractSpanId = (line: unknown) => {
+        const match = String(line).match(/span_id=([0-9a-f]+)/);
+        return match?.[1];
+      };
+
+      const spanId0 = extractSpanId(calls[0]?.[1]);
+      const spanId1 = extractSpanId(calls[1]?.[1]);
+      expect(spanId0).toBeDefined();
+      expect(spanId0).toBe(spanId1);
     });
 
     it('creates a new debug directory after the runtime base dir changes', async () => {
@@ -214,12 +292,10 @@ describe('debugLogger', () => {
 
       expect(isDebugLoggingDegraded()).toBe(true);
 
-      // Reset mock to succeed
       vi.mocked(fs.appendFile).mockResolvedValue(undefined);
       logger.debug('second write succeeds');
       await vi.runAllTimersAsync();
 
-      // Should still be degraded
       expect(isDebugLoggingDegraded()).toBe(true);
     });
   });

@@ -15,9 +15,8 @@ import {
   resourceFromAttributes,
 } from '@opentelemetry/resources';
 
-import { createHash } from 'node:crypto';
-
 import { SERVICE_NAME } from './constants.js';
+import { deriveTraceId, randomHexString } from './trace-id-utils.js';
 
 const EXPORT_TIMEOUT_MS = 30_000;
 const MAX_SPAN_NAME_LENGTH = 128;
@@ -237,23 +236,6 @@ function safeStringify(value: unknown): string {
   } catch {
     return '[unserializable]';
   }
-}
-
-function randomHexString(length: number): string {
-  const bytes = new Uint8Array(length / 2);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/**
- * Derive a deterministic 32-char hex traceId from a session ID.
- * All events in the same session will share this traceId,
- * making them appear under a single trace in the backend.
- * Uses SHA-256 truncated to 32 hex chars (128 bits) to match the
- * OTel trace ID format.
- */
-function deriveTraceId(sessionId: string): string {
-  return createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
 }
 
 /**

@@ -20,6 +20,7 @@ import {
   type FinishReason,
 } from '@google/genai';
 import type OpenAI from 'openai';
+import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import {
   ApiRequestEvent,
   ApiResponseEvent,
@@ -46,6 +47,7 @@ import {
   getErrorStatus,
   getErrorType,
 } from '../../utils/errors.js';
+import { withSpan, startSpanWithContext } from '../../telemetry/tracer.js';
 
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
@@ -152,63 +154,78 @@ export class LoggingContentGenerator implements ContentGenerator {
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    const startTime = Date.now();
-    const isInternal = isInternalPromptId(userPromptId);
-    if (!isInternal) {
-      this.logApiRequest(
-        this.toContents(req.contents),
-        req.model,
-        userPromptId,
-      );
-    }
-    const openaiRequest = isInternal
-      ? undefined
-      : await this.buildOpenAIRequestForLogging(req);
-    try {
-      const response = await this.wrapped.generateContent(req, userPromptId);
-      const durationMs = Date.now() - startTime;
-      this._logApiResponse(
-        response.responseId ?? '',
-        durationMs,
-        response.modelVersion || req.model,
-        userPromptId,
-        response.usageMetadata,
-      );
-      if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, response);
-      }
-      return response;
-    } catch (error) {
-      const durationMs = Date.now() - startTime;
-      this._logApiError('', durationMs, error, req.model, userPromptId);
-      if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, undefined, error);
-      }
-      throw error;
-    }
+    return withSpan(
+      'api.generateContent',
+      { model: req.model, prompt_id: userPromptId },
+      async () => {
+        const startTime = Date.now();
+        const isInternal = isInternalPromptId(userPromptId);
+        if (!isInternal) {
+          this.logApiRequest(
+            this.toContents(req.contents),
+            req.model,
+            userPromptId,
+          );
+        }
+        const openaiRequest = isInternal
+          ? undefined
+          : await this.buildOpenAIRequestForLogging(req);
+        try {
+          const response = await this.wrapped.generateContent(req, userPromptId);
+          const durationMs = Date.now() - startTime;
+          this._logApiResponse(
+            response.responseId ?? '',
+            durationMs,
+            response.modelVersion || req.model,
+            userPromptId,
+            response.usageMetadata,
+          );
+          if (!isInternal) {
+            await this.logOpenAIInteraction(openaiRequest, response);
+          }
+          return response;
+        } catch (error) {
+          const durationMs = Date.now() - startTime;
+          this._logApiError('', durationMs, error, req.model, userPromptId);
+          if (!isInternal) {
+            await this.logOpenAIInteraction(openaiRequest, undefined, error);
+          }
+          throw error;
+        }
+      },
+    );
   }
 
   async generateContentStream(
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const { span, runInContext } = startSpanWithContext(
+      'api.generateContentStream',
+      { model: req.model, prompt_id: userPromptId },
+    );
+
     const startTime = Date.now();
     const isInternal = isInternalPromptId(userPromptId);
-    if (!isInternal) {
-      this.logApiRequest(
-        this.toContents(req.contents),
-        req.model,
-        userPromptId,
-      );
-    }
-    const openaiRequest = isInternal
-      ? undefined
-      : await this.buildOpenAIRequestForLogging(req);
 
+    let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
+      if (!isInternal) {
+        this.logApiRequest(
+          this.toContents(req.contents),
+          req.model,
+          userPromptId,
+        );
+        openaiRequest = await this.buildOpenAIRequestForLogging(req);
+      }
       stream = await this.wrapped.generateContentStream(req, userPromptId);
     } catch (error) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      span.end();
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
@@ -217,12 +234,15 @@ export class LoggingContentGenerator implements ContentGenerator {
       throw error;
     }
 
-    return this.loggingStreamWrapper(
-      stream,
-      startTime,
-      userPromptId,
-      req.model,
-      openaiRequest,
+    return runInContext(() =>
+      this.loggingStreamWrapper(
+        stream,
+        startTime,
+        userPromptId,
+        req.model,
+        openaiRequest,
+        span,
+      ),
     );
   }
 
@@ -232,6 +252,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
     model: string,
     openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
+    span?: Span,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // For internal prompts we only need the last usage metadata (for /stats);
@@ -273,6 +294,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           this.consolidateGeminiResponsesForLogging(responses);
         await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
       }
+      span?.setStatus({ code: SpanStatusCode.OK });
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError(
@@ -285,7 +307,13 @@ export class LoggingContentGenerator implements ContentGenerator {
       if (!isInternal) {
         await this.logOpenAIInteraction(openaiRequest, undefined, error);
       }
+      span?.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: error instanceof Error ? error.message : String(error),
+      });
       throw error;
+    } finally {
+      span?.end();
     }
   }
 

@@ -97,6 +97,7 @@ import { createHookOutput } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
+import { withSpan } from '../telemetry/tracer.js';
 
 const MAX_TURNS = 100;
 
@@ -1206,84 +1207,90 @@ export class GeminiClient {
     model: string,
     promptIdOverride?: string,
   ): Promise<GenerateContentResponse> {
-    let currentAttemptModel: string = model;
-    const promptId =
-      promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
+    return withSpan(
+      'client.generateContent',
+      { model, prompt_id: promptIdOverride ?? '' },
+      async () => {
+        let currentAttemptModel: string = model;
+        const promptId =
+          promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
 
-    try {
-      const userMemory = this.config.getUserMemory();
-      const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
-        : this.getMainSessionSystemInstruction();
+        try {
+          const userMemory = this.config.getUserMemory();
+          const finalSystemInstruction = generationConfig.systemInstruction
+            ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
+            : this.getMainSessionSystemInstruction();
 
-      const requestConfig: GenerateContentConfig = {
-        abortSignal,
-        ...generationConfig,
-        systemInstruction: finalSystemInstruction,
-      };
+          const requestConfig: GenerateContentConfig = {
+            abortSignal,
+            ...generationConfig,
+            systemInstruction: finalSystemInstruction,
+          };
 
-      // When the requested model differs from the main model (e.g. fast model
-      // side queries for session recap / title / summary), resolve the target
-      // model's own ContentGeneratorConfig so that per-model settings like
-      // extra_body, samplingParams, and reasoning are not inherited from the
-      // main model's config.
-      const mainModel = this.config.getModel() ?? model;
-      const isPerModel = model !== mainModel;
+          // When the requested model differs from the main model (e.g. fast model
+          // side queries for session recap / title / summary), resolve the target
+          // model's own ContentGeneratorConfig so that per-model settings like
+          // extra_body, samplingParams, and reasoning are not inherited from the
+          // main model's config.
+          const mainModel = this.config.getModel() ?? model;
+          const isPerModel = model !== mainModel;
 
-      // Resolve the authType for retry logic. When using a per-model content
-      // generator (e.g. fast model side queries), the retry authType must match
-      // the target model's provider, not the main session's provider. This
-      // ensures QWEN_OAUTH quota detection checks against the right provider.
-      const retryAuthType = isPerModel
-        ? (this.createRetryAuthTypeForModel(model) ??
-          this.config.getContentGeneratorConfig()?.authType ??
-          AuthType.USE_OPENAI)
-        : this.config.getContentGeneratorConfig()?.authType;
+          // Resolve the authType for retry logic. When using a per-model content
+          // generator (e.g. fast model side queries), the retry authType must match
+          // the target model's provider, not the main session's provider. This
+          // ensures QWEN_OAUTH quota detection checks against the right provider.
+          const retryAuthType = isPerModel
+            ? (this.createRetryAuthTypeForModel(model) ??
+              this.config.getContentGeneratorConfig()?.authType ??
+              AuthType.USE_OPENAI)
+            : this.config.getContentGeneratorConfig()?.authType;
 
-      const contentGenerator = isPerModel
-        ? await this.createContentGeneratorForModel(model)
-        : this.getContentGeneratorOrFail();
-      const apiCall = () => {
-        currentAttemptModel = model;
+          const contentGenerator = isPerModel
+            ? await this.createContentGeneratorForModel(model)
+            : this.getContentGeneratorOrFail();
+          const apiCall = () => {
+            currentAttemptModel = model;
 
-        return contentGenerator.generateContent(
-          {
-            model,
-            config: requestConfig,
-            contents,
-          },
-          promptId,
-        );
-      };
-      const result = await retryWithBackoff(apiCall, {
-        authType: retryAuthType,
-        persistentMode: isUnattendedMode(),
-        signal: abortSignal,
-        heartbeatFn: (info) => {
-          process.stderr.write(
-            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+            return contentGenerator.generateContent(
+              {
+                model,
+                config: requestConfig,
+                contents,
+              },
+              promptId,
+            );
+          };
+          const result = await retryWithBackoff(apiCall, {
+            authType: retryAuthType,
+            persistentMode: isUnattendedMode(),
+            signal: abortSignal,
+            heartbeatFn: (info) => {
+              process.stderr.write(
+                `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+              );
+            },
+          });
+          return result;
+        } catch (error: unknown) {
+          if (abortSignal.aborted) {
+            throw error;
+          }
+
+          await reportError(
+            error,
+            `Error generating content via API with model ${currentAttemptModel}.`,
+            {
+              requestContents: contents,
+              requestConfig: generationConfig,
+            },
+            'generateContent-api',
           );
-        },
-      });
-      return result;
-    } catch (error: unknown) {
-      if (abortSignal.aborted) {
-        throw error;
-      }
-
-      await reportError(
-        error,
-        `Error generating content via API with model ${currentAttemptModel}.`,
-        {
-          requestContents: contents,
-          requestConfig: generationConfig,
-        },
-        'generateContent-api',
-      );
-      throw new Error(
-        `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
-      );
-    }
+          throw new Error(
+            `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
+          );
+        }
+      },
+    );
   }
 
   /**
