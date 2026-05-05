@@ -351,6 +351,16 @@ export class ChatRecordingService {
    */
   private autoTitleController: AbortController | undefined;
 
+  /**
+   * JSON-serialized form of the most recent attribution snapshot we
+   * wrote, used to deduplicate identical writes on every non-retry
+   * turn. Without this, sessions that touch many files would write a
+   * full duplicate of the entire snapshot to the JSONL on every turn,
+   * inflating the on-disk session and making `/resume` slower to
+   * hydrate.
+   */
+  private lastAttributionSnapshotJson: string | undefined;
+
   constructor(config: Config) {
     this.config = config;
     this.lastRecordUuid =
@@ -969,9 +979,19 @@ export class ChatRecordingService {
    * Records an attribution state snapshot for session persistence.
    * Called at the start of every non-retry turn so that a resumed session
    * sees the most recent state including edits made during the prior turn.
+   *
+   * Deduplicates identical successive writes: if the snapshot's JSON
+   * form is byte-identical to the last one we wrote, skip the append.
+   * Without this, sessions that touch many files would write a full
+   * duplicate of the entire snapshot to the JSONL on every turn, even
+   * when nothing changed — inflating session size and slowing /resume.
    */
   recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
     try {
+      const json = JSON.stringify(snapshot);
+      if (json === this.lastAttributionSnapshotJson) {
+        return;
+      }
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
@@ -980,6 +1000,7 @@ export class ChatRecordingService {
       };
 
       this.appendRecord(record);
+      this.lastAttributionSnapshotJson = json;
     } catch (error) {
       debugLogger.error('Error saving attribution snapshot:', error);
     }

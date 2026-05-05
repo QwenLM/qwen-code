@@ -429,6 +429,45 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordAttributionSnapshot', () => {
+    const baseSnapshot = {
+      type: 'attribution-snapshot' as const,
+      version: 1,
+      surface: 'cli',
+      fileStates: {},
+      baselines: {},
+      promptCount: 0,
+      promptCountAtLastCommit: 0,
+    };
+
+    it('should write each distinct snapshot', async () => {
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      chatRecordingService.recordAttributionSnapshot({
+        ...baseSnapshot,
+        promptCount: 1,
+      });
+      chatRecordingService.recordAttributionSnapshot({
+        ...baseSnapshot,
+        promptCount: 2,
+      });
+      await chatRecordingService.flush();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+    });
+
+    // Sessions that touch many files emit a non-retry turn snapshot
+    // every prompt cycle. Without dedup, repeated identical snapshots
+    // (no edits, no prompt-counter change) would re-serialize the entire
+    // attribution state into the JSONL on every turn, inflating session
+    // size and slowing /resume.
+    it('should skip a snapshot identical to the previous write', async () => {
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock

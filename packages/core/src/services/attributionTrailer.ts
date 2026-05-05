@@ -91,10 +91,8 @@ export function formatAttributionSummary(note: CommitAttributionNote): string {
     );
   }
 
-  if (note.excludedGenerated.length > 0) {
-    lines.push(
-      `  Excluded generated: ${note.excludedGenerated.length} file(s)`,
-    );
+  if (note.excludedGeneratedCount > 0) {
+    lines.push(`  Excluded generated: ${note.excludedGeneratedCount} file(s)`);
   }
 
   return lines.join('\n');

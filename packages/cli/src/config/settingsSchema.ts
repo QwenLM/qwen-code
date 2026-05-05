@@ -395,7 +395,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: true,
             description:
-              'Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.',
+              'Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both.',
             showInDialog: true,
           },
           pr: {

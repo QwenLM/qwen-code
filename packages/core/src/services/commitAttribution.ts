@@ -83,9 +83,26 @@ export interface CommitAttributionNote {
     surfaces: string[];
   };
   surfaceBreakdown: Record<string, { aiChars: number; percent: number }>;
+  /**
+   * Sample of generated/vendored files that were excluded from
+   * attribution. Capped at `MAX_EXCLUDED_GENERATED_SAMPLE` paths so a
+   * commit churning thousands of `dist/` artifacts can't blow past the
+   * 30 KB note budget and silently drop attribution for the real
+   * source files in the same commit. Use `excludedGeneratedCount` for
+   * the true total.
+   */
   excludedGenerated: string[];
+  /** Total count of excluded files (≥ excludedGenerated.length). */
+  excludedGeneratedCount: number;
   promptCount: number;
 }
+
+/**
+ * Upper bound on the number of excluded-generated paths we serialize
+ * into the git note. Keeps the JSON payload bounded for commits with
+ * lots of generated artifacts.
+ */
+export const MAX_EXCLUDED_GENERATED_SAMPLE = 50;
 
 /** Result of running git commands to get staged file info. */
 export interface StagedFileInfo {
@@ -439,6 +456,7 @@ export class CommitAttributionService {
 
     const files: Record<string, FileAttributionDetail> = {};
     const excludedGenerated: string[] = [];
+    let excludedGeneratedCount = 0;
     const surfaceCounts: Record<string, number> = {};
     let totalAiChars = 0;
     let totalHumanChars = 0;
@@ -463,7 +481,12 @@ export class CommitAttributionService {
 
     for (const relFile of stagedInfo.files) {
       if (isGeneratedFile(relFile)) {
-        excludedGenerated.push(relFile);
+        excludedGeneratedCount++;
+        // Cap the sample so a commit churning thousands of `dist/`
+        // artifacts can't blow past the 30 KB note budget.
+        if (excludedGenerated.length < MAX_EXCLUDED_GENERATED_SAMPLE) {
+          excludedGenerated.push(relFile);
+        }
         continue;
       }
 
@@ -535,6 +558,7 @@ export class CommitAttributionService {
       },
       surfaceBreakdown,
       excludedGenerated,
+      excludedGeneratedCount,
       promptCount: this.getPromptsSinceLastCommit(),
     };
   }

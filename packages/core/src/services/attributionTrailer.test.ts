@@ -28,6 +28,7 @@ const sampleNote: CommitAttributionNote = {
   },
   surfaceBreakdown: { cli: { aiChars: 150, percent: 38 } },
   excludedGenerated: ['package-lock.json'],
+  excludedGeneratedCount: 1,
   promptCount: 3,
 };
 
@@ -68,6 +69,7 @@ describe('attributionTrailer', () => {
         ...sampleNote,
         files: {},
         excludedGenerated: [],
+        excludedGeneratedCount: 0,
       };
       for (let i = 0; i < 2000; i++) {
         hugeNote.files[
