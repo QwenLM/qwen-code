@@ -34,9 +34,6 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           GITHUB_REPOSITORY: '${{ github.repository }}'
         run: |-
-          echo "🔍 Finding issues without labels..."
-          NO_LABEL_ISSUES=$(gh issue list --repo ${{ github.repository }} --search "is:open is:issue no:label" --json number,title,body)
-
           echo '🔍 Finding issues without labels...'
           NO_LABEL_ISSUES="$(gh issue list --repo "${GITHUB_REPOSITORY}" \
             --search 'is:open is:issue no:label' --json number,title,body)"

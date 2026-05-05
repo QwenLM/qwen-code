@@ -11,6 +11,7 @@ export const DEFAULT_SCHEDULED_LIMIT = 10;
 const RELATED_ISSUE_LIMIT = 3;
 const GITHUB_API_BASE = 'https://api.github.com';
 const MAX_GITHUB_REQUEST_ATTEMPTS = 3;
+const MAX_COMMENT_PAGES = 5;
 
 const STOP_WORDS = new Set([
   'about',
@@ -593,24 +594,42 @@ export function analyzeIssue({
   return result;
 }
 
-function parseArgs(argv) {
+function requireArgValue(argv, index, flag) {
+  const value = argv[index + 1];
+  if (!value || value.startsWith('--')) {
+    throw new Error(`${flag} requires a value.`);
+  }
+  return value;
+}
+
+function parseLimit(value, source) {
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error(`${source} must be a positive integer.`);
+  }
+  return limit;
+}
+
+export function parseArgs(argv) {
   const args = {
     mode: process.env.RUN_MODE || 'single',
     issueNumber: process.env.ISSUE_NUMBER || '',
     dryRun: process.env.DRY_RUN === 'true',
-    limit: Number(process.env.SCHEDULED_LIMIT || DEFAULT_SCHEDULED_LIMIT),
+    limit: process.env.SCHEDULED_LIMIT
+      ? parseLimit(process.env.SCHEDULED_LIMIT, 'SCHEDULED_LIMIT')
+      : DEFAULT_SCHEDULED_LIMIT,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--mode') {
-      args.mode = argv[index + 1];
+      args.mode = requireArgValue(argv, index, arg);
       index += 1;
     } else if (arg === '--issue') {
-      args.issueNumber = argv[index + 1];
+      args.issueNumber = requireArgValue(argv, index, arg);
       index += 1;
     } else if (arg === '--limit') {
-      args.limit = Number(argv[index + 1]);
+      args.limit = parseLimit(requireArgValue(argv, index, arg), arg);
       index += 1;
     } else if (arg === '--dry-run') {
       args.dryRun = true;
@@ -645,9 +664,9 @@ export function shouldRetryGitHubRequest(error) {
 }
 
 async function githubRequest(path, options = {}) {
-  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  const token = process.env.GITHUB_TOKEN;
   if (!token) {
-    throw new Error('GH_TOKEN or GITHUB_TOKEN is required.');
+    throw new Error('GITHUB_TOKEN is required.');
   }
 
   for (let attempt = 1; attempt <= MAX_GITHUB_REQUEST_ATTEMPTS; attempt += 1) {
@@ -714,9 +733,21 @@ async function getIssue(owner, repo, issueNumber) {
 }
 
 async function listComments(owner, repo, issueNumber) {
-  return githubRequest(
-    `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`,
-  );
+  const comments = [];
+  let page = 1;
+
+  while (page <= MAX_COMMENT_PAGES) {
+    const batch = await githubRequest(
+      `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+    );
+    comments.push(...batch);
+    if (batch.length < 100) {
+      break;
+    }
+    page += 1;
+  }
+
+  return comments;
 }
 
 function dateDaysAgo(days) {
@@ -788,7 +819,7 @@ async function findRelatedIssues(owner, repo, issue) {
 
   const query = `repo:${owner}/${repo} is:issue ${terms.join(' ')}`;
   const candidates = await searchIssues(owner, repo, query, 10);
-  return selectRelatedIssues(issue, candidates);
+  return candidates.filter((candidate) => candidate.number !== issue.number);
 }
 
 async function applyAnalysis(owner, repo, issue, analysis, dryRun) {

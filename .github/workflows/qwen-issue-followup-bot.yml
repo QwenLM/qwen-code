@@ -23,7 +23,7 @@ on:
         default: true
         type: 'boolean'
       scheduled_limit:
-        description: 'Maximum number of candidate issues to process during a scheduled scan.'
+        description: 'Maximum number of candidate issues to process during a scheduled scan. Each candidate may run one related-issue search.'
         required: false
         default: '10'
         type: 'string'

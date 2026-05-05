@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+/* global process */
 
 import {
   analyzeIssue,
@@ -7,6 +8,7 @@ import {
   DEFAULT_SCHEDULED_LIMIT,
   INVALID_COMMENT_MARKER,
   NEEDS_INFO_COMMENT_MARKER,
+  parseArgs,
   RELATED_COMMENT_MARKER,
   shouldRetryGitHubRequest,
 } from './issue-followup-bot.mjs';
@@ -23,6 +25,30 @@ const labelNames = [
   'status/waiting-for-feedback',
   'coding-plan',
 ];
+
+const parseEnvKeys = ['RUN_MODE', 'ISSUE_NUMBER', 'DRY_RUN', 'SCHEDULED_LIMIT'];
+
+function withCleanParseEnv(callback) {
+  const originalEnv = new Map(
+    parseEnvKeys.map((key) => [key, process.env[key]]),
+  );
+
+  for (const key of parseEnvKeys) {
+    delete process.env[key];
+  }
+
+  try {
+    return callback();
+  } finally {
+    for (const [key, value] of originalEnv) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
 
 describe('issue follow-up bot analysis', () => {
   it('closes obvious test issues with a bot comment', () => {
@@ -274,5 +300,41 @@ describe('github request retry policy', () => {
 describe('scheduled candidate limit', () => {
   it('defaults to a small manual rollout batch', () => {
     assert.equal(DEFAULT_SCHEDULED_LIMIT, 10);
+  });
+});
+
+describe('argument parsing', () => {
+  it('parses scheduled dry-run arguments with a small limit', () => {
+    withCleanParseEnv(() => {
+      assert.deepEqual(parseArgs(['--mode', 'scheduled', '--limit', '1']), {
+        mode: 'scheduled',
+        issueNumber: '',
+        dryRun: false,
+        limit: 1,
+      });
+    });
+  });
+
+  it('rejects missing option values', () => {
+    withCleanParseEnv(() => {
+      assert.throws(() => parseArgs(['--mode']), /--mode requires a value/);
+      assert.throws(
+        () => parseArgs(['--issue', '--dry-run']),
+        /--issue requires a value/,
+      );
+    });
+  });
+
+  it('rejects invalid scheduled limits', () => {
+    withCleanParseEnv(() => {
+      assert.throws(
+        () => parseArgs(['--limit', '0']),
+        /--limit must be a positive integer/,
+      );
+      assert.throws(
+        () => parseArgs(['--limit', 'many']),
+        /--limit must be a positive integer/,
+      );
+    });
   });
 });
