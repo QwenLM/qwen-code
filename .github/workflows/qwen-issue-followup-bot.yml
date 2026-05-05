@@ -9,13 +9,6 @@ on:
   issue_comment:
     types:
       - 'created'
-  push:
-    branches:
-      - 'codex/issue-followup-bot'
-    paths:
-      - '.github/workflows/qwen-issue-followup-bot.yml'
-      - '.github/scripts/issue-followup-bot.mjs'
-      - '.github/scripts/issue-followup-bot.test.mjs'
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
@@ -51,95 +44,6 @@ env:
   BOT_GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
 
 jobs:
-  canary-smoke-test:
-    timeout-minutes: 5
-    if: |-
-      ${{
-        github.repository == 'QwenLM/qwen-code' &&
-        github.event_name == 'push' &&
-        github.ref == 'refs/heads/codex/issue-followup-bot'
-      }}
-    runs-on: 'ubuntu-latest'
-    permissions:
-      contents: 'read'
-      issues: 'write'
-    env:
-      SMOKE_ISSUE_NUMBER: '3770'
-    steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
-
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: 'Run canary issue follow-up'
-        env:
-          GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
-          GITHUB_REPOSITORY: '${{ github.repository }}'
-        run: |-
-          set -euo pipefail
-
-          if [[ -z "${GITHUB_TOKEN}" ]]; then
-            echo '::error::QWEN_CODE_BOT_TOKEN or CI_BOT_PAT is required for canary write testing.'
-            exit 1
-          fi
-
-          comments_json="$(gh api \
-            "/repos/${GITHUB_REPOSITORY}/issues/${SMOKE_ISSUE_NUMBER}/comments?per_page=100")"
-          duplicate_comment_ids="$(echo "${comments_json}" | jq -r \
-            '[.[] | select(.body | contains("<!-- qwen-issue-bot:needs-info -->"))] | sort_by(.created_at) | .[0:-1][]?.id')"
-
-          for comment_id in ${duplicate_comment_ids}; do
-            gh api --method DELETE \
-              "/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}"
-          done
-
-          node .github/scripts/issue-followup-bot.mjs \
-            --mode single \
-            --issue "${SMOKE_ISSUE_NUMBER}"
-
-      - name: 'Verify canary writes'
-        env:
-          GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
-          GITHUB_REPOSITORY: '${{ github.repository }}'
-        run: |-
-          set -euo pipefail
-
-          issue_json="$(gh issue view "${SMOKE_ISSUE_NUMBER}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json comments,labels,state)"
-
-          echo "${issue_json}" | jq .
-
-          if ! echo "${issue_json}" | jq -e '.state == "OPEN"' >/dev/null; then
-            echo "::error::Expected canary issue #${SMOKE_ISSUE_NUMBER} to remain open."
-            exit 1
-          fi
-
-          for label in \
-            'type/bug' \
-            'category/ui' \
-            'status/need-information' \
-            'status/waiting-for-feedback'
-          do
-            if ! echo "${issue_json}" | jq -e --arg label "${label}" \
-              'any(.labels[].name; . == $label)' >/dev/null
-            then
-              echo "::error::Expected canary issue #${SMOKE_ISSUE_NUMBER} to have label ${label}."
-              exit 1
-            fi
-          done
-
-          marker_comment_count="$(echo "${issue_json}" | jq \
-            '[.comments[] | select(.body | contains("<!-- qwen-issue-bot:needs-info -->")) | select(.author.login == "qwen-code-ci-bot")] | length')"
-          if [[ "${marker_comment_count}" != '1' ]]
-          then
-            echo "::error::Expected canary issue #${SMOKE_ISSUE_NUMBER} to have exactly one qwen-code-ci-bot needs-info comment."
-            exit 1
-          fi
-
   single-issue:
     timeout-minutes: 5
     if: |-
