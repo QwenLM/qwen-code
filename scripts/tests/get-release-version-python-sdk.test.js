@@ -50,6 +50,16 @@ function makeExecError(message, { stderr = '', stdout = '', status } = {}) {
   return error;
 }
 
+function makeTimeoutError(command) {
+  const error = new Error(`Command failed: ${command}\nSIGTERM`);
+  // Real Node.js execSync timeout shape (verified on Node 20+):
+  // killed=undefined, signal='SIGTERM', code='ETIMEDOUT'
+  error.code = 'ETIMEDOUT';
+  error.signal = 'SIGTERM';
+  error.status = null;
+  return error;
+}
+
 function makeExecSyncMock({
   tags = {},
   tagError = null,
@@ -926,5 +936,52 @@ describe('python sdk get-release-version', () => {
       previousReleaseTag: 'v0.1.0',
       resumeExistingRelease: true,
     });
+  });
+
+  it('throws a timeout error when gh release view times out', async () => {
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        releases: {
+          'sdk-python-v0.1.0-preview.0': makeTimeoutError(
+            'gh release view "sdk-python-v0.1.0-preview.0"',
+          ),
+        },
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).rejects.toThrow(
+      'gh release view timed out after 30s checking "sdk-python-v0.1.0-preview.0" — GitHub API may be unavailable',
+    );
+  });
+
+  it('throws a timeout error when git tag -l times out', async () => {
+    execSyncMock.mockImplementation(
+      makeExecSyncMock({
+        tagError: makeTimeoutError('git tag -l'),
+      }),
+    );
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'preview' })).rejects.toThrow(
+      'git tag -l timed out after 10s — local git may be unresponsive',
+    );
+  });
+
+  it('throws a timeout error when git rev-parse times out', async () => {
+    execSyncMock.mockImplementation((command) => {
+      if (command === 'git rev-parse --short HEAD') {
+        throw makeTimeoutError('git rev-parse --short HEAD');
+      }
+      return makeExecSyncMock()(command);
+    });
+
+    const getVersion = await loadGetVersion();
+
+    await expect(getVersion({ type: 'nightly' })).rejects.toThrow(
+      'git rev-parse timed out after 10s — local git may be unresponsive',
+    );
   });
 });

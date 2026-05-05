@@ -21,6 +21,8 @@ const __dirname = dirname(__filename);
 
 const PACKAGE_NAME = 'qwen-code-sdk';
 const TAG_PREFIX = 'sdk-python-';
+const NETWORK_COMMAND_TIMEOUT_MS = 30_000;
+const LOCAL_COMMAND_TIMEOUT_MS = 10_000;
 
 function readPyprojectVersion() {
   const pyprojectPath = join(__dirname, '..', 'pyproject.toml');
@@ -117,7 +119,7 @@ function toBaseVersion(version) {
 async function getAllVersionsFromPyPI() {
   const response = await fetch(`https://pypi.org/pypi/${PACKAGE_NAME}/json`, {
     headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(NETWORK_COMMAND_TIMEOUT_MS),
   });
 
   if (response.status === 404) {
@@ -241,7 +243,33 @@ function getUtcTimestamp() {
 }
 
 function getGitShortHash() {
-  return execSync('git rev-parse --short HEAD').toString().trim();
+  try {
+    return execSync('git rev-parse --short HEAD', {
+      timeout: LOCAL_COMMAND_TIMEOUT_MS,
+    })
+      .toString()
+      .trim();
+  } catch (error) {
+    if (isTimeoutError(error)) {
+      throw new Error(
+        `git rev-parse timed out after ${LOCAL_COMMAND_TIMEOUT_MS / 1000}s — local git may be unresponsive`,
+      );
+    }
+    throw error;
+  }
+}
+
+function isTimeoutError(error) {
+  // Node.js execSync timeout: `code` is 'ETIMEDOUT' on POSIX; on some
+  // versions/platforms `killed` is true with signal 'SIGTERM' or null.
+  // Match the pattern used in packages/core/src/utils/pdf.ts.
+  return (
+    error.code === 'ETIMEDOUT' ||
+    (error.killed === true &&
+      (error.signal === 'SIGTERM' ||
+        error.signal === undefined ||
+        error.signal === null))
+  );
 }
 
 async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
@@ -252,17 +280,27 @@ async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
   };
   const fullTag = `${TAG_PREFIX}${releaseTag}`;
   try {
-    const tagOutput = execSync(`git tag -l '${fullTag}'`).toString().trim();
+    const tagOutput = execSync(`git tag -l '${fullTag}'`, {
+      timeout: LOCAL_COMMAND_TIMEOUT_MS,
+    })
+      .toString()
+      .trim();
     if (tagOutput === fullTag) {
       state.gitTagExists = true;
     }
   } catch (error) {
+    if (isTimeoutError(error)) {
+      throw new Error(
+        `git tag -l timed out after ${LOCAL_COMMAND_TIMEOUT_MS / 1000}s — local git may be unresponsive`,
+      );
+    }
     throw new Error(`Failed to check git tags for conflicts: ${error.message}`);
   }
 
   try {
     const output = execSync(
       `gh release view "${fullTag}" --json tagName --jq .tagName`,
+      { timeout: NETWORK_COMMAND_TIMEOUT_MS },
     )
       .toString()
       .trim();
@@ -270,6 +308,13 @@ async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
       state.githubReleaseExists = true;
     }
   } catch (error) {
+    // Timeout check must precede isExpectedMissingGitHubRelease — a timed-out
+    // process may emit partial stderr matching "release not found".
+    if (isTimeoutError(error)) {
+      throw new Error(
+        `gh release view timed out after ${NETWORK_COMMAND_TIMEOUT_MS / 1000}s checking "${fullTag}" — GitHub API may be unavailable`,
+      );
+    }
     if (!isExpectedMissingGitHubRelease(error)) {
       throw new Error(
         `Failed to check GitHub releases for conflicts: ${error.message}`,
