@@ -78,6 +78,19 @@ export interface SettingDefinition {
   options?: readonly SettingEnumOption[];
   /** Schema for array items when type is 'array' */
   items?: SettingItemDefinition;
+  /**
+   * Escape hatch for the JSON Schema generator: when set, this object is
+   * emitted verbatim under the setting's properties entry instead of the
+   * shape derived from `type`/`properties`/etc. The `description` is still
+   * carried forward from the SettingDefinition.
+   *
+   * Use sparingly — for most settings the generator's normal mapping is
+   * preferable so the source schema stays the single source of truth. The
+   * one valid case so far is settings whose accepted runtime shape is a
+   * union (e.g. string | { path } | { small, large }) that the
+   * SettingDefinition `type` field cannot express.
+   */
+  jsonSchemaOverride?: Record<string, unknown>;
 }
 
 /**
@@ -770,6 +783,46 @@ const SETTINGS_SCHEMA = {
         description:
           'Replace the default QWEN ASCII art. Accepts an inline string, {"path": "..."}, or {"small": ..., "large": ...} for width-aware selection.',
         showInDialog: false,
+        // The runtime accepts three shapes (inline string, {path}, or
+        // {small,large} where each tier is itself string-or-{path}). The
+        // SettingDefinition `type: 'object'` keeps the in-app dialog out of
+        // the way (we don't want a multi-line ASCII editor in the TUI), but
+        // the JSON Schema needs a real union so VS Code stops flagging the
+        // documented bare-string form.
+        jsonSchemaOverride: {
+          oneOf: [
+            { type: 'string' },
+            {
+              type: 'object',
+              properties: {
+                path: { type: 'string' },
+                small: {
+                  oneOf: [
+                    { type: 'string' },
+                    {
+                      type: 'object',
+                      properties: { path: { type: 'string' } },
+                      required: ['path'],
+                      additionalProperties: false,
+                    },
+                  ],
+                },
+                large: {
+                  oneOf: [
+                    { type: 'string' },
+                    {
+                      type: 'object',
+                      properties: { path: { type: 'string' } },
+                      required: ['path'],
+                      additionalProperties: false,
+                    },
+                  ],
+                },
+              },
+              additionalProperties: false,
+            },
+          ],
+        },
       },
     },
   },

@@ -272,31 +272,50 @@
           "default": ""
         },
         "customAsciiArt": {
-          "description": "Replace the default QWEN ASCII art. Accepts an inline string, {\"path\": \"...\"}, or {\"small\": ..., \"large\": ...} for width-aware selection.",
           "oneOf": [
-            { "type": "string" },
+            {
+              "type": "string"
+            },
             {
               "type": "object",
               "properties": {
-                "path": { "type": "string" },
+                "path": {
+                  "type": "string"
+                },
                 "small": {
                   "oneOf": [
-                    { "type": "string" },
+                    {
+                      "type": "string"
+                    },
                     {
                       "type": "object",
-                      "properties": { "path": { "type": "string" } },
-                      "required": ["path"],
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
                       "additionalProperties": false
                     }
                   ]
                 },
                 "large": {
                   "oneOf": [
-                    { "type": "string" },
+                    {
+                      "type": "string"
+                    },
                     {
                       "type": "object",
-                      "properties": { "path": { "type": "string" } },
-                      "required": ["path"],
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
                       "additionalProperties": false
                     }
                   ]
@@ -304,7 +323,8 @@
               },
               "additionalProperties": false
             }
-          ]
+          ],
+          "description": "Replace the default QWEN ASCII art. Accepts an inline string, {\"path\": \"...\"}, or {\"small\": ..., \"large\": ...} for width-aware selection."
         }
       }
     },

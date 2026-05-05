@@ -77,6 +77,14 @@ interface ScopedSource {
  * for each tier, the first scope that defines it. Each tier carries its
  * scope's directory so relative `{path}` entries resolve against the file
  * that declared them.
+ *
+ * Workspace settings are skipped entirely when `settings.isTrusted` is
+ * false. The standard `settings.merged` view already drops untrusted
+ * workspace data; this resolver bypasses that view (it needs per-scope
+ * file paths to resolve relative `{path}` entries), so the trust check
+ * has to be re-applied here. Without it, an untrusted checkout could
+ * influence startup rendering and trigger local file reads through a
+ * `{path}` entry before the user has opted in.
  */
 function collectScopedTiers(settings: LoadedSettings): {
   small?: ScopedSource;
@@ -84,7 +92,7 @@ function collectScopedTiers(settings: LoadedSettings): {
 } {
   const order: SettingsFile[] = [
     settings.system,
-    settings.workspace,
+    ...(settings.isTrusted ? [settings.workspace] : []),
     settings.user,
     settings.systemDefaults,
   ];

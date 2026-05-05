@@ -22,6 +22,7 @@ function makeSettings(opts: {
   userPath?: string;
   systemUi?: Settings['ui'];
   systemPath?: string;
+  isTrusted?: boolean;
 }): LoadedSettings {
   const file = (settings: Settings, p: string): SettingsFile => ({
     settings,
@@ -57,7 +58,7 @@ function makeSettings(opts: {
           opts.workspacePath ?? '/repo/.qwen/settings.json',
         )
       : empty,
-    isTrusted: true,
+    isTrusted: opts.isTrusted ?? true,
     migratedInMemorScopes: new Set(),
     migrationWarnings: [],
     merged,
@@ -290,6 +291,43 @@ describe('resolveCustomBanner', () => {
       makeSettings({ userUi: { customAsciiArt: '   \n   ' } }),
     );
     expect(out.asciiArt.small).toBeUndefined();
+  });
+
+  it('ignores untrusted workspace settings — does not honor an untrusted checkout (no inline render, no file read)', () => {
+    const file = path.join(tmpDir, 'evil.txt');
+    fs.writeFileSync(file, 'EVIL');
+    const out = resolveCustomBanner(
+      makeSettings({
+        isTrusted: false,
+        // Workspace tries to provide both an inline string AND a {path}
+        // tier — both must be ignored when the workspace is untrusted.
+        workspaceUi: {
+          customAsciiArt: {
+            small: 'WORKSPACE-INLINE',
+            large: { path: 'evil.txt' },
+          } as CustomAsciiArtSetting,
+        },
+        workspacePath: path.join(tmpDir, 'settings.json'),
+        // User scope still contributes; if it didn't, we couldn't tell
+        // "untrusted dropped the workspace" apart from "resolver broke".
+        userUi: { customAsciiArt: 'USER-FALLBACK' },
+      }),
+    );
+    expect(out.asciiArt.small).toBe('USER-FALLBACK');
+    expect(out.asciiArt.large).toBe('USER-FALLBACK');
+    expect(out.asciiArt.small).not.toContain('WORKSPACE');
+    expect(out.asciiArt.small).not.toContain('EVIL');
+  });
+
+  it('honors workspace settings when isTrusted is true (sanity check on the trust gate)', () => {
+    const out = resolveCustomBanner(
+      makeSettings({
+        isTrusted: true,
+        workspaceUi: { customAsciiArt: 'WORKSPACE-TRUSTED' },
+        userUi: { customAsciiArt: 'USER' },
+      }),
+    );
+    expect(out.asciiArt.small).toBe('WORKSPACE-TRUSTED');
   });
 
   it('uses workspace value when both user and workspace provide art', () => {
