@@ -66,6 +66,7 @@ vi.mock('node:fs', async (importOriginal) => {
     realpathSync: vi.fn((path) => path),
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
     readFileSync: vi.fn(),
   };
   return {
@@ -1834,7 +1835,7 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('plan file persistence', () => {
-    it('should save plan to disk', () => {
+    it('should save plan to disk atomically', () => {
       const config = new Config(baseParams);
 
       config.savePlan('# My Plan\n1. Step one\n2. Step two');
@@ -1843,10 +1844,16 @@ describe('setApprovalMode with folder trust', () => {
         expect.stringContaining('plans'),
         { recursive: true },
       );
+      // Writes to temp file first
       expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('.md'),
+        expect.stringContaining('.tmp'),
         '# My Plan\n1. Step one\n2. Step two',
         'utf-8',
+      );
+      // Then atomically renames to final path
+      expect(fs.renameSync).toHaveBeenCalledWith(
+        expect.stringContaining('.tmp'),
+        expect.stringContaining('.md'),
       );
     });
 
@@ -1890,6 +1897,35 @@ describe('setApprovalMode with folder trust', () => {
       const filePath = config.getPlanFilePath();
       expect(filePath).toContain('test-session-123');
       expect(filePath).toMatch(/\.md$/);
+    });
+
+    it('should use configured plansDirectory for plan file path', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+
+      expect(config.getPlansDir()).toBe(
+        path.join(path.resolve(baseParams.targetDir), 'project-plans'),
+      );
+      expect(config.getPlanFilePath()).toBe(
+        path.join(
+          path.resolve(baseParams.targetDir),
+          'project-plans',
+          'test-session-123.md',
+        ),
+      );
+    });
+
+    it('should reject configured plansDirectory outside targetDir', () => {
+      expect(
+        () =>
+          new Config({
+            ...baseParams,
+            plansDirectory: '../project-plans',
+          }),
+      ).toThrow('plansDirectory must resolve within the project root');
     });
   });
 

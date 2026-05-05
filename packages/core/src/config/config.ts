@@ -462,6 +462,8 @@ export interface ConfigParameters {
     enableFuzzySearch?: boolean;
   };
   checkpointing?: boolean;
+  /** Directory where approved plan files are stored. Must resolve inside targetDir. */
+  plansDirectory?: string;
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
@@ -781,6 +783,7 @@ export class Config {
   private readonly jsonFile: string | undefined;
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
+  private readonly plansDir: string;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
@@ -807,6 +810,7 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
     );
@@ -2115,10 +2119,17 @@ export class Config {
   }
 
   /**
+   * Returns the directory where this session's plan file is stored.
+   */
+  getPlansDir(): string {
+    return this.plansDir;
+  }
+
+  /**
    * Returns the file path for this session's plan file.
    */
   getPlanFilePath(): string {
-    return Storage.getPlanFilePath(this.sessionId);
+    return path.join(this.plansDir, `${this.sessionId}.md`);
   }
 
   /**
@@ -2128,7 +2139,11 @@ export class Config {
     const filePath = this.getPlanFilePath();
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(filePath, plan, 'utf-8');
+    // Write to a temp file first, then atomically rename to avoid
+    // leaving a corrupted file if the process crashes mid-write.
+    const tmpPath = filePath + '.tmp';
+    fs.writeFileSync(tmpPath, plan, 'utf-8');
+    fs.renameSync(tmpPath, filePath);
   }
 
   /**

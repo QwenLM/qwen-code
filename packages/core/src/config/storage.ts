@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
+import { FatalConfigError } from '../utils/errors.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -179,12 +180,102 @@ export class Storage {
     return path.join(Storage.getGlobalQwenDir(), IDE_DIR_NAME);
   }
 
-  static getPlansDir(): string {
+  /**
+   * Checks whether {@link childPath} resides within {@link parentPath},
+   * resolving symbolic links to prevent traversal bypass attacks.
+   */
+  private static isPathWithinDirectory(
+    childPath: string,
+    parentPath: string,
+  ): boolean {
+    let realParent: string;
+    try {
+      realParent = fs.realpathSync(parentPath);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        realParent = parentPath;
+      } else {
+        throw err;
+      }
+    }
+
+    let realChild: string;
+    try {
+      realChild = fs.realpathSync(childPath);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err;
+      }
+      // Path does not exist yet (e.g. the plans directory hasn't been
+      // created). Resolve the deepest existing parent to detect
+      // intermediate symlink components.
+      const childParent = path.dirname(childPath);
+      let realChildParent: string;
+      try {
+        realChildParent = fs.realpathSync(childParent);
+      } catch (innerErr: unknown) {
+        if ((innerErr as NodeJS.ErrnoException).code === 'ENOENT') {
+          // Even the parent doesn't exist — fall back to syntactic
+          // validation. A fully non-existent path under the project
+          // root is safe.
+          realChildParent = childParent;
+        } else {
+          throw innerErr;
+        }
+      }
+      realChild = path.join(realChildParent, path.basename(childPath));
+    }
+
+    const relativePath = path.relative(realParent, realChild);
+    return (
+      relativePath === '' ||
+      (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+    );
+  }
+
+  static getPlansDir(
+    projectRoot?: string,
+    plansDirectory?: string | null,
+  ): string {
+    const configuredPlansDirectory = plansDirectory?.trim();
+    if (configuredPlansDirectory) {
+      if (!projectRoot) {
+        throw new FatalConfigError(
+          'projectRoot is required when plansDirectory is configured.',
+        );
+      }
+
+      const resolvedProjectRoot = path.resolve(projectRoot);
+      const resolvedPlansDirectory = path.isAbsolute(configuredPlansDirectory)
+        ? path.resolve(configuredPlansDirectory)
+        : path.resolve(resolvedProjectRoot, configuredPlansDirectory);
+
+      if (
+        !Storage.isPathWithinDirectory(
+          resolvedPlansDirectory,
+          resolvedProjectRoot,
+        )
+      ) {
+        throw new FatalConfigError(
+          `plansDirectory must resolve within the project root.`,
+        );
+      }
+
+      return resolvedPlansDirectory;
+    }
+
     return path.join(Storage.getGlobalQwenDir(), PLANS_DIR_NAME);
   }
 
-  static getPlanFilePath(sessionId: string): string {
-    return path.join(Storage.getPlansDir(), `${sessionId}.md`);
+  static getPlanFilePath(
+    sessionId: string,
+    projectRoot?: string,
+    plansDirectory?: string | null,
+  ): string {
+    return path.join(
+      Storage.getPlansDir(projectRoot, plansDirectory),
+      `${sessionId}.md`,
+    );
   }
 
   static getGlobalBinDir(): string {
