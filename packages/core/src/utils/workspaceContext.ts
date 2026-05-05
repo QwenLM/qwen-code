@@ -22,6 +22,7 @@ export type Unsubscribe = () => void;
 export class WorkspaceContext {
   private directories = new Set<string>();
   private initialDirectories: Set<string>;
+  private readonly skippedDirectories: string[] = [];
   private onDirectoriesChangedListeners = new Set<() => void>();
   /**
    * Memoized realpath results. Every workspace-bounded tool call ultimately
@@ -48,6 +49,14 @@ export class WorkspaceContext {
     for (const additionalDirectory of additionalDirectories) {
       this.addDirectory(additionalDirectory);
     }
+  }
+
+  /**
+   * Returns directories that were skipped during construction because they
+   * did not exist or were not readable.
+   */
+  getSkippedDirectories(): readonly string[] {
+    return this.skippedDirectories;
   }
 
   /**
@@ -88,6 +97,9 @@ export class WorkspaceContext {
       this.directories.add(resolved);
       this.notifyDirectoriesChanged();
     } catch (err) {
+      if (!this.skippedDirectories.includes(directory)) {
+        this.skippedDirectories.push(directory);
+      }
       debugLogger.warn(
         `Skipping unreadable directory: ${directory} (${err instanceof Error ? err.message : String(err)})`,
       );

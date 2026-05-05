@@ -412,7 +412,7 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'array',
           string: true,
           description:
-            'Additional directories to include in the workspace (comma-separated or multiple --include-directories)',
+            'Additional directories to include in the workspace. Paths are resolved to absolute paths. Non-existent directories are skipped with a warning. Use comma-separated values or pass the flag multiple times.',
           coerce: (dirs: string[]) =>
             // Handle comma-separated values
             dirs.flatMap((dir) => dir.split(',').map((d) => d.trim())),

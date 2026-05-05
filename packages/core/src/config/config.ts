@@ -797,6 +797,12 @@ export class Config {
       this.targetDir,
       this.explicitIncludeDirectories,
     );
+    const skippedDirs = this.workspaceContext.getSkippedDirectories();
+    if (skippedDirs.length > 0) {
+      process.stderr.write(
+        `Warning: The following --include-directories paths were skipped because they do not exist or are not readable:\n${skippedDirs.map((d) => `  - ${d}`).join('\n')}\n`,
+      );
+    }
     this.debugMode = params.debugMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     const normalizedOutputFormat = normalizeConfigOutputFormat(

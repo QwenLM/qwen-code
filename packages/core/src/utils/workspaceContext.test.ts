@@ -490,6 +490,60 @@ describe('WorkspaceContext removeDirectory', () => {
   });
 });
 
+describe('WorkspaceContext getSkippedDirectories', () => {
+  let tempDir: string;
+  let cwd: string;
+  let existingDir: string;
+  let nonExistentDir1: string;
+  let nonExistentDir2: string;
+
+  beforeEach(() => {
+    tempDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-context-skipped-')),
+    );
+    cwd = path.join(tempDir, 'project');
+    existingDir = path.join(tempDir, 'existing');
+    nonExistentDir1 = path.join(tempDir, 'no-such-dir-1');
+    nonExistentDir2 = path.join(tempDir, 'no-such-dir-2');
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(existingDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('should return empty when all directories exist', () => {
+    const ctx = new WorkspaceContext(cwd, [existingDir]);
+    expect(ctx.getSkippedDirectories()).toEqual([]);
+  });
+
+  it('should report a single skipped directory', () => {
+    const ctx = new WorkspaceContext(cwd, [nonExistentDir1]);
+    expect(ctx.getSkippedDirectories()).toEqual([nonExistentDir1]);
+  });
+
+  it('should report multiple skipped directories', () => {
+    const ctx = new WorkspaceContext(cwd, [
+      nonExistentDir1,
+      existingDir,
+      nonExistentDir2,
+    ]);
+    const skipped = ctx.getSkippedDirectories();
+    expect(skipped).toHaveLength(2);
+    expect(skipped).toContain(nonExistentDir1);
+    expect(skipped).toContain(nonExistentDir2);
+  });
+
+  it('should not duplicate skipped directories', () => {
+    const ctx = new WorkspaceContext(cwd, [nonExistentDir1]);
+    // Adding the same invalid path again should not double-report
+    ctx.addDirectory(nonExistentDir1);
+    expect(ctx.getSkippedDirectories()).toEqual([nonExistentDir1]);
+  });
+});
+
 describe('WorkspaceContext isInitialDirectory', () => {
   let tempDir: string;
   let cwd: string;
