@@ -23,6 +23,32 @@ function readOptionValue(argv, index, optionName) {
   return value;
 }
 
+function parseCliArgs(argv, options, defaults = {}) {
+  const args = { ...defaults };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    const option = options[arg];
+    if (!option) {
+      fail(`Unknown option: ${arg}`);
+    }
+
+    if (option.type === 'boolean') {
+      args[option.name] = true;
+      continue;
+    }
+
+    const value = readOptionValue(argv, index, arg);
+    if (option.validate) {
+      option.validate(value);
+    }
+    args[option.name] = value;
+    index += 1;
+  }
+
+  return args;
+}
+
 function parseSha256Sums(content) {
   const checksums = new Map();
   for (const line of content.split(/\r?\n/)) {
@@ -49,4 +75,11 @@ function fail(message) {
   throw new Error(`ERROR: ${message}`);
 }
 
-export { fail, isMainModule, parseSha256Sums, readOptionValue, sha256File };
+export {
+  fail,
+  isMainModule,
+  parseCliArgs,
+  parseSha256Sums,
+  readOptionValue,
+  sha256File,
+};

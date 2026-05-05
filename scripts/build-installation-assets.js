@@ -14,8 +14,8 @@ import { INSTALLATION_ASSETS } from './release-asset-config.js';
 import {
   fail,
   isMainModule,
+  parseCliArgs,
   parseSha256Sums,
-  readOptionValue,
   sha256File,
 } from './release-script-utils.js';
 
@@ -23,9 +23,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
+const CLI_OPTIONS = {
+  '--help': { name: 'help', type: 'boolean' },
+  '-h': { name: 'help', type: 'boolean' },
+  '--out-dir': { name: 'outDir' },
+  '--version': { name: 'version', validate: validateReleaseVersion },
+};
+
 if (isMainModule(import.meta.url)) {
   try {
-    const args = parseArgs(process.argv.slice(2));
+    const args = parseCliArgs(process.argv.slice(2), CLI_OPTIONS, {
+      help: false,
+      outDir: undefined,
+      version: undefined,
+    });
     if (args.help) {
       printUsage();
     } else {
@@ -138,37 +149,6 @@ async function assertInstallationAssetChecksums(
       fail(`Checksum verification failed for ${output}.`);
     }
   }
-}
-
-function parseArgs(argv) {
-  const args = {
-    help: false,
-    outDir: undefined,
-    version: undefined,
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    switch (arg) {
-      case '--help':
-      case '-h':
-        args.help = true;
-        break;
-      case '--out-dir':
-        args.outDir = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--version':
-        args.version = readOptionValue(argv, index, arg);
-        validateReleaseVersion(args.version);
-        index += 1;
-        break;
-      default:
-        fail(`Unknown option: ${arg}`);
-    }
-  }
-
-  return args;
 }
 
 function printUsage() {

@@ -18,8 +18,8 @@ import { isStandaloneArchiveName } from './release-asset-config.js';
 import {
   fail,
   isMainModule,
+  parseCliArgs,
   parseSha256Sums,
-  readOptionValue,
   sha256File,
 } from './release-script-utils.js';
 
@@ -51,6 +51,14 @@ const RELEASE_TARGETS = [
   { qwenTarget: 'win-x64', nodeTarget: 'win-x64', nodeArchiveExtension: 'zip' },
 ];
 const EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length;
+const CLI_OPTIONS = {
+  '--help': { name: 'help', type: 'boolean' },
+  '-h': { name: 'help', type: 'boolean' },
+  '--node-version': { name: 'nodeVersion' },
+  '--out-dir': { name: 'outDir' },
+  '--runtime-dir': { name: 'runtimeDir' },
+  '--version': { name: 'version' },
+};
 
 if (isMainModule(import.meta.url)) {
   try {
@@ -62,7 +70,13 @@ if (isMainModule(import.meta.url)) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseCliArgs(process.argv.slice(2), CLI_OPTIONS, {
+    help: false,
+    nodeVersion: undefined,
+    outDir: undefined,
+    runtimeDir: undefined,
+    version: undefined,
+  });
   if (args.help) {
     printUsage();
     return;
@@ -230,46 +244,6 @@ function standaloneArchiveName(qwenTarget) {
     fail(`No standalone package target config found for ${qwenTarget}`);
   }
   return `qwen-code-${qwenTarget}.${targetConfig.outputExtension}`;
-}
-
-function parseArgs(argv) {
-  const args = {
-    help: false,
-    nodeVersion: undefined,
-    outDir: undefined,
-    runtimeDir: undefined,
-    version: undefined,
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    switch (arg) {
-      case '--help':
-      case '-h':
-        args.help = true;
-        break;
-      case '--node-version':
-        args.nodeVersion = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--out-dir':
-        args.outDir = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--runtime-dir':
-        args.runtimeDir = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--version':
-        args.version = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      default:
-        fail(`Unknown option: ${arg}`);
-    }
-  }
-
-  return args;
 }
 
 function printUsage() {

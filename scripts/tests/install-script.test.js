@@ -37,6 +37,9 @@ const installationAssetsScriptUrl = pathToFileURL(
 const releaseAssetConfigUrl = pathToFileURL(
   path.resolve('scripts/release-asset-config.js'),
 ).href;
+const releaseScriptUtilsUrl = pathToFileURL(
+  path.resolve('scripts/release-script-utils.js'),
+).href;
 // These E2E cases execute the Unix shell installer and POSIX symlink behavior.
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
@@ -255,8 +258,12 @@ describe('standalone release packaging', () => {
       "import { isReleaseChecksumAsset } from './release-asset-config.js';",
     );
     expect(packageScript).toContain(
-      "import {\n  fail,\n  isMainModule,\n  readOptionValue,\n  sha256File,\n} from './release-script-utils.js';",
+      "import {\n  fail,\n  isMainModule,\n  parseCliArgs,\n  sha256File,\n} from './release-script-utils.js';",
     );
+    expect(packageScript).toContain(
+      'parseCliArgs(process.argv.slice(2), CLI_OPTIONS',
+    );
+    expect(packageScript).not.toContain('function parseArgs');
 
     const releaseScript = readScript('scripts/build-standalone-release.js');
     expect(releaseScript).toContain('Copyright 2025 Qwen Team');
@@ -276,6 +283,10 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain(
       "import { isStandaloneArchiveName } from './release-asset-config.js';",
     );
+    expect(releaseScript).toContain(
+      'parseCliArgs(process.argv.slice(2), CLI_OPTIONS',
+    );
+    expect(releaseScript).not.toContain('function parseArgs');
 
     const installationAssetsScript = readScript(
       'scripts/build-installation-assets.js',
@@ -288,6 +299,10 @@ describe('standalone release packaging', () => {
     expect(installationAssetsScript).toContain(
       "from './release-script-utils.js'",
     );
+    expect(installationAssetsScript).toContain(
+      'parseCliArgs(process.argv.slice(2), CLI_OPTIONS',
+    );
+    expect(installationAssetsScript).not.toContain('function parseArgs');
 
     const releaseAssetConfig = readScript('scripts/release-asset-config.js');
     expect(releaseAssetConfig).toContain('Copyright 2025 Qwen Team');
@@ -301,10 +316,37 @@ describe('standalone release packaging', () => {
 
     const releaseScriptUtils = readScript('scripts/release-script-utils.js');
     expect(releaseScriptUtils).toContain('Copyright 2025 Qwen Team');
+    expect(releaseScriptUtils).toContain('function parseCliArgs');
     expect(releaseScriptUtils).toContain('function parseSha256Sums');
     expect(releaseScriptUtils).toContain('async function sha256File');
     expect(releaseScriptUtils).toContain('function readOptionValue');
     expect(releaseScriptUtils).toContain('function isMainModule');
+  });
+
+  it('parses release script CLI options through the shared helper', async () => {
+    const { parseCliArgs } = await import(releaseScriptUtilsUrl);
+
+    const args = parseCliArgs(
+      ['--name', 'qwen', '--flag', '-h'],
+      {
+        '--name': { name: 'name' },
+        '--flag': { name: 'flag', type: 'boolean' },
+        '-h': { name: 'help', type: 'boolean' },
+      },
+      { flag: false, help: false, name: undefined },
+    );
+
+    expect(args).toEqual({
+      flag: true,
+      help: true,
+      name: 'qwen',
+    });
+    expect(() => parseCliArgs(['--unknown'], {}, {})).toThrow(
+      /Unknown option: --unknown/,
+    );
+    expect(() =>
+      parseCliArgs(['--name'], { '--name': { name: 'name' } }, {}),
+    ).toThrow(/--name requires a value/);
   });
 
   it('loads the standalone release packaging helper', () => {

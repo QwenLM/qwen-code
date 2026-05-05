@@ -15,7 +15,7 @@ import { isReleaseChecksumAsset } from './release-asset-config.js';
 import {
   fail,
   isMainModule,
-  readOptionValue,
+  parseCliArgs,
   sha256File,
 } from './release-script-utils.js';
 
@@ -56,6 +56,15 @@ const DIST_ALLOWED_ENTRY_PATTERNS = [
   /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,
 ];
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
+const CLI_OPTIONS = {
+  '--help': { name: 'help', type: 'boolean' },
+  '-h': { name: 'help', type: 'boolean' },
+  '--target': { name: 'target' },
+  '--node-archive': { name: 'nodeArchive' },
+  '--out-dir': { name: 'outDir' },
+  '--version': { name: 'version' },
+  '--skip-checksums': { name: 'skipChecksums', type: 'boolean' },
+};
 
 if (isMainModule(import.meta.url)) {
   try {
@@ -67,7 +76,14 @@ if (isMainModule(import.meta.url)) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseCliArgs(process.argv.slice(2), CLI_OPTIONS, {
+    help: false,
+    nodeArchive: undefined,
+    outDir: undefined,
+    skipChecksums: false,
+    target: undefined,
+    version: undefined,
+  });
 
   if (args.help) {
     printUsage();
@@ -134,50 +150,6 @@ async function main() {
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
-}
-
-function parseArgs(argv) {
-  const args = {
-    help: false,
-    outDir: undefined,
-    nodeArchive: undefined,
-    skipChecksums: false,
-    target: undefined,
-    version: undefined,
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    switch (arg) {
-      case '--help':
-      case '-h':
-        args.help = true;
-        break;
-      case '--target':
-        args.target = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--node-archive':
-        args.nodeArchive = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--out-dir':
-        args.outDir = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--version':
-        args.version = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--skip-checksums':
-        args.skipChecksums = true;
-        break;
-      default:
-        fail(`Unknown option: ${arg}`);
-    }
-  }
-
-  return args;
 }
 
 function printUsage() {
