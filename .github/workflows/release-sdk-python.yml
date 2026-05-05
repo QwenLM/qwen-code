@@ -406,9 +406,17 @@ jobs:
           NOTES_START_TAG_ARG=""
           GENERATE_NOTES_FLAG="--generate-notes"
           if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
-            # --notes-start-tag replaces the old gh release view fetch;
-            # gh release create handles missing tags with a clear error.
-            NOTES_START_TAG_ARG="--notes-start-tag sdk-python-${PREVIOUS_RELEASE_TAG}"
+            # Verify the previous tag exists in Git before using --notes-start-tag.
+            # If a prior release published to PyPI but failed to create a GitHub
+            # release/tag, the tag won't exist — fall back to static notes to
+            # avoid failing gh release create after PyPI publish.
+            if git rev-parse "sdk-python-${PREVIOUS_RELEASE_TAG}" >/dev/null 2>&1; then
+              NOTES_START_TAG_ARG="--notes-start-tag sdk-python-${PREVIOUS_RELEASE_TAG}"
+            else
+              echo "::warning::Previous tag sdk-python-${PREVIOUS_RELEASE_TAG} not found; skipping --generate-notes."
+              GENERATE_NOTES_FLAG=""
+              echo "See commit history for changes." >> "${NOTES_FILE}"
+            fi
           else
             # PREVIOUS_RELEASE_TAG is only computed for stable releases.
             # For preview/nightly, skip --generate-notes to avoid including non-SDK commits.
