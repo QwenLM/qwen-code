@@ -422,6 +422,7 @@ jobs:
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
             dist/standalone/qwen-code-* \
+            dist/standalone/install \
             dist/standalone/install-qwen.sh \
             dist/standalone/install-qwen.bat \
             dist/standalone/SHA256SUMS \

@@ -34,13 +34,27 @@ GitHub releases publish these standalone archives:
 - `qwen-code-linux-arm64.tar.gz`
 - `qwen-code-linux-x64.tar.gz`
 - `qwen-code-win-x64.zip`
+- `install`
 - `install-qwen.sh`
 - `install-qwen.bat`
 - `SHA256SUMS`
 
+Release packaging copies these from the source-tracking installer scripts:
+`install` and `install-qwen.sh` come from `install-qwen-with-source.sh`, while
+`install-qwen.bat` comes from `install-qwen-with-source.bat`.
+
 The installer scripts are published as release assets so version-specific
 install entrypoints can be distributed alongside the standalone archives after
-that release is created:
+that release is created. The extensionless `install` asset is the Unix installer
+alias for future hosted endpoints such as `https://qwen-code.ai/install`; it is
+identical to `install-qwen.sh` and can be used interchangeably on Unix systems.
+Use `install-qwen.bat` on Windows. That hosted endpoint is not available yet;
+until it is live, use a concrete release version in the direct GitHub release
+URL and replace `vX.Y.Z` with the actual release tag:
+
+```bash
+curl -fsSL https://github.com/QwenLM/qwen-code/releases/download/vX.Y.Z/install | bash
+```
 
 ```bash
 curl -fsSL https://github.com/QwenLM/qwen-code/releases/download/vX.Y.Z/install-qwen.sh | bash

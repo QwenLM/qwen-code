@@ -13,6 +13,12 @@ const INSTALLATION_ASSETS = [
     output: 'install-qwen.sh',
     mode: 0o755,
   },
+  // Hosted endpoint alias for install-qwen.sh; keep byte-for-byte identical.
+  {
+    sourcePath: ['scripts', 'installation', 'install-qwen-with-source.sh'],
+    output: 'install',
+    mode: 0o755,
+  },
   {
     sourcePath: ['scripts', 'installation', 'install-qwen-with-source.bat'],
     output: 'install-qwen.bat',
