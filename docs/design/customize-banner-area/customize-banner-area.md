@@ -68,22 +68,22 @@ falls back to plain output).
 
 ## Customization rules — what can change, what is locked
 
-| Region | Today's source | Customization category | Rationale |
-| --- | --- | --- | --- |
-| **A. Logo column** | `shortAsciiLogo` (`AsciiArt.ts`) | **Replaceable + auto-hideable** | Pure brand surface. White-label needs full control over the visual. The existing "auto-hide on narrow terminals" fallback is preserved. |
-| **B①. Title — brand text** (`>_ Qwen Code`) | Hard-coded in `Header.tsx` | **Replaceable** | Brand surface. The leading `>_` glyph is part of the existing brand; if a user wants it gone, they simply omit it from `customBannerTitle`. |
-| **B①. Title — version suffix** (`(vX.Y.Z)`) | `version` prop | **Locked** | Critical for bug reports. Hiding it makes "what version are you on?" answerable only via `--version`, which is a real cost in support workflows. We trade a small white-label loss for support tractability. |
-| **B②. Status line** (auth + model) | `formattedAuthType`, `model` props | **Locked** | Operational and security signal. Users must always see which credential is in use and which model will spend their tokens. Suppressing it is a footgun even for white-label scenarios. |
-| **B③. Path line** (working directory) | `workingDirectory` prop | **Locked** | Operational. "Which directory am I in?" is a constant question; the banner is its canonical answer. |
-| **Whole banner** (A + B) | `<Header>` mount in `AppHeader.tsx` | **Hideable** | A single `ui.hideBanner: true` skips both regions — same shape as the existing screen-reader gate. `<Tips>` continues to be governed independently by `ui.hideTips`. |
+| Region                                      | Today's source                      | Customization category          | Rationale                                                                                                                                                                                                    |
+| ------------------------------------------- | ----------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A. Logo column**                          | `shortAsciiLogo` (`AsciiArt.ts`)    | **Replaceable + auto-hideable** | Pure brand surface. White-label needs full control over the visual. The existing "auto-hide on narrow terminals" fallback is preserved.                                                                      |
+| **B①. Title — brand text** (`>_ Qwen Code`) | Hard-coded in `Header.tsx`          | **Replaceable**                 | Brand surface. The leading `>_` glyph is part of the existing brand; if a user wants it gone, they simply omit it from `customBannerTitle`.                                                                  |
+| **B①. Title — version suffix** (`(vX.Y.Z)`) | `version` prop                      | **Locked**                      | Critical for bug reports. Hiding it makes "what version are you on?" answerable only via `--version`, which is a real cost in support workflows. We trade a small white-label loss for support tractability. |
+| **B②. Status line** (auth + model)          | `formattedAuthType`, `model` props  | **Locked**                      | Operational and security signal. Users must always see which credential is in use and which model will spend their tokens. Suppressing it is a footgun even for white-label scenarios.                       |
+| **B③. Path line** (working directory)       | `workingDirectory` prop             | **Locked**                      | Operational. "Which directory am I in?" is a constant question; the banner is its canonical answer.                                                                                                          |
+| **Whole banner** (A + B)                    | `<Header>` mount in `AppHeader.tsx` | **Hideable**                    | A single `ui.hideBanner: true` skips both regions — same shape as the existing screen-reader gate. `<Tips>` continues to be governed independently by `ui.hideTips`.                                         |
 
 The matrix translates to three settings, no more:
 
-| Setting | Default | Effect | Region affected |
-| --- | --- | --- | --- |
-| `ui.hideBanner` | `false` | Hides the entire banner (regions A + B). | A + B |
-| `ui.customBannerTitle` | unset | Replaces the brand text in B①. The version suffix is still appended. Trimmed; an empty string means "use default". | B① brand text |
-| `ui.customAsciiArt` | unset | Replaces region A. Three accepted shapes (see below). Falls back to default on any error. | A |
+| Setting                | Default | Effect                                                                                                             | Region affected |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------ | --------------- |
+| `ui.hideBanner`        | `false` | Hides the entire banner (regions A + B).                                                                           | A + B           |
+| `ui.customBannerTitle` | unset   | Replaces the brand text in B①. The version suffix is still appended. Trimmed; an empty string means "use default". | B① brand text   |
+| `ui.customAsciiArt`    | unset   | Replaces region A. Three accepted shapes (see below). Falls back to default on any error.                          | A               |
 
 What is **not** offered, by design:
 
@@ -109,8 +109,8 @@ the project root) are supported with the standard merge precedence
 ```jsonc
 {
   "ui": {
-    "hideBanner": true
-  }
+    "hideBanner": true,
+  },
 }
 ```
 
@@ -122,8 +122,8 @@ still render unless `ui.hideTips` is also `true`.
 ```jsonc
 {
   "ui": {
-    "customBannerTitle": "Acme CLI"
-  }
+    "customBannerTitle": "Acme CLI",
+  },
 }
 ```
 
@@ -136,8 +136,8 @@ yourself: `"customBannerTitle": ">_ Acme CLI"`.
 ```jsonc
 {
   "ui": {
-    "customAsciiArt": "  ___  _    _  ____ \n / _ \\| |  / |/ _\\\n| |_| | |__| | __/\n \\___/|____|_|___|"
-  }
+    "customAsciiArt": "  ___  _    _  ____ \n / _ \\| |  / |/ _\\\n| |_| | |__| | __/\n \\___/|____|_|___|",
+  },
 }
 ```
 
@@ -148,7 +148,7 @@ with the active gradient theme just like the default logo.
 > the result. The simplest path is `figlet`:
 > `npx figlet -f "ANSI Shadow" "xxxCode" > brand.txt` and then point
 > `customAsciiArt: { "path": "./brand.txt" }` at it. The CLI does not
-> render text-to-art at runtime — see the *Out of scope* section for
+> render text-to-art at runtime — see the _Out of scope_ section for
 > why.
 
 ### Replace the ASCII art — external file
@@ -156,8 +156,8 @@ with the active gradient theme just like the default logo.
 ```jsonc
 {
   "ui": {
-    "customAsciiArt": { "path": "./brand.txt" }
-  }
+    "customAsciiArt": { "path": "./brand.txt" },
+  },
 }
 ```
 
@@ -177,9 +177,9 @@ Avoids JSON-escaping a multi-line string. Path resolution rules:
   "ui": {
     "customAsciiArt": {
       "small": "  ACME\n  ----",
-      "large": { "path": "./brand-wide.txt" }
-    }
-  }
+      "large": { "path": "./brand-wide.txt" },
+    },
+  },
 }
 ```
 
@@ -197,9 +197,9 @@ omitted: a missing tier simply falls through to the next step.
     "customBannerTitle": "Acme CLI",
     "customAsciiArt": {
       "small": "  ACME\n  ----",
-      "large": { "path": "./brand-wide.txt" }
-    }
-  }
+      "large": { "path": "./brand-wide.txt" },
+    },
+  },
 }
 ```
 
@@ -258,8 +258,8 @@ and again only on settings reload events:
    - If it is a string, use it as-is.
    - If it is `{ path }`, read the file synchronously with `O_NOFOLLOW`
      defense (Windows: plain read-only — the constant is not exposed),
-     capped at 64 KB. Relative paths resolve against the *owning
-     settings file's directory* — workspace settings against the
+     capped at 64 KB. Relative paths resolve against the _owning
+     settings file's directory_ — workspace settings against the
      workspace `.qwen/`, user settings against `~/.qwen/`. Read failure
      logs `[BANNER]` warn and falls back to default for that tier.
 3. **Sanitize**. Pass each resolved string through
@@ -350,8 +350,7 @@ the file and line range from the current `main`.
 `packages/cli/src/ui/components/AppHeader.tsx:53` — extend `showBanner`:
 
 ```ts
-const showBanner =
-  !config.getScreenReader() && !settings.merged.ui?.hideBanner;
+const showBanner = !config.getScreenReader() && !settings.merged.ui?.hideBanner;
 ```
 
 `packages/cli/src/ui/components/AppHeader.tsx:64-71` — pass the resolved
@@ -436,10 +435,10 @@ choice if the constraints change.
 ```jsonc
 {
   "ui": {
-    "customAsciiArt": "...",        // string | {path} | {small,large}
+    "customAsciiArt": "...", // string | {path} | {small,large}
     "customBannerTitle": "Acme CLI",
-    "hideBanner": false
-  }
+    "hideBanner": false,
+  },
 }
 ```
 
@@ -460,9 +459,9 @@ choice if the constraints change.
     "banner": {
       "hide": false,
       "title": "Acme CLI",
-      "asciiArt": { "path": "./brand.txt" }
-    }
-  }
+      "asciiArt": { "path": "./brand.txt" },
+    },
+  },
 }
 ```
 
@@ -496,8 +495,8 @@ choice if the constraints change.
 ```jsonc
 {
   "ui": {
-    "bannerTemplate": "{{logo}}\n>_ {{title}} ({{version}})\n{{auth}} | {{model}}\n{{path}}"
-  }
+    "bannerTemplate": "{{logo}}\n>_ {{title}} ({{version}})\n{{auth}} | {{model}}\n{{path}}",
+  },
 }
 ```
 
@@ -533,15 +532,15 @@ the path-form, read from disk. Both surfaces are attack-reachable if a
 hostile or compromised settings file is loaded. The same threat model
 that drives the session-title feature applies here.
 
-| Concern | Guard |
-| --- | --- |
-| ANSI / OSC-8 / CSI injection in art or title | `stripTerminalControlSequences` (shared with session-title) before render and before any cache write. |
-| Oversize file freezes startup | 64 KB hard cap on file reads. |
-| Pathological art freezes layout | 200 lines × 200 cols cap on each resolved string. Excess is truncated; a `[BANNER]` warn is logged. |
-| Symlink redirect on the path form | `O_NOFOLLOW` on file reads (Windows: plain read-only; constant not exposed). |
-| Missing or unreadable file | Catch, log `[BANNER]` warn, fall back to default. Never throw into the UI. |
-| Title with newlines or excess length | Strip newlines, cap at 80 characters. |
-| Race on settings reload | Resolution is memoized by source (path or string hash). Reloads invalidate cache for changed sources only. |
+| Concern                                      | Guard                                                                                                      |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| ANSI / OSC-8 / CSI injection in art or title | `stripTerminalControlSequences` (shared with session-title) before render and before any cache write.      |
+| Oversize file freezes startup                | 64 KB hard cap on file reads.                                                                              |
+| Pathological art freezes layout              | 200 lines × 200 cols cap on each resolved string. Excess is truncated; a `[BANNER]` warn is logged.        |
+| Symlink redirect on the path form            | `O_NOFOLLOW` on file reads (Windows: plain read-only; constant not exposed).                               |
+| Missing or unreadable file                   | Catch, log `[BANNER]` warn, fall back to default. Never throw into the UI.                                 |
+| Title with newlines or excess length         | Strip newlines, cap at 80 characters.                                                                      |
+| Race on settings reload                      | Resolution is memoized by source (path or string hash). Reloads invalidate cache for changed sources only. |
 
 Failure mode summary: every soft failure ends in `shortAsciiLogo` (or
 the locked default title) plus a debug-log warn. Hard failures
@@ -552,16 +551,16 @@ the locked default title) plus a debug-log warn. Hard failures
 These were considered and deliberately deferred. Each can be a separate
 follow-up if user demand surfaces.
 
-| Item | Why not |
-| --- | --- |
-| Text-to-ASCII rendering (`{ text: "xxxCode" }` form) | Considered and rejected for v1. Adding this would require either a `figlet` runtime dependency (~2–3 MB unpacked once a usable set of fonts is included) or a vendored single-font renderer (~200 lines + a `.flf` font file we'd own). Both options bring ongoing surface area: font selection, font-license tracking, "my font doesn't render right on terminal X" issues, and CJK / wide-character handling. The driving use case for this feature (white-label / multi-tenant) almost always has a designer producing intentional ASCII art, not relying on a default figlet font. Users who want one-line generation can already get it with `npx figlet "xxxCode" > brand.txt` + `customAsciiArt: { "path": "./brand.txt" }` — same outcome, no added dependency, no support burden inside Qwen Code. If demand surfaces later this form is purely additive: extend `AsciiArtSource` to `string \| {path} \| {text, font?}` without breaking any existing config. |
-| `/banner` slash command for live editing | The settings UI is the canonical edit surface. A live editor for multi-line ASCII art is its own project. |
-| Custom gradient colors / per-line color overrides | Theme owns colors. A separate proposal can extend the theme contract; banner customization should not duplicate that surface. |
-| URL-loaded ASCII art | Network fetch at startup is its own can of worms — failure modes, caching, security review. The file-path form is the lower-risk equivalent. |
-| Animation (spinning logo, marquee title) | Adds rendering load and a11y concerns; nothing in the use cases needs it. |
-| VSCode / Web UI banner parity | Those surfaces don't render the Ink banner today. If they grow a banner, this design is the reference. |
-| Dynamic reload on file change | The resolver runs at startup and on settings reload only. Mid-session art changes are rare enough that "restart to take effect" is the acceptable trade. |
-| Hiding only individual locked regions (version, auth, model, path) | These are operational signals; suppressing them harms support and security posture more than it helps white-label scenarios. |
+| Item                                                               | Why not                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Text-to-ASCII rendering (`{ text: "xxxCode" }` form)               | Considered and rejected for v1. Adding this would require either a `figlet` runtime dependency (~2–3 MB unpacked once a usable set of fonts is included) or a vendored single-font renderer (~200 lines + a `.flf` font file we'd own). Both options bring ongoing surface area: font selection, font-license tracking, "my font doesn't render right on terminal X" issues, and CJK / wide-character handling. The driving use case for this feature (white-label / multi-tenant) almost always has a designer producing intentional ASCII art, not relying on a default figlet font. Users who want one-line generation can already get it with `npx figlet "xxxCode" > brand.txt` + `customAsciiArt: { "path": "./brand.txt" }` — same outcome, no added dependency, no support burden inside Qwen Code. If demand surfaces later this form is purely additive: extend `AsciiArtSource` to `string \| {path} \| {text, font?}` without breaking any existing config. |
+| `/banner` slash command for live editing                           | The settings UI is the canonical edit surface. A live editor for multi-line ASCII art is its own project.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Custom gradient colors / per-line color overrides                  | Theme owns colors. A separate proposal can extend the theme contract; banner customization should not duplicate that surface.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| URL-loaded ASCII art                                               | Network fetch at startup is its own can of worms — failure modes, caching, security review. The file-path form is the lower-risk equivalent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Animation (spinning logo, marquee title)                           | Adds rendering load and a11y concerns; nothing in the use cases needs it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| VSCode / Web UI banner parity                                      | Those surfaces don't render the Ink banner today. If they grow a banner, this design is the reference.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Dynamic reload on file change                                      | The resolver runs at startup and on settings reload only. Mid-session art changes are rare enough that "restart to take effect" is the acceptable trade.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Hiding only individual locked regions (version, auth, model, path) | These are operational signals; suppressing them harms support and security posture more than it helps white-label scenarios.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 ## Verification plan
 
