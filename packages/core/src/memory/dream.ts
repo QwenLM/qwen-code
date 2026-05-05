@@ -89,10 +89,20 @@ export async function runManagedAutoMemoryDream(
   }
 
   const agentResult = await runDreamByAgent(projectRoot, config, abortSignal);
+  // Re-check the abort signal between each metadata write step. The
+  // fork agent may complete successfully right before the user
+  // presses 'x' / model calls task_stop; without these checks the
+  // post-fork writes would persist `lastDreamAt` while manager.ts
+  // marks the record `'cancelled'`. The visible UI state (Stopped)
+  // and the scheduler gate (sees a recent dream) would then disagree,
+  // suppressing the next legitimate dream cycle.
+  if (abortSignal?.aborted) return agentResult;
   if (agentResult.touchedTopics.length > 0) {
     await bumpMetadata(projectRoot, now);
+    if (abortSignal?.aborted) return agentResult;
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
+  if (abortSignal?.aborted) return agentResult;
 
   await updateDreamMetadataResult(projectRoot, now, agentResult.touchedTopics);
 

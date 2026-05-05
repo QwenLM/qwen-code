@@ -410,7 +410,14 @@ export class MemoryManager {
         this.subscribersByType.set(type, set);
       }
       set.add(listener);
-      return () => set!.delete(listener);
+      return () => {
+        set!.delete(listener);
+        // Drop the Map entry when the per-type bucket is empty so the
+        // long-lived MemoryManager doesn't accumulate empty Sets across
+        // repeated subscribe/unsubscribe cycles (e.g. React mount /
+        // unmount in the bg-tasks UI hook).
+        if (set!.size === 0) this.subscribersByType.delete(type);
+      };
     }
     this.subscribers.add(listener);
     return () => this.subscribers.delete(listener);
