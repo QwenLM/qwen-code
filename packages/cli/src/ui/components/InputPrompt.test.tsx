@@ -1200,8 +1200,8 @@ describe('InputPrompt', () => {
   it('should cycle export format on Down when /export <fmt> was typed manually (not via popup)', async () => {
     // Regression for PR #3701 fifth-round review: users who type
     // "/export md" directly (without going through the Phase-1 popup)
-    // must still get Phase-2 cycling on arrow keys — the ref-seeding
-    // asymmetry previously required arriving via the popup.
+    // must still get Phase-2 cycling on arrow keys, but programmatic
+    // buffer.setText/history restores must not arm the same state.
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
       showSuggestions: false, // popup is closed for direct input
@@ -1214,18 +1214,64 @@ describe('InputPrompt', () => {
       activeSuggestionIndex: 0,
       isPerfectMatch: false,
     });
-    // Simulate a user typing "/export md" manually.
-    props.buffer.setText('/export md');
 
-    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const TestHarness = () => {
+      const buffer = useTextBuffer({
+        initialText: '',
+        viewport: { width: 80, height: 20 },
+        isValidPath: () => false,
+        onChange: () => {},
+      });
+      return <InputPrompt {...props} buffer={buffer} />;
+    };
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(<TestHarness />);
     await wait();
 
-    (props.buffer.setText as ReturnType<typeof vi.fn>).mockClear();
+    stdin.write('/export md');
+    await wait();
+    expect(stripAnsi(lastFrame() ?? '')).toContain('/export md');
 
     // Pressing Down must cycle to the NEXT format (json).
     stdin.write('\u001B[B');
     await wait();
-    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export json');
+    expect(stripAnsi(lastFrame() ?? '')).toContain('/export json');
+    unmount();
+  });
+
+  it('should not arm export cycling from restored history text', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: false,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+
+    const TestHarness = () => {
+      const buffer = useTextBuffer({
+        initialText: '/export md',
+        viewport: { width: 80, height: 20 },
+        isValidPath: () => false,
+        onChange: () => {},
+      });
+      return <InputPrompt {...props} buffer={buffer} />;
+    };
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(<TestHarness />);
+    await wait();
+
+    stdin.write('\u001B[B');
+    await wait();
+
+    expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+    expect(stripAnsi(lastFrame() ?? '')).toContain('/export md');
+    expect(stripAnsi(lastFrame() ?? '')).not.toContain('/export json');
     unmount();
   });
 
@@ -2815,6 +2861,66 @@ describe('InputPrompt', () => {
       expect(frame).toContain('(r:)');
       expect(frame).toContain('git commit');
       expect(frame).toContain('git push');
+      unmount();
+    });
+
+    it('shows command search suggestions over active export suggestions', async () => {
+      props.shellModeActive = false;
+      const exportSuggestions = [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ];
+
+      mockedUseCommandCompletion.mockImplementation((buffer) => {
+        const isExportRoot = buffer.text.trim() === '/export';
+        return {
+          ...mockCommandCompletion,
+          showSuggestions: isExportRoot,
+          suggestions: isExportRoot ? exportSuggestions : [],
+          activeSuggestionIndex: 0,
+          isPerfectMatch: isExportRoot,
+        };
+      });
+      vi.mocked(useReverseSearchCompletion).mockImplementation(
+        (_buffer, _data, isActive) => ({
+          ...mockReverseSearchCompletion,
+          suggestions: isActive
+            ? [{ label: 'git status', value: 'git status' }]
+            : [],
+          showSuggestions: !!isActive,
+          activeSuggestionIndex: isActive ? 0 : -1,
+        }),
+      );
+
+      const TestHarness = () => {
+        const buffer = useTextBuffer({
+          initialText: '/export',
+          viewport: { width: 80, height: 20 },
+          isValidPath: () => false,
+          onChange: () => {},
+        });
+        return <InputPrompt {...props} buffer={buffer} />;
+      };
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <TestHarness />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B');
+      await wait();
+      expect(stripAnsi(lastFrame() ?? '')).toContain('/export md');
+      expect(stripAnsi(lastFrame() ?? '')).toContain('jsonl');
+
+      stdin.write('\x12'); // Ctrl+R
+      await wait();
+
+      const frame = stripAnsi(lastFrame() ?? '');
+      expect(frame).toContain('(r:)');
+      expect(frame).toContain('git status');
+      expect(frame).not.toContain('jsonl');
       unmount();
     });
 

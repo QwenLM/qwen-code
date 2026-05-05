@@ -1134,6 +1134,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         followup.dismiss();
         onPromptSuggestionDismiss?.();
       }
+
+      if (
+        !key.ctrl &&
+        !key.meta &&
+        !key.paste &&
+        ((key.sequence && key.sequence.length === 1) ||
+          key.name === 'backspace' ||
+          key.name === 'delete')
+      ) {
+        exportCompletion.markNextTextChangeAsUserInput();
+      }
       // NOTE: the former unconditional
       //   `exportCompletion.reset();`
       // at this fallthrough was removed — the phase-2 buffer-text guard above
@@ -1306,14 +1317,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   };
 
   const activeCompletion = getActiveCompletion();
-  const suggestionDisplayProps = exportCompletion.suggestionDisplayProps ?? {
-    suggestions: activeCompletion.suggestions,
-    activeIndex: activeCompletion.activeSuggestionIndex,
-    isLoading: activeCompletion.isLoadingSuggestions,
-    scrollOffset: activeCompletion.visibleStartIndex,
-  };
+  const shouldUseExportSuggestions =
+    !commandSearchActive && !reverseSearchActive;
+  const suggestionDisplayProps =
+    shouldUseExportSuggestions && exportCompletion.suggestionDisplayProps
+      ? exportCompletion.suggestionDisplayProps
+      : {
+          suggestions: activeCompletion.suggestions,
+          activeIndex: activeCompletion.activeSuggestionIndex,
+          isLoading: activeCompletion.isLoadingSuggestions,
+          scrollOffset: activeCompletion.visibleStartIndex,
+        };
   const shouldShowSuggestions =
-    exportCompletion.shouldShowSuggestions || activeCompletion.showSuggestions;
+    (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
+    activeCompletion.showSuggestions;
 
   // Notify parent about suggestions visibility changes
   useEffect(() => {

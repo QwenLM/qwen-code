@@ -25,7 +25,7 @@ const EXPORT_COMMAND_INPUT = '/export';
  *   1. No escaping concerns when format names contain regex metacharacters.
  *   2. O(1) cost after the cheap startsWith prefix guard.
  */
-const getExportFormatFromInput = (
+export const getExportFormatFromInput = (
   input: string,
   validFormats: readonly string[],
 ): string | null => {
@@ -45,7 +45,7 @@ const getExportFormatFromInput = (
  * Extracted as a module-level pure function to avoid per-keystroke
  * closure recreation inside handleInput.
  */
-const getNextExportCompletionIndex = (
+export const getNextExportCompletionIndex = (
   formatList: readonly string[],
   currentIndex: number,
   direction: 'up' | 'down',
@@ -87,6 +87,11 @@ export interface ExportCompletionResult {
   /** Reset all export cycling state (call on ESC / Ctrl+C / Ctrl+U / submit). */
   reset: () => void;
   /**
+   * Allow the next buffer text change to seed export cycling if it becomes
+   * exactly "/export <fmt>". Call this only for direct user text edits.
+   */
+  markNextTextChangeAsUserInput: () => void;
+  /**
    * Shared "has navigated" flag.  The generic completion path sets this
    * to true on arrow navigation and the isPerfectMatch + Enter path reads
    * it.  Owned by this hook so both the export-specific and generic paths
@@ -108,6 +113,7 @@ export function useExportCompletion(
   const navigatedRef = useRef(false);
   const navigatedTextRef = useRef('');
   const cyclingActiveRef = useRef(false);
+  const nextTextChangeWasUserInputRef = useRef(false);
 
   // Derive the canonical export format list from slashCommands so adding a
   // new "/export <fmt>" sub-command automatically enables arrow/Tab cycling.
@@ -134,13 +140,24 @@ export function useExportCompletion(
     [exportFormatSuggestions],
   );
 
-  // Seed cyclingActiveRef when the user manually types "/export <fmt>"
-  // without going through the Phase-1 popup (UX symmetry).
+  const markNextTextChangeAsUserInput = useCallback(() => {
+    nextTextChangeWasUserInputRef.current = true;
+  }, []);
+
+  // Seed cyclingActiveRef only for text changes that InputPrompt marked as
+  // direct user edits. History navigation and programmatic setText() calls can
+  // also produce "/export <fmt>", but they must not steal the next Up/Down key
+  // from the normal history/navigation handlers.
   useEffect(() => {
     const fmt = getExportFormatFromInput(buffer.text, exportCycleFormats);
-    if (fmt !== null && !cyclingActiveRef.current) {
+    if (
+      nextTextChangeWasUserInputRef.current &&
+      fmt !== null &&
+      !cyclingActiveRef.current
+    ) {
       cyclingActiveRef.current = true;
     }
+    nextTextChangeWasUserInputRef.current = false;
   }, [buffer.text, exportCycleFormats]);
 
   // Reset navigated flag on every popup visibility transition (true↔false)
@@ -153,6 +170,7 @@ export function useExportCompletion(
 
   const reset = useCallback(() => {
     cyclingActiveRef.current = false;
+    nextTextChangeWasUserInputRef.current = false;
     navigatedRef.current = false;
     navigatedTextRef.current = '';
   }, []);
@@ -288,22 +306,37 @@ export function useExportCompletion(
       ? false
       : true;
 
-  const suggestionDisplayProps: ExportCompletionResult['suggestionDisplayProps'] =
-    shouldShowSuggestions
-      ? {
-          suggestions: exportFormatSuggestions,
-          activeIndex: selectedExportFormatIndex,
-          isLoading: false,
-          scrollOffset: 0,
-        }
-      : null;
+  const suggestionDisplayProps = useMemo<
+    ExportCompletionResult['suggestionDisplayProps']
+  >(
+    () =>
+      shouldShowSuggestions
+        ? {
+            suggestions: exportFormatSuggestions,
+            activeIndex: selectedExportFormatIndex,
+            isLoading: false,
+            scrollOffset: 0,
+          }
+        : null,
+    [exportFormatSuggestions, selectedExportFormatIndex, shouldShowSuggestions],
+  );
 
-  return {
-    shouldShowSuggestions,
-    suggestionDisplayProps,
-    handleExportInput,
-    reset,
-    navigatedRef,
-    navigatedTextRef,
-  };
+  return useMemo(
+    () => ({
+      shouldShowSuggestions,
+      suggestionDisplayProps,
+      handleExportInput,
+      reset,
+      markNextTextChangeAsUserInput,
+      navigatedRef,
+      navigatedTextRef,
+    }),
+    [
+      shouldShowSuggestions,
+      suggestionDisplayProps,
+      handleExportInput,
+      reset,
+      markNextTextChangeAsUserInput,
+    ],
+  );
 }
