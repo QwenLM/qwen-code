@@ -14,6 +14,7 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
 
 /**
@@ -539,6 +540,12 @@ export class ContentGenerationPipeline {
     const toolCallParser = isStreaming
       ? new StreamingToolCallParser()
       : undefined;
+    const responseParsingOptions =
+      this.config.provider.getResponseParsingOptions?.();
+    const taggedThinkingParser =
+      isStreaming && responseParsingOptions?.taggedThinkingTags
+        ? new TaggedThinkingParser()
+        : undefined;
 
     return {
       model: effectiveModel,
@@ -546,6 +553,8 @@ export class ContentGenerationPipeline {
       startTime: Date.now(),
       splitToolMedia: this.contentGeneratorConfig.splitToolMedia ?? false,
       ...(toolCallParser ? { toolCallParser } : {}),
+      ...(responseParsingOptions ? { responseParsingOptions } : {}),
+      ...(taggedThinkingParser ? { taggedThinkingParser } : {}),
     };
   }
 }
