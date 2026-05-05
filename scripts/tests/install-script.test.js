@@ -14,6 +14,7 @@ const {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -435,7 +436,7 @@ describe('standalone release packaging', () => {
   });
 
   it('rejects a runtime archive without a Node executable', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
     try {
@@ -464,14 +465,12 @@ describe('standalone release packaging', () => {
       ).toThrow(/Node\.js runtime for .* must contain/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   });
 
   it('packages a win-x64 standalone archive', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
     try {
@@ -509,14 +508,12 @@ describe('standalone release packaging', () => {
       );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   }, 30_000);
 
   itOnUnix('dereferences safe Node.js runtime symlinks', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
     try {
@@ -538,14 +535,12 @@ describe('standalone release packaging', () => {
       expect(lstatSync(npmShim).isSymbolicLink()).toBe(false);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   });
 
   itOnUnix('rejects Node.js runtime symlinks that escape the archive', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
     try {
@@ -570,14 +565,12 @@ describe('standalone release packaging', () => {
       ).toThrow(/symlink escapes the archive/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   });
 
   itOnUnix('rejects Node.js runtime symlink cycles', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
     try {
@@ -602,14 +595,12 @@ describe('standalone release packaging', () => {
       ).toThrow(/symlink cycle/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   });
 
   it('rejects unexpected dist assets', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
     try {
@@ -634,11 +625,7 @@ describe('standalone release packaging', () => {
       ).toThrow(/Unexpected dist asset/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      } else {
-        rmSync('dist/debug-cache.tmp', { force: true });
-      }
+      restoreDist();
     }
   });
 
@@ -675,7 +662,7 @@ describe('Linux/macOS installer end-to-end', () => {
   itOnUnix(
     'installs a local standalone archive with checksum verification',
     () => {
-      const createdDist = ensureMinimalDist();
+      const restoreDist = ensureMinimalDist();
       const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
       try {
@@ -702,15 +689,13 @@ describe('Linux/macOS installer end-to-end', () => {
         expect(version).toBe('0.0.0-smoke');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
-        if (createdDist) {
-          rmSync('dist', { recursive: true, force: true });
-        }
+        restoreDist();
       }
     },
   );
 
   itOnUnix('shell-quotes custom install paths in the generated wrapper', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
     try {
@@ -740,14 +725,12 @@ describe('Linux/macOS installer end-to-end', () => {
       expect(existsSync(path.join(tmpDir, 'qwen-pwned'))).toBe(false);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   });
 
   itOnUnix('rejects a tampered local archive', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
     try {
@@ -763,14 +746,12 @@ describe('Linux/macOS installer end-to-end', () => {
       ).toThrow(/Checksum verification failed/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   });
 
   itOnUnix('rejects a local archive when SHA256SUMS is missing', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
     try {
@@ -786,9 +767,7 @@ describe('Linux/macOS installer end-to-end', () => {
       ).toThrow(/SHA256SUMS not found/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   });
 
@@ -832,7 +811,7 @@ describe('Linux/macOS installer end-to-end', () => {
   );
 
   itOnUnix('refuses to overwrite a non-managed install directory', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
     try {
@@ -850,14 +829,12 @@ describe('Linux/macOS installer end-to-end', () => {
       );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   });
 
   itOnUnix('does not fall back to npm when detect finds a bad archive', () => {
-    const createdDist = ensureMinimalDist();
+    const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
     try {
@@ -881,9 +858,7 @@ describe('Linux/macOS installer end-to-end', () => {
       expect(failureMessage).not.toContain('Falling back to npm installation');
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
-      if (createdDist) {
-        rmSync('dist', { recursive: true, force: true });
-      }
+      restoreDist();
     }
   });
 
@@ -1101,8 +1076,13 @@ describe('Windows installer end-to-end', () => {
 });
 
 function ensureMinimalDist() {
-  if (existsSync('dist')) {
-    return false;
+  const distPath = path.resolve('dist');
+  const backupRoot = mkdtempSync(path.join(tmpdir(), 'qwen-dist-backup-'));
+  const backupDist = path.join(backupRoot, 'dist');
+  const hadExistingDist = existsSync(distPath);
+
+  if (hadExistingDist) {
+    renameSync(distPath, backupDist);
   }
 
   mkdirSync('dist/vendor', { recursive: true });
@@ -1112,7 +1092,14 @@ function ensureMinimalDist() {
     'dist/package.json',
     JSON.stringify({ name: '@qwen-code/qwen-code', version: '0.0.0' }),
   );
-  return true;
+
+  return () => {
+    rmSync(distPath, { recursive: true, force: true });
+    if (hadExistingDist) {
+      renameSync(backupDist, distPath);
+    }
+    rmSync(backupRoot, { recursive: true, force: true });
+  };
 }
 
 function createFakeNodeArchive(tmpDir, options = {}) {
