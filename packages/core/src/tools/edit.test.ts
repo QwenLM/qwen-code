@@ -958,6 +958,58 @@ describe('EditTool', () => {
         );
       }
     });
+
+    it('refuses to edit a file that changed since the last tracked Read', async () => {
+      // Symmetric with WriteFile's stale-fence test. The model recorded a
+      // Read of the file, then something else (another tool call running
+      // in parallel, a hook, or the user's editor) mutated it. Edit must
+      // not silently land its replacement on the new content.
+      const filePath = path.join(rootDir, 'edit-stale.txt');
+      fs.writeFileSync(filePath, 'original content');
+      const initialStats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, initialStats, {
+        full: true,
+        cacheable: true,
+      });
+
+      // Mutate the file behind the cache's back, ensuring the mtime moves
+      // forward by at least one millisecond so the cache fingerprint
+      // differs from the new on-disk state.
+      const futureMs = initialStats.mtimeMs + 1000;
+      fs.writeFileSync(filePath, 'changed by someone else');
+      fs.utimesSync(filePath, futureMs / 1000, futureMs / 1000);
+
+      const invocation = tool.build({
+        file_path: filePath,
+        old_string: 'original',
+        new_string: 'attempted',
+      }) as ToolInvocation<EditToolParams, ToolResult>;
+      const abortSignal = new AbortController().signal;
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_STALE_BEFORE_WRITE);
+      // The on-disk content must be the external write, untouched by Edit.
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('changed by someone else');
+    });
+
+    it('proceeds normally when the model has never read the file', async () => {
+      // First-time edits (brand new files via empty old_string, or files
+      // the user named without ever Reading) must continue to work —
+      // staleness is only a fence when the cache has a recorded prior
+      // interaction.
+      const filePath = path.join(rootDir, 'edit-fresh.txt');
+
+      const invocation = tool.build({
+        file_path: filePath,
+        old_string: '',
+        new_string: 'hello',
+      }) as ToolInvocation<EditToolParams, ToolResult>;
+      const abortSignal = new AbortController().signal;
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('hello');
+    });
   });
 
   describe.skipIf(process.platform === 'win32')(
