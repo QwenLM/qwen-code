@@ -1096,6 +1096,36 @@ describe('EditTool', () => {
       expect(result.error?.message).toMatch(/is a directory/);
     });
 
+    it('rejects an edit with a stat failure other than ENOENT (fail-closed)', async () => {
+      // Symmetric with WriteFile's EACCES test. checkPriorRead is
+      // shared today, but if a future change adds an Edit-side
+      // fallback that downgrades a real verify failure to
+      // EDIT_REQUIRES_PRIOR_READ, only the write path would catch
+      // it without this test.
+      fs.writeFileSync(filePath, 'untouched', 'utf8');
+      const statSpy = vi
+        .spyOn(fs.promises, 'stat')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+        );
+
+      const result = await tool
+        .build({
+          file_path: filePath,
+          old_string: 'untouched',
+          new_string: 'modified',
+        })
+        .execute(abortSignal);
+
+      expect(result.error?.type).toBe(
+        ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      );
+      expect(result.error?.message).toMatch(/Could not stat .*\(EACCES\)/);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched');
+
+      statSpy.mockRestore();
+    });
+
     it('does not let an unread file be probed via NO_OCCURRENCE_FOUND', async () => {
       // Regression for the read-less content oracle: pre-fix, a model
       // could call Edit with candidate old_strings on an unread file

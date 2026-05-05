@@ -339,7 +339,6 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     }
 
     if (!fileExists) {
-      fs.mkdirSync(dirName, { recursive: true });
       const userEncoding = this.config.getDefaultFileEncoding();
       if (userEncoding === FileEncoding.UTF8_BOM) {
         // User explicitly configured UTF-8 BOM for all new files
@@ -355,9 +354,9 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     }
 
     // Final pre-write freshness check. The earlier post-read check
-    // ran before mkdirSync / encoding detection; we re-stat here so
-    // an external mutation that lands in the gap between those
-    // operations and the writeTextFile below is caught.
+    // ran before encoding detection; we re-stat here so an external
+    // mutation that lands in the gap between those operations and
+    // the writeTextFile below is caught.
     //
     // It does NOT eliminate the race. A concurrent writer that
     // lands between this stat and the writeTextFile call below
@@ -405,6 +404,15 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           },
         };
       }
+    }
+
+    // Create parent directories AFTER the pre-write enforcement
+    // check passes. Doing it before would leak intermediate
+    // directories on the failure path (rejected new-file writes
+    // would otherwise litter the filesystem with empty mkdir'd
+    // ancestors).
+    if (!fileExists) {
+      fs.mkdirSync(dirName, { recursive: true });
     }
 
     try {

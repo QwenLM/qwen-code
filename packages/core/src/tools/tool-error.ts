@@ -66,6 +66,13 @@ export enum ToolErrorType {
   // distinguish edit-vs-write should look at the originating tool
   // name in the surrounding ToolCallEvent rather than the error
   // code itself.
+  //
+  // Note for operators routing alerts: a single `edit_requires_prior_read`
+  // signal can mean any of the three cases above. If per-cause monitoring
+  // becomes important, splitting this into separate codes (e.g.
+  // `EDIT_NO_PRIOR_READ`, `EDIT_PARTIAL_PRIOR_READ`,
+  // `EDIT_TARGET_NOT_TEXT_EDITABLE`) is a follow-up; for now the
+  // originating tool name and the message text already disambiguate.
   EDIT_REQUIRES_PRIOR_READ = 'edit_requires_prior_read',
   // Returned when Edit / WriteFile is asked to mutate a file the model
   // *has* read this session, but the on-disk bytes have changed since

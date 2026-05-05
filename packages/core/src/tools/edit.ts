@@ -475,8 +475,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     try {
-      this.ensureParentDirectoriesExist(this.params.file_path);
-
       // Final pre-write freshness check. calculateEdit() ran a
       // post-read check, but execute() can be called arbitrarily
       // long after that (user approval, modify-and-confirm, etc.).
@@ -532,6 +530,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           };
         }
       }
+
+      // Create parent directories AFTER the pre-write enforcement
+      // check passes. Doing it before would leak intermediate
+      // directories on the failure path — a real (if minor) FS
+      // litter that the previous order created on every rejected
+      // edit.
+      this.ensureParentDirectoriesExist(this.params.file_path);
 
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)
