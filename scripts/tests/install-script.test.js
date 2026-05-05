@@ -301,6 +301,7 @@ describe('standalone release packaging', () => {
 
     expect(output).toContain('package:installation-assets');
     expect(output).toContain('--out-dir PATH');
+    expect(output).toContain('--version VERSION');
   });
 
   it('rejects invalid installation asset CLI arguments', () => {
@@ -311,6 +312,14 @@ describe('standalone release packaging', () => {
     expectCommandFailure(
       ['scripts/build-installation-assets.js', '--out-dir'],
       /--out-dir requires a value/,
+    );
+    expectCommandFailure(
+      ['scripts/build-installation-assets.js', '--version'],
+      /--version requires a value/,
+    );
+    expectCommandFailure(
+      ['scripts/build-installation-assets.js', '--version', 'beta'],
+      /--version must be a semver string/,
     );
   });
 
@@ -413,6 +422,37 @@ describe('standalone release packaging', () => {
       await expect(assertInstallationAssetChecksums(tmpDir)).rejects.toThrow(
         /Checksum verification failed for install-qwen\.sh/,
       );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('stamps release versions into copied installation assets', async () => {
+    const { assertInstallationAssetChecksums, buildInstallationAssets } =
+      await import(installationAssetsScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-assets-'));
+
+    try {
+      await buildInstallationAssets(tmpDir, { version: '0.16.0' });
+
+      const installSh = readScript(path.join(tmpDir, 'install-qwen.sh'));
+      const installBat = readScript(path.join(tmpDir, 'install-qwen.bat'));
+
+      expect(installSh).toContain('VERSION="${QWEN_INSTALL_VERSION:-0.16.0}"');
+      expect(installSh).toContain(
+        'Standalone release version. Defaults to 0.16.0.',
+      );
+      expect(installSh).toContain('--version)');
+      expect(installBat).toContain('set "VERSION=0.16.0"');
+      expect(installBat).toContain(
+        'Standalone release version. Defaults to 0.16.0.',
+      );
+      expect(installBat).toContain(
+        'if defined QWEN_INSTALL_VERSION set "VERSION=!QWEN_INSTALL_VERSION!"',
+      );
+      await expect(
+        assertInstallationAssetChecksums(tmpDir),
+      ).resolves.not.toThrow();
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -633,7 +673,9 @@ describe('standalone release packaging', () => {
     const workflow = readScript('.github/workflows/release.yml');
 
     expect(workflow).toContain('npm run package:standalone:release --');
-    expect(workflow).toContain('npm run package:installation-assets --');
+    expect(workflow).toContain(
+      'npm run package:installation-assets -- --out-dir dist/standalone --version "${RELEASE_VERSION}"',
+    );
     expect(workflow).not.toContain('verify_node_checksum()');
     expect(workflow).not.toContain('download_node()');
     expect(workflow).toContain('dist/standalone/qwen-code-*');

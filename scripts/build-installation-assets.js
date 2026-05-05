@@ -26,6 +26,9 @@ if (isMainModule()) {
     } else {
       await buildInstallationAssets(
         path.resolve(args.outDir || path.join(rootDir, 'dist', 'standalone')),
+        {
+          version: args.version,
+        },
       );
     }
   } catch (error) {
@@ -39,7 +42,7 @@ function isMainModule() {
 }
 
 async function buildInstallationAssets(outDir, options = {}) {
-  const { assets = INSTALLATION_ASSETS, root = rootDir } = options;
+  const { assets = INSTALLATION_ASSETS, root = rootDir, version } = options;
   fs.mkdirSync(outDir, { recursive: true });
 
   for (const asset of assets) {
@@ -49,7 +52,11 @@ async function buildInstallationAssets(outDir, options = {}) {
     }
 
     const destination = path.join(outDir, asset.output);
-    fs.copyFileSync(source, destination);
+    const contents = fs.readFileSync(source, 'utf8');
+    fs.writeFileSync(
+      destination,
+      version ? stampInstallerVersion(contents, asset, version) : contents,
+    );
     if (asset.mode !== undefined && process.platform !== 'win32') {
       fs.chmodSync(destination, asset.mode);
     }
@@ -57,6 +64,56 @@ async function buildInstallationAssets(outDir, options = {}) {
 
   await writeSha256Sums(outDir);
   await assertInstallationAssetChecksums(outDir, assets);
+}
+
+function stampInstallerVersion(contents, asset, version) {
+  validateReleaseVersion(version);
+
+  const sourceName = asset.sourcePath.at(-1);
+  if (sourceName.endsWith('.sh')) {
+    const stampedDefault = replaceRequired(
+      contents,
+      'VERSION="${QWEN_INSTALL_VERSION:-latest}"',
+      `VERSION="\${QWEN_INSTALL_VERSION:-${version}}"`,
+      asset.output,
+    );
+    return stampVersionHelpText(stampedDefault, asset.output, version);
+  }
+
+  if (sourceName.endsWith('.bat')) {
+    const stampedDefault = replaceRequired(
+      contents,
+      'set "VERSION=latest"',
+      `set "VERSION=${version}"`,
+      asset.output,
+    );
+    return stampVersionHelpText(stampedDefault, asset.output, version);
+  }
+
+  return contents;
+}
+
+function replaceRequired(contents, search, replacement, output) {
+  if (!contents.includes(search)) {
+    fail(`Unable to stamp release version in ${output}`);
+  }
+  return contents.replace(search, replacement);
+}
+
+function stampVersionHelpText(contents, output, version) {
+  return replaceRequired(
+    contents,
+    'Standalone release version. Defaults to latest.',
+    `Standalone release version. Defaults to ${version}.`,
+    output,
+  );
+}
+
+function validateReleaseVersion(version) {
+  if (/^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$/.test(version)) {
+    return;
+  }
+  fail('--version must be a semver string');
 }
 
 async function assertInstallationAssetChecksums(
@@ -108,6 +165,7 @@ function parseArgs(argv) {
   const args = {
     help: false,
     outDir: undefined,
+    version: undefined,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -119,6 +177,11 @@ function parseArgs(argv) {
         break;
       case '--out-dir':
         args.outDir = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--version':
+        args.version = readOptionValue(argv, index, arg);
+        validateReleaseVersion(args.version);
         index += 1;
         break;
       default:
@@ -144,6 +207,8 @@ Usage:
 
 Options:
   --out-dir PATH  Output directory. Defaults to dist/standalone.
+  --version VERSION
+                  Stamp release installers so their default version is VERSION.
 `);
 }
 
