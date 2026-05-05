@@ -2664,6 +2664,129 @@ describe('runNonInteractive', () => {
       expect(leadingToolResult).toBeDefined();
     });
 
+    it('tries multiple structured_output calls in the same turn until one succeeds', async () => {
+      // Same-turn batch: [structured_output(bad), structured_output(good)].
+      // The first fails validation; the second has valid args and should
+      // be tried in-order, ending the session without an extra turn —
+      // rather than the older behaviour of only attempting the first
+      // structured_output and forcing a retry.
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+
+      const abortAllSpy = vi.fn();
+      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
+        setNotificationCallback: vi.fn(),
+        setRegisterCallback: vi.fn(),
+        getAll: vi.fn().mockReturnValue([]),
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        abortAll: abortAllSpy,
+      });
+
+      const writes: string[] = [];
+      processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+        writes.push(
+          typeof chunk === 'string'
+            ? chunk
+            : Buffer.from(chunk).toString('utf8'),
+        );
+        return true;
+      });
+
+      const goodArgs = { summary: 'ok' };
+      const badStructured: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured-bad',
+          name: 'structured_output',
+          args: { wrong: 'shape' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-multi-struct',
+        },
+      };
+      const goodStructured: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured-good',
+          name: 'structured_output',
+          args: goodArgs,
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-multi-struct',
+        },
+      };
+
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([badStructured, goodStructured]),
+      );
+
+      // First structured_output returns a tool-execution error (bad args);
+      // second one returns clean responseParts so the session can capture.
+      mockCoreExecuteToolCall
+        .mockResolvedValueOnce({
+          error: new Error('args invalid'),
+          errorType: 'TOOL_INVALID_ARGUMENTS',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-structured-bad',
+                name: 'structured_output',
+                response: { error: 'args invalid' },
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          responseParts: [{ text: 'ok' }],
+        });
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output',
+        'prompt-id-multi-struct',
+      );
+
+      // Both structured_output calls must have been attempted in original
+      // order; the loop stops at the first success so no third execution.
+      const executedNames = mockCoreExecuteToolCall.mock.calls.map(
+        (call) => (call[1] as { name: string; callId: string }).name,
+      );
+      const executedIds = mockCoreExecuteToolCall.mock.calls.map(
+        (call) => (call[1] as { name: string; callId: string }).callId,
+      );
+      expect(executedNames).toEqual(['structured_output', 'structured_output']);
+      expect(executedIds).toEqual([
+        'tool-structured-bad',
+        'tool-structured-good',
+      ]);
+
+      // No retry turn was needed.
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(abortAllSpy).toHaveBeenCalledTimes(1);
+
+      // Result must reflect the second (successful) structured_output's
+      // submitted args, not a retry payload.
+      const events = writes
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line))
+        .flat();
+      const result = events.find(
+        (m: unknown) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { type?: string }).type === 'result',
+      );
+      expect(result).toBeDefined();
+      expect(result.is_error).toBe(false);
+      expect(result.structured_result).toEqual(goodArgs);
+    });
+
     it('keeps the session running when structured_output args fail validation so the model can retry', async () => {
       (mockConfig.getJsonSchema as Mock).mockReturnValue({
         type: 'object',

@@ -490,30 +490,33 @@ export async function runNonInteractive(
           // If --json-schema is active and the model emitted a
           // `structured_output` call in the same assistant turn as other
           // tools, the structured call is the terminal contract — execute
-          // ONLY the first `structured_output` and synthesise a "skipped"
-          // tool_result for every other call in the batch. Without this,
-          // a batch like `[write_file(...), structured_output(...)]` would
-          // run the side-effecting tool before the run is accepted, and
-          // an invalid structured_output mid-batch (`[structured_output(bad),
-          // write_file(...)]`) would still fall through to the trailing
-          // tool before the retry turn.
+          // every `structured_output` call in the batch in original order
+          // until one succeeds (then break), and skip every non-structured
+          // call regardless. Earlier shapes:
+          //   `[write_file(...), structured_output(...)]`    → write_file
+          //                                                     never runs
+          //   `[structured_output(bad), structured_output(good)]`
+          //     → first fails validation, second succeeds, session ends
+          //   `[structured_output(bad), write_file(...)]`    → write_file
+          //                                                     never runs
+          // Once a structured_output succeeds, any later structured_output
+          // calls in the same turn are also unexecuted (only one terminal
+          // contract per turn) — they get a synthesised tool_result the
+          // same way non-structured suppressed calls do.
           let requestsToExecute = toolCallRequests;
-          let suppressedCalls: ToolCallRequestInfo[] = [];
           if (
             config.getJsonSchema() &&
             toolCallRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT)
           ) {
-            const structuredIdx = toolCallRequests.findIndex(
+            requestsToExecute = toolCallRequests.filter(
               (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
             );
-            requestsToExecute = [toolCallRequests[structuredIdx]];
-            suppressedCalls = toolCallRequests.filter(
-              (_, i) => i !== structuredIdx,
-            );
           }
+          const executedCallIds = new Set<string>();
 
           for (const requestInfo of requestsToExecute) {
             const finalRequestInfo = requestInfo;
+            executedCallIds.add(finalRequestInfo.callId);
 
             const inputFormat =
               typeof config.getInputFormat === 'function'
@@ -591,29 +594,35 @@ export async function runNonInteractive(
             }
           }
 
-          // Synthesise tool_result events + retry parts for any sibling
-          // tool calls suppressed by the pre-scan. Runs for both the
-          // success and retry paths so the emitted event log pairs every
-          // tool_use the model produced with a tool_result, AND the
-          // retry-turn payload (when reached) doesn't leave Anthropic /
-          // OpenAI staring at unpaired tool_use blocks.
-          if (suppressedCalls.length > 0) {
-            const suppressedOutput =
-              'Skipped: structured_output was also requested in this turn and takes precedence as the terminal output contract. Re-issue this call in a separate turn if needed.';
-            for (const call of suppressedCalls) {
+          // Synthesise tool_result events + retry parts for every tool_use
+          // block from the prior assistant message that we did NOT actually
+          // execute — non-structured siblings that were suppressed up
+          // front, plus any structured_output calls left unexecuted after
+          // an earlier one in the batch already succeeded. Runs for both
+          // the success and retry paths so the emitted event log pairs
+          // every tool_use with a tool_result AND the retry-turn payload
+          // (when reached) doesn't leave Anthropic / OpenAI staring at
+          // unpaired tool_use blocks.
+          const unexecutedCalls = toolCallRequests.filter(
+            (r) => !executedCallIds.has(r.callId),
+          );
+          if (unexecutedCalls.length > 0) {
+            const skippedOutput =
+              "Skipped: this turn's structured_output contract took precedence as the terminal output. Re-issue this call in a separate turn if needed.";
+            for (const call of unexecutedCalls) {
               const responseParts: Part[] = [
                 {
                   functionResponse: {
                     id: call.callId,
                     name: call.name,
-                    response: { output: suppressedOutput },
+                    response: { output: skippedOutput },
                   },
                 },
               ];
               adapter.emitToolResult(call, {
                 callId: call.callId,
                 responseParts,
-                resultDisplay: suppressedOutput,
+                resultDisplay: skippedOutput,
                 error: undefined,
                 errorType: undefined,
               });
