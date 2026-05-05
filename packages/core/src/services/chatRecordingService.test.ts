@@ -466,6 +466,45 @@ describe('ChatRecordingService', () => {
       await chatRecordingService.flush();
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
     });
+
+    // After rewindRecording, the previous attribution snapshot lives on
+    // the abandoned branch, so the dedup key has to clear — otherwise
+    // the post-rewind identical snapshot would be silently skipped and
+    // /resume on the rewound session would lose all attribution state.
+    it('should re-write an identical snapshot after rewindRecording', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'turn 1' }]);
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      const beforeRewind = vi.mocked(jsonl.writeLine).mock.calls.length;
+
+      chatRecordingService.rewindRecording(0, { truncatedCount: 0 });
+      // Same snapshot bytes — without the rewind reset this would dedup.
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      // 1 rewind record + 1 fresh snapshot = 2 more writes after rewind.
+      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
+        beforeRewind + 2,
+      );
+    });
+
+    // A transient write failure must NOT permanently suppress future
+    // identical snapshots: if the dedup key were committed before the
+    // write, the next identical snapshot would dedup and the session
+    // would have no attribution snapshot at all.
+    it('should retry an identical snapshot after a write failure', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      // Wait for the queued (failing) write to settle so the rollback runs.
+      await chatRecordingService.flush();
+      const afterFailure = vi.mocked(jsonl.writeLine).mock.calls.length;
+
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      // Retry should fire, so we get a new write call.
+      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
+        afterFailure + 1,
+      );
+    });
   });
 
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)

@@ -507,7 +507,14 @@ export class ChatRecordingService {
    * local-disk writes failures are rare enough to accept the fire-and-forget
    * simplification.
    */
-  private appendRecord(record: ChatRecord): void {
+  /**
+   * Returns a promise that resolves after the queued write succeeds and
+   * rejects (without logging) if it fails. The internal `writeChain` is
+   * advanced with a swallowing catch so the chain stays alive across
+   * failures; callers that need to react to per-record success can await
+   * the returned promise.
+   */
+  private appendRecord(record: ChatRecord): Promise<void> {
     let conversationFile: string;
     try {
       conversationFile = this.ensureConversationFile();
@@ -516,12 +523,13 @@ export class ChatRecordingService {
       throw error;
     }
     this.lastRecordUuid = record.uuid;
-    this.writeChain = this.writeChain
+    const writePromise = this.writeChain
       .catch(() => {})
-      .then(() => jsonl.writeLine(conversationFile, record))
-      .catch((err) => {
-        debugLogger.error('Error appending record (async):', err);
-      });
+      .then(() => jsonl.writeLine(conversationFile, record));
+    this.writeChain = writePromise.catch((err) => {
+      debugLogger.error('Error appending record (async):', err);
+    });
+    return writePromise;
   }
 
   /**
@@ -836,6 +844,12 @@ export class ChatRecordingService {
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
+      // The previous attribution snapshot now sits on the abandoned
+      // branch — clear the dedup key so the next snapshot lands on the
+      // active branch and `/resume` can find it. Without this, a
+      // post-rewind identical snapshot would be skipped and the rewound
+      // session would lose all attribution state on restore.
+      this.lastAttributionSnapshotJson = undefined;
 
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -985,6 +999,12 @@ export class ChatRecordingService {
    * Without this, sessions that touch many files would write a full
    * duplicate of the entire snapshot to the JSONL on every turn, even
    * when nothing changed — inflating session size and slowing /resume.
+   *
+   * Set the dedup key optimistically and roll it back if the write
+   * fails. Synchronous identical calls (common during a tool-driven
+   * turn) all dedup correctly, but a transient write failure clears
+   * the key so the next identical snapshot retries the write rather
+   * than being permanently suppressed.
    */
   recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
     try {
@@ -999,8 +1019,14 @@ export class ChatRecordingService {
         systemPayload: { snapshot },
       };
 
-      this.appendRecord(record);
       this.lastAttributionSnapshotJson = json;
+      this.appendRecord(record).catch(() => {
+        // Write failed — only roll back if the key still belongs to
+        // our snapshot (a later distinct write may have overwritten it).
+        if (this.lastAttributionSnapshotJson === json) {
+          this.lastAttributionSnapshotJson = undefined;
+        }
+      });
     } catch (error) {
       debugLogger.error('Error saving attribution snapshot:', error);
     }

@@ -2035,30 +2035,35 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
 
     try {
-      // The four `rev-parse`-shaped calls are independent — fan out so
-      // we don't pay the spawn latency serially. Same for the three
-      // diff calls below once we know which form to use.
+      // The three calls are independent — fan out so we don't pay the
+      // spawn latency serially. Same for the three diff calls below
+      // once we know which form to use.
       // - `rev-parse --verify HEAD~1`: probe whether the parent OBJECT
       //   is locally available (fails in shallow clones where the
       //   parent was pruned).
-      // - `rev-list --count HEAD`: total commits reachable. `=== 1`
-      //   means HEAD truly is the root commit (no parent SHA recorded
-      //   on HEAD), where `diff-tree --root` is correct. `> 1` means
-      //   HEAD has a parent recorded — if --verify also failed, this
-      //   is a shallow clone and we must NOT fall back to --root
-      //   (which would diff against the empty tree and over-attribute).
-      const [hasParentOutput, commitCountOutput, repoRootOutput] =
+      // - `log -1 --pretty=%P HEAD`: read the parent SHA from HEAD's
+      //   commit metadata. Works regardless of shallow status because
+      //   the parent SHA is recorded on the commit itself, not derived
+      //   by walking. Empty output = HEAD is a true root commit.
+      //   Non-empty output = HEAD has a parent (whether or not its
+      //   object is locally available).
+      // - `rev-parse --show-toplevel`: capture the repo root.
+      //
+      // `rev-list --count HEAD` looks tempting as a "is this a root
+      // commit?" probe but it returns 1 in a depth-1 shallow clone
+      // (only the local object is reachable), aliasing the shallow
+      // and root cases. The parent-SHA approach disambiguates them
+      // correctly.
+      const [hasParentOutput, parentShaOutput, repoRootOutput] =
         await Promise.all([
           runGit('rev-parse --verify HEAD~1'),
-          runGit('rev-list --count HEAD'),
+          runGit('log -1 --pretty=%P HEAD'),
           runGit('rev-parse --show-toplevel'),
         ]);
       const hasParent = hasParentOutput.length > 0;
-      const totalCommits = parseInt(commitCountOutput.trim(), 10);
-      const isTrueRootCommit =
-        Number.isFinite(totalCommits) && totalCommits === 1;
-      // Shallow clone: HEAD has a parent but the object isn't local.
-      // Bail rather than over-attribute via --root.
+      const isTrueRootCommit = parentShaOutput.trim().length === 0;
+      // Shallow clone: HEAD has a parent recorded but the object
+      // isn't local. Bail rather than over-attribute via --root.
       if (!hasParent && !isTrueRootCommit) {
         debugLogger.warn(
           'getCommittedFileInfo: HEAD~1 unreadable but commit is not the ' +
