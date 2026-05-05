@@ -385,15 +385,35 @@ describe('MemoryManager', () => {
       expect(result).toEqual({ status: 'skipped', skippedReason: 'disabled' });
     });
 
+    it('skips when params.config is omitted entirely', async () => {
+      // Without config, runManagedAutoMemoryDream throws — surfacing
+      // a noisy failed entry in the bg-tasks dialog. The early skip
+      // converts the omitted-config case to the same disabled-skip
+      // path so callers can't accidentally produce visible failures
+      // by leaving config out (the type allows it for test ergonomics).
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleDream({
+        projectRoot,
+        sessionId: 'sess-no-config',
+        // config intentionally omitted
+        now: new Date('2026-04-02T10:00:00.000Z'),
+      });
+      expect(result).toEqual({ status: 'skipped', skippedReason: 'disabled' });
+      // Crucially — no record was stored for this skip.
+      expect(mgr.listTasksByType('dream', projectRoot)).toEqual([]);
+    });
+
     it('skips when called again in the same session', async () => {
       const scanner = vi
         .fn()
         .mockResolvedValue(['sess-0', 'sess-1', 'sess-2', 'sess-3', 'sess-4']);
       const mgr = new MemoryManager(scanner);
 
+      const config = makeMockConfig();
       const first = await mgr.scheduleDream({
         projectRoot,
         sessionId: 'sess-x',
+        config,
         now: new Date('2026-04-01T10:00:00.000Z'),
         minHoursBetweenDreams: 0,
         minSessionsBetweenDreams: 1,
@@ -404,6 +424,7 @@ describe('MemoryManager', () => {
       const second = await mgr.scheduleDream({
         projectRoot,
         sessionId: 'sess-x',
+        config,
         now: new Date('2026-04-01T11:00:00.000Z'),
         minHoursBetweenDreams: 0,
         minSessionsBetweenDreams: 1,
@@ -436,6 +457,7 @@ describe('MemoryManager', () => {
       const result = await mgr.scheduleDream({
         projectRoot,
         sessionId: 'sess-new',
+        config: makeMockConfig(),
         now: new Date('2026-04-01T10:00:00.000Z'),
         minHoursBetweenDreams: 24,
         minSessionsBetweenDreams: 1,
@@ -451,6 +473,7 @@ describe('MemoryManager', () => {
       const result = await mgr.scheduleDream({
         projectRoot,
         sessionId: 'sess-new',
+        config: makeMockConfig(),
         now: new Date('2026-04-01T10:00:00.000Z'),
         minHoursBetweenDreams: 0,
         minSessionsBetweenDreams: 5,
@@ -472,6 +495,7 @@ describe('MemoryManager', () => {
       const result = await mgr.scheduleDream({
         projectRoot,
         sessionId: 'sess-x',
+        config: makeMockConfig(),
         now: new Date('2026-04-01T10:00:00.000Z'),
         minHoursBetweenDreams: 0,
         minSessionsBetweenDreams: 3,

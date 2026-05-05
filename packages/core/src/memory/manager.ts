@@ -703,7 +703,12 @@ export class MemoryManager {
   async scheduleDream(
     params: ScheduleDreamParams,
   ): Promise<DreamScheduleResult> {
-    if (params.config && !params.config.getManagedAutoDreamEnabled()) {
+    // `params.config` is optional only because some test paths omit it;
+    // production callers always pass it. Without a config the
+    // fork-agent execution can't start (`runManagedAutoMemoryDream`
+    // throws). Skip early so a missing-config call doesn't surface a
+    // failed dream entry in the bg-tasks dialog.
+    if (!params.config || !params.config.getManagedAutoDreamEnabled()) {
       return { status: 'skipped', skippedReason: 'disabled' };
     }
 
