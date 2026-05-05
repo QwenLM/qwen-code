@@ -93,6 +93,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   WebFetch: 'web_fetch',
   WebFetchTool: 'web_fetch',
 
+  // WebSearch tool
+  web_search: 'web_search',
+  WebSearch: 'web_search',
+  WebSearchTool: 'web_search',
+
   // Agent (subagent) tool
   agent: 'agent',
   Agent: 'agent',

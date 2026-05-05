@@ -17,6 +17,7 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.GREP,
   ToolNames.GLOB,
   ToolNames.WEB_FETCH,
+  ToolNames.WEB_SEARCH,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
 ]);

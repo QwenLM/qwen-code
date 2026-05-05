@@ -2880,6 +2880,10 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
+    await registerLazy(ToolNames.WEB_SEARCH, async () => {
+      const { WebSearchTool } = await import('../tools/web-search.js');
+      return new WebSearchTool(this);
+    });
     if (this.isLspEnabled() && this.getLspClient()) {
       await registerLazy(ToolNames.LSP, async () => {
         const { LspTool } = await import('../tools/lsp.js');

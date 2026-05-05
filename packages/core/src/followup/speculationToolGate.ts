@@ -33,8 +33,9 @@ const SAFE_READ_ONLY_TOOLS = new Set<string>([
   ToolNames.GLOB,
   ToolNames.LS,
   ToolNames.LSP,
-  // web_fetch and web_search excluded — they require user confirmation
-  // for external network requests, which speculation bypasses
+  // web_fetch and web_search excluded — they make external network requests
+  // and require user confirmation, which speculation bypasses. They are
+  // listed in BOUNDARY_TOOLS below to halt speculation explicitly.
 ]);
 
 /** Tools that produce file writes — must be redirected to overlay */
@@ -49,6 +50,7 @@ const BOUNDARY_TOOLS = new Set<string>([
   ToolNames.ASK_USER_QUESTION,
   ToolNames.EXIT_PLAN_MODE,
   ToolNames.WEB_FETCH,
+  ToolNames.WEB_SEARCH,
 ]);
 
 /**
