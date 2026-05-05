@@ -23,7 +23,7 @@ on:
         default: true
         type: 'boolean'
       scheduled_limit:
-        description: 'Maximum number of candidate issues to process during a scheduled scan. Each candidate may run one related-issue search.'
+        description: 'Maximum number of candidate issues to process during a scheduled scan.'
         required: false
         default: '10'
         type: 'string'
@@ -38,13 +38,14 @@ defaults:
 
 permissions:
   contents: 'read'
+  id-token: 'write'
   issues: 'write'
 
 env:
   BOT_GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
 
 jobs:
-  single-issue:
+  prepare-issues:
     timeout-minutes: 5
     if: |-
       ${{
@@ -53,7 +54,8 @@ jobs:
         (
           github.event_name == 'issues' ||
           github.event_name == 'issue_comment' ||
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.issue_number != '')
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch'
         ) &&
         (github.event_name != 'issues' || github.event.issue.pull_request == null) &&
         (
@@ -67,64 +69,164 @@ jobs:
         )
       }}
     runs-on: 'ubuntu-latest'
+    outputs:
+      dry_run: '${{ steps.collect.outputs.dry_run }}'
+      issues_json: '${{ steps.collect.outputs.issues_json }}'
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
-
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: 'Run issue follow-up bot'
+      - name: 'Collect candidate issues'
+        id: 'collect'
         env:
           GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
           GITHUB_REPOSITORY: '${{ github.repository }}'
           ISSUE_NUMBER: '${{ github.event.issue.number || github.event.inputs.issue_number }}'
           DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' && 'true' || 'false' }}"
-        run: |-
-          set -euo pipefail
-
-          args=(--mode single --issue "${ISSUE_NUMBER}")
-          if [[ "${DRY_RUN}" == "true" ]]; then
-            args+=(--dry-run)
-          fi
-
-          node .github/scripts/issue-followup-bot.mjs "${args[@]}"
-
-  scheduled-candidates:
-    timeout-minutes: 10
-    if: |-
-      ${{
-        github.repository == 'QwenLM/qwen-code' &&
-        (github.event_name == 'workflow_dispatch' || vars.QWEN_ISSUE_FOLLOWUP_BOT_ENABLED == 'true') &&
-        (
-          github.event_name == 'schedule' ||
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.issue_number == '')
-        )
-      }}
-    runs-on: 'ubuntu-latest'
-    steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
-
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: 'Run scheduled candidate follow-up'
-        env:
-          GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
-          GITHUB_REPOSITORY: '${{ github.repository }}'
-          DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' && 'true' || 'false' }}"
           SCHEDULED_LIMIT: "${{ github.event.inputs.scheduled_limit || '10' }}"
         run: |-
           set -euo pipefail
 
-          args=(--mode scheduled --limit "${SCHEDULED_LIMIT}")
-          if [[ "${DRY_RUN}" == "true" ]]; then
-            args+=(--dry-run)
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo '::error::QWEN_CODE_BOT_TOKEN or CI_BOT_PAT is required.'
+            exit 1
           fi
 
-          node .github/scripts/issue-followup-bot.mjs "${args[@]}"
+          if ! [[ "${SCHEDULED_LIMIT}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::scheduled_limit must be a positive integer, got ${SCHEDULED_LIMIT}."
+            exit 1
+          fi
+
+          if [[ -n "${ISSUE_NUMBER}" ]]; then
+            echo "Collecting single issue #${ISSUE_NUMBER}."
+            issues_json="$(gh issue view "${ISSUE_NUMBER}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json number,title,body,state,labels,assignees,comments,url \
+              | jq -c '
+                if .state != "OPEN" or (.assignees | length) > 0 then
+                  []
+                else
+                  [.]
+                end
+              ')"
+          else
+            echo "Collecting up to ${SCHEDULED_LIMIT} scheduled candidate issues."
+            no_label_issues="$(gh issue list --repo "${GITHUB_REPOSITORY}" \
+              --search 'is:open is:issue no:label no:assignee' \
+              --limit "${SCHEDULED_LIMIT}" \
+              --json number,title,body,labels,assignees,url)"
+            needs_triage_issues="$(gh issue list --repo "${GITHUB_REPOSITORY}" \
+              --search 'is:open is:issue label:"status/needs-triage" no:assignee -label:"status/need-information" -label:"status/waiting-for-feedback"' \
+              --limit "${SCHEDULED_LIMIT}" \
+              --json number,title,body,labels,assignees,url)"
+            issues_json="$(echo "${no_label_issues}" "${needs_triage_issues}" \
+              | jq -c -s --argjson limit "${SCHEDULED_LIMIT}" 'add | unique_by(.number) | .[:$limit]')"
+          fi
+
+          echo "Candidate issues: ${issues_json}"
+          {
+            echo 'issues_json<<EOF'
+            echo "${issues_json}"
+            echo 'EOF'
+            echo "dry_run=${DRY_RUN}"
+          } >> "${GITHUB_OUTPUT}"
+
+  follow-up-issues:
+    timeout-minutes: 15
+    needs: 'prepare-issues'
+    if: |-
+      ${{ needs.prepare-issues.outputs.issues_json != '[]' }}
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Run Qwen issue follow-up'
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
+          ISSUES_TO_FOLLOW_UP: '${{ needs.prepare-issues.outputs.issues_json }}'
+          DRY_RUN: '${{ needs.prepare-issues.outputs.dry_run }}'
+          REPOSITORY: '${{ github.repository }}'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          settings_json: |-
+            {
+              "maxSessionTurns": 20,
+              "coreTools": [
+                "run_shell_command",
+                "write_file"
+              ],
+              "sandbox": false
+            }
+          prompt: |-
+            ## Role
+
+            You are the Qwen Code issue follow-up bot. Your job is to provide
+            early community follow-up for GitHub issues while avoiding repeated
+            or over-confident actions.
+
+            ## Inputs
+
+            - Repository: `${REPOSITORY}`
+            - Dry run: `${DRY_RUN}`
+            - Candidate issues JSON: `${ISSUES_TO_FOLLOW_UP}`
+
+            ## Hard Safety Rules
+
+            - Process only issues from `ISSUES_TO_FOLLOW_UP`.
+            - Before acting on each issue, run:
+              `gh issue view ISSUE_NUMBER --repo "${REPOSITORY}" --json number,title,body,state,labels,assignees,comments,url`
+            - Skip the issue if it is closed, assigned to anyone, or is not a real issue.
+            - Skip the issue if it already has one of these marker comments and
+              does not still have `status/needs-triage`:
+              - `<!-- qwen-issue-bot:invalid -->`
+              - `<!-- qwen-issue-bot:needs-info -->`
+              - `<!-- qwen-issue-bot:related -->`
+            - Do not assign issues to people in this phase.
+            - Use only labels that already exist in the repository.
+            - If `DRY_RUN` is `true`, do not modify GitHub. Print the planned
+              actions as JSON instead.
+            - Never create duplicate marker comments. If a marker comment already
+              exists and you need to change it, update that existing comment.
+
+            ## What To Decide
+
+            For each candidate issue, use your judgment to decide whether to:
+
+            1. Add useful labels such as one `type/*`, one `category/*`, relevant
+               `scope/*`, and relevant `status/*`.
+            2. Ask for missing information when the report is plausible but lacks
+               reproduction details, environment, expected/actual behavior, logs,
+               screenshots, or configuration snippets.
+            3. Link a small number of potentially related issues after searching
+               the repository. These are only references, not automatic duplicate
+               decisions.
+            4. Close only issues that are clearly test, placeholder, spam, or
+               otherwise non-actionable. Use `not_planned`.
+
+            ## Comment Markers
+
+            Use these hidden markers at the beginning of bot comments:
+
+            - Invalid issue: `<!-- qwen-issue-bot:invalid -->`
+            - Needs information: `<!-- qwen-issue-bot:needs-info -->`
+            - Related issues: `<!-- qwen-issue-bot:related -->`
+
+            ## Execution Guidance
+
+            - Run `gh label list --repo "${REPOSITORY}" --limit 200` before
+              selecting labels.
+            - Use `gh issue edit` to add or remove labels.
+            - Use `gh issue comment` to create comments.
+            - Use `gh api --method PATCH /repos/${REPOSITORY}/issues/comments/COMMENT_ID`
+              to update an existing marker comment.
+            - After you successfully add labels, add or update a marker comment,
+              or close an issue, remove `status/needs-triage` if present.
+            - Keep comments concise and neutral. Ask for facts; do not imply a
+              root cause unless the issue clearly proves it.
+
+            ## Output
+
+            End with one JSON object containing:
+
+            - `processed`: issue numbers changed or planned
+            - `skipped`: issue numbers skipped with reason
+            - `dryRun`: boolean
+            - `actions`: concise action summaries
