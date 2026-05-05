@@ -1322,21 +1322,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // attribute only the actual amend delta.
       const isAmend = isAmendCommit(strippedCommand);
       await this.attachCommitAttribution(cwd, preHead, isAmend);
-    } else if (commitCtx.hasCommit) {
-      // A `cd subdir && git commit` (or `git -C ... commit`) ran a
-      // commit we can't attribute, but our cwd's HEAD may still have
-      // moved (subdir is the same repo). If it did, the singleton's
-      // pending per-file attributions just got consumed by that
-      // commit — clear them so they don't leak into the next
-      // foreground commit. If HEAD didn't move (commit landed in a
-      // genuinely different repo), leave the entries alone.
-      const preHead = await preHeadPromise;
-      const postHead = await this.getGitHead(cwd);
-      if (postHead !== null && postHead !== preHead) {
-        const svc = CommitAttributionService.getInstance();
-        if (svc.hasAttributions()) svc.clearAttributions(true);
-      }
     }
+    // Intentionally NO `else if (commitCtx.hasCommit)` cleanup branch:
+    // commands that match `hasCommit` but not `attributableInCwd`
+    // (e.g. `cd /abs/path/to/this/repo && git commit`, `git -C . commit`)
+    // can land a commit in our cwd, but we don't know which files were
+    // staged — the user may have done a partial `git add A` and left
+    // unstaged AI edits to B and C pending. A wholesale
+    // `clearAttributions(true)` here would silently lose B and C even
+    // though they weren't committed. Leave the singleton alone; the
+    // next attributable commit's `attachCommitAttribution` will do a
+    // proper partial clear via `clearAttributedFiles`.
 
     // Decide whether to emit the long-run advisory. Conditions:
     //   - Process completed under its own steam (no AbortSignal
@@ -1875,6 +1871,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // The commit already happened, so we diff HEAD~1..HEAD instead of --cached.
       const stagedInfo = await this.getCommittedFileInfo(cwd, isAmend);
 
+      // null = analysis failed (shallow clone, --amend without reflog,
+      // partial diff failure, etc.). Leave `committedAbsolutePaths`
+      // null so the finally block falls back to a full clear and we
+      // don't leak stale per-file attributions into the next commit.
+      // Skip the note write entirely — emitting a structurally valid
+      // but factually wrong all-zero note is worse than no note.
+      if (stagedInfo === null) {
+        return; // finally block still runs for cleanup
+      }
+
       // Pass the actual model name (e.g. `qwen3-coder-plus`) rather than the
       // co-author display label so the note's `generator` field reflects
       // which model produced the changes — and so generateNotePayload's
@@ -1992,12 +1998,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * Get information about files in the most recent commit by diffing
-   * HEAD against its parent (HEAD~1). Falls back to empty info on error.
+   * HEAD against its parent (HEAD~1).
+   *
+   * Returns:
+   * - A populated `StagedFileInfo` when analysis succeeded.
+   * - An empty `StagedFileInfo` when the commit truly has no files
+   *   (e.g. `--allow-empty`). The caller does a no-op partial clear so
+   *   pending AI attributions stay tracked for the next real commit.
+   * - `null` when analysis itself failed (shallow clone with no parent
+   *   object, --amend with no reflog, partial diff failure, exception).
+   *   The caller treats this as "could not determine the committed
+   *   set" and falls back to a full clear so stale per-file state
+   *   doesn't leak into a subsequent commit.
    */
   private async getCommittedFileInfo(
     cwd: string,
     isAmend: boolean,
-  ): Promise<StagedFileInfo> {
+  ): Promise<StagedFileInfo | null> {
     const empty: StagedFileInfo = {
       files: [],
       diffSizes: new Map(),
@@ -2048,7 +2065,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             'true root (shallow clone?); skipping attribution to avoid ' +
             'attributing the entire commit contents.',
         );
-        return empty;
+        return null;
       }
       // Capture the repo root so the attribution service can
       // reconcile paths from `git diff` (relative to the toplevel)
@@ -2077,7 +2094,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             'getCommittedFileInfo: --amend with empty reflog; skipping ' +
               'attribution note (cannot determine amend delta).',
           );
-          return empty;
+          return null;
         }
         diffArgs = {
           name: 'diff --name-only HEAD@{1} HEAD',
@@ -2130,7 +2147,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             '--name-only listed files; skipping attribution note to ' +
             'avoid emitting all-zero AI percentages.',
         );
-        return empty;
+        return null;
       }
 
       return {
@@ -2140,7 +2157,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         repoRoot: repoRoot.length > 0 ? repoRoot : undefined,
       };
     } catch {
-      return empty;
+      return null;
     }
   }
 
