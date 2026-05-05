@@ -23,10 +23,19 @@ export interface AutoMemoryDreamResult {
   systemMessage?: string;
 }
 
-async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
+async function bumpMetadata(
+  projectRoot: string,
+  now: Date,
+  abortSignal?: AbortSignal,
+): Promise<void> {
   const metadataPath = getAutoMemoryMetadataPath(projectRoot);
   try {
     const content = await fs.readFile(metadataPath, 'utf-8');
+    // Re-check between the read and the write — the user can press 'x'
+    // (or model can call task_stop) during the disk read, and we don't
+    // want to persist `lastDreamAt` for a cancelled run (would suppress
+    // the next legitimate dream cycle).
+    if (abortSignal?.aborted) return;
     const metadata = JSON.parse(content) as AutoMemoryMetadata;
     metadata.updatedAt = now.toISOString();
     metadata.lastDreamAt = now.toISOString();
@@ -98,13 +107,19 @@ export async function runManagedAutoMemoryDream(
   // suppressing the next legitimate dream cycle.
   if (abortSignal?.aborted) return agentResult;
   if (agentResult.touchedTopics.length > 0) {
-    await bumpMetadata(projectRoot, now);
+    await bumpMetadata(projectRoot, now, abortSignal);
     if (abortSignal?.aborted) return agentResult;
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
   if (abortSignal?.aborted) return agentResult;
 
-  await updateDreamMetadataResult(projectRoot, now, agentResult.touchedTopics);
+  await updateDreamMetadataResult(
+    projectRoot,
+    now,
+    agentResult.touchedTopics,
+    undefined,
+    abortSignal,
+  );
 
   logMemoryDream(
     config,
@@ -124,10 +139,15 @@ async function updateDreamMetadataResult(
   now: Date,
   touchedTopics: AutoMemoryType[],
   sessionId?: string,
+  abortSignal?: AbortSignal,
 ): Promise<void> {
   const metadataPath = getAutoMemoryMetadataPath(projectRoot);
   try {
     const content = await fs.readFile(metadataPath, 'utf-8');
+    // Re-check between the read and the write so a late cancel
+    // (after the read await but before the write await) doesn't
+    // persist `lastDreamAt` for an aborted run.
+    if (abortSignal?.aborted) return;
     const metadata = JSON.parse(content) as AutoMemoryMetadata;
     metadata.updatedAt = now.toISOString();
     metadata.lastDreamAt = now.toISOString();
