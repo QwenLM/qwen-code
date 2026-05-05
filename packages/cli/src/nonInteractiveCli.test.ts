@@ -3020,5 +3020,130 @@ describe('runNonInteractive', () => {
       );
       expect(suppressed?.functionResponse?.name).toBe('side_effect_tool');
     });
+
+    it('captures structured_output emitted from a drain-turn (queued notification)', async () => {
+      // Main turn ends with plain text → control falls into the drain
+      // block. A monitor notification then arrives and the model's reply
+      // to it calls structured_output. The synthetic tool is registered
+      // for the whole session, so the drain turn must apply the same
+      // terminal handling as the main loop — capture the args, abort
+      // background work, and emit the structured success envelope.
+      // Without this fix the drain treated structured_output as a regular
+      // tool, sent its response back to the model, and the run exited
+      // with the "Model produced plain text..." failure even though a
+      // valid structured payload had already been accepted.
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+      setupMetricsMock();
+
+      const writes: string[] = [];
+      processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+        writes.push(
+          typeof chunk === 'string'
+            ? chunk
+            : Buffer.from(chunk).toString('utf8'),
+        );
+        return true;
+      });
+
+      // Inject a monitor notification synchronously when the registry
+      // wires up — same trick the existing notification tests use to
+      // enqueue a drain item before the first turn runs.
+      const notificationXml =
+        '<task-notification>\n' +
+        '<task-id>mon_1</task-id>\n' +
+        '<kind>monitor</kind>\n' +
+        '<status>running</status>\n' +
+        '<summary>Monitor emitted event #1.</summary>\n' +
+        '<result>ready</result>\n' +
+        '</task-notification>';
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        if (!cb) return;
+        cb('Monitor "logs" event #1: ready', notificationXml, {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'running',
+          eventCount: 1,
+        });
+      });
+
+      const drainStructuredArgs = { summary: 'drain-captured' };
+      const drainStructuredCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-drain-structured',
+          name: 'structured_output',
+          args: drainStructuredArgs,
+          isClientInitiated: false,
+          prompt_id: 'prompt-drain-struct',
+        },
+      };
+
+      // First turn: plain text, no tool calls — drains into the queue.
+      // Drain turn: model invokes structured_output as the reply to the
+      // notification.
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: GeminiEventType.Content, value: 'Monitor launched.' },
+            {
+              type: GeminiEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 2 },
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents([drainStructuredCall]));
+
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'ok' }],
+      });
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Watch the logs',
+        'prompt-drain-struct',
+      );
+
+      // The drain turn captured structured_output → success exit, not the
+      // "Model produced plain text..." failure path.
+      expect(exitCode).toBe(0);
+
+      // Two stream calls: main + drain reply. structured_output executed
+      // exactly once (during drain).
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+      const drainCallArg = mockCoreExecuteToolCall.mock.calls[0][1] as {
+        name: string;
+      };
+      expect(drainCallArg.name).toBe('structured_output');
+
+      // The terminating result event must carry the drain-captured args
+      // under structured_result, not be flagged as an error.
+      const events = writes
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line));
+      const result = events.find(
+        (m: unknown) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { type?: string }).type === 'result',
+      );
+      expect(result).toBeDefined();
+      expect(result.is_error).toBe(false);
+      expect(result.structured_result).toEqual(drainStructuredArgs);
+    });
   });
 });

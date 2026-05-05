@@ -416,6 +416,12 @@ export async function runNonInteractive(
 
       let isFirstTurn = true;
       let modelOverride: string | undefined;
+      // Session-scoped because the synthetic `structured_output` tool can
+      // be invoked from EITHER the main assistant-turn loop or from a
+      // drain-turn (queued notification / cron prompt); whichever fires
+      // first wins, and both paths need to surface the same structured
+      // result envelope.
+      let structuredSubmission: unknown = undefined;
       while (true) {
         turnCount++;
         if (
@@ -482,10 +488,10 @@ export async function runNonInteractive(
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
-          // When --json-schema is active, the first successful call to the
-          // synthetic structured_output tool terminates the session with the
-          // submitted args as the structured result.
-          let structuredSubmission: unknown = undefined;
+          // The session-scoped `structuredSubmission` is the output of
+          // the synthetic structured_output tool. Set in either the main
+          // turn or a drain turn; whichever path captures it terminates
+          // the session.
 
           // If --json-schema is active and the model emitted a
           // `structured_output` call in the same assistant turn as other
@@ -751,7 +757,28 @@ export async function runNonInteractive(
               if (itemToolCallRequests.length > 0) {
                 const itemToolResponseParts: Part[] = [];
 
-                for (const requestInfo of itemToolCallRequests) {
+                // Apply the same pre-scan as the main loop: when
+                // --json-schema is active, the synthetic structured_output
+                // tool is registered for the whole session, so a drain
+                // turn (cron task / notification reply) can also fire it.
+                // Treat it as terminal: execute every structured_output in
+                // the batch in original order until one succeeds, suppress
+                // every non-structured sibling.
+                let itemRequestsToExecute = itemToolCallRequests;
+                if (
+                  config.getJsonSchema() &&
+                  itemToolCallRequests.some(
+                    (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+                  )
+                ) {
+                  itemRequestsToExecute = itemToolCallRequests.filter(
+                    (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+                  );
+                }
+                const itemExecutedCallIds = new Set<string>();
+
+                for (const requestInfo of itemRequestsToExecute) {
+                  itemExecutedCallIds.add(requestInfo.callId);
                   const isAgentTool = requestInfo.name === 'agent';
                   const { handler: outputUpdateHandler } = isAgentTool
                     ? createAgentToolProgressHandler(
@@ -794,6 +821,54 @@ export async function runNonInteractive(
                   if ('modelOverride' in toolResponse) {
                     itemModelOverride = toolResponse.modelOverride;
                   }
+
+                  if (
+                    requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+                    !toolResponse.error
+                  ) {
+                    // A drain-turn structured_output is just as terminal
+                    // as a main-turn one — write to the session-scoped
+                    // submission so the post-drain code emits success.
+                    structuredSubmission = requestInfo.args;
+                    break;
+                  }
+                }
+
+                // Synthesise tool_result for every tool_use the model
+                // emitted that wasn't actually executed (suppressed
+                // non-structured siblings + unexecuted structured_output
+                // calls left over after a successful break).
+                const itemUnexecuted = itemToolCallRequests.filter(
+                  (r) => !itemExecutedCallIds.has(r.callId),
+                );
+                if (itemUnexecuted.length > 0) {
+                  const itemSkippedOutput =
+                    "Skipped: this turn's structured_output contract took precedence as the terminal output. Re-issue this call in a separate turn if needed.";
+                  for (const call of itemUnexecuted) {
+                    const responseParts: Part[] = [
+                      {
+                        functionResponse: {
+                          id: call.callId,
+                          name: call.name,
+                          response: { output: itemSkippedOutput },
+                        },
+                      },
+                    ];
+                    adapter.emitToolResult(call, {
+                      callId: call.callId,
+                      responseParts,
+                      resultDisplay: itemSkippedOutput,
+                      error: undefined,
+                      errorType: undefined,
+                    });
+                    itemToolResponseParts.push(...responseParts);
+                  }
+                }
+
+                if (structuredSubmission !== undefined) {
+                  // Stop processing further turns for this drain item;
+                  // the post-drain code will emit the terminal result.
+                  return;
                 }
                 itemMessages = [{ role: 'user', parts: itemToolResponseParts }];
               } else {
@@ -814,6 +889,10 @@ export async function runNonInteractive(
             if (drainPromise) return drainPromise;
             const p = (async () => {
               while (localQueue.length > 0) {
+                // Stop draining once a queued item's structured_output
+                // call captured the terminal contract — no point running
+                // more queued prompts that can't influence the result.
+                if (structuredSubmission !== undefined) return;
                 await drainOneItem();
               }
             })();
@@ -847,6 +926,16 @@ export async function runNonInteractive(
               });
 
               const checkCronDone = () => {
+                // A drain-turn structured_output makes the rest of the
+                // cron schedule moot: we already have a terminal result
+                // and the post-drain emit is about to fire. Stop the
+                // scheduler so no further jobs enqueue.
+                if (structuredSubmission !== undefined) {
+                  abortController.signal.removeEventListener('abort', onAbort);
+                  scheduler.stop();
+                  resolve();
+                  return;
+                }
                 if (scheduler.size === 0 && !drainPromise) {
                   abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
@@ -898,6 +987,10 @@ export async function runNonInteractive(
             // through the model, but later monitor output is SDK-only.
             captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
+            // A drain-turn structured_output captured the terminal
+            // contract — bail out of the holdback loop early and let the
+            // post-loop code emit the success result.
+            if (structuredSubmission !== undefined) break;
             // Wait for every background task's terminal notification, not
             // just the running ones: cancel() marks status 'cancelled'
             // synchronously but the notification is emitted later by the
@@ -919,6 +1012,23 @@ export async function runNonInteractive(
             outputFormat === OutputFormat.JSON
               ? uiTelemetryService.getMetrics()
               : undefined;
+
+          // A drain-turn structured_output captured the terminal contract
+          // — emit the structured success envelope rather than falling
+          // through to the "Model produced plain text..." failure path.
+          if (structuredSubmission !== undefined) {
+            registry.abortAll();
+            adapter.emitResult({
+              isError: false,
+              durationMs: Date.now() - startTime,
+              apiDurationMs: totalApiDurationMs,
+              numTurns: turnCount,
+              usage,
+              stats,
+              structuredResult: structuredSubmission,
+            });
+            return 0;
+          }
 
           // --json-schema contract: the model MUST terminate via the
           // structured_output tool. Reaching this branch means it emitted
