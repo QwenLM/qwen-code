@@ -197,12 +197,12 @@ describe('createSessionRootContext', () => {
     expect(ctx).toBeDefined();
   });
 
-  it('produces deterministic output for the same session ID', () => {
-    // The context wraps a span with a deterministic traceId
+  it('returns a valid context for repeated calls with the same session ID', () => {
+    // createSessionRootContext derives a deterministic traceId from the
+    // session ID but uses a random spanId, so each call produces a new
+    // context. We verify it doesn't throw and returns defined results.
     const ctx1 = createSessionRootContext('session-abc');
     const ctx2 = createSessionRootContext('session-abc');
-    // Both should be defined (we can't easily compare Contexts,
-    // but we verify it doesn't throw)
     expect(ctx1).toBeDefined();
     expect(ctx2).toBeDefined();
   });

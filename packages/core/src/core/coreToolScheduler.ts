@@ -1786,7 +1786,9 @@ export class CoreToolScheduler {
         const toolUseId = generateToolUseId();
 
         // Get MessageBus for hook execution
-        const messageBus = this.config.getMessageBus() as MessageBus | undefined;
+        const messageBus = this.config.getMessageBus() as
+          | MessageBus
+          | undefined;
         const hooksEnabled = !this.config.getDisableAllHooks();
 
         // PreToolUse Hook
@@ -1811,7 +1813,10 @@ export class CoreToolScheduler {
               ToolErrorType.EXECUTION_DENIED,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
-            span.setStatus({ code: SpanStatusCode.ERROR, message: blockMessage });
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: blockMessage,
+            });
             return;
           }
         }
@@ -1891,8 +1896,7 @@ export class CoreToolScheduler {
               );
             }
             span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: 'User cancelled tool execution.',
+              code: SpanStatusCode.UNSET,
             });
             return; // Both code paths should return here
           }
@@ -1936,7 +1940,10 @@ export class CoreToolScheduler {
                   ToolErrorType.EXECUTION_DENIED,
                 );
                 this.setStatusInternal(callId, 'error', errorResponse);
-                span.setStatus({ code: SpanStatusCode.ERROR, message: stopMessage });
+                span.setStatus({
+                  code: SpanStatusCode.ERROR,
+                  message: stopMessage,
+                });
                 return;
               }
             }
@@ -1957,7 +1964,10 @@ export class CoreToolScheduler {
                 ? toolResult.resultFilePaths
                 : [];
             const candidatePaths = Array.from(
-              new Set([...inputPaths.map((p) => unescapePath(p)), ...resultPaths]),
+              new Set([
+                ...inputPaths.map((p) => unescapePath(p)),
+                ...resultPaths,
+              ]),
             );
 
             if (candidatePaths.length > 0) {
@@ -1999,7 +2009,9 @@ export class CoreToolScheduler {
                 // and would waste a turn trying. Gate the reminder on
                 // whether the active tool registry actually exposes
                 // SkillTool to the model.
-                const hasSkillTool = !!this.toolRegistry.getTool(ToolNames.SKILL);
+                const hasSkillTool = !!this.toolRegistry.getTool(
+                  ToolNames.SKILL,
+                );
                 if (hasSkillTool) {
                   // Escape skill names defensively: validateSkillName already
                   // excludes `<>&` for parsed file-based skills, but
@@ -2031,7 +2043,11 @@ export class CoreToolScheduler {
               }
             }
 
-            const response = convertToFunctionResponse(toolName, callId, content);
+            const response = convertToFunctionResponse(
+              toolName,
+              callId,
+              content,
+            );
             const successResponse: ToolCallResponseInfo = {
               callId,
               responseParts: response,
@@ -2074,7 +2090,10 @@ export class CoreToolScheduler {
               toolResult.error.type,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
-            span.setStatus({ code: SpanStatusCode.ERROR, message: errorMessage });
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: errorMessage,
+            });
           }
         } catch (executionError: unknown) {
           const errorMessage =
@@ -2109,8 +2128,7 @@ export class CoreToolScheduler {
               );
             }
             span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: 'User cancelled tool execution.',
+              code: SpanStatusCode.UNSET,
             });
             return;
           } else {
@@ -2143,7 +2161,10 @@ export class CoreToolScheduler {
                 ToolErrorType.UNHANDLED_EXCEPTION,
               ),
             );
-            span.setStatus({ code: SpanStatusCode.ERROR, message: exceptionErrorMessage });
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: exceptionErrorMessage,
+            });
           }
         }
       },

@@ -12,6 +12,7 @@ import {
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   resolveHttpOtlpUrl,
+  refreshSessionContext,
 } from './sdk.js';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
@@ -34,8 +35,14 @@ vi.mock('@opentelemetry/exporter-metrics-otlp-http');
 vi.mock('@opentelemetry/sdk-node');
 vi.mock('./gcp-exporters.js');
 vi.mock('./log-to-span-processor.js');
+vi.mock('./session-context.js');
+vi.mock('./tracer.js', () => ({
+  createSessionRootContext: vi.fn((id: string) => ({ __sessionId: id })),
+}));
 
 import { LogToSpanProcessor } from './log-to-span-processor.js';
+import { setSessionContext } from './session-context.js';
+import { createSessionRootContext } from './tracer.js';
 
 describe('resolveHttpOtlpUrl', () => {
   it('appends signal path to base collector URL', () => {
@@ -417,5 +424,50 @@ describe('Telemetry SDK', () => {
       attributes: Record<string, string>;
     };
     expect(resource.attributes['service.version']).toBe('unknown');
+  });
+});
+
+describe('refreshSessionContext', () => {
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig = {
+      getTelemetryEnabled: () => true,
+      getTelemetryOtlpEndpoint: () => 'http://localhost:4317',
+      getTelemetryOtlpProtocol: () => 'grpc',
+      getTelemetryOtlpTracesEndpoint: () => undefined,
+      getTelemetryOtlpLogsEndpoint: () => undefined,
+      getTelemetryOtlpMetricsEndpoint: () => undefined,
+      getTelemetryTarget: () => 'local',
+      getTelemetryUseCollector: () => false,
+      getTelemetryOutfile: () => undefined,
+      getDebugMode: () => false,
+      getSessionId: () => 'test-session',
+      getCliVersion: () => '1.0.0-test',
+    } as unknown as Config;
+  });
+
+  afterEach(async () => {
+    await shutdownTelemetry();
+  });
+
+  it('should update session context when telemetry is initialized', () => {
+    initializeTelemetry(mockConfig);
+
+    refreshSessionContext('new-session-id');
+
+    expect(createSessionRootContext).toHaveBeenCalledWith('new-session-id');
+    expect(setSessionContext).toHaveBeenCalledWith({
+      __sessionId: 'new-session-id',
+    });
+  });
+
+  it('should be a no-op when telemetry is not initialized', () => {
+    // Do NOT call initializeTelemetry — telemetryInitialized remains false
+    refreshSessionContext('some-session');
+
+    expect(createSessionRootContext).not.toHaveBeenCalled();
+    expect(setSessionContext).not.toHaveBeenCalled();
   });
 });
