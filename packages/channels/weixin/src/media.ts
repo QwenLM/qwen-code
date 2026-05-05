@@ -45,14 +45,21 @@ export async function downloadAndDecrypt(
 ): Promise<Buffer> {
   const url = buildCdnDownloadUrl(encryptQueryParam);
 
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    throw new Error(`CDN download failed: HTTP ${resp.status}`);
-  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 40000);
 
-  const ciphertext = Buffer.from(await resp.arrayBuffer());
-  const keyBuf = parseAesKey(aesKey);
-  return decryptAesEcb(ciphertext, keyBuf);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) {
+      throw new Error(`CDN download failed: HTTP ${resp.status}`);
+    }
+
+    const ciphertext = Buffer.from(await resp.arrayBuffer());
+    const keyBuf = parseAesKey(aesKey);
+    return decryptAesEcb(ciphertext, keyBuf);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /** AES-128-ECB encryption for CDN upload. */

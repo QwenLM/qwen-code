@@ -301,7 +301,10 @@ export async function getUploadUrl(
     );
 
     // Check API-level error first
-    if (resp.ret !== undefined && resp.ret !== 0) {
+    if (
+      (resp.ret !== undefined && resp.ret !== 0) ||
+      (resp.errcode !== undefined && resp.errcode !== 0)
+    ) {
       throw new WeixinApiError(
         `getuploadurl failed: ret=${resp.ret} errcode=${resp.errcode ?? '(none)'} errmsg=${resp.errmsg || '(none)'}`,
         200,
@@ -366,12 +369,17 @@ export async function uploadToCdn(
       if (!resp.ok) {
         // Try to extract error details from CDN response
         let cdnErrMsg: string | undefined;
+        let cdnRet: number | undefined;
+        let cdnErrCode: number | undefined;
         try {
           const errBody = (await resp.json()) as {
             errmsg?: string;
             ret?: number;
+            errcode?: number;
           };
           cdnErrMsg = errBody.errmsg;
+          cdnRet = errBody.ret;
+          cdnErrCode = errBody.errcode;
         } catch {
           // ignore
         }
@@ -380,6 +388,8 @@ export async function uploadToCdn(
             ? `CDN upload failed: HTTP ${resp.status} — ${cdnErrMsg}`
             : `CDN upload failed: HTTP ${resp.status}`,
           resp.status,
+          cdnRet,
+          cdnErrCode,
         );
       }
       // Extract x-encrypted-param from response header

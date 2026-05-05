@@ -248,8 +248,11 @@ export class WeixinChannel extends ChannelBase {
         } catch (err) {
           const status = err instanceof WeixinApiError ? err.status : 0;
           const ret = err instanceof WeixinApiError ? err.ret : undefined;
+          const errcode =
+            err instanceof WeixinApiError ? err.errcode : undefined;
+          const msg = err instanceof Error ? err.message : String(err);
           process.stderr.write(
-            `[Weixin:${this.name}] Failed to send image (status=${status} ret=${ret})\n`,
+            `[Weixin:${this.name}] Failed to send image (status=${status} ret=${ret} errcode=${errcode}): ${msg}\n`,
           );
           try {
             await sendText({

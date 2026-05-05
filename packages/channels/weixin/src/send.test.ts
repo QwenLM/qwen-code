@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
 import { markdownToPlainText } from './send.js';
 
 const {
@@ -68,7 +69,9 @@ vi.mock('./api.js', () => ({
 const { encryptAesEcb, computeMd5 } =
   await vi.importActual<typeof import('./media.js')>('./media.js');
 
-const { sendImage } = await import('./send.js');
+const { sendImage, detectImageMime, validateImagePath } = await import(
+  './send.js'
+);
 
 describe('markdownToPlainText', () => {
   it('strips code blocks', () => {
@@ -150,6 +153,112 @@ describe('markdownToPlainText', () => {
   });
 });
 
+describe('detectImageMime', () => {
+  it('detects PNG magic bytes', () => {
+    const buf = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    expect(detectImageMime(buf)).toBe('image/png');
+  });
+
+  it('detects GIF magic bytes', () => {
+    const buf = Buffer.from([0x47, 0x49, 0x46]);
+    expect(detectImageMime(buf)).toBe('image/gif');
+  });
+
+  it('detects WebP magic bytes (RIFF)', () => {
+    const buf = Buffer.from([0x52, 0x49, 0x46, 0x46]);
+    expect(detectImageMime(buf)).toBe('image/webp');
+  });
+
+  it('detects JPEG magic bytes', () => {
+    const buf = Buffer.from([0xff, 0xd8, 0xff]);
+    expect(detectImageMime(buf)).toBe('image/jpeg');
+  });
+
+  it('throws for unrecognized magic bytes', () => {
+    const buf = Buffer.from([0x00, 0x00, 0x00, 0x00]);
+    expect(() => detectImageMime(buf)).toThrow('Unrecognized image format');
+  });
+});
+
+describe('validateImagePath', () => {
+  const workspaceDirs = ['/home/user/project'];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Restore default mock behaviour: identity pass-through for realpath,
+    // regular file, small size, PNG magic in readSync.
+    mockRealpathSync.mockImplementation((p: string) => p);
+    mockStatSync.mockReturnValue({
+      isFile: () => true,
+      size: 100,
+    } as unknown as ReturnType<(typeof fs)['statSync']>);
+    vi.mocked(fs.readSync).mockImplementation((_fd: number, buf: Buffer) => {
+      PNG_HEADER.copy(buf);
+      return PNG_HEADER.length;
+    });
+  });
+
+  it('rejects disallowed extensions', () => {
+    expect(() =>
+      validateImagePath('/tmp/screenshot.txt', workspaceDirs),
+    ).toThrow('Image extension not allowed');
+  });
+
+  it('rejects non-existent files', () => {
+    mockRealpathSync.mockImplementation(() => {
+      throw new Error('ENOENT: no such file');
+    });
+    expect(() => validateImagePath('/tmp/missing.png', workspaceDirs)).toThrow(
+      'Image file not found',
+    );
+  });
+
+  it('rejects non-regular files (directories etc.)', () => {
+    mockStatSync.mockReturnValue({
+      isFile: () => false,
+      size: 0,
+    } as unknown as ReturnType<(typeof fs)['statSync']>);
+    expect(() => validateImagePath('/tmp/some-dir.png', workspaceDirs)).toThrow(
+      'Not a regular file',
+    );
+  });
+
+  it('rejects files exceeding 20 MB cap', () => {
+    mockStatSync.mockReturnValue({
+      isFile: () => true,
+      size: 21 * 1024 * 1024,
+    } as unknown as ReturnType<(typeof fs)['statSync']>);
+    expect(() => validateImagePath('/tmp/huge.png', workspaceDirs)).toThrow(
+      'Image too large',
+    );
+  });
+
+  it('rejects paths outside allowed directories', () => {
+    mockRealpathSync.mockImplementation((p: string) => p);
+    expect(() => validateImagePath('/etc/passwd.png', workspaceDirs)).toThrow(
+      'Image path outside allowed directories',
+    );
+  });
+
+  it('rejects image with magic bytes that do not match extension', () => {
+    // readSync returns JPEG magic, but file extension is .png
+    vi.mocked(fs.readSync).mockImplementation((_fd: number, buf: Buffer) => {
+      const jpegMagic = Buffer.from([0xff, 0xd8, 0xff]);
+      jpegMagic.copy(buf);
+      return jpegMagic.length;
+    });
+    expect(() =>
+      validateImagePath('/tmp/actually-jpeg.png', workspaceDirs),
+    ).toThrow('Image type mismatch');
+  });
+
+  it('returns resolved realpath on success', () => {
+    mockRealpathSync.mockImplementation((p: string) => `/private${p}`);
+    const result = validateImagePath('/tmp/photo.png', workspaceDirs);
+    expect(result).toBe('/private/tmp/photo.png');
+  });
+});
+
 describe('sendImage', () => {
   const defaultParams = {
     to: 'user-123',
@@ -172,7 +281,9 @@ describe('sendImage', () => {
       isFile: () => true,
       size: fakeImageData.length,
     } as unknown as ReturnType<(typeof import('node:fs'))['statSync']>);
-    // realpathSync: identity pass-through (default mock)
+    // realpathSync: identity pass-through (restore default after
+    // validateImagePath tests may have overridden it).
+    mockRealpathSync.mockImplementation((p: string) => p);
     // readFileSync: returns PNG-headed data for MIME check + full read
     mockReadFileSync.mockReturnValue(fakeImageData);
   });

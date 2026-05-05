@@ -122,7 +122,7 @@ export function validateImagePath(
     realpathSync('/tmp/') + '/',
     tmpdir() + '/',
     realpathSync(tmpdir()) + '/',
-    ...workspaceDirs.map((d) => resolve(d) + '/'),
+    ...workspaceDirs.map((d) => realpathSync(resolve(d)) + '/'),
   ];
 
   if (!ALLOWED_DIRS.some((dir) => real.startsWith(dir))) {
