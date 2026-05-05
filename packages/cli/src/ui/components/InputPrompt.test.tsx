@@ -78,6 +78,38 @@ const mockSlashCommands: SlashCommand[] = [
       },
     ],
   },
+  {
+    name: 'export',
+    kind: CommandKind.BUILT_IN,
+    description: 'Export session',
+    action: vi.fn(),
+    subCommands: [
+      {
+        name: 'html',
+        kind: CommandKind.BUILT_IN,
+        description: 'Export HTML',
+        action: vi.fn(),
+      },
+      {
+        name: 'md',
+        kind: CommandKind.BUILT_IN,
+        description: 'Export Markdown',
+        action: vi.fn(),
+      },
+      {
+        name: 'json',
+        kind: CommandKind.BUILT_IN,
+        description: 'Export JSON',
+        action: vi.fn(),
+      },
+      {
+        name: 'jsonl',
+        kind: CommandKind.BUILT_IN,
+        description: 'Export JSONL',
+        action: vi.fn(),
+      },
+    ],
+  },
 ];
 
 describe('InputPrompt', () => {
@@ -846,41 +878,6 @@ describe('InputPrompt', () => {
         isPerfectMatch: isExportRoot,
       };
     });
-    props.slashCommands = [
-      ...mockSlashCommands,
-      {
-        name: 'export',
-        kind: CommandKind.BUILT_IN,
-        description: 'Export session',
-        action: vi.fn(),
-        subCommands: [
-          {
-            name: 'html',
-            kind: CommandKind.BUILT_IN,
-            description: 'Export HTML',
-            action: vi.fn(),
-          },
-          {
-            name: 'md',
-            kind: CommandKind.BUILT_IN,
-            description: 'Export Markdown',
-            action: vi.fn(),
-          },
-          {
-            name: 'json',
-            kind: CommandKind.BUILT_IN,
-            description: 'Export JSON',
-            action: vi.fn(),
-          },
-          {
-            name: 'jsonl',
-            kind: CommandKind.BUILT_IN,
-            description: 'Export JSONL',
-            action: vi.fn(),
-          },
-        ],
-      },
-    ];
     const TestHarness = () => {
       const buffer = useTextBuffer({
         initialText: '/export',
@@ -928,41 +925,6 @@ describe('InputPrompt', () => {
         isPerfectMatch: isExportRoot,
       };
     });
-    props.slashCommands = [
-      ...mockSlashCommands,
-      {
-        name: 'export',
-        kind: CommandKind.BUILT_IN,
-        description: 'Export session',
-        action: vi.fn(),
-        subCommands: [
-          {
-            name: 'html',
-            kind: CommandKind.BUILT_IN,
-            description: 'Export HTML',
-            action: vi.fn(),
-          },
-          {
-            name: 'md',
-            kind: CommandKind.BUILT_IN,
-            description: 'Export Markdown',
-            action: vi.fn(),
-          },
-          {
-            name: 'json',
-            kind: CommandKind.BUILT_IN,
-            description: 'Export JSON',
-            action: vi.fn(),
-          },
-          {
-            name: 'jsonl',
-            kind: CommandKind.BUILT_IN,
-            description: 'Export JSONL',
-            action: vi.fn(),
-          },
-        ],
-      },
-    ];
 
     const TestHarness = () => {
       const buffer = useTextBuffer({
@@ -1421,6 +1383,65 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     expect(props.onSubmit).not.toHaveBeenCalled();
     unmount();
+  });
+
+  it('should submit directly on Enter after arrow-navigate + backspace + retype to perfect match', async () => {
+    // Regression for PR #3701 review (issue #5): navigate → backspace
+    // → retype → Enter must submit the raw buffer, not autocomplete.
+    // If the popup persists across backspace+retype and the navigated flag
+    // is not cleared on buffer.text changes, Enter would autocomplete the
+    // first sub-command instead of submitting the perfect match.
+    mockedUseCommandCompletion.mockImplementation((buf) => {
+      const text = buf.text;
+      const isMemory = text === '/memory';
+      return {
+        ...mockCommandCompletion,
+        showSuggestions: true, // popup stays visible throughout
+        suggestions: [
+          { label: 'show', value: 'show' },
+          { label: 'add', value: 'add' },
+          { label: 'refresh', value: 'refresh' },
+        ],
+        activeSuggestionIndex: 0,
+        isPerfectMatch: isMemory,
+      };
+    });
+    props.buffer.setText('/memory');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Arrow-navigate so completionSelectionWasNavigatedRef flips to true.
+    stdin.write('\u001B[B');
+    await wait();
+    expect(mockCommandCompletion.navigateDown).toHaveBeenCalled();
+
+    // Simulate backspace to /memor — popup stays visible in this test.
+    // Use unmount + re-render to force useEffect re-evaluation on the
+    // changed buffer.text (direct setText on the mock object doesn't
+    // trigger React state updates, so effects don't fire).
+    props.buffer.setText('/memor');
+    unmount();
+    const { unmount: unmountAfterEdit } = renderWithProviders(
+      <InputPrompt {...props} />,
+    );
+    await wait();
+
+    // Retype: /memor → /memory.
+    props.buffer.setText('/memory');
+    unmountAfterEdit();
+    const { stdin: stdinFinal, unmount: unmountFinal } = renderWithProviders(
+      <InputPrompt {...props} />,
+    );
+    await wait();
+
+    // Enter must submit '/memory', NOT autocomplete 'show'.
+    stdinFinal.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('/memory');
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmountFinal();
   });
 
   it('should submit directly on Enter for a perfect match without prior arrow navigation', async () => {
