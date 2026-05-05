@@ -310,6 +310,131 @@ describe('McpClientManager', () => {
     expect(replacementClients[1].discover).toHaveBeenCalledOnce();
   });
 
+  it('should restore health checks after failed server rediscovery', async () => {
+    vi.useFakeTimers();
+
+    const firstClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    const failedClient = {
+      connect: vi.fn().mockRejectedValue(new Error('transient failure')),
+      discover: vi.fn(),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient)
+      .mockReturnValueOnce(firstClient as unknown as McpClient)
+      .mockReturnValueOnce(failedClient as unknown as McpClient);
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ 'test-server': {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      {
+        autoReconnect: true,
+        checkIntervalMs: 10,
+        maxConsecutiveFailures: 1,
+        reconnectDelayMs: 10,
+      },
+    );
+
+    try {
+      await manager.discoverMcpToolsForServer(
+        'test-server',
+        {} as unknown as Config,
+      );
+      expect(
+        (
+          manager as unknown as {
+            healthCheckTimers: Map<string, NodeJS.Timeout>;
+          }
+        ).healthCheckTimers.has('test-server'),
+      ).toBe(true);
+
+      await manager.discoverMcpToolsForServer(
+        'test-server',
+        {} as unknown as Config,
+      );
+
+      expect(failedClient.connect).toHaveBeenCalledOnce();
+      expect(
+        (
+          manager as unknown as {
+            healthCheckTimers: Map<string, NodeJS.Timeout>;
+          }
+        ).healthCheckTimers.has('test-server'),
+      ).toBe(true);
+    } finally {
+      await manager.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('should clear in-flight discovery tracking when stopping', async () => {
+    let resolveConnect!: () => void;
+    const connectPromise = new Promise<void>((resolve) => {
+      resolveConnect = resolve;
+    });
+    const mockedMcpClient = {
+      connect: vi.fn(() => connectPromise),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ 'test-server': {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+
+    const discovery = manager.discoverMcpToolsForServer(
+      'test-server',
+      {} as unknown as Config,
+    );
+    await Promise.resolve();
+
+    expect(
+      (
+        manager as unknown as {
+          serverDiscoveryPromises: Map<string, Promise<void>>;
+        }
+      ).serverDiscoveryPromises.has('test-server'),
+    ).toBe(true);
+
+    await manager.stop();
+
+    expect(
+      (
+        manager as unknown as {
+          serverDiscoveryPromises: Map<string, Promise<void>>;
+        }
+      ).serverDiscoveryPromises.has('test-server'),
+    ).toBe(false);
+
+    resolveConnect();
+    await discovery;
+  });
+
   it('should no-op when discovering an unknown server', async () => {
     const mockedMcpClient = {
       connect: vi.fn(),

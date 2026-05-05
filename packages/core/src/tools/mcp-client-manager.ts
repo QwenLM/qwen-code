@@ -221,8 +221,6 @@ export class McpClientManager {
     try {
       await client.connect();
       await client.discover(cliConfig);
-      // Start health check for this server after successful discovery
-      this.startHealthCheck(serverName);
     } catch (error) {
       // Log the error but don't throw: callers expect best-effort discovery.
       debugLogger.error(
@@ -231,6 +229,7 @@ export class McpClientManager {
         )}`,
       );
     } finally {
+      this.startHealthCheck(serverName);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
   }
@@ -259,6 +258,7 @@ export class McpClientManager {
     this.clients.clear();
     this.consecutiveFailures.clear();
     this.isReconnecting.clear();
+    this.serverDiscoveryPromises.clear();
   }
 
   /**
@@ -281,6 +281,7 @@ export class McpClientManager {
         this.clients.delete(serverName);
         this.consecutiveFailures.delete(serverName);
         this.isReconnecting.delete(serverName);
+        this.serverDiscoveryPromises.delete(serverName);
         this.eventEmitter?.emit('mcp-client-update', this.clients);
       }
     }
