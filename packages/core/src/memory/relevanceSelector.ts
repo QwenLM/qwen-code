@@ -91,10 +91,18 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     purpose: 'auto-memory-recall',
     contents,
     schema: RESPONSE_SCHEMA,
+      ? AbortSignal.any([AbortSignal.timeout(2_000), callerAbortSignal])
+      : AbortSignal.timeout(2_000),
+>>>>>>> f4d4a05a5 (fix(memory): route auto-memory recall selector to fast model)
+=======
     abortSignal: callerAbortSignal
-      ? AbortSignal.any([AbortSignal.timeout(1_000), callerAbortSignal])
-      : AbortSignal.timeout(1_000),
+      ? AbortSignal.any([AbortSignal.timeout(2_000), callerAbortSignal])
+      : AbortSignal.timeout(2_000),
 
+=======
+      ? AbortSignal.any([AbortSignal.timeout(2_000), callerAbortSignal])
+      : AbortSignal.timeout(2_000),
+>>>>>>> f4d4a05a5 (fix(memory): route auto-memory recall selector to fast model)
     // Use the fast model for this background side-query to reduce latency and
     // cost. Falls back to the main session model if no fast model is configured.
     model: config.getFastModel(),
