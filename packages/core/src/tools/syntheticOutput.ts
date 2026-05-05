@@ -6,12 +6,11 @@
 
 import type { ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 
 const structuredOutputDescription = `Submit your final answer as structured JSON that conforms to the provided schema.
 
-CRITICAL: In structured-output mode, this is the ONLY way to deliver the final result. Call this tool exactly once when you are ready to finish. Do not emit the final answer as plain text — it will be discarded. Use other tools (Read, Grep, etc.) to gather the information you need before calling this tool.
+CRITICAL: In structured-output mode, this is the ONLY way to deliver the final result. Call this tool to deliver the final result; the first call with valid arguments ends the session. Do not emit the final answer as plain text — it will be discarded. Use other tools (Read, Grep, etc.) to gather the information you need before calling this tool.
 
 The arguments you pass MUST validate against the tool's parameter schema. If validation fails you will receive the error and may retry with corrected fields.`;
 
@@ -32,7 +31,7 @@ export class SyntheticOutputTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.STRUCTURED_OUTPUT;
 
-  constructor(_config: Config, userSchema: Record<string, unknown>) {
+  constructor(userSchema: Record<string, unknown>) {
     super(
       SyntheticOutputTool.Name,
       ToolDisplayNames.STRUCTURED_OUTPUT,

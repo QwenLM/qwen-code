@@ -272,6 +272,25 @@ describe('resolveJsonSchemaArg', () => {
     );
   });
 
+  it('accepts $ref nested inside anyOf / oneOf / allOf branches', () => {
+    // Root $ref is rejected unconditionally (Ajv applies it conjunctively
+    // with siblings), but $ref *inside* a composition branch is opaque
+    // at parse time — Ajv will resolve it at runtime. Refusing nested
+    // refs would block common $defs/$ref composition shapes.
+    const a = resolveJsonSchemaArg(
+      '{"anyOf":[{"$ref":"#/$defs/Foo"},{"type":"string"}],"$defs":{"Foo":{"type":"object"}}}',
+    );
+    expect(a).toBeDefined();
+    const b = resolveJsonSchemaArg(
+      '{"oneOf":[{"$ref":"#/$defs/A"},{"$ref":"#/$defs/B"}],"$defs":{"A":{"type":"object"},"B":{"type":"object"}}}',
+    );
+    expect(b).toBeDefined();
+    const c = resolveJsonSchemaArg(
+      '{"allOf":[{"$ref":"#/$defs/Bar"},{"type":"object"}],"$defs":{"Bar":{"type":"object"}}}',
+    );
+    expect(c).toBeDefined();
+  });
+
   it('handles boolean subschemas in allOf', () => {
     // `true` is neutral in allOf, `false` makes the whole schema unsatisfiable.
     const ok = resolveJsonSchemaArg('{"allOf":[true,{"type":"object"}]}');

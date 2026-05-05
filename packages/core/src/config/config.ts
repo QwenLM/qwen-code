@@ -2914,7 +2914,7 @@ export class Config {
         const { SyntheticOutputTool } = await import(
           '../tools/syntheticOutput.js'
         );
-        return new SyntheticOutputTool(this, schema);
+        return new SyntheticOutputTool(schema);
       });
     }
 

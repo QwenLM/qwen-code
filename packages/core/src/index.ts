@@ -106,18 +106,15 @@ export { buildSkillLlmContent } from './tools/skill-utils.js';
 // Note: runtime value imports (e.g. `new EditTool(...)`) must use the direct
 // module path (e.g. `@qwen-code/qwen-code-core/dist/tools/edit.js`) as these
 // classes are now lazy-loaded and are not exported as values from the package root.
-//
-// Exception: `SyntheticOutputTool` is exported as a runtime value because the
-// CLI's `--json-schema` flow constructs it directly from the package root
-// (it isn't user-pluggable like the eager-load tools), so the lazy-load
-// rationale doesn't apply.
 export type { EditTool, EditToolParams } from './tools/edit.js';
 export type {
   ExitPlanModeTool,
   ExitPlanModeParams,
 } from './tools/exitPlanMode.js';
-export { SyntheticOutputTool } from './tools/syntheticOutput.js';
-export type { StructuredOutputParams } from './tools/syntheticOutput.js';
+export type {
+  SyntheticOutputTool,
+  StructuredOutputParams,
+} from './tools/syntheticOutput.js';
 export type { GlobTool, GlobToolParams, GlobPath } from './tools/glob.js';
 export type { GrepTool, GrepToolParams } from './tools/grep.js';
 export type { LSTool, LSToolParams, FileEntry } from './tools/ls.js';

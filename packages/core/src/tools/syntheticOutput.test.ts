@@ -4,14 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { SyntheticOutputTool } from './syntheticOutput.js';
 import { ToolNames } from './tool-names.js';
-import type { Config } from '../config/config.js';
 
 function makeTool(schema: Record<string, unknown>): SyntheticOutputTool {
-  const mockConfig = { isInteractive: vi.fn().mockReturnValue(false) } as unknown as Config;
-  return new SyntheticOutputTool(mockConfig, schema);
+  return new SyntheticOutputTool(schema);
 }
 
 describe('SyntheticOutputTool', () => {
@@ -37,9 +35,7 @@ describe('SyntheticOutputTool', () => {
 
   it('accepts args that match the user schema', () => {
     const tool = makeTool(objectSchema);
-    expect(
-      tool.validateToolParams({ summary: 'ok', score: 1 }),
-    ).toBeNull();
+    expect(tool.validateToolParams({ summary: 'ok', score: 1 })).toBeNull();
   });
 
   it('rejects args missing required fields', () => {
@@ -66,5 +62,4 @@ describe('SyntheticOutputTool', () => {
     expect(String(result.llmContent)).toMatch(/accepted/i);
     expect(String(result.llmContent)).toMatch(/end/i);
   });
-
 });

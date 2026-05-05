@@ -45,6 +45,17 @@ import {
 } from './utils/errors.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
+
+/**
+ * Maximum wait, in milliseconds, for in-flight background tasks to emit
+ * their terminal `task_notification` after `abortAll()` on the
+ * structured-output success path. Tasks are marked cancelled
+ * synchronously by `abortAll`, but the natural task handler emits the
+ * notification on a later microtask — without a brief holdback the
+ * structured-output run would silently drop those events. Capped so a
+ * slow agent can't block exit indefinitely.
+ */
+const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -641,6 +652,22 @@ export async function runNonInteractive(
             // terminal emitResult; structured-output mode is a single-shot
             // contract and the caller expects a deterministic shutdown.
             registry.abortAll();
+            // `abortAll()` marks each task `cancelled` synchronously, but
+            // the matching `task_notification` is emitted later by the
+            // task's natural handler. Hold back briefly (capped at
+            // STRUCTURED_SHUTDOWN_HOLDBACK_MS) so consumers see every
+            // `task_started` paired with its terminal notification — the
+            // same pairing the regular terminal path guarantees via the
+            // hasUnfinalizedTasks loop below — without blocking exit on
+            // a slow agent that the user has already declared done.
+            const holdbackDeadline =
+              Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
+            while (
+              Date.now() < holdbackDeadline &&
+              registry.hasUnfinalizedTasks()
+            ) {
+              await new Promise((r) => setTimeout(r, 50));
+            }
             // Match the regular terminal path's holdback: drain queued
             // task notifications to the SDK and finalise one-shot
             // monitors before emitResult, so consumers always see a

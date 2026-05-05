@@ -3010,15 +3010,41 @@ describe('runNonInteractive', () => {
             functionResponse?: { id?: string; name?: string };
           }>
         | undefined;
-      const responseIds = (retryParts || [])
+      const retryPartsTyped = (retryParts || []) as Array<{
+        functionResponse?: {
+          id?: string;
+          name?: string;
+          response?: unknown;
+        };
+      }>;
+      const responseIds = retryPartsTyped
         .map((p) => p.functionResponse?.id)
         .filter(Boolean);
       expect(responseIds).toContain('tool-leading');
       expect(responseIds).toContain('tool-structured-bad');
-      const suppressed = (retryParts || []).find(
+      const suppressed = retryPartsTyped.find(
         (p) => p.functionResponse?.id === 'tool-leading',
       );
       expect(suppressed?.functionResponse?.name).toBe('side_effect_tool');
+
+      // The failed structured_output's tool_result must carry the actual
+      // validation error from `executeToolCall` so the model has signal
+      // to correct itself on the retry — a regression that overwrote it
+      // with the synthesised "Skipped" message would leave the model
+      // blind. Assert the shape: the bad call's response carries the
+      // validation error string, not the suppressed-output prose.
+      const failedStructured = retryPartsTyped.find(
+        (p) => p.functionResponse?.id === 'tool-structured-bad',
+      );
+      expect(failedStructured?.functionResponse?.name).toBe(
+        'structured_output',
+      );
+      expect(
+        JSON.stringify(failedStructured?.functionResponse?.response),
+      ).toContain('args invalid');
+      expect(
+        JSON.stringify(failedStructured?.functionResponse?.response),
+      ).not.toMatch(/Skipped:/);
     });
 
     it('captures structured_output emitted from a drain-turn (queued notification)', async () => {

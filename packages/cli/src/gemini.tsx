@@ -744,6 +744,15 @@ export async function main() {
         trimmedInput.length > 0 ? trimmedInput : '',
       );
       await runExitCleanup();
+      // `runNonInteractiveStreamJson` doesn't return an explicit exit
+      // code yet, so a cleanup task that mutates `process.exitCode`
+      // could clobber a non-zero failure signal. This is currently safe
+      // because `--json-schema` is rejected at parse time when combined
+      // with `--input-format stream-json` (see the yargs `.check` in
+      // resolveCliGenerationConfig), so structured-output failures
+      // never reach this branch. If a future stream-json equivalent of
+      // structured output is added, plumb the exit code through the
+      // function's return value the way `runNonInteractive` below does.
       process.exit(process.exitCode ?? 0);
     }
 

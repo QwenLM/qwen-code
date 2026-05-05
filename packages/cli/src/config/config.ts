@@ -188,9 +188,19 @@ export interface CliArgs {
  * follow refs ourselves (local-only resolution would still need to
  * handle remote / recursive refs) so users wanting composition should
  * inline the schema at the root or use `allOf`.
+ *
+ * The `$ref` rejection is **root-only**. Sub-schemas inside `anyOf` /
+ * `oneOf` / `allOf` recurse with `isRoot=false`, where a `$ref` is
+ * treated as opaque (assume-object-compatible) and deferred to Ajv at
+ * runtime — otherwise common composition shapes like
+ * `{anyOf:[{$ref:"#/$defs/Foo"}, {type:"string"}]}` would be wrongly
+ * rejected at parse time even though Ajv can resolve them.
  */
-function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
-  if (typeof schema['$ref'] === 'string') {
+function schemaRootAcceptsObject(
+  schema: Record<string, unknown>,
+  isRoot = true,
+): boolean {
+  if (isRoot && typeof schema['$ref'] === 'string') {
     // Reject any root `$ref`. The previous "accept when sibling
     // `type:"object"` is present" carve-out was unsound: Ajv applies
     // both keywords, so `{type:"object", $ref:"#/$defs/Foo",
@@ -239,7 +249,11 @@ function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
     if (v === true) return true;
     if (v === false) return false;
     if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      return schemaRootAcceptsObject(v as Record<string, unknown>);
+      // isRoot=false: nested branches don't trigger the root-only `$ref`
+      // rejection — the parent's keyword scope already pins the
+      // sub-schema's role to "candidate value type", and Ajv will
+      // resolve the ref at runtime.
+      return schemaRootAcceptsObject(v as Record<string, unknown>, false);
     }
     return false;
   };
