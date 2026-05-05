@@ -20,13 +20,13 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
-const RIPGREP_FIELD_SEPARATOR = '\u001f';
+const RIPGREP_FIELD_SEPARATOR = '';
 
 interface RipgrepJsonMatch {
   type: 'match';
   data: {
     path: { text?: string };
-    lines: { text?: string };
+    lines?: { text?: string };
     line_number: number;
   };
 }
@@ -166,12 +166,13 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // Get raw ripgrep output
-      const rawOutput = await this.performRipgrepSearch({
-        pattern: this.params.pattern,
-        paths: searchPaths,
-        glob: this.params.glob,
-        signal,
-      });
+      const { stdout: rawOutput, truncated: truncatedBySystemLimit } =
+        await this.performRipgrepSearch({
+          pattern: this.params.pattern,
+          paths: searchPaths,
+          glob: this.params.glob,
+          signal,
+        });
 
       // Build search description
       const searchLocationDescription = this.params.path
@@ -196,7 +197,6 @@ class GrepToolInvocation extends BaseToolInvocation<
         key: string;
       }
 
-      let parsedJsonOutput = false;
       let allLines = rawOutput
         .split('\n')
         .filter((line) => line.trim())
@@ -204,11 +204,10 @@ class GrepToolInvocation extends BaseToolInvocation<
           try {
             const parsed = JSON.parse(line) as unknown;
             if (isRipgrepJsonMatch(parsed)) {
-              parsedJsonOutput = true;
               const filePath = parsed.data.path.text;
               if (filePath === undefined) return [];
               const lineNumber = String(parsed.data.line_number);
-              const content = parsed.data.lines.text ?? '';
+              const content = parsed.data.lines?.text ?? '';
               return [
                 {
                   rawLine: `${filePath}:${lineNumber}:${content.replace(/\r?\n$/, '')}`,
@@ -218,13 +217,11 @@ class GrepToolInvocation extends BaseToolInvocation<
               ];
             }
             if (typeof parsed === 'object' && parsed !== null) {
-              parsedJsonOutput = true;
+              return [];
             }
           } catch {
             // Fall through to legacy/mock text parsing below.
           }
-
-          if (parsedJsonOutput) return [];
 
           const fields = line.split(RIPGREP_FIELD_SEPARATOR);
           if (fields.length === 1) {
@@ -266,6 +263,10 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       const totalMatches = allLines.length;
+      if (totalMatches === 0) {
+        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
+        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+      }
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
 
       // Build header early to calculate available space
@@ -325,14 +326,22 @@ class GrepToolInvocation extends BaseToolInvocation<
       let llmContent = header + grepOutput;
 
       // Add truncation notice if needed
-      if (truncatedByLineLimit || truncatedByCharLimit) {
+      if (
+        truncatedByLineLimit ||
+        truncatedByCharLimit ||
+        truncatedBySystemLimit
+      ) {
         const omittedMatches = totalMatches - includedLines;
         llmContent += `\n---\n[${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
       }
 
       // Build display message (show real count, not truncated)
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
-      if (truncatedByLineLimit || truncatedByCharLimit) {
+      if (
+        truncatedByLineLimit ||
+        truncatedByCharLimit ||
+        truncatedBySystemLimit
+      ) {
         displayMessage += ` (truncated)`;
       }
 
@@ -364,7 +373,7 @@ class GrepToolInvocation extends BaseToolInvocation<
     paths: string[]; // Can be files or directories
     glob?: string;
     signal: AbortSignal;
-  }): Promise<string> {
+  }): Promise<{ stdout: string; truncated: boolean }> {
     const { pattern, paths, glob } = options;
 
     const rgArgs: string[] = [
@@ -425,7 +434,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       throw result.error;
     }
 
-    return result.stdout;
+    return { stdout: result.stdout, truncated: result.truncated };
   }
 
   private getFileFilteringOptions(): FileFilteringOptions {

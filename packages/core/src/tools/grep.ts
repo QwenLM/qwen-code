@@ -305,10 +305,18 @@ class GrepToolInvocation extends BaseToolInvocation<
     absoluteFilePath: string,
     lineNumber: number,
     lineContent: string,
+    fileLineCache: Map<string, string[]>,
+    lineCacheStats?: { reads: Map<string, number> },
   ): boolean {
     try {
-      const fileContent = fs.readFileSync(absoluteFilePath, 'utf8');
-      return fileContent.split(/\r?\n/)[lineNumber - 1] === lineContent;
+      let lines = fileLineCache.get(absoluteFilePath);
+      if (lines === undefined) {
+        lines = fs.readFileSync(absoluteFilePath, 'utf8').split(/\r?\n/);
+        fileLineCache.set(absoluteFilePath, lines);
+        const reads = lineCacheStats?.reads;
+        reads?.set(absoluteFilePath, (reads.get(absoluteFilePath) ?? 0) + 1);
+      }
+      return lines[lineNumber - 1] === lineContent;
     } catch {
       return false;
     }
@@ -318,10 +326,12 @@ class GrepToolInvocation extends BaseToolInvocation<
     output: string,
     basePath: string,
     includeResultFilePaths: boolean,
+    lineCacheStats?: { reads: Map<string, number> },
   ): GrepMatch[] {
     const results: GrepMatch[] = [];
     if (!output) return results;
 
+    const fileLineCache = new Map<string, string[]>();
     const lines = output.split(EOL); // Use OS-specific end-of-line
 
     for (const line of lines) {
@@ -357,6 +367,8 @@ class GrepToolInvocation extends BaseToolInvocation<
               absoluteFilePath,
               lineNumber,
               lineContent,
+              fileLineCache,
+              lineCacheStats,
             )
               ? absoluteFilePath
               : '',

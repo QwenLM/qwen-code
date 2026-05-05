@@ -187,6 +187,52 @@ describe('RipGrepTool', () => {
       ]);
     });
 
+    it('should treat summary-only JSON output as no matches', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${JSON.stringify({ type: 'summary', data: { stats: { matches: 0 } } })}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'missing' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toBe(
+        'No matches found for pattern "missing" in the workspace directory.',
+      );
+      expect(result.returnDisplay).toBe('No matches found');
+    });
+
+    it('handles JSON match events without a lines field', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${JSON.stringify({ type: 'match', data: { path: { text: 'fileA.txt' }, line_number: 1 } })}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('fileA.txt:1:');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileA.txt'),
+      ]);
+    });
+
+    it('surfaces ripgrep system-level truncation in display metadata', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        truncated: true,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toBe('Found 1 match (truncated)');
+      expect(result.llmContent).toContain('[0 lines truncated] ...');
+    });
+
     it('should preserve absolute result paths reported by ripgrep', async () => {
       const absoluteMatchPath = path.join(
         tempRootDir,
@@ -538,7 +584,7 @@ describe('RipGrepTool', () => {
       const multiDirGrepTool = new RipGrepTool(multiDirConfig);
 
       (runRipgrep as Mock).mockResolvedValue({
-        stdout: `fileA.txt:1:hello world${EOL}${secondDir}/extra.txt:1:hello from second dir${EOL}`,
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}${secondDir}${path.sep}extra.txt${sep}1${sep}hello from second dir${EOL}`,
         truncated: false,
         error: undefined,
       });
@@ -643,7 +689,7 @@ describe('RipGrepTool', () => {
       const multiDirGrepTool = new RipGrepTool(multiDirConfig);
 
       // Simulate ripgrep returning the same file:line twice (once from each search root)
-      const dupLine = `${path.join(subDir, 'fileC.txt')}:1:hello world`;
+      const dupLine = `${path.join(subDir, 'fileC.txt')}${sep}1${sep}hello world`;
       (runRipgrep as Mock).mockResolvedValue({
         stdout: `${dupLine}${EOL}${dupLine}${EOL}`,
         truncated: false,

@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fsSync from 'node:fs';
 import type { GrepToolParams } from './grep.js';
 import { GrepTool } from './grep.js';
 import path from 'node:path';
@@ -214,6 +215,37 @@ describe('GrepTool', () => {
         path.join(tempRootDir, 'fileA.txt'),
         path.join(tempRootDir, 'sub', 'fileC.txt'),
       ]);
+    });
+
+    it('caches fallback grep validation reads per file', async () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+          includeResultFilePaths: boolean,
+          lineCacheStats?: { reads: Map<string, number> },
+        ) => Array<{ absoluteFilePath: string }>;
+      };
+      const filePath = path.join(tempRootDir, 'fileA.txt');
+      const stats = { reads: new Map<string, number>() };
+      const readSpy = vi.spyOn(fsSync, 'readFileSync');
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `fileA.txt:1:hello world${os.EOL}fileA.txt:2:second line with world${os.EOL}`,
+        tempRootDir,
+        true,
+        stats,
+      );
+
+      expect(matches.map((match) => match.absoluteFilePath)).toEqual([
+        filePath,
+        filePath,
+      ]);
+      expect(stats.reads.get(filePath)).toBe(1);
+      expect(readSpy).toHaveBeenCalledTimes(1);
+      readSpy.mockRestore();
     });
 
     it('only reports result paths for matches visible before character truncation', async () => {
