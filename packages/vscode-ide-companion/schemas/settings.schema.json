@@ -67,6 +67,10 @@
         },
         "gitCoAuthor": {
           "description": "Attribution added to git commits and pull requests created through Qwen Code.",
+          "default": {
+            "commit": true,
+            "pr": true
+          },
           "anyOf": [
             {
               "type": "boolean"

@@ -372,7 +372,11 @@ const SETTINGS_SCHEMA = {
         label: 'Attribution',
         category: 'General',
         requiresRestart: false,
-        default: {},
+        // Match `normalizeGitCoAuthor`'s runtime defaults so the IDE
+        // schema publishes the same "enabled by default" hint users see
+        // at runtime. The empty-object form here would silently lose
+        // editor-surfaced defaults.
+        default: { commit: true, pr: true },
         description:
           'Attribution added to git commits and pull requests created through Qwen Code.',
         showInDialog: false,

@@ -2452,6 +2452,39 @@ describe('ShellTool', () => {
         );
       });
 
+      // A `-b 'flag'` mention literally inside the outer `--body "..."`
+      // text must NOT be picked as the body argument: the trailer
+      // would land mid-body, corrupting the user-approved command.
+      // Mirrors addCoAuthorToGitCommit's nested-match check.
+      it('should pick the OUTER --body when an inner -b appears in body text', async () => {
+        const command =
+          'gh pr create --title "x" --body "docs mention -b \'flag\' here"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+
+        const calls = mockShellExecutionService.mock.calls;
+        const cmd = calls[calls.length - 1]?.[0] as string;
+        // The trailer must appear AFTER the closing `"` of the outer
+        // body, not between `flag` and `here`.
+        expect(cmd).toMatch(
+          /--body "docs mention -b 'flag' here[\s\S]*Generated with Qwen Code"/,
+        );
+        expect(cmd).not.toMatch(
+          /-b 'flag[\s\S]*Generated with Qwen Code[\s\S]*' here"/,
+        );
+      });
+
       it('should append attribution to gh pr create --body when pr enabled', async () => {
         const command = 'gh pr create --title "x" --body "Summary"';
         const invocation = shellTool.build({ command, is_background: false });

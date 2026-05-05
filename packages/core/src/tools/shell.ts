@@ -1802,14 +1802,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const attributionService = CommitAttributionService.getInstance();
 
     if (!commitCreated) {
-      // No new commit landed (nothing staged, hook rejected, or user
-      // reset right after). Drop the per-file attributions but keep the
-      // "since last commit" prompt counters intact — the user's next
-      // attempt should still credit prompts that happened during this
-      // failed try.
-      if (attributionService.hasAttributions()) {
-        attributionService.clearAttributions(false);
-      }
+      // HEAD didn't move in this cwd. Possible causes:
+      //   1. Commit failed (hook rejected, nothing staged, etc.)
+      //   2. User did `git commit && git reset HEAD~1` — HEAD reverted
+      //   3. Submodule case (`cd submodule && git commit`) — the inner
+      //      repo's HEAD moved, ours didn't
+      // We can't tell these apart reliably from here. Dropping the
+      // per-file attributions on (1)/(2) is fine in isolation, but on
+      // (3) we'd silently lose the user's outer-repo edits even though
+      // none of them were committed. Leave attributions intact instead:
+      // a later successful commit will overwrite the counters and the
+      // accumulated aiContribution still represents real AI work.
       return;
     }
 
@@ -2015,17 +2018,38 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
 
     try {
-      // The two `rev-parse` calls are independent — fan out so we
-      // don't pay the spawn latency twice serially. Same for the
-      // three diff calls below once we know which form to use.
-      const [hasParentOutput, repoRootOutput] = await Promise.all([
-        runGit('rev-parse --verify HEAD~1'),
-        runGit('rev-parse --show-toplevel'),
-      ]);
-      // hasParent fails for shallow clones where the parent was
-      // pruned, which is fine — diff-tree --root is a safe fallback
-      // that diffs against the empty tree.
+      // The four `rev-parse`-shaped calls are independent — fan out so
+      // we don't pay the spawn latency serially. Same for the three
+      // diff calls below once we know which form to use.
+      // - `rev-parse --verify HEAD~1`: probe whether the parent OBJECT
+      //   is locally available (fails in shallow clones where the
+      //   parent was pruned).
+      // - `rev-list --count HEAD`: total commits reachable. `=== 1`
+      //   means HEAD truly is the root commit (no parent SHA recorded
+      //   on HEAD), where `diff-tree --root` is correct. `> 1` means
+      //   HEAD has a parent recorded — if --verify also failed, this
+      //   is a shallow clone and we must NOT fall back to --root
+      //   (which would diff against the empty tree and over-attribute).
+      const [hasParentOutput, commitCountOutput, repoRootOutput] =
+        await Promise.all([
+          runGit('rev-parse --verify HEAD~1'),
+          runGit('rev-list --count HEAD'),
+          runGit('rev-parse --show-toplevel'),
+        ]);
       const hasParent = hasParentOutput.length > 0;
+      const totalCommits = parseInt(commitCountOutput.trim(), 10);
+      const isTrueRootCommit =
+        Number.isFinite(totalCommits) && totalCommits === 1;
+      // Shallow clone: HEAD has a parent but the object isn't local.
+      // Bail rather than over-attribute via --root.
+      if (!hasParent && !isTrueRootCommit) {
+        debugLogger.warn(
+          'getCommittedFileInfo: HEAD~1 unreadable but commit is not the ' +
+            'true root (shallow clone?); skipping attribution to avoid ' +
+            'attributing the entire commit contents.',
+        );
+        return empty;
+      }
       // Capture the repo root so the attribution service can
       // reconcile paths from `git diff` (relative to the toplevel)
       // against absolute paths recorded by the edit/write tools.
@@ -2365,12 +2389,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
     const bodyDoubleMatch = lastMatch(segment.matchAll(bodyDoublePattern));
     const bodySingleMatch = lastMatch(segment.matchAll(bodySinglePattern));
+    // Pick whichever match appears LAST in the segment, regardless of
+    // quote style — but reject any candidate that's nested inside the
+    // other's range. For `gh pr create --body "docs mention -b 'flag'"`
+    // the inner `-b 'flag'` is INSIDE the outer `--body "..."`; without
+    // a nesting check the inner (later) `-b` would win and the trailer
+    // would be spliced into the body text rather than appended after it.
+    const bodyMatchRange = (m: RegExpMatchArray | null) =>
+      m ? { start: m.index ?? 0, end: (m.index ?? 0) + m[0].length } : null;
+    const bodyIsInside = (
+      inner: RegExpMatchArray | null,
+      outer: RegExpMatchArray | null,
+    ): boolean => {
+      const i = bodyMatchRange(inner);
+      const o = bodyMatchRange(outer);
+      return !!(i && o && i.start >= o.start && i.end <= o.end);
+    };
     let bodyMatch: RegExpMatchArray | null;
     if (bodyDoubleMatch && bodySingleMatch) {
-      bodyMatch =
-        (bodyDoubleMatch.index ?? 0) > (bodySingleMatch.index ?? 0)
-          ? bodyDoubleMatch
-          : bodySingleMatch;
+      if (bodyIsInside(bodySingleMatch, bodyDoubleMatch)) {
+        bodyMatch = bodyDoubleMatch;
+      } else if (bodyIsInside(bodyDoubleMatch, bodySingleMatch)) {
+        bodyMatch = bodySingleMatch;
+      } else {
+        bodyMatch =
+          (bodyDoubleMatch.index ?? 0) > (bodySingleMatch.index ?? 0)
+            ? bodyDoubleMatch
+            : bodySingleMatch;
+      }
     } else {
       bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
     }

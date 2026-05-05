@@ -148,7 +148,7 @@ function convertSettingToJsonSchema(
       break;
   }
 
-  // Add default value for simple types only
+  // Add default value for simple and object types
   if (setting.default !== undefined && setting.default !== null) {
     const defaultVal = setting.default;
     if (
@@ -159,6 +159,14 @@ function convertSettingToJsonSchema(
       schema.default = defaultVal;
     } else if (Array.isArray(defaultVal) && defaultVal.length > 0) {
       schema.default = defaultVal;
+    } else if (
+      typeof defaultVal === 'object' &&
+      !Array.isArray(defaultVal) &&
+      Object.keys(defaultVal).length > 0
+    ) {
+      // Non-empty plain object — publish so IDE editors can surface the
+      // default value (e.g. `{commit: true, pr: true}` for gitCoAuthor).
+      schema.default = defaultVal;
     }
   }
 
@@ -166,11 +174,20 @@ function convertSettingToJsonSchema(
   // later expanded into an object), wrap with `anyOf` so existing values
   // in users' settings.json don't trip the IDE schema validator while
   // they wait for our migration to rewrite them on the next launch.
+  //
+  // Lift `description` and `default` to the outer (anyOf) level so IDE
+  // editors that surface schema-driven defaults / descriptions still see
+  // them — burying these behind `anyOf[N]` makes most validators ignore
+  // the `default`, which loses the "enabled by default" hint for any
+  // setting using `legacyTypes`.
   if (setting.legacyTypes && setting.legacyTypes.length > 0) {
     const description = schema.description;
+    const defaultVal = schema.default;
     delete schema.description;
+    delete schema.default;
     return {
       ...(description ? { description } : {}),
+      ...(defaultVal !== undefined ? { default: defaultVal } : {}),
       anyOf: [...setting.legacyTypes.map((t) => ({ type: t })), schema],
     };
   }
