@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import {
   analyzeIssue,
   buildRelatedIssueComment,
+  DEFAULT_SCHEDULED_LIMIT,
   INVALID_COMMENT_MARKER,
   NEEDS_INFO_COMMENT_MARKER,
   RELATED_COMMENT_MARKER,
@@ -267,5 +268,11 @@ describe('github request retry policy', () => {
     assert.equal(shouldRetryGitHubRequest({ status: 503 }), true);
     assert.equal(shouldRetryGitHubRequest({ status: 404 }), false);
     assert.equal(shouldRetryGitHubRequest(new Error('bad request')), false);
+  });
+});
+
+describe('scheduled candidate limit', () => {
+  it('defaults to a small manual rollout batch', () => {
+    assert.equal(DEFAULT_SCHEDULED_LIMIT, 10);
   });
 });

@@ -25,7 +25,7 @@ on:
       scheduled_limit:
         description: 'Maximum number of candidate issues to process during a scheduled scan.'
         required: false
-        default: '50'
+        default: '10'
         type: 'string'
 
 concurrency:
@@ -110,7 +110,7 @@ jobs:
           GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
           GITHUB_REPOSITORY: '${{ github.repository }}'
           DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' && 'true' || 'false' }}"
-          SCHEDULED_LIMIT: "${{ github.event.inputs.scheduled_limit || '50' }}"
+          SCHEDULED_LIMIT: "${{ github.event.inputs.scheduled_limit || '10' }}"
         run: |-
           set -euo pipefail
 

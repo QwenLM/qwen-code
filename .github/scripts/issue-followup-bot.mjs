@@ -7,7 +7,7 @@ export const INVALID_COMMENT_MARKER = '<!-- qwen-issue-bot:invalid -->';
 export const NEEDS_INFO_COMMENT_MARKER = '<!-- qwen-issue-bot:needs-info -->';
 export const RELATED_COMMENT_MARKER = '<!-- qwen-issue-bot:related -->';
 
-const DEFAULT_SCHEDULED_LIMIT = 50;
+export const DEFAULT_SCHEDULED_LIMIT = 10;
 const RELATED_ISSUE_LIMIT = 3;
 const GITHUB_API_BASE = 'https://api.github.com';
 const MAX_GITHUB_REQUEST_ATTEMPTS = 3;
