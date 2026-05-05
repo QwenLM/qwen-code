@@ -86,6 +86,23 @@ describe('WebSearchTool', () => {
       const tool = new WebSearchTool(mockConfig);
       expect(() => tool.build({ query: 'foo bar' })).not.toThrow();
     });
+
+    it('rejects fractional max_results', () => {
+      const tool = new WebSearchTool(mockConfig);
+      expect(() =>
+        tool.build({ query: 'foo bar', max_results: 1.5 }),
+      ).toThrow();
+    });
+
+    it('rejects NaN / Infinity max_results', () => {
+      const tool = new WebSearchTool(mockConfig);
+      expect(() =>
+        tool.build({ query: 'foo bar', max_results: Number.NaN }),
+      ).toThrow();
+      expect(() =>
+        tool.build({ query: 'foo bar', max_results: Number.POSITIVE_INFINITY }),
+      ).toThrow();
+    });
   });
 
   describe('provider gating', () => {
@@ -109,6 +126,20 @@ describe('WebSearchTool', () => {
       const inv = tool.build({ query: 'hello world' });
       const r = await inv.execute(new AbortController().signal);
       expect(r.error?.type).toBe(ToolErrorType.WEB_SEARCH_PROVIDER_UNSUPPORTED);
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it('rejects QWEN_OAUTH authType (token resolved via credential manager, not handled here)', async () => {
+      const { AuthType } = await import('../core/contentGenerator.js');
+      const cfg = buildMockConfig({
+        authType: AuthType.QWEN_OAUTH,
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+      });
+      const tool = new WebSearchTool(cfg);
+      const inv = tool.build({ query: 'hello world' });
+      const r = await inv.execute(new AbortController().signal);
+      expect(r.error?.type).toBe(ToolErrorType.WEB_SEARCH_PROVIDER_UNSUPPORTED);
+      expect(r.error?.message).toContain('Qwen OAuth');
       expect(mockCreate).not.toHaveBeenCalled();
     });
 
@@ -364,6 +395,61 @@ describe('WebSearchTool', () => {
       ).length;
       expect(succeeded).toBe(8);
       expect(limited).toBe(8);
+    });
+  });
+
+  describe('result formatting', () => {
+    it('attaches safety footer to NO_RESULTS llmContent', async () => {
+      mockCreate.mockResolvedValueOnce(buildSearchResponse([]));
+      const tool = new WebSearchTool(mockConfig);
+      const inv = tool.build({ query: 'hello world' });
+      const r = await inv.execute(new AbortController().signal);
+      expect(r.error?.type).toBe(ToolErrorType.WEB_SEARCH_NO_RESULTS);
+      // Safety footer must appear even when no usable hits — prompt-injection
+      // guidance has to be in-band on every LLM-visible result.
+      expect(r.llmContent).toContain('untrusted data');
+      expect(r.llmContent).toContain('Safety:');
+    });
+
+    it('emits omitted-by-filters note distinctly from size-truncation note', async () => {
+      // 5 raw results, blocked_domains drops 3 → 2 survive, omitted=3.
+      // Body is small, so size-truncation note must NOT appear.
+      mockCreate.mockResolvedValueOnce(
+        buildSearchResponse([
+          { title: 'k1', url: 'https://github.com/a' },
+          { title: 'k2', url: 'https://github.com/b' },
+          { title: 'd1', url: 'https://blocked.com/x' },
+          { title: 'd2', url: 'https://blocked.com/y' },
+          { title: 'd3', url: 'https://blocked.com/z' },
+        ]),
+      );
+      const tool = new WebSearchTool(mockConfig);
+      const inv = tool.build({
+        query: 'hello world',
+        blocked_domains: ['blocked.com'],
+      });
+      const r = await inv.execute(new AbortController().signal);
+      expect(r.error).toBeUndefined();
+      expect(r.llmContent).toContain('3 result(s) omitted');
+      expect(r.llmContent).not.toContain('truncated to');
+    });
+
+    it('emits size-truncation note when body exceeds size cap', async () => {
+      // Build a body that exceeds MAX_RESULT_SIZE_CHARS (100k). 5 results
+      // each with a 30k snippet = 150k chars.
+      const big = Array.from({ length: 5 }, (_, i) => ({
+        title: `t${i}`,
+        url: `https://example.com/${i}`,
+        snippet: 'x'.repeat(30_000),
+      }));
+      mockCreate.mockResolvedValueOnce(buildSearchResponse(big));
+      const tool = new WebSearchTool(mockConfig);
+      const inv = tool.build({ query: 'hello world' });
+      const r = await inv.execute(new AbortController().signal);
+      expect(r.error).toBeUndefined();
+      expect(r.llmContent).toContain('truncated to');
+      // No omitted note — all 5 raw results survived the filter step.
+      expect(r.llmContent).not.toContain('omitted by');
     });
   });
 
