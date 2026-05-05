@@ -18,7 +18,6 @@ import type {
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
 
@@ -153,9 +152,7 @@ ${textContent}
         `[WebFetchTool] Processing content with prompt: "${this.params.prompt}"`,
       );
 
-      const model =
-        this.config.getFastModel() ??
-        (this.config.getModel() || DEFAULT_QWEN_MODEL);
+      const model = this.config.getFastModel() ?? this.config.getModel();
       this.debugLogger.debug(
         `[WebFetchTool] Processing content with model: ${model}`,
       );
