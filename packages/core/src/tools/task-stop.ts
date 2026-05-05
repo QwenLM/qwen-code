@@ -140,9 +140,9 @@ class TaskStopInvocation extends BaseToolInvocation<
     // trio (MemoryManager owns its own task map); only `dream` is
     // cancellable — extract is short-lived and runs on the request
     // path, so cancelling it would interfere with the user's own turn.
-    // cancelTask() is synchronous and the status guard above already
-    // confirmed `running`, so the call cannot fail in this branch — no
-    // extra error path is needed.
+    // The `status === 'running'` check below is the single guard that
+    // governs this branch; cancelTask() is synchronous and returns true
+    // for any running dream, so no separate failure path is needed.
     const memoryManager = this.config.getMemoryManager();
     const memoryRecord = memoryManager.getTask(taskId);
     if (memoryRecord && memoryRecord.taskType === 'dream') {

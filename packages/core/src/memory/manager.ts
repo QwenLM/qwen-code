@@ -728,6 +728,11 @@ export class MemoryManager {
     );
     this.storeWith(record, {
       status: 'running',
+      // Set the initial progressText so the dialog's Progress section
+      // has something to show during the in-flight window — fork-agent
+      // execution exposes no per-turn callback today, so without this
+      // the section stays empty until completion.
+      progressText: 'Scheduled managed auto-memory dream.',
       metadata: { sessionCount: sessionIds.length },
     });
     this.dreamInFlightByKey.set(dedupeKey, record.id);

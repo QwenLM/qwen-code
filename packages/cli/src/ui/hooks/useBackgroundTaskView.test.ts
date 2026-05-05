@@ -303,6 +303,41 @@ describe('useBackgroundTaskView', () => {
     );
   });
 
+  it('skips setEntries when the memory listener fires with unchanged dream content', () => {
+    // MemoryManager.subscribe() fires for ALL task transitions, including
+    // extract task records that have no dialog surface. Without the
+    // dream-signature dedup, every extract notify would trigger a full
+    // re-merge + a fresh array reference into setEntries — re-rendering
+    // the dialog and pill on entries that are byte-identical to the
+    // previous snapshot. This test pins the dedup by firing the memory
+    // listener while the dream snapshot stays unchanged and asserting
+    // that the entries reference is preserved.
+    const dreams: Array<ReturnType<typeof dream>> = [dream('d-only', 100)];
+    const { config, memoryMgr } = makeConfig({
+      agents: () => [],
+      shells: () => [],
+      monitors: () => [],
+      dreams: () => dreams,
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    const before = result.current.entries;
+    expect(before.map(entryId)).toEqual(['d-only']);
+
+    // Fire the memory listener without mutating `dreams`. With the
+    // signature-dedup in place, this must NOT call setEntries; React
+    // will then preserve the existing array reference.
+    act(() => memoryMgr.fire());
+    expect(result.current.entries).toBe(before);
+
+    // Sanity check the inverse path: when dreams DO change, the
+    // listener must propagate. A flipped status should change the
+    // signature and force a fresh setEntries.
+    dreams.splice(0, 1, dream('d-only', 100, { status: 'completed' }));
+    act(() => memoryMgr.fire());
+    expect(result.current.entries).not.toBe(before);
+    expect(result.current.entries[0]?.status).toBe('completed');
+  });
+
   it('refreshes entries when the memory manager fires its subscribe listener', () => {
     const dreams: Array<ReturnType<typeof dream>> = [];
     const { config, memoryMgr } = makeConfig({

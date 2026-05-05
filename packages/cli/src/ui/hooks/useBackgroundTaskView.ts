@@ -115,6 +115,15 @@ export function useBackgroundTaskView(
     const monitorRegistry = config.getMonitorRegistry();
     const memoryManager = config.getMemoryManager();
     const projectRoot = config.getProjectRoot();
+    // Dream snapshot signature for the memory-subscribe path. The
+    // manager's subscribe() fires on ALL task transitions (including
+    // extract, which has no dialog surface — multiple notifies per
+    // UserQuery on heavy auto-memory builds). Without this guard each
+    // extract notify would force a full re-merge + setEntries with a
+    // fresh array reference, re-rendering the dialog and pill on
+    // entries that didn't change. The other 3 registries already only
+    // fire on their own changes, so this dedup is dream-specific.
+    let lastDreamSig = '';
 
     const refresh = () => {
       const agentEntries: DialogEntry[] = agentRegistry
@@ -181,15 +190,36 @@ export function useBackgroundTaskView(
         ...monitorEntries,
         ...dreamEntries,
       ].sort((a, b) => a.startTime - b.startTime);
+      // Cache the dream signature derived from the freshly-built
+      // entries — the memory listener uses this to skip redundant
+      // setEntries calls when an extract notify fires (extract has no
+      // dialog surface, so the merged result is identical).
+      lastDreamSig = computeDreamSig();
       setEntries(merged);
     };
+
+    const computeDreamSig = (): string =>
+      memoryManager
+        .listTasksByType('dream', projectRoot)
+        .map((t) => `${t.id}:${t.status}:${t.updatedAt}`)
+        .join('|');
 
     refresh();
 
     agentRegistry.setStatusChangeCallback(refresh);
     shellRegistry.setStatusChangeCallback(refresh);
     monitorRegistry.setStatusChangeCallback(refresh);
-    const unsubscribeMemory = memoryManager.subscribe(refresh);
+
+    // Memory listener gates refresh on dream-content changes — see the
+    // `lastDreamSig` rationale above. Extract notifies hit this path
+    // with an unchanged dream signature and short-circuit before the
+    // full re-merge.
+    const memoryListener = () => {
+      const sig = computeDreamSig();
+      if (sig === lastDreamSig) return;
+      refresh();
+    };
+    const unsubscribeMemory = memoryManager.subscribe(memoryListener);
 
     return () => {
       agentRegistry.setStatusChangeCallback(undefined);
