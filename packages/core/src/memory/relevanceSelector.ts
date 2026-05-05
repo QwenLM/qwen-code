@@ -92,9 +92,8 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     contents,
     schema: RESPONSE_SCHEMA,
     abortSignal: callerAbortSignal
-      ? AbortSignal.any([AbortSignal.timeout(1_000), callerAbortSignal])
-      : AbortSignal.timeout(1_000),
-
+      ? AbortSignal.any([AbortSignal.timeout(2_000), callerAbortSignal])
+      : AbortSignal.timeout(2_000),
     // Use the fast model for this background side-query to reduce latency and
     // cost. Falls back to the main session model if no fast model is configured.
     model: config.getFastModel(),
