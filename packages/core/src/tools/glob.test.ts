@@ -105,6 +105,13 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain(path.join(tempRootDir, 'fileA.txt'));
       expect(result.llmContent).toContain(path.join(tempRootDir, 'FileB.TXT'));
       expect(result.returnDisplay).toBe('Found 2 matching file(s)');
+      expect(result.resultFilePaths).toHaveLength(2);
+      expect(result.resultFilePaths).toContain(
+        path.join(tempRootDir, 'fileA.txt'),
+      );
+      expect(result.resultFilePaths).toContain(
+        path.join(tempRootDir, 'FileB.TXT'),
+      );
     });
 
     it('should find files case-insensitively by default (pattern: *.TXT)', async () => {

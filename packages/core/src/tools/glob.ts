@@ -276,6 +276,7 @@ class GlobToolInvocation extends BaseToolInvocation<
       return {
         llmContent: resultMessage,
         returnDisplay: `Found ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
+        resultFilePaths: sortedAbsolutePaths,
       };
     } catch (error) {
       const errorMessage =

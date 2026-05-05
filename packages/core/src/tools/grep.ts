@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { EOL } from 'node:os';
@@ -62,6 +63,7 @@ export interface GrepToolParams {
  */
 interface GrepMatch {
   filePath: string;
+  absoluteFilePath: string;
   lineNumber: number;
   line: string;
 }
@@ -209,20 +211,37 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build grep output
       let grepOutput = '';
-      for (const filePath in matchesByFile) {
-        grepOutput += `File: ${filePath}\n`;
-        matchesByFile[filePath].forEach((match) => {
-          const trimmedLine = match.line.trim();
-          grepOutput += `L${match.lineNumber}: ${trimmedLine}\n`;
-        });
-        grepOutput += '---\n';
-      }
-
-      // Apply character limit as safety net
+      const visibleMatches: GrepMatch[] = [];
       let truncatedByCharLimit = false;
-      if (Number.isFinite(charLimit) && grepOutput.length > charLimit) {
-        grepOutput = grepOutput.slice(0, charLimit) + '...';
-        truncatedByCharLimit = true;
+      const appendChunk = (chunk: string, match?: GrepMatch): boolean => {
+        if (
+          Number.isFinite(charLimit) &&
+          grepOutput.length + chunk.length > charLimit
+        ) {
+          grepOutput += chunk.slice(
+            0,
+            Math.max(charLimit - grepOutput.length, 0),
+          );
+          grepOutput += '...';
+          truncatedByCharLimit = true;
+          return false;
+        }
+        grepOutput += chunk;
+        if (match) visibleMatches.push(match);
+        return true;
+      };
+
+      for (const filePath in matchesByFile) {
+        if (!appendChunk(`File: ${filePath}\n`)) break;
+        let stopRendering = false;
+        for (const match of matchesByFile[filePath]) {
+          const trimmedLine = match.line.trim();
+          if (!appendChunk(`L${match.lineNumber}: ${trimmedLine}\n`, match)) {
+            stopRendering = true;
+            break;
+          }
+        }
+        if (stopRendering || !appendChunk('---\n')) break;
       }
 
       // Count how many lines we actually included after character truncation
@@ -252,6 +271,13 @@ class GrepToolInvocation extends BaseToolInvocation<
       return {
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
+        resultFilePaths: Array.from(
+          new Set(
+            visibleMatches
+              .map((match) => match.absoluteFilePath)
+              .filter((filePath) => filePath !== ''),
+          ),
+        ),
       };
     } catch (error) {
       debugLogger.error(`Error during GrepLogic execution: ${error}`);
@@ -275,7 +301,24 @@ class GrepToolInvocation extends BaseToolInvocation<
    * @param {string} basePath The absolute directory the search was run from, for relative paths.
    * @returns {GrepMatch[]} Array of match objects.
    */
-  private parseGrepOutput(output: string, basePath: string): GrepMatch[] {
+  private shouldIncludeParsedResultPath(
+    absoluteFilePath: string,
+    lineNumber: number,
+    lineContent: string,
+  ): boolean {
+    try {
+      const fileContent = fs.readFileSync(absoluteFilePath, 'utf8');
+      return fileContent.split(/\r?\n/)[lineNumber - 1] === lineContent;
+    } catch {
+      return false;
+    }
+  }
+
+  private parseGrepOutput(
+    output: string,
+    basePath: string,
+    includeResultFilePaths: boolean,
+  ): GrepMatch[] {
     const results: GrepMatch[] = [];
     if (!output) return results;
 
@@ -308,6 +351,15 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         results.push({
           filePath: relativeFilePath || path.basename(absoluteFilePath),
+          absoluteFilePath:
+            includeResultFilePaths &&
+            this.shouldIncludeParsedResultPath(
+              absoluteFilePath,
+              lineNumber,
+              lineContent,
+            )
+              ? absoluteFilePath
+              : '',
           lineNumber,
           line: lineContent,
         });
@@ -388,7 +440,7 @@ class GrepToolInvocation extends BaseToolInvocation<
                 );
             });
           });
-          return this.parseGrepOutput(output, absolutePath);
+          return this.parseGrepOutput(output, absolutePath, true);
         } catch (gitError: unknown) {
           debugLogger.debug(
             `GrepLogic: git grep failed: ${getErrorMessage(
@@ -490,7 +542,7 @@ class GrepToolInvocation extends BaseToolInvocation<
             child.on('error', onError);
             child.on('close', onClose);
           });
-          return this.parseGrepOutput(output, absolutePath);
+          return this.parseGrepOutput(output, absolutePath, true);
         } catch (grepError: unknown) {
           debugLogger.debug(
             `GrepLogic: System grep failed: ${getErrorMessage(
@@ -531,6 +583,7 @@ class GrepToolInvocation extends BaseToolInvocation<
                 filePath:
                   path.relative(absolutePath, fileAbsolutePath) ||
                   path.basename(fileAbsolutePath),
+                absoluteFilePath: fileAbsolutePath,
                 lineNumber: index + 1,
                 line,
               });

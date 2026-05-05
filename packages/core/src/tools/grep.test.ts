@@ -97,6 +97,9 @@ describe('GrepTool', () => {
   } as unknown as Config;
 
   beforeEach(async () => {
+    Object.assign(mockConfig, {
+      getTruncateToolOutputThreshold: () => 25000,
+    });
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
     grepTool = new GrepTool(mockConfig);
 
@@ -207,6 +210,33 @@ describe('GrepTool', () => {
       );
       expect(result.llmContent).toContain('L1: another world in sub dir');
       expect(result.returnDisplay).toBe('Found 3 matches');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileA.txt'),
+        path.join(tempRootDir, 'sub', 'fileC.txt'),
+      ]);
+    });
+
+    it('only reports result paths for matches visible before character truncation', async () => {
+      Object.assign(mockConfig, {
+        getTruncateToolOutputThreshold: () => 30,
+      });
+      await fs.writeFile(path.join(tempRootDir, 'a.ts'), 'visible marker');
+      await fs.writeFile(path.join(tempRootDir, 'z.ts'), 'hidden marker');
+
+      const invocation = grepTool.build({ pattern: 'marker', glob: '*.ts' });
+      const result = await invocation.execute(abortSignal);
+
+      const allResultPaths = [
+        path.join(tempRootDir, 'a.ts'),
+        path.join(tempRootDir, 'z.ts'),
+      ];
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.resultFilePaths?.length).toBeLessThan(
+        allResultPaths.length,
+      );
+      for (const resultPath of result.resultFilePaths ?? []) {
+        expect(allResultPaths).toContain(resultPath);
+      }
     });
 
     it('should find matches in a specific path', async () => {

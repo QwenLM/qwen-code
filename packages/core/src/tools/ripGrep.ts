@@ -20,6 +20,33 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
+const RIPGREP_FIELD_SEPARATOR = '\u001f';
+
+interface RipgrepJsonMatch {
+  type: 'match';
+  data: {
+    path: { text?: string };
+    lines: { text?: string };
+    line_number: number;
+  };
+}
+
+function isRipgrepJsonMatch(value: unknown): value is RipgrepJsonMatch {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as {
+    type?: unknown;
+    data?: {
+      path?: { text?: unknown };
+      lines?: { text?: unknown };
+      line_number?: unknown;
+    };
+  };
+  return (
+    candidate.type === 'match' &&
+    typeof candidate.data?.path?.text === 'string' &&
+    typeof candidate.data?.line_number === 'number'
+  );
+}
 
 /**
  * Per-process cache for `.qwenignore` discovery. The same directories show
@@ -42,6 +69,13 @@ function trimCache<K, V>(m: Map<K, V>): void {
   if (m.size <= RIPGREP_CACHE_MAX) return;
   const oldest = m.keys().next().value;
   if (oldest !== undefined) m.delete(oldest as K);
+}
+
+function toAbsoluteResultPath(filePath: string, searchRoot: string): string {
+  if (path.isAbsolute(filePath) || path.win32.isAbsolute(filePath)) {
+    return filePath;
+  }
+  return path.resolve(searchRoot, filePath);
 }
 
 /**
@@ -156,24 +190,77 @@ class GrepToolInvocation extends BaseToolInvocation<
         return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
       }
 
-      // Split into lines and count total matches
-      let allLines = rawOutput.split('\n').filter((line) => line.trim());
+      interface RipgrepMatchLine {
+        rawLine: string;
+        filePath: string;
+        key: string;
+      }
+
+      let parsedJsonOutput = false;
+      let allLines = rawOutput
+        .split('\n')
+        .filter((line) => line.trim())
+        .flatMap((line): RipgrepMatchLine[] => {
+          try {
+            const parsed = JSON.parse(line) as unknown;
+            if (isRipgrepJsonMatch(parsed)) {
+              parsedJsonOutput = true;
+              const filePath = parsed.data.path.text;
+              if (filePath === undefined) return [];
+              const lineNumber = String(parsed.data.line_number);
+              const content = parsed.data.lines.text ?? '';
+              return [
+                {
+                  rawLine: `${filePath}:${lineNumber}:${content.replace(/\r?\n$/, '')}`,
+                  filePath,
+                  key: `${filePath}:${lineNumber}`,
+                },
+              ];
+            }
+            if (typeof parsed === 'object' && parsed !== null) {
+              parsedJsonOutput = true;
+            }
+          } catch {
+            // Fall through to legacy/mock text parsing below.
+          }
+
+          if (parsedJsonOutput) return [];
+
+          const fields = line.split(RIPGREP_FIELD_SEPARATOR);
+          if (fields.length === 1) {
+            const firstColon = line.indexOf(':');
+            const secondColon =
+              firstColon === -1 ? -1 : line.indexOf(':', firstColon + 1);
+            if (firstColon === -1 || secondColon === -1) return [];
+            const filePath = line.substring(0, firstColon);
+            const lineNumber = line.substring(firstColon + 1, secondColon);
+            if (!/^[0-9]+$/.test(lineNumber)) return [];
+            return [
+              {
+                rawLine: line,
+                filePath,
+                key: `${filePath}:${lineNumber}`,
+              },
+            ];
+          }
+          if (fields.length !== 3) return [];
+          const [filePath, lineNumber, content] = fields;
+          return [
+            {
+              rawLine: `${filePath}:${lineNumber}:${content}`,
+              filePath,
+              key: `${filePath}:${lineNumber}`,
+            },
+          ];
+        });
 
       // Deduplicate lines from potentially overlapping workspace directories.
       // ripgrep reports the same file twice when given paths like /a and /a/sub.
       if (searchPaths.length > 1) {
         const seen = new Set<string>();
         allLines = allLines.filter((line) => {
-          // ripgrep output format: filepath:linenum:content
-          const firstColon = line.indexOf(':');
-          if (firstColon !== -1) {
-            const secondColon = line.indexOf(':', firstColon + 1);
-            if (secondColon !== -1) {
-              const key = line.substring(0, secondColon);
-              if (seen.has(key)) return false;
-              seen.add(key);
-            }
-          }
+          if (seen.has(line.key)) return false;
+          seen.add(line.key);
           return true;
         });
       }
@@ -202,21 +289,26 @@ class GrepToolInvocation extends BaseToolInvocation<
       let grepOutput = '';
       let truncatedByCharLimit = false;
       let includedLines = 0;
+      const visibleLines: RipgrepMatchLine[] = [];
       if (Number.isFinite(charLimit)) {
         const parts: string[] = [];
         let currentLength = 0;
 
         for (const line of linesToInclude) {
           const sep = includedLines > 0 ? 1 : 0;
-          includedLines++;
-
-          const projectedLength = currentLength + line.length + sep;
+          const projectedLength = currentLength + line.rawLine.length + sep;
           if (projectedLength <= charLimit) {
-            parts.push(line);
+            parts.push(line.rawLine);
+            visibleLines.push(line);
+            includedLines++;
             currentLength = projectedLength;
           } else {
             const remaining = Math.max(charLimit - currentLength - sep, 10);
-            parts.push(line.slice(0, remaining) + '...');
+            const partialLine = line.rawLine.slice(0, remaining);
+            parts.push(partialLine + '...');
+            if (partialLine.startsWith(`${line.filePath}:`)) {
+              visibleLines.push(line);
+            }
             truncatedByCharLimit = true;
             break;
           }
@@ -224,7 +316,8 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         grepOutput = parts.join('\n');
       } else {
-        grepOutput = linesToInclude.join('\n');
+        grepOutput = linesToInclude.map((line) => line.rawLine).join('\n');
+        visibleLines.push(...linesToInclude);
         includedLines = linesToInclude.length;
       }
 
@@ -243,9 +336,18 @@ class GrepToolInvocation extends BaseToolInvocation<
         displayMessage += ` (truncated)`;
       }
 
+      const resultFilePaths = Array.from(
+        new Set(
+          visibleLines.map((line) =>
+            toAbsoluteResultPath(line.filePath, searchPaths[0]),
+          ),
+        ),
+      );
+
       return {
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
+        resultFilePaths,
       };
     } catch (error) {
       debugLogger.error('Error during ripgrep search operation:', error);
@@ -266,9 +368,9 @@ class GrepToolInvocation extends BaseToolInvocation<
     const { pattern, paths, glob } = options;
 
     const rgArgs: string[] = [
-      '--line-number',
-      '--no-heading',
-      '--with-filename',
+      '--json',
+      '--path-separator',
+      '/',
       '--ignore-case',
       '--regexp',
       pattern,

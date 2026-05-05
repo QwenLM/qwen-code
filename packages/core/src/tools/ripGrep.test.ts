@@ -41,6 +41,7 @@ describe('RipGrepTool', () => {
   let grepTool: RipGrepTool;
   let fileExclusionsMock: { getGlobExcludes: () => string[] };
   const abortSignal = new AbortController().signal;
+  const sep = '\x1f';
 
   const mockConfig = {
     getTargetDir: () => tempRootDir,
@@ -55,6 +56,9 @@ describe('RipGrepTool', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mockSpawn.mockReset();
+    Object.assign(mockConfig, {
+      getTruncateToolOutputThreshold: () => 25000,
+    });
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
     fileExclusionsMock = {
       getGlobExcludes: vi.fn().mockReturnValue([]),
@@ -160,7 +164,7 @@ describe('RipGrepTool', () => {
   describe('execute', () => {
     it('should find matches for a simple pattern in all files', async () => {
       (runRipgrep as Mock).mockResolvedValue({
-        stdout: `fileA.txt:1:hello world${EOL}fileA.txt:2:second line with world${EOL}sub/fileC.txt:1:another world in sub dir${EOL}`,
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}fileA.txt${sep}2${sep}second line with world${EOL}sub/fileC.txt${sep}1${sep}another world in sub dir${EOL}`,
         truncated: false,
         error: undefined,
       });
@@ -177,6 +181,70 @@ describe('RipGrepTool', () => {
         'sub/fileC.txt:1:another world in sub dir',
       );
       expect(result.returnDisplay).toBe('Found 3 matches');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileA.txt'),
+        path.join(tempRootDir, 'sub/fileC.txt'),
+      ]);
+    });
+
+    it('should preserve absolute result paths reported by ripgrep', async () => {
+      const absoluteMatchPath = path.join(
+        tempRootDir,
+        'packages/core/src/skills/target.ts',
+      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${absoluteMatchPath}${sep}1${sep}CORE_HELPER_TARGET_MARKER${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = {
+        pattern: 'CORE_HELPER_TARGET_MARKER',
+        glob: '**/*.ts',
+      };
+      const invocation = grepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.resultFilePaths).toEqual([absoluteMatchPath]);
+    });
+
+    it('should parse Windows-style absolute result paths reported by ripgrep', async () => {
+      const absoluteMatchPath =
+        'C:\\repo\\packages\\core\\src\\skills\\target.ts';
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${absoluteMatchPath}${sep}12${sep}CORE_HELPER_TARGET_MARKER${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({
+        pattern: 'CORE_HELPER_TARGET_MARKER',
+        glob: '**/*.ts',
+      });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.resultFilePaths).toEqual([absoluteMatchPath]);
+    });
+
+    it('only reports result paths for lines visible before character truncation', async () => {
+      Object.assign(mockConfig, {
+        getTruncateToolOutputThreshold: () => 25,
+      });
+      const visiblePath = 'a.ts';
+      const hiddenPath = 'hidden-file-with-long-name.ts';
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${visiblePath}${sep}1${sep}visible marker${EOL}${hiddenPath}${sep}1${sep}hidden marker${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'marker', glob: '**/*.ts' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, visiblePath),
+      ]);
     });
 
     it('should find matches in a specific path', async () => {
