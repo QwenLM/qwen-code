@@ -169,6 +169,12 @@ class TaskStopInvocation extends BaseToolInvocation<
       // sees the cancel didn't take and doesn't claim success.
       const cancelled = memoryManager.cancelTask(taskId);
       if (!cancelled) {
+        // Distinct from TASK_STOP_NOT_RUNNING (the task IS running)
+        // and TASK_STOP_NOT_CANCELLABLE (the kind supports cancel,
+        // we just couldn't deliver it). INTERNAL_ERROR signals that
+        // this is unexpected and worth filing — the abort controller
+        // should have been registered alongside status='running' in
+        // scheduleDream.
         return {
           llmContent:
             `Error: Dream task "${taskId}" could not be cancelled ` +
@@ -176,7 +182,7 @@ class TaskStopInvocation extends BaseToolInvocation<
           returnDisplay: 'Dream cancellation failed (internal state).',
           error: {
             message: `dream cancel failed: ${taskId}`,
-            type: ToolErrorType.TASK_STOP_NOT_RUNNING,
+            type: ToolErrorType.TASK_STOP_INTERNAL_ERROR,
           },
         };
       }

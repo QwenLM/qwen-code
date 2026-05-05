@@ -148,13 +148,17 @@ export function useBackgroundTaskView(
       const monitorEntries: DialogEntry[] = monitorRegistry
         .getAll()
         .map((e) => ({ ...e, kind: 'monitor' as const }));
-      // Dream entries: only surface tasks that actually fired. `pending`
-      // is a sub-second transition state, and `skipped` records would
-      // flood the dialog (every UserQuery that misses the gate creates
-      // one). Extract tasks intentionally stay out of this view — they
-      // fire on every UserQuery (much higher frequency than dream) and
-      // their completion is already covered by the `memory_saved` toast
-      // in useGeminiStream.
+      // Dream entries: only surface tasks that actually fired.
+      // `pending` is a sub-second transition state and `skipped`
+      // records arise from the rare race where the schedule-time
+      // lock check passed but `acquireDreamLock` then hit EEXIST in
+      // runDream — these never reflect user-visible work, so filter
+      // them out. (Most gate misses don't create a record at all;
+      // scheduleDream returns `{status: 'skipped'}` early without
+      // touching the task map.) Extract tasks also intentionally
+      // stay out of this view — they fire on every UserQuery and
+      // their completion is already covered by the `memory_saved`
+      // toast in useGeminiStream.
       //
       // Cap retained terminal entries — MemoryManager.tasks Map has no
       // eviction path, so completed/failed dreams accumulate forever

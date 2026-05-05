@@ -296,16 +296,38 @@ describe('MemoryManager', () => {
       expect(unfilteredFires.mock.calls.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('returns an unsubscribe function that drops the filtered listener', () => {
+    it('returns an unsubscribe function that drops the filtered listener even when later notifies fire', async () => {
+      // Verify the unsubscribe actually severs the listener — the
+      // earlier version of this test only asserted "not called yet"
+      // without ever firing a notify, so the listener could have
+      // remained attached and the test would still pass.
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
+      });
       const mgr = new MemoryManager();
       const fires = vi.fn();
-      const unsubscribe = mgr.subscribe(fires, { taskType: 'dream' });
+      const unsubscribe = mgr.subscribe(fires, { taskType: 'extract' });
+
+      // First extract should fire the listener (storeWith + completion update).
+      await mgr.scheduleExtract({
+        projectRoot: '/p',
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+      await mgr.drain();
+      const firesBeforeUnsubscribe = fires.mock.calls.length;
+      expect(firesBeforeUnsubscribe).toBeGreaterThanOrEqual(1);
+
+      // After unsubscribe, a second extract must not increment the count.
       unsubscribe();
-      // Trigger any notify path (using store via scheduleExtract/runAutoMemoryExtract
-      // requires more setup; fire by directly inserting a dream record through a
-      // schedule path is not necessary — confirming the unsubscribe pulls the
-      // listener from the type-bucket is enough for this contract test).
-      expect(fires).not.toHaveBeenCalled();
+      await mgr.scheduleExtract({
+        projectRoot: '/p',
+        sessionId: 'sess-2',
+        history: [{ role: 'user', parts: [{ text: 'hi again' }] }],
+      });
+      await mgr.drain();
+      expect(fires.mock.calls.length).toBe(firesBeforeUnsubscribe);
     });
   });
 

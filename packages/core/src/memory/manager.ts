@@ -41,8 +41,6 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logMemoryExtract, MemoryExtractEvent } from '../telemetry/index.js';
-
-const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
 import { isAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
@@ -69,6 +67,8 @@ import { appendManagedAutoMemoryToUserMemory } from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
 import type { AutoMemoryMetadata } from './types.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
 
 // ─── Re-export public types consumed by callers ───────────────────────────────
 

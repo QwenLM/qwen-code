@@ -424,7 +424,7 @@ describe('TaskStopTool', () => {
         new AbortController().signal,
       );
 
-      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_RUNNING);
+      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_INTERNAL_ERROR);
       expect(result.llmContent).toContain('could not be cancelled');
     });
   });
