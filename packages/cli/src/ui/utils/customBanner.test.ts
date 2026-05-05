@@ -8,12 +8,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  pickAsciiArtTier,
-  resolveCustomBanner,
-} from './customBanner.js';
+import { pickAsciiArtTier, resolveCustomBanner } from './customBanner.js';
 import type { LoadedSettings, SettingsFile } from '../../config/settings.js';
-import type { CustomAsciiArtSetting, Settings } from '../../config/settingsSchema.js';
+import type {
+  CustomAsciiArtSetting,
+  Settings,
+} from '../../config/settingsSchema.js';
 
 function makeSettings(opts: {
   workspaceUi?: Settings['ui'];
@@ -46,7 +46,10 @@ function makeSettings(opts: {
       : empty,
     systemDefaults: empty,
     user: opts.userUi
-      ? file({ ui: opts.userUi }, opts.userPath ?? '/home/u/.qwen/settings.json')
+      ? file(
+          { ui: opts.userUi },
+          opts.userPath ?? '/home/u/.qwen/settings.json',
+        )
       : empty,
     workspace: opts.workspaceUi
       ? file(
@@ -156,6 +159,20 @@ describe('resolveCustomBanner', () => {
     expect(out.asciiArt.small).toContain('ART');
   });
 
+  it('strips C1 control characters (0x80-0x9f) including single-byte CSI', () => {
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: { customAsciiArt: 'A\x9b31mB\x9c\x90X' },
+      }),
+    );
+    // 0x9b (single-byte CSI), 0x9c (ST), 0x90 (DCS) are all C1 — must be
+    // replaced with space, not interpreted by the terminal.
+    expect(out.asciiArt.small).not.toMatch(/[\x80-\x9f]/);
+    expect(out.asciiArt.small).toContain('A');
+    expect(out.asciiArt.small).toContain('B');
+    expect(out.asciiArt.small).toContain('X');
+  });
+
   it('strips OSC-8 hyperlinks from inline art', () => {
     const out = resolveCustomBanner(
       makeSettings({
@@ -174,7 +191,11 @@ describe('resolveCustomBanner', () => {
         userUi: { customAsciiArt: 'line1\nline2\nline3' },
       }),
     );
-    expect(out.asciiArt.small?.split('\n')).toEqual(['line1', 'line2', 'line3']);
+    expect(out.asciiArt.small?.split('\n')).toEqual([
+      'line1',
+      'line2',
+      'line3',
+    ]);
   });
 
   it('caps art at 200 lines × 200 cols', () => {
@@ -189,6 +210,39 @@ describe('resolveCustomBanner', () => {
       makeSettings({ userUi: { customAsciiArt: tooWide } }),
     );
     expect(out2.asciiArt.small?.length).toBe(200);
+  });
+
+  it('reads from an absolute path verbatim', () => {
+    const file = path.join(tmpDir, 'absolute.txt');
+    fs.writeFileSync(file, 'ABS\nART');
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: {
+          customAsciiArt: { path: file } as CustomAsciiArtSetting,
+        },
+        userPath: '/some/other/dir/settings.json',
+      }),
+    );
+    expect(out.asciiArt.small).toBe('ABS\nART');
+  });
+
+  it('refuses to follow a symlink at the configured path on POSIX', () => {
+    if (process.platform === 'win32') return;
+    const real = path.join(tmpDir, 'real.txt');
+    fs.writeFileSync(real, 'REAL\nART');
+    const link = path.join(tmpDir, 'link.txt');
+    fs.symlinkSync(real, link);
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: {
+          customAsciiArt: { path: 'link.txt' } as CustomAsciiArtSetting,
+        },
+        userPath: path.join(tmpDir, 'settings.json'),
+      }),
+    );
+    // O_NOFOLLOW makes openSync throw ELOOP — resolver soft-fails, so the
+    // tier ends up undefined rather than reading through the symlink.
+    expect(out.asciiArt.small).toBeUndefined();
   });
 
   it('falls back when the {path} target is missing', () => {
@@ -272,6 +326,17 @@ describe('resolveCustomBanner', () => {
     expect(out.title).toBe('Acme CLI');
   });
 
+  it('strips C1 control characters from the title', () => {
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: { customBannerTitle: 'Acme\x9b31m CLI\x9c' },
+      }),
+    );
+    expect(out.title).not.toMatch(/[\x80-\x9f]/);
+    expect(out.title).toContain('Acme');
+    expect(out.title).toContain('CLI');
+  });
+
   it('caps the title at 80 characters', () => {
     const out = resolveCustomBanner(
       makeSettings({
@@ -320,12 +385,12 @@ describe('pickAsciiArtTier', () => {
   });
 
   it('skips missing tiers', () => {
-    expect(
-      pickAsciiArtTier(undefined, 'fits', 100, 2, 40, measure),
-    ).toBe('fits');
-    expect(
-      pickAsciiArtTier('fits', undefined, 100, 2, 40, measure),
-    ).toBe('fits');
+    expect(pickAsciiArtTier(undefined, 'fits', 100, 2, 40, measure)).toBe(
+      'fits',
+    );
+    expect(pickAsciiArtTier('fits', undefined, 100, 2, 40, measure)).toBe(
+      'fits',
+    );
     expect(
       pickAsciiArtTier(undefined, undefined, 100, 2, 40, measure),
     ).toBeUndefined();

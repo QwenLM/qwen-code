@@ -43,9 +43,7 @@ type CacheEntry = { value: string | undefined };
  * and falls back to the locked default for that field. The CLI must never
  * crash on a banner config error.
  */
-export function resolveCustomBanner(
-  settings: LoadedSettings,
-): ResolvedBanner {
+export function resolveCustomBanner(settings: LoadedSettings): ResolvedBanner {
   const ui = settings.merged.ui;
   const cache = new Map<string, CacheEntry>();
 
@@ -59,9 +57,11 @@ export function resolveCustomBanner(
   return {
     asciiArt: {
       small:
-        scoped.small && resolveTier(scoped.small.source, scoped.small.dir, cache),
+        scoped.small &&
+        resolveTier(scoped.small.source, scoped.small.dir, cache),
       large:
-        scoped.large && resolveTier(scoped.large.source, scoped.large.dir, cache),
+        scoped.large &&
+        resolveTier(scoped.large.source, scoped.large.dir, cache),
     },
     title,
   };
@@ -261,8 +261,10 @@ function sanitizeArt(input: string): string {
   s = s.replace(/\x1b\[[\d;?]*[a-zA-Z]/g, ' ');
   // SS2/SS3/DCS leaders
   s = s.replace(/\x1b[NOP]/g, ' ');
-  // Remaining C0/C1 controls + DEL → space, but keep \n and \t.
-  s = s.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ' ');
+  // Remaining C0 controls + DEL + C1 controls (0x80-0x9f, e.g. single-byte
+  // CSI 0x9b) → space. Keep \n (0x0a) and \t (0x09) so multi-line ASCII art
+  // and tab-aligned art survive.
+  s = s.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ' ');
   /* eslint-enable no-control-regex */
 
   const rawLines = s.split('\n');
@@ -293,9 +295,7 @@ function sanitizeArt(input: string): string {
   if (cappedLines.length === 0) return '';
 
   if (truncatedRows) {
-    debugLogger.warn(
-      `Truncated ui.customAsciiArt to ${MAX_ART_LINES} lines.`,
-    );
+    debugLogger.warn(`Truncated ui.customAsciiArt to ${MAX_ART_LINES} lines.`);
   }
   if (truncatedCols) {
     debugLogger.warn(
@@ -313,7 +313,10 @@ function sanitizeTitle(raw: unknown): string | undefined {
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ' ')
     .replace(/\x1b\[[\d;?]*[a-zA-Z]/g, ' ')
     .replace(/\x1b[NOP]/g, ' ')
-    .replace(/[\x00-\x1f\x7f]/g, ' ');
+    // C0 + DEL + C1 controls. Titles never need newlines or tabs (they live
+    // on a single line of the info panel) so the range is denser than the
+    // art sanitizer's.
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
   /* eslint-enable no-control-regex */
   t = t.replace(/\s+/g, ' ').trim();
   if (!t) return undefined;

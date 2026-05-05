@@ -74,8 +74,14 @@ export const Header: React.FC<HeaderProps> = ({
     terminalWidth - containerMarginX * 2,
   );
 
-  // Pick the widest custom tier that fits. If neither tier fits or no
-  // custom art was provided, fall through to the bundled `shortAsciiLogo`.
+  // Two distinct fallback paths:
+  //   - User supplied a custom tier and at least one tier fits → render that.
+  //   - User supplied custom art but neither tier fits → hide the logo column.
+  //     Falling back to the bundled QWEN logo here would silently undo a
+  //     white-label deployment on narrow terminals.
+  //   - User supplied no custom art → fall through to `shortAsciiLogo` and let
+  //     the existing width gate decide whether to show or hide it.
+  const hasCustomArt = Boolean(customAsciiArt?.small || customAsciiArt?.large);
   const customTier = pickAsciiArtTier(
     customAsciiArt?.small,
     customAsciiArt?.large,
@@ -84,13 +90,14 @@ export const Header: React.FC<HeaderProps> = ({
     minInfoPanelWidth,
     getAsciiArtWidth,
   );
-  const displayLogo = customTier ?? shortAsciiLogo;
+  const displayLogo = customTier ?? (hasCustomArt ? '' : shortAsciiLogo);
   const logoWidth = getAsciiArtWidth(displayLogo);
 
   // Check if we have enough space for logo + gap + minimum info panel.
-  // For the default logo this can still be false on very narrow terminals;
-  // for a custom tier we already proved it fits inside `pickAsciiArtTier`.
+  // When `displayLogo` is empty (custom art too wide for both tiers) showLogo
+  // will be false, hiding the column entirely.
   const showLogo =
+    displayLogo !== '' &&
     availableTerminalWidth >= logoWidth + logoGap + minInfoPanelWidth;
 
   // Calculate available width for info panel (use all remaining space)

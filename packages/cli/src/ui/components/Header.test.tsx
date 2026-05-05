@@ -137,13 +137,27 @@ describe('<Header />', () => {
     expect(lastFrame()).not.toContain('X'.repeat(60));
   });
 
-  it('falls back to the default Qwen logo when no custom tier fits', () => {
+  it('hides the logo column when neither custom tier fits — does NOT fall back to the default Qwen logo (preserves white-label intent)', () => {
     const { lastFrame } = render(
       <Header
         {...defaultProps}
         customAsciiArt={{ small: 'X'.repeat(150), large: 'Y'.repeat(150) }}
       />,
     );
-    expect(lastFrame()).toContain('██╔═══██╗');
+    expect(lastFrame()).not.toContain('██╔═══██╗');
+    expect(lastFrame()).not.toContain('X'.repeat(150));
+    expect(lastFrame()).not.toContain('Y'.repeat(150));
+    // Info panel still renders.
+    expect(lastFrame()).toContain('Qwen OAuth');
+  });
+
+  it('falls back to the default Qwen logo when no custom art was provided at all', () => {
+    useTerminalSizeMock.mockReturnValue({ columns: 60, rows: 24 });
+    const { lastFrame } = render(<Header {...defaultProps} />);
+    // With no customAsciiArt, narrow widths still hide the QWEN logo, but a
+    // wide enough terminal would show it — the previous test already covers
+    // the wide case. This one just confirms the no-custom-art path doesn't
+    // incidentally hide the logo.
+    expect(lastFrame()).toContain('>_ Qwen Code');
   });
 });

@@ -20,19 +20,27 @@ const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 const createSettings = (options?: {
   hideTips?: boolean;
   hideBanner?: boolean;
-}): LoadedSettings =>
-  ({
-    merged: {
-      ui: {
-        hideTips: options?.hideTips ?? true,
-        hideBanner: options?.hideBanner,
-      },
-    },
+  customBannerTitle?: string;
+  customAsciiArt?: unknown;
+}): LoadedSettings => {
+  const ui = {
+    hideTips: options?.hideTips ?? true,
+    hideBanner: options?.hideBanner,
+    customBannerTitle: options?.customBannerTitle,
+    customAsciiArt: options?.customAsciiArt,
+  };
+  return {
+    merged: { ui },
     system: { settings: {}, originalSettings: {}, path: '' },
     systemDefaults: { settings: {}, originalSettings: {}, path: '' },
-    user: { settings: {}, originalSettings: {}, path: '' },
+    user: {
+      settings: { ui },
+      originalSettings: { ui },
+      path: '/home/u/.qwen/settings.json',
+    },
     workspace: { settings: {}, originalSettings: {}, path: '' },
-  }) as never;
+  } as never;
+};
 
 const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ authType: undefined })),
@@ -107,5 +115,21 @@ describe('<AppHeader />', () => {
     );
     expect(lastFrame()).not.toContain('>_ Qwen Code');
     expect(lastFrame()).not.toContain('██╔═══██╗');
+  });
+
+  it('renders custom banner title and inline ASCII art end-to-end through resolveCustomBanner', () => {
+    const { lastFrame } = renderWithProviders(
+      createMockUIState(),
+      createSettings({
+        customBannerTitle: 'Acme CLI',
+        customAsciiArt: '   ACME\n   ----',
+      }),
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Acme CLI');
+    expect(frame).not.toContain('>_ Qwen Code');
+    expect(frame).toContain('ACME');
+    // Default Qwen logo must NOT bleed through when the user supplied art.
+    expect(frame).not.toContain('██╔═══██╗');
   });
 });
