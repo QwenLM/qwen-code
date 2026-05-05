@@ -1914,7 +1914,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
           : `multi-commit shell command (${commitCount} commits since ` +
             `${preHead ? preHead.slice(0, 12) : 'repo root'})`;
       debugLogger.warn(`Refusing AI attribution: ${reason}.`);
-      attributionService.clearAttributions(true);
+      // Snapshot the prompt counter but do NOT clear per-file
+      // attributions: in a `commit a && commit b` chain, the user
+      // may have unstaged AI edits to files that appeared in NEITHER
+      // commit. Wholesale-clearing here would erase those even
+      // though the rest of the flow is built to preserve unstaged
+      // entries across partial commits.
+      attributionService.noteCommitWithoutClearing();
       return null;
     }
 
@@ -1924,17 +1930,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // "at last commit" so a later `gh pr create` doesn't report an
     // inflated N-shotted count spanning multiple commits.
     if (!attributionService.hasAttributions()) {
-      attributionService.clearAttributions(true);
+      attributionService.noteCommitWithoutClearing();
       return null;
     }
 
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
     if (!gitCoAuthorSettings.commit) {
-      // Commit succeeded but attribution is disabled. Still snapshot
-      // the prompt counters as "at last commit" so the next commit
-      // starts a fresh window — otherwise the user would carry stale
-      // counts forward forever.
-      attributionService.clearAttributions(true);
+      // Commit succeeded but attribution is disabled. Snapshot the
+      // prompt counters as "at last commit" but leave per-file
+      // attributions alone — a wholesale clear here would lose the
+      // user's pending unstaged AI work just because they toggled
+      // attribution off, which is a much harsher contract than the
+      // toggle name suggests.
+      attributionService.noteCommitWithoutClearing();
       return null;
     }
 
@@ -1993,6 +2001,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
         stagedInfo.files,
         canonicalBase,
       );
+
+      // No file in this commit was AI-touched in the current session.
+      // Writing a note anyway would emit an all-zero "0% AI" payload
+      // attached to a commit that legitimately had no AI involvement
+      // — actively misleading. Skip the note; the partial clear in
+      // the finally block is a no-op (empty set) so unrelated pending
+      // attributions stay tracked for a later commit.
+      if (committedAbsolutePaths.size === 0) {
+        return null;
+      }
 
       const note = attributionService.generateNotePayload(
         stagedInfo,
@@ -2063,13 +2081,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Partial clear: only drop tracking for the files that actually
       // landed in this commit. Files the AI edited but the user
       // omitted from `git add` stay pending for a later commit.
-      // If we never determined the committed set (early failure in
-      // getCommittedFileInfo), fall back to a full clear so we don't
-      // leak stale per-file state — counters still get snapshotted.
+      // If we never determined the committed set (analysis failure:
+      // shallow clone, --amend without reflog, partial diff failure,
+      // exception), DO NOT wholesale-clear: that would erase pending
+      // AI edits for files the user never staged in this commit. The
+      // small risk is stale per-file state for the just-committed
+      // file (re-attributed if it appears in a future commit) — much
+      // less harmful than losing unrelated unstaged work.
       if (committedAbsolutePaths) {
         attributionService.clearAttributedFiles(committedAbsolutePaths);
       } else {
-        attributionService.clearAttributions(true);
+        attributionService.noteCommitWithoutClearing();
       }
     }
     return warning;

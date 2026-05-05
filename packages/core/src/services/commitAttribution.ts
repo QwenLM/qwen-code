@@ -330,6 +330,20 @@ export class CommitAttributionService {
   }
 
   /**
+   * Snapshot the prompt counter as the new "last commit" without
+   * clearing per-file attribution. Used when a commit landed but we
+   * can't reliably determine which files were in it (multi-commit
+   * chain we won't write a note for, attribution toggle off, diff
+   * analysis failed). Wholesale-clearing in those branches would
+   * silently wipe pending AI edits for *unrelated* files the user
+   * didn't stage — a worse failure mode than the small risk of
+   * stale per-file state for files that did just land.
+   */
+  noteCommitWithoutClearing(): void {
+    this.promptCountAtLastCommit = this.promptCount;
+  }
+
+  /**
    * Resolve a set of repo-relative file paths to the canonical absolute
    * keys actually stored in the attribution map. Used by cleanup to
    * partial-clear only the files that just landed in a commit.
