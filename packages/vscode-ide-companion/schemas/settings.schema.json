@@ -79,7 +79,7 @@
               "type": "object",
               "properties": {
                 "commit": {
-                  "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
+                  "description": "Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both.",
                   "type": "boolean",
                   "default": true
                 },
