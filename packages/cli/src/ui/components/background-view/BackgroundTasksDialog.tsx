@@ -437,6 +437,55 @@ const DreamDetailBody: React.FC<{
           </Box>
         </Fragment>
       )}
+
+      {/*
+        Lock-release / metadata-write warnings on a successfully-
+        completed dream. Rendered as warnings (not errors) so the
+        terminal status stays Completed; explains why subsequent
+        dreams may be silently skipped as 'locked' (lock release
+        failure) or why the scheduler gate isn't picking up the
+        latest run (metadata write failure).
+      */}
+      {entry.lockReleaseError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.warning}>
+              Lock release warning
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {entry.lockReleaseError}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="wrap">
+              {`Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+      {entry.metadataWriteError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.warning}>
+              Metadata write warning
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {entry.metadataWriteError}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="wrap">
+              {`The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
     </MaxSizedBox>
   );
 };

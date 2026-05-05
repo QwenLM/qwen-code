@@ -105,15 +105,10 @@ async function updateDreamMetadataResult(
   now: Date,
   touchedTopics: AutoMemoryType[],
   sessionId?: string,
-  abortSignal?: AbortSignal,
 ): Promise<void> {
   const metadataPath = getAutoMemoryMetadataPath(projectRoot);
   try {
     const content = await fs.readFile(metadataPath, 'utf-8');
-    // Re-check between the read and the write so a late cancel
-    // (after the read await but before the write await) doesn't
-    // persist `lastDreamAt` for an aborted run.
-    if (abortSignal?.aborted) return;
     const metadata = JSON.parse(content) as AutoMemoryMetadata;
     metadata.updatedAt = now.toISOString();
     metadata.lastDreamAt = now.toISOString();

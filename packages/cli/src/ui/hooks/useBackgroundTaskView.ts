@@ -76,6 +76,16 @@ export type DreamDialogEntry = {
   sessionCount?: number;
   /** Memory topic files written — populated on completion. */
   touchedTopics?: readonly string[];
+  /**
+   * Best-effort warnings populated by `runDream` when post-fork
+   * housekeeping fails (gating-metadata write or consolidation-lock
+   * release). The dream itself completed successfully — these are
+   * informational so the user can explain why subsequent dreams may
+   * be silently skipped as `'locked'` or why the scheduler gate
+   * isn't seeing the most recent dream's timestamp.
+   */
+  lockReleaseError?: string;
+  metadataWriteError?: string;
 };
 
 /**
@@ -133,6 +143,12 @@ export function useBackgroundTaskView(
     // metadata is updated without an observable dialog change.
     let lastDreamSig = '';
 
+    // Declared before `refresh` so the function ordering can't trip
+    // the temporal-dead-zone if a future refactor adds a synchronous
+    // call to refresh between the two `const` bindings.
+    const computeDreamSig = (dreams: readonly MemoryTaskRecord[]): string =>
+      dreams.map((t) => `${t.id}:${t.status}:${t.updatedAt}`).join('|');
+
     // refresh accepts a pre-fetched dream snapshot so the memory
     // listener can reuse the same array it computed for its dedup
     // check — avoids a second listTasksByType call AND eliminates the
@@ -184,6 +200,8 @@ export function useBackgroundTaskView(
       ].map((t) => {
         const sessionCount = t.metadata?.['sessionCount'];
         const touchedTopics = t.metadata?.['touchedTopics'];
+        const lockReleaseError = t.metadata?.['lockReleaseError'];
+        const metadataWriteError = t.metadata?.['metadataWriteError'];
         return {
           kind: 'dream' as const,
           dreamId: t.id,
@@ -197,6 +215,12 @@ export function useBackgroundTaskView(
           touchedTopics: Array.isArray(touchedTopics)
             ? (touchedTopics.filter((s) => typeof s === 'string') as string[])
             : undefined,
+          lockReleaseError:
+            typeof lockReleaseError === 'string' ? lockReleaseError : undefined,
+          metadataWriteError:
+            typeof metadataWriteError === 'string'
+              ? metadataWriteError
+              : undefined,
         };
       });
       // Merge by startTime so the order matches launch order across all
@@ -217,9 +241,6 @@ export function useBackgroundTaskView(
       lastDreamSig = computeDreamSig(allDreams);
       setEntries(merged);
     };
-
-    const computeDreamSig = (dreams: readonly MemoryTaskRecord[]): string =>
-      dreams.map((t) => `${t.id}:${t.status}:${t.updatedAt}`).join('|');
 
     // Wrap registry callbacks in a thunk so React's setStatusChange
     // signature (no-arg) doesn't accidentally pass an entry into

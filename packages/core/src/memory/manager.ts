@@ -40,7 +40,12 @@ import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { logMemoryExtract, MemoryExtractEvent } from '../telemetry/index.js';
+import {
+  logMemoryDream,
+  logMemoryExtract,
+  MemoryDreamEvent,
+  MemoryExtractEvent,
+} from '../telemetry/index.js';
 import { isAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
@@ -779,6 +784,16 @@ export class MemoryManager {
       params.projectRoot,
       params.sessionId,
     );
+    // Register the AbortController BEFORE storeWith. storeWith fires
+    // a notify which can synchronously call cancelTask via subscribers
+    // (e.g. a UI listener). If the controller isn't in
+    // `dreamAbortControllers` by then, cancelTask falls into the
+    // missing-controller defensive warn-and-return-false path and the
+    // model gets a phantom failure on a brand-new dream. Registering
+    // first means any reentrant cancel sees a complete state.
+    const abortController = new AbortController();
+    this.dreamAbortControllers.set(record.id, abortController);
+    this.dreamInFlightByKey.set(dedupeKey, record.id);
     this.storeWith(record, {
       status: 'running',
       // Set the initial progressText so the dialog's Progress section
@@ -788,9 +803,6 @@ export class MemoryManager {
       progressText: 'Scheduled managed auto-memory dream.',
       metadata: { sessionCount: sessionIds.length },
     });
-    this.dreamInFlightByKey.set(dedupeKey, record.id);
-    const abortController = new AbortController();
-    this.dreamAbortControllers.set(record.id, abortController);
 
     const promise = this.track(
       record.id,
@@ -920,28 +932,65 @@ export class MemoryManager {
           },
         });
         if (abortSignal.aborted) {
-          // cancelTask flipped status to 'cancelled' between our
-          // pre-update check and the synchronous update above; our
-          // update overwrote. Restore cancelled state and skip the
-          // gating-metadata write so the next legitimate dream cycle
-          // isn't suppressed by a bumped lastDreamAt.
+          // Defense-in-depth: unreachable today (no `await` between
+          // the pre-update check and the synchronous update above,
+          // so JS's single-threaded execution prevents
+          // `signal.aborted` from transitioning between them — a
+          // cancelTask landing inside the storeWith notify would
+          // already have flipped status, and our update would have
+          // raced ahead of it to 'completed'). Kept against a future
+          // refactor that introduces an `await` between the two
+          // checks. Preserves the touched-topic metadata on the
+          // restored cancelled record so the user can still tell
+          // memory files were modified before the abort took.
           this.update(record, {
             status: 'cancelled',
-            progressText: 'Cancelled by user.',
+            progressText: 'Cancelled after memory changes.',
+            metadata: {
+              touchedTopics: result.touchedTopics,
+              dedupedEntries: result.dedupedEntries,
+            },
           });
           return record;
         }
         // Status is now 'completed'; cancelTask will refuse from
         // here on out. Safe to write scheduler-gating metadata
         // without a race window.
-        const nextMetadata = await readDreamMetadata(params.projectRoot);
-        nextMetadata.lastDreamAt = now.toISOString();
-        nextMetadata.lastDreamSessionId = params.sessionId;
-        nextMetadata.updatedAt = now.toISOString();
-        nextMetadata.lastDreamTouchedTopics = result.touchedTopics;
-        nextMetadata.lastDreamStatus =
-          result.touchedTopics.length > 0 ? 'updated' : 'noop';
-        await writeDreamMetadata(params.projectRoot, nextMetadata);
+        //
+        // Wrap the read/write in a try/catch — pre-PR `bumpMetadata`
+        // in dream.ts swallowed errors as best-effort; without this
+        // wrap a transient ENOENT / EPERM on the metadata file would
+        // propagate to the outer catch and overwrite a
+        // legitimately-completed dream with `'failed'`. The dream
+        // already did its work (touched files are on disk and
+        // visible). Trade-off: the next dream cycle won't see a
+        // bumped lastDreamAt and may re-fire — same trade as the
+        // original best-effort behavior.
+        try {
+          const nextMetadata = await readDreamMetadata(params.projectRoot);
+          nextMetadata.lastDreamAt = now.toISOString();
+          nextMetadata.lastDreamSessionId = params.sessionId;
+          nextMetadata.updatedAt = now.toISOString();
+          nextMetadata.lastDreamTouchedTopics = result.touchedTopics;
+          nextMetadata.lastDreamStatus =
+            result.touchedTopics.length > 0 ? 'updated' : 'noop';
+          // Mirror the manual /dream path's reset so the two write
+          // sites don't drift. The field is currently dead code on
+          // main (only ever written, never read) but keeping the two
+          // paths in sync avoids surprises if a future change starts
+          // reading it.
+          nextMetadata.recentSessionIdsSinceDream = [];
+          await writeDreamMetadata(params.projectRoot, nextMetadata);
+        } catch (metaError) {
+          const message =
+            metaError instanceof Error ? metaError.message : String(metaError);
+          debugLogger.warn(
+            `Failed to persist dream gating metadata for ${record.id}: ${message}`,
+          );
+          this.update(record, {
+            metadata: { metadataWriteError: message },
+          });
+        }
       } finally {
         // Lock release errors are logged AND surfaced on the record's
         // metadata so the user can see why subsequent dreams may be
@@ -969,6 +1018,18 @@ export class MemoryManager {
       // marked the record cancelled. The fork agent throws an abort
       // error which lands here; don't overwrite with 'failed'.
       if (abortSignal.aborted && record.status === 'cancelled') {
+        if (params.config) {
+          logMemoryDream(
+            params.config,
+            new MemoryDreamEvent({
+              trigger: 'auto',
+              status: 'cancelled',
+              deduped_entries: 0,
+              touched_topics: [],
+              duration_ms: 0,
+            }),
+          );
+        }
         return record;
       }
       this.update(record, {

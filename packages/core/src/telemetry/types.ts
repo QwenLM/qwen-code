@@ -1204,7 +1204,7 @@ export class MemoryDreamEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   /** 'auto' = scheduler-triggered; 'manual' = user ran /dream */
   trigger: 'auto' | 'manual';
-  status: 'updated' | 'noop' | 'failed';
+  status: 'updated' | 'noop' | 'failed' | 'cancelled';
   deduped_entries: number;
   touched_topics_count: number;
   touched_topics: string;
@@ -1212,7 +1212,7 @@ export class MemoryDreamEvent implements BaseTelemetryEvent {
 
   constructor(params: {
     trigger: 'auto' | 'manual';
-    status: 'updated' | 'noop' | 'failed';
+    status: 'updated' | 'noop' | 'failed' | 'cancelled';
     deduped_entries: number;
     touched_topics: string[];
     duration_ms: number;
