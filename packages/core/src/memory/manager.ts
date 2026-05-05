@@ -774,7 +774,18 @@ export class MemoryManager {
     if (record.taskType !== 'dream') return false;
     if (record.status !== 'running') return false;
 
+    // The AbortController is registered synchronously alongside the
+    // status='running' transition in scheduleDream and only cleared in
+    // runDream's finally block (which only runs after a terminal
+    // status transition has already happened). So under normal flow
+    // an entry that is `running` MUST have a controller. Treat the
+    // missing-controller case as a contract violation: don't flip
+    // status (a cancelled record without an aborted fork would leak
+    // the consolidation lock until the agent finishes naturally) and
+    // return false so the caller knows the abort didn't take.
     const ac = this.dreamAbortControllers.get(taskId);
+    if (!ac) return false;
+
     // Mark cancelled BEFORE aborting so the runDream catch path can
     // detect the user-cancel intent (signal.aborted + status already
     // 'cancelled') and avoid overwriting with a generic 'failed'.
@@ -782,7 +793,7 @@ export class MemoryManager {
       status: 'cancelled',
       progressText: 'Cancelled by user.',
     });
-    ac?.abort();
+    ac.abort();
     return true;
   }
 

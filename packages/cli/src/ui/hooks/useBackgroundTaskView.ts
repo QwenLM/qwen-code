@@ -29,6 +29,7 @@ import {
   type BackgroundTaskEntry,
   type BackgroundShellEntry,
   type Config,
+  type MemoryTaskRecord,
   type MonitorEntry,
 } from '@qwen-code/qwen-code-core';
 
@@ -125,7 +126,12 @@ export function useBackgroundTaskView(
     // fire on their own changes, so this dedup is dream-specific.
     let lastDreamSig = '';
 
-    const refresh = () => {
+    // refresh accepts a pre-fetched dream snapshot so the memory
+    // listener can reuse the same array it computed for its dedup
+    // check — avoids a second listTasksByType call AND eliminates the
+    // race window where the listener's gate sig and the entries it
+    // builds would otherwise come from two separate snapshots.
+    const refresh = (dreamSnapshot?: readonly MemoryTaskRecord[]) => {
       const agentEntries: DialogEntry[] = agentRegistry
         .getAll()
         .map((e) => ({ ...e, kind: 'agent' as const }));
@@ -149,7 +155,8 @@ export function useBackgroundTaskView(
       // cap the dialog would grow unbounded; with it the user sees all
       // running dreams plus the most recent few terminal results
       // (mirrors MonitorRegistry.MAX_RETAINED_TERMINAL_MONITORS).
-      const allDreams = memoryManager.listTasksByType('dream', projectRoot);
+      const allDreams =
+        dreamSnapshot ?? memoryManager.listTasksByType('dream', projectRoot);
       const runningDreams = allDreams.filter((t) => t.status === 'running');
       const terminalDreams = allDreams
         .filter(
@@ -193,31 +200,37 @@ export function useBackgroundTaskView(
       // Cache the dream signature derived from the freshly-built
       // entries — the memory listener uses this to skip redundant
       // setEntries calls when an extract notify fires (extract has no
-      // dialog surface, so the merged result is identical).
-      lastDreamSig = computeDreamSig();
+      // dialog surface, so the merged result is identical). Computed
+      // from the same `allDreams` snapshot used to build dreamEntries
+      // so the gate value can never desync from what's on screen.
+      lastDreamSig = computeDreamSig(allDreams);
       setEntries(merged);
     };
 
-    const computeDreamSig = (): string =>
-      memoryManager
-        .listTasksByType('dream', projectRoot)
-        .map((t) => `${t.id}:${t.status}:${t.updatedAt}`)
-        .join('|');
+    const computeDreamSig = (dreams: readonly MemoryTaskRecord[]): string =>
+      dreams.map((t) => `${t.id}:${t.status}:${t.updatedAt}`).join('|');
+
+    // Wrap registry callbacks in a thunk so React's setStatusChange
+    // signature (no-arg) doesn't accidentally pass an entry into
+    // refresh's `dreamSnapshot` parameter.
+    const refreshFromRegistry = () => refresh();
 
     refresh();
 
-    agentRegistry.setStatusChangeCallback(refresh);
-    shellRegistry.setStatusChangeCallback(refresh);
-    monitorRegistry.setStatusChangeCallback(refresh);
+    agentRegistry.setStatusChangeCallback(refreshFromRegistry);
+    shellRegistry.setStatusChangeCallback(refreshFromRegistry);
+    monitorRegistry.setStatusChangeCallback(refreshFromRegistry);
 
     // Memory listener gates refresh on dream-content changes — see the
     // `lastDreamSig` rationale above. Extract notifies hit this path
     // with an unchanged dream signature and short-circuit before the
-    // full re-merge.
+    // full re-merge. The fetched snapshot is forwarded to refresh so
+    // both the gate and the rendered dreamEntries come from one read.
     const memoryListener = () => {
-      const sig = computeDreamSig();
+      const dreams = memoryManager.listTasksByType('dream', projectRoot);
+      const sig = computeDreamSig(dreams);
       if (sig === lastDreamSig) return;
-      refresh();
+      refresh(dreams);
     };
     const unsubscribeMemory = memoryManager.subscribe(memoryListener);
 

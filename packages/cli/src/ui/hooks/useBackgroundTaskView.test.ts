@@ -118,12 +118,20 @@ const monitor = (id: string, startTime: number) => ({
 
 // Mirror the MemoryTaskRecord shape that MemoryManager.listTasksByType
 // returns. Status defaults to 'running'; tests override to exercise the
-// filter (`pending` / `skipped` records must be excluded).
+// filter (`pending` / `skipped` records must be excluded; `cancelled`
+// flows through the same terminal-cap path as `completed` / `failed`
+// once the task_stop / dialog cancel keystroke lands one).
 const dream = (
   id: string,
   startTimeMs: number,
   overrides: Partial<{
-    status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+    status:
+      | 'pending'
+      | 'running'
+      | 'completed'
+      | 'failed'
+      | 'cancelled'
+      | 'skipped';
     progressText: string;
     error: string;
     metadata: Record<string, unknown>;
@@ -301,6 +309,25 @@ describe('useBackgroundTaskView', () => {
     expect(ids).toEqual(
       ['d-mid', 'd-newest', 'd-recent', 'd-running-now'].sort(),
     );
+  });
+
+  it('surfaces a cancelled dream with kind=dream so the dialog can render the terminal status', () => {
+    // `'cancelled'` arrives via the dialog `x stop` / `task_stop` path
+    // which routes through `MemoryManager.cancelTask`. The view-model
+    // must accept it the same way it accepts `'completed'` / `'failed'`,
+    // because the dialog's terminal-cap window depends on showing the
+    // user the outcome of the abort they just triggered.
+    const { config } = makeConfig({
+      agents: () => [],
+      shells: () => [],
+      monitors: () => [],
+      dreams: () => [dream('d-stopped', 100, { status: 'cancelled' })],
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    expect(result.current.entries).toHaveLength(1);
+    const [only] = result.current.entries;
+    expect(only.kind).toBe('dream');
+    expect(only.status).toBe('cancelled');
   });
 
   it('skips setEntries when the memory listener fires with unchanged dream content', () => {

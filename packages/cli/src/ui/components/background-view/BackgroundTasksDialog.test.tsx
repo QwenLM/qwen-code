@@ -472,10 +472,10 @@ describe('BackgroundTasksDialog', () => {
   });
 
   describe('dream entries', () => {
-    // Smoke for the PR-1 read-only surface — dream tasks render through
-    // the unified pill / dialog plumbing but cannot yet be cancelled.
-    // PR-2 lands MemoryManager.cancelTask + task_stop dispatch + the
-    // 'x stop' affordance.
+    // Coverage for the dream task kind in the unified pill / dialog
+    // plumbing — list rendering, detail body, hint visibility, and
+    // cancellation routing. Mirrors the agent / shell / monitor
+    // coverage profile so each kind has parity in this test file.
     it('renders the [dream] row with session count in list mode', () => {
       const h = setup([dreamEntry({ sessionCount: 7 })]);
       h.call(() => h.probe.current!.actions.openDialog());
