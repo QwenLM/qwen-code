@@ -260,7 +260,16 @@ function getGitShortHash() {
 }
 
 function isTimeoutError(error) {
-  return error.killed === true;
+  // Node.js execSync timeout: `code` is 'ETIMEDOUT' on POSIX; on some
+  // versions/platforms `killed` is true with signal 'SIGTERM' or null.
+  // Match the pattern used in packages/core/src/utils/pdf.ts.
+  return (
+    error.code === 'ETIMEDOUT' ||
+    (error.killed === true &&
+      (error.signal === 'SIGTERM' ||
+        error.signal === undefined ||
+        error.signal === null))
+  );
 }
 
 async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
@@ -299,6 +308,8 @@ async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
       state.githubReleaseExists = true;
     }
   } catch (error) {
+    // Timeout check must precede isExpectedMissingGitHubRelease — a timed-out
+    // process may emit partial stderr matching "release not found".
     if (isTimeoutError(error)) {
       throw new Error(
         `gh release view timed out after ${NETWORK_COMMAND_TIMEOUT_MS / 1000}s checking "${fullTag}" — GitHub API may be unavailable`,
