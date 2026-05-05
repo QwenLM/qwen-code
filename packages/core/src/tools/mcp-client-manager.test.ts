@@ -246,10 +246,7 @@ describe('McpClientManager', () => {
     }> = [];
 
     vi.mocked(McpClient).mockImplementation(() => {
-      if (
-        replacementClients.length === 0 &&
-        vi.mocked(McpClient).mock.calls.length === 1
-      ) {
+      if (vi.mocked(McpClient).mock.calls.length === 1) {
         return firstClient as unknown as McpClient;
       }
 

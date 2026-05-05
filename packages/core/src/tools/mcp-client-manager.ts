@@ -155,8 +155,9 @@ export class McpClientManager {
       return;
     }
 
-    const discoveryPromise = Promise.resolve().then(() =>
-      this.discoverMcpToolsForServerInternal(serverName, cliConfig),
+    const discoveryPromise = this.discoverMcpToolsForServerInternal(
+      serverName,
+      cliConfig,
     );
     this.serverDiscoveryPromises.set(serverName, discoveryPromise);
 
