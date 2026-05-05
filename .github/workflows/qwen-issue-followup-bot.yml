@@ -123,9 +123,9 @@ jobs:
           done
 
           if ! echo "${issue_json}" | jq -e \
-            '.comments[] | select(.body | contains("<!-- qwen-issue-bot:needs-info -->")) | select(.author.is_bot == true)' >/dev/null
+            '.comments[] | select(.body | contains("<!-- qwen-issue-bot:needs-info -->")) | select(.author.login == "qwen-code-ci-bot")' >/dev/null
           then
-            echo "::error::Expected canary issue #${SMOKE_ISSUE_NUMBER} to have a bot needs-info comment."
+            echo "::error::Expected canary issue #${SMOKE_ISSUE_NUMBER} to have a qwen-code-ci-bot needs-info comment."
             exit 1
           fi
 
