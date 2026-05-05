@@ -7,15 +7,21 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
-import { writeSha256Sums } from './create-standalone-package.js';
+import { TARGETS, writeSha256Sums } from './create-standalone-package.js';
 import { isStandaloneArchiveName } from './release-asset-config.js';
+import {
+  fail,
+  isMainModule,
+  parseSha256Sums,
+  readOptionValue,
+  sha256File,
+} from './release-script-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,7 +52,7 @@ const RELEASE_TARGETS = [
 ];
 const EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length;
 
-if (isMainModule()) {
+if (isMainModule(import.meta.url)) {
   try {
     await main();
   } catch (error) {
@@ -100,10 +106,6 @@ async function main() {
   } finally {
     fs.rmSync(runtimeDir, { recursive: true, force: true });
   }
-}
-
-function isMainModule() {
-  return process.argv[1] && path.resolve(process.argv[1]) === __filename;
 }
 
 async function packageTarget({
@@ -161,14 +163,7 @@ async function downloadFile(url, destination) {
 }
 
 function parseChecksums(content) {
-  const checksums = new Map();
-  for (const line of content.split(/\r?\n/)) {
-    const [hash, fileName] = line.trim().split(/\s+/, 2);
-    if (hash && fileName) {
-      checksums.set(fileName.replace(/^\*/, ''), hash);
-    }
-  }
-  return checksums;
+  return parseSha256Sums(content);
 }
 
 async function verifyNodeArchive(archivePath, archiveName, checksums) {
@@ -185,12 +180,6 @@ async function verifyNodeArchive(archivePath, archiveName, checksums) {
   console.log(`Verified Node.js runtime checksum for ${archiveName}`);
 }
 
-async function sha256File(filePath) {
-  const hash = crypto.createHash('sha256');
-  await pipeline(fs.createReadStream(filePath), hash);
-  return hash.digest('hex');
-}
-
 function assertStandaloneOutput(outDir) {
   const checksumPath = path.join(outDir, 'SHA256SUMS');
   if (!fs.existsSync(checksumPath)) {
@@ -205,9 +194,8 @@ function assertStandaloneOutput(outDir) {
     .filter(Boolean)
     .filter(isStandaloneArchiveName)
     .sort();
-  const expectedArchiveNames = RELEASE_TARGETS.map(
-    ({ qwenTarget }) =>
-      `qwen-code-${qwenTarget}.${qwenTarget === 'win-x64' ? 'zip' : 'tar.gz'}`,
+  const expectedArchiveNames = RELEASE_TARGETS.map(({ qwenTarget }) =>
+    standaloneArchiveName(qwenTarget),
   ).sort();
   const missing = expectedArchiveNames.filter(
     (archiveName) => !archiveNames.includes(archiveName),
@@ -234,6 +222,14 @@ function assertStandaloneOutput(outDir) {
   }
 
   console.log(`Verified ${archiveNames.length} standalone release checksums.`);
+}
+
+function standaloneArchiveName(qwenTarget) {
+  const targetConfig = TARGETS.get(qwenTarget);
+  if (!targetConfig) {
+    fail(`No standalone package target config found for ${qwenTarget}`);
+  }
+  return `qwen-code-${qwenTarget}.${targetConfig.outputExtension}`;
 }
 
 function parseArgs(argv) {
@@ -276,14 +272,6 @@ function parseArgs(argv) {
   return args;
 }
 
-function readOptionValue(argv, index, optionName) {
-  const value = argv[index + 1];
-  if (!value || value.startsWith('-')) {
-    fail(`${optionName} requires a value`);
-  }
-  return value;
-}
-
 function printUsage() {
   console.log(`
 Usage:
@@ -295,10 +283,6 @@ Options:
   --runtime-dir PATH     Temporary Node.js runtime download directory.
   --node-version VERSION Node.js version to download. Defaults to current Node.
 `);
-}
-
-function fail(message) {
-  throw new Error(`ERROR: ${message}`);
 }
 
 export { assertStandaloneOutput, parseChecksums, RELEASE_TARGETS };

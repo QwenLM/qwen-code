@@ -7,13 +7,17 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { isReleaseChecksumAsset } from './release-asset-config.js';
+import {
+  fail,
+  isMainModule,
+  readOptionValue,
+  sha256File,
+} from './release-script-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -53,7 +57,7 @@ const DIST_ALLOWED_ENTRY_PATTERNS = [
 ];
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
 
-if (isMainModule()) {
+if (isMainModule(import.meta.url)) {
   try {
     await main();
   } catch (error) {
@@ -132,10 +136,6 @@ async function main() {
   }
 }
 
-function isMainModule() {
-  return process.argv[1] && path.resolve(process.argv[1]) === __filename;
-}
-
 function parseArgs(argv) {
   const args = {
     help: false,
@@ -178,14 +178,6 @@ function parseArgs(argv) {
   }
 
   return args;
-}
-
-function readOptionValue(argv, index, optionName) {
-  const value = argv[index + 1];
-  if (!value || value.startsWith('-')) {
-    fail(`${optionName} requires a value`);
-  }
-  return value;
 }
 
 function printUsage() {
@@ -552,6 +544,11 @@ function createZipArchive(outputPath, cwd) {
   run('zip', ['-qr', outputPath, 'qwen-code'], { cwd });
 }
 
+/**
+ * Rebuild SHA256SUMS from scratch by scanning outDir for all release checksum
+ * assets. This overwrites any existing SHA256SUMS, so callers must ensure all
+ * desired release assets are present in outDir before calling.
+ */
 async function writeSha256Sums(outDir) {
   const entries = fs.readdirSync(outDir).filter(isReleaseChecksumAsset).sort();
 
@@ -561,20 +558,15 @@ async function writeSha256Sums(outDir) {
     );
   }
 
-  const lines = [];
-  for (const entry of entries) {
-    const filePath = path.join(outDir, entry);
-    const hash = await sha256File(filePath);
-    lines.push(`${hash}  ${entry}`);
-  }
+  const lines = await Promise.all(
+    entries.map(async (entry) => {
+      const filePath = path.join(outDir, entry);
+      const hash = await sha256File(filePath);
+      return `${hash}  ${entry}`;
+    }),
+  );
 
   fs.writeFileSync(path.join(outDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
-}
-
-async function sha256File(filePath) {
-  const hash = crypto.createHash('sha256');
-  await pipeline(fs.createReadStream(filePath), hash);
-  return hash.digest('hex');
 }
 
 function run(command, args, options = {}) {
@@ -592,8 +584,4 @@ function run(command, args, options = {}) {
   }
 }
 
-function fail(message) {
-  throw new Error(`Error: ${message}`);
-}
-
-export { writeSha256Sums };
+export { TARGETS, writeSha256Sums };

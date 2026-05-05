@@ -7,18 +7,23 @@
  */
 
 import fs from 'node:fs';
-import crypto from 'node:crypto';
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { writeSha256Sums } from './create-standalone-package.js';
 import { INSTALLATION_ASSETS } from './release-asset-config.js';
+import {
+  fail,
+  isMainModule,
+  parseSha256Sums,
+  readOptionValue,
+  sha256File,
+} from './release-script-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
-if (isMainModule()) {
+if (isMainModule(import.meta.url)) {
   try {
     const args = parseArgs(process.argv.slice(2));
     if (args.help) {
@@ -35,10 +40,6 @@ if (isMainModule()) {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   }
-}
-
-function isMainModule() {
-  return process.argv[1] && path.resolve(process.argv[1]) === __filename;
 }
 
 async function buildInstallationAssets(outDir, options = {}) {
@@ -139,28 +140,6 @@ async function assertInstallationAssetChecksums(
   }
 }
 
-function parseSha256Sums(content) {
-  const checksums = new Map();
-  for (const line of content.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    const match = /^([0-9a-fA-F]{64})\s+\*?(.+)$/.exec(trimmed);
-    if (match) {
-      checksums.set(match[2], match[1].toLowerCase());
-    }
-  }
-  return checksums;
-}
-
-async function sha256File(filePath) {
-  const hash = crypto.createHash('sha256');
-  await pipeline(fs.createReadStream(filePath), hash);
-  return hash.digest('hex');
-}
-
 function parseArgs(argv) {
   const args = {
     help: false,
@@ -192,14 +171,6 @@ function parseArgs(argv) {
   return args;
 }
 
-function readOptionValue(argv, index, optionName) {
-  const value = argv[index + 1];
-  if (!value || value.startsWith('-')) {
-    fail(`${optionName} requires a value`);
-  }
-  return value;
-}
-
 function printUsage() {
   console.log(`
 Usage:
@@ -210,10 +181,6 @@ Options:
   --version VERSION
                   Stamp release installers so their default version is VERSION.
 `);
-}
-
-function fail(message) {
-  throw new Error(`ERROR: ${message}`);
 }
 
 export {

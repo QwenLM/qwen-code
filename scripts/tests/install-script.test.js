@@ -28,6 +28,9 @@ const readScript = (path) => readFileSync(path, 'utf8');
 const standaloneReleaseScriptUrl = pathToFileURL(
   path.resolve('scripts/build-standalone-release.js'),
 ).href;
+const standalonePackageScriptUrl = pathToFileURL(
+  path.resolve('scripts/create-standalone-package.js'),
+).href;
 const installationAssetsScriptUrl = pathToFileURL(
   path.resolve('scripts/build-installation-assets.js'),
 ).href;
@@ -167,6 +170,12 @@ describe('installation scripts', () => {
     expect(script).not.toContain('findstr /C:"!ARCHIVE_NAME!"');
     expect(script).not.toContain('certutil -hashfile');
     expect(script).toContain('qwen-code-win-x64.zip');
+    expect(script).toContain(':ValidateArchiveContents');
+    expect(script).toContain('Archive contains unsafe path entries');
+    expect(script).toContain('System.IO.Compression.FileSystem');
+    expect(script).toContain('[IO.Compression.ZipFile]::OpenRead');
+    expect(script).toContain('[IO.Path]::GetRandomFileName()');
+    expect(script).not.toContain('qwen-code-install-%RANDOM%%RANDOM%');
     expect(script).toContain('Expand-Archive');
     expect(script).toContain('$env:QWEN_DOWNLOAD_URL');
     expect(script).toContain('$env:QWEN_ARCHIVE_FILE');
@@ -199,6 +208,8 @@ describe('installation scripts', () => {
     );
     expect(script).toContain('qwen-code\\node\\node.exe');
     expect(script).toContain('Archive contains symlinks or reparse points');
+    expect(script).toContain('WARNING: Failed to restore previous install');
+    expect(script).toContain('WARNING: Failed to remove failed install');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
   });
@@ -221,6 +232,7 @@ describe('standalone release packaging', () => {
     expect(existsSync('scripts/build-standalone-release.js')).toBe(true);
     expect(existsSync('scripts/build-installation-assets.js')).toBe(true);
     expect(existsSync('scripts/release-asset-config.js')).toBe(true);
+    expect(existsSync('scripts/release-script-utils.js')).toBe(true);
 
     const packageScript = readScript('scripts/create-standalone-package.js');
     expect(packageScript).toContain('Copyright 2025 Qwen Team');
@@ -235,11 +247,15 @@ describe('standalone release packaging', () => {
     expect(packageScript).toContain('refusing to write empty SHA256SUMS');
     expect(packageScript).toContain('--skip-checksums');
     expect(packageScript).toContain('dereference: true');
-    expect(packageScript).toContain('fs.createReadStream');
     expect(packageScript).toContain('Expand-Archive');
     expect(packageScript).toContain('Compress-Archive');
+    expect(packageScript).toContain('Rebuild SHA256SUMS from scratch');
+    expect(packageScript).toContain('Promise.all(');
     expect(packageScript).toContain(
       "import { isReleaseChecksumAsset } from './release-asset-config.js';",
+    );
+    expect(packageScript).toContain(
+      "import {\n  fail,\n  isMainModule,\n  readOptionValue,\n  sha256File,\n} from './release-script-utils.js';",
     );
 
     const releaseScript = readScript('scripts/build-standalone-release.js');
@@ -251,9 +267,9 @@ describe('standalone release packaging', () => {
       'EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length',
     );
     expect(releaseScript).toContain('nodeArchiveExtension');
-    expect(releaseScript).toContain('fs.createReadStream');
     expect(releaseScript).toContain('expectedArchiveNames');
-    expect(releaseScript).toContain('qwen-code-${qwenTarget}');
+    expect(releaseScript).toContain('standaloneArchiveName(qwenTarget)');
+    expect(releaseScript).toContain('TARGETS.get(qwenTarget)');
     expect(releaseScript).toContain('scripts/create-standalone-package.js');
     expect(releaseScript).toContain('--skip-checksums');
     expect(releaseScript).toContain('writeSha256Sums(outDir)');
@@ -269,6 +285,9 @@ describe('standalone release packaging', () => {
     expect(installationAssetsScript).toContain(
       'assertInstallationAssetChecksums(outDir, assets)',
     );
+    expect(installationAssetsScript).toContain(
+      "from './release-script-utils.js'",
+    );
 
     const releaseAssetConfig = readScript('scripts/release-asset-config.js');
     expect(releaseAssetConfig).toContain('Copyright 2025 Qwen Team');
@@ -279,6 +298,13 @@ describe('standalone release packaging', () => {
     expect(releaseAssetConfig).toContain('install-qwen.bat');
     expect(releaseAssetConfig).toContain('isStandaloneArchiveName');
     expect(releaseAssetConfig).toContain('isReleaseChecksumAsset');
+
+    const releaseScriptUtils = readScript('scripts/release-script-utils.js');
+    expect(releaseScriptUtils).toContain('Copyright 2025 Qwen Team');
+    expect(releaseScriptUtils).toContain('function parseSha256Sums');
+    expect(releaseScriptUtils).toContain('async function sha256File');
+    expect(releaseScriptUtils).toContain('function readOptionValue');
+    expect(releaseScriptUtils).toContain('function isMainModule');
   });
 
   it('loads the standalone release packaging helper', () => {
@@ -363,11 +389,12 @@ describe('standalone release packaging', () => {
     const { assertStandaloneOutput, RELEASE_TARGETS } = await import(
       standaloneReleaseScriptUrl
     );
+    const { TARGETS } = await import(standalonePackageScriptUrl);
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-test-'));
 
     try {
       const lines = RELEASE_TARGETS.map(({ qwenTarget }) => {
-        const extension = qwenTarget === 'win-x64' ? 'zip' : 'tar.gz';
+        const extension = TARGETS.get(qwenTarget).outputExtension;
         return `${'a'.repeat(64)}  qwen-code-${qwenTarget}.${extension}`;
       });
       writeFileSync(
@@ -1092,6 +1119,28 @@ describe('Windows installer end-to-end', () => {
     }
   });
 
+  itOnWindows(
+    'rejects standalone archives containing path traversal entries',
+    () => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = createWindowsTraversalStandaloneArchive(tmpDir);
+
+        expect(() =>
+          runWindowsInstaller(
+            archive,
+            path.join(tmpDir, 'install'),
+            path.join(tmpDir, 'home'),
+          ),
+        ).toThrow(/Archive contains unsafe path/);
+        expect(existsSync(path.join(tmpDir, 'qwen-slip'))).toBe(false);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   itOnWindows('rejects unsafe environment-derived install paths', () => {
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
@@ -1233,6 +1282,47 @@ function createFakeWindowsStandaloneArchive(tmpDir) {
 
   const archive = path.join(outDir, 'qwen-code-win-x64.zip');
   createZipForTest(archive, tmpDir, path.basename(packageRoot));
+  writeChecksumFile(outDir, path.basename(archive));
+  return archive;
+}
+
+function createWindowsTraversalStandaloneArchive(tmpDir) {
+  const outDir = path.join(tmpDir, 'out');
+  mkdirSync(outDir, { recursive: true });
+
+  const archive = path.join(outDir, 'qwen-code-win-x64.zip');
+  execFileSync(
+    'powershell',
+    [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      [
+        "$ErrorActionPreference = 'Stop'",
+        'Add-Type -AssemblyName System.IO.Compression.FileSystem',
+        'function Add-ZipEntry($zip, $name, $content) {',
+        '  $entry = $zip.CreateEntry($name)',
+        '  $writer = [IO.StreamWriter]::new($entry.Open())',
+        '  try { $writer.Write($content) } finally { $writer.Dispose() }',
+        '}',
+        '$zip = [IO.Compression.ZipFile]::Open($env:QWEN_TEST_ZIP_ARCHIVE, [IO.Compression.ZipArchiveMode]::Create)',
+        'try {',
+        "  Add-ZipEntry $zip '../qwen-slip' 'path traversal'",
+        "  Add-ZipEntry $zip 'qwen-code/bin/qwen.cmd' '@echo off`r`necho 0.0.0-smoke`r`n'",
+        "  Add-ZipEntry $zip 'qwen-code/node/node.exe' 'fake node.exe'",
+        '  Add-ZipEntry $zip \'qwen-code/manifest.json\' \'{"name":"@qwen-code/qwen-code"}\'',
+        '} finally { $zip.Dispose() }',
+      ].join('; '),
+    ],
+    {
+      env: {
+        ...process.env,
+        QWEN_TEST_ZIP_ARCHIVE: archive,
+      },
+      stdio: 'ignore',
+    },
+  );
   writeChecksumFile(outDir, path.basename(archive));
   return archive;
 }

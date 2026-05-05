@@ -481,8 +481,8 @@ if not "!ARCHIVE_PATH!"=="" (
         )
     )
 
-    set "TEMP_DIR=%TEMP%\qwen-code-install-%RANDOM%%RANDOM%"
-    mkdir "!TEMP_DIR!" >nul 2>&1
+    call :CreateTempDir
+    if !ERRORLEVEL! NEQ 0 exit /b 1
     set "ARCHIVE_FILE=!TEMP_DIR!\!ARCHIVE_NAME!"
 
     echo INFO: Downloading !ARCHIVE_URL!
@@ -495,8 +495,8 @@ if not "!ARCHIVE_PATH!"=="" (
 )
 
 if "!TEMP_DIR!"=="" (
-    set "TEMP_DIR=%TEMP%\qwen-code-install-%RANDOM%%RANDOM%"
-    mkdir "!TEMP_DIR!" >nul 2>&1
+    call :CreateTempDir
+    if !ERRORLEVEL! NEQ 0 exit /b 1
 )
 
 REM Verify integrity before extraction or changing the install directory.
@@ -509,6 +509,11 @@ if !ERRORLEVEL! NEQ 0 (
 REM Extract into a temporary directory, then validate required entry points.
 set "EXTRACT_DIR=!TEMP_DIR!\extract"
 mkdir "!EXTRACT_DIR!" >nul 2>&1
+call :ValidateArchiveContents "!ARCHIVE_FILE!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
 set "QWEN_ARCHIVE_FILE=!ARCHIVE_FILE!"
 set "QWEN_EXTRACT_DIR=!EXTRACT_DIR!"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:QWEN_ARCHIVE_FILE -DestinationPath $env:QWEN_EXTRACT_DIR -Force"
@@ -564,8 +569,22 @@ if !ERRORLEVEL! NEQ 0 (
     exit /b 1
 )
 
-if exist "!NEW_INSTALL_DIR!" rmdir /S /Q "!NEW_INSTALL_DIR!" >nul 2>&1
-if exist "!OLD_INSTALL_DIR!" rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
+if exist "!NEW_INSTALL_DIR!" (
+    rmdir /S /Q "!NEW_INSTALL_DIR!" >nul 2>&1
+    if !ERRORLEVEL! NEQ 0 (
+        if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+        echo ERROR: Failed to remove stale staging directory: !NEW_INSTALL_DIR!.
+        exit /b 1
+    )
+)
+if exist "!OLD_INSTALL_DIR!" (
+    rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
+    if !ERRORLEVEL! NEQ 0 (
+        if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+        echo ERROR: Failed to remove stale backup directory: !OLD_INSTALL_DIR!.
+        exit /b 1
+    )
+)
 move /Y "!EXTRACT_DIR!\qwen-code" "!NEW_INSTALL_DIR!" >nul
 if !ERRORLEVEL! NEQ 0 (
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
@@ -583,7 +602,7 @@ if exist "!INSTALL_DIR!" (
 )
 move /Y "!NEW_INSTALL_DIR!" "!INSTALL_DIR!" >nul
 if !ERRORLEVEL! NEQ 0 (
-    if exist "!OLD_INSTALL_DIR!" move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+    call :RestoreOldInstall
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
     echo ERROR: Failed to install standalone archive to !INSTALL_DIR!.
     exit /b 1
@@ -594,8 +613,8 @@ echo @echo off
 echo call "!INSTALL_DIR!\bin\qwen.cmd" %%*
 ) > "!INSTALL_BIN_DIR!\qwen.cmd.new"
 if !ERRORLEVEL! NEQ 0 (
-    if exist "!INSTALL_DIR!" rmdir /S /Q "!INSTALL_DIR!" >nul 2>&1
-    if exist "!OLD_INSTALL_DIR!" move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+    call :RemoveInstalledDirWithWarning
+    call :RestoreOldInstall
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
     echo ERROR: Failed to create qwen wrapper in !INSTALL_BIN_DIR!.
     exit /b 1
@@ -603,14 +622,17 @@ if !ERRORLEVEL! NEQ 0 (
 move /Y "!INSTALL_BIN_DIR!\qwen.cmd.new" "!INSTALL_BIN_DIR!\qwen.cmd" >nul
 if !ERRORLEVEL! NEQ 0 (
     if exist "!INSTALL_BIN_DIR!\qwen.cmd.new" del /F /Q "!INSTALL_BIN_DIR!\qwen.cmd.new" >nul 2>&1
-    if exist "!INSTALL_DIR!" rmdir /S /Q "!INSTALL_DIR!" >nul 2>&1
-    if exist "!OLD_INSTALL_DIR!" move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+    call :RemoveInstalledDirWithWarning
+    call :RestoreOldInstall
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
     echo ERROR: Failed to create qwen wrapper in !INSTALL_BIN_DIR!.
     exit /b 1
 )
 
-if exist "!OLD_INSTALL_DIR!" rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
+if exist "!OLD_INSTALL_DIR!" (
+    rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
+    if !ERRORLEVEL! NEQ 0 echo WARNING: Failed to remove old install backup: !OLD_INSTALL_DIR!
+)
 
 set "PATH=!INSTALL_BIN_DIR!;!PATH!"
 call :CreateSourceJson
@@ -618,6 +640,38 @@ if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
 
 echo SUCCESS: Qwen Code standalone archive installed successfully.
 echo INFO: Installed to !INSTALL_DIR!
+exit /b 0
+
+:CreateTempDir
+set "TEMP_DIR="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $dir = Join-Path $env:TEMP ('qwen-code-install-' + [IO.Path]::GetRandomFileName()); New-Item -ItemType Directory -Path $dir -ErrorAction Stop | Out-Null; [Console]::Write($dir)"`) do set "TEMP_DIR=%%I"
+if "!TEMP_DIR!"=="" (
+    echo ERROR: Failed to create a temporary directory.
+    exit /b 1
+)
+exit /b 0
+
+:ValidateArchiveContents
+set "QWEN_ARCHIVE_FILE=%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); try { foreach ($entry in $archive.Entries) { $name = $entry.FullName; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name.StartsWith('\') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)' -or $name.Contains('\')) { Write-Error ('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } finally { $archive.Dispose() }"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_ARCHIVE_FILE="
+if %PS_STATUS% NEQ 0 echo ERROR: Archive contains unsafe path entries.
+exit /b %PS_STATUS%
+
+:RemoveInstalledDirWithWarning
+if not exist "!INSTALL_DIR!" exit /b 0
+rmdir /S /Q "!INSTALL_DIR!" >nul 2>&1
+if !ERRORLEVEL! NEQ 0 echo WARNING: Failed to remove failed install directory: !INSTALL_DIR!
+exit /b 0
+
+:RestoreOldInstall
+if not exist "!OLD_INSTALL_DIR!" exit /b 0
+move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+if !ERRORLEVEL! NEQ 0 (
+    echo WARNING: Failed to restore previous install from !OLD_INSTALL_DIR! to !INSTALL_DIR!.
+    exit /b 1
+)
 exit /b 0
 
 :RejectArchiveLinks
