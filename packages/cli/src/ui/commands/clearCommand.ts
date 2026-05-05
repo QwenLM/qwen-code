@@ -12,26 +12,12 @@ import {
   SessionEndReason,
   SessionStartSource,
   ToolNames,
-  type Config,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
-
-function hasBlockingBackgroundWork(config: Config): boolean {
-  return (
-    config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
-    config.getMonitorRegistry().getRunning().length > 0 ||
-    config
-      .getBackgroundShellRegistry()
-      .getAll()
-      .some((entry) => entry.status === 'running')
-  );
-}
-
-function resetBackgroundStateForSessionSwitch(config: Config): void {
-  config.getBackgroundTaskRegistry().reset();
-  config.getMonitorRegistry().reset();
-  config.getBackgroundShellRegistry().reset();
-}
+import {
+  hasBlockingBackgroundWork,
+  resetBackgroundStateForSessionSwitch,
+} from '../utils/backgroundWorkUtils.js';
 
 export const clearCommand: SlashCommand = {
   name: 'clear',

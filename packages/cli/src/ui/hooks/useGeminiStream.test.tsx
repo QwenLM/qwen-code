@@ -37,6 +37,7 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 
 // --- MOCKS ---
 const mockSendMessageStream = vi
@@ -148,6 +149,9 @@ describe('useGeminiStream', () => {
 
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
+    vi.mocked(findLastSafeSplitPoint).mockImplementation(
+      (s: string) => s.length,
+    );
 
     mockAddItem = vi.fn();
     // Define the mock for getGeminiClient
@@ -1204,6 +1208,78 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('does not render leading blank content chunks as an empty assistant item', async () => {
+      vi.useFakeTimers();
+
+      let releaseNextChunk!: () => void;
+      const waitForNextChunk = new Promise<void>((resolve) => {
+        releaseNextChunk = resolve;
+      });
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      vi.mocked(findLastSafeSplitPoint).mockImplementation((s: string) =>
+        s.startsWith('\n\n') ? 2 : s.length,
+      );
+
+      const mockStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: '\n\n',
+        };
+        await waitForNextChunk;
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: '哈哈',
+        };
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([]);
+
+      await act(async () => {
+        releaseNextChunk();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini',
+          text: '哈哈',
+        }),
+      ]);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('buffers streamed thoughts until the throttle interval elapses', async () => {
       vi.useFakeTimers();
 
@@ -1238,6 +1314,77 @@ describe('useGeminiStream', () => {
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       expect(result.current.pendingHistoryItems).toEqual([]);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: 'Thinking',
+        }),
+      ]);
+      expect(result.current.thought).toEqual({ description: 'Thinking' });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('does not render leading blank thought chunks as an empty thought item', async () => {
+      vi.useFakeTimers();
+
+      let releaseNextChunk!: () => void;
+      const waitForNextChunk = new Promise<void>((resolve) => {
+        releaseNextChunk = resolve;
+      });
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      const mockStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Thought,
+          value: { description: '\n\n' },
+        };
+        await waitForNextChunk;
+        yield {
+          type: ServerGeminiEventType.Thought,
+          value: { description: 'Thinking' },
+        };
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([]);
+      expect(result.current.thought).toBeNull();
+
+      await act(async () => {
+        releaseNextChunk();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
 
       await act(async () => {
         vi.advanceTimersByTime(60);

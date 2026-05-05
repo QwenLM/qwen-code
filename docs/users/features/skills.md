@@ -89,13 +89,34 @@ Show concrete examples of using this Skill.
 
 Qwen Code currently validates that:
 
-- `name` is a non-empty string
+- `name` is a non-empty string matching `/^[\p{L}\p{N}_:.-]+$/u` — Unicode letters and digits (CJK / Cyrillic / accented Latin all OK), plus `_`, `:`, `.`, `-`. Whitespace, slashes, brackets and other structurally unsafe characters are rejected at parse time.
 - `description` is a non-empty string
 
-Recommended conventions (not strictly enforced yet):
+Recommended conventions:
 
-- Use lowercase letters, numbers, and hyphens in `name`
+- Prefer lowercase ASCII with hyphens for shareable names (e.g. `tsx-helper`)
 - Make `description` specific: include both **what** the Skill does and **when** to use it (key words users will naturally mention)
+
+### Optional: gate a Skill on file paths (`paths:`)
+
+For Skills that only matter to specific parts of a codebase, add a `paths:` list of glob patterns. The Skill stays out of the model's available-skills listing until a tool call touches a matching file:
+
+```yaml
+---
+name: tsx-helper
+description: React TSX component helper
+paths:
+  - 'src/**/*.tsx'
+  - 'packages/*/src/**/*.tsx'
+---
+```
+
+Notes:
+
+- Globs are matched relative to the project root with [picomatch](https://github.com/micromatch/picomatch); files outside the project root never trigger activation.
+- A path-gated Skill **stays activated for the rest of the session** once a matching file is touched. A new session, or a `refreshCache` triggered by editing any Skill file, resets activations.
+- `paths:` only gates **model** discovery, and only at the SkillTool listing level. You can always invoke a path-gated Skill yourself via `/<skill-name>` or the `/skills` picker — that user path runs the Skill body regardless of activation state. The model side, however, stays gated until a matching file is touched: a slash invocation does **not** unlock model-side activation, so if you want the model to chain off your invocation (call `Skill { skill: ... }` itself), also access a file matching the skill's `paths:` first.
+- Combining `paths:` with `disable-model-invocation: true` is allowed but the gate has no effect — the Skill is hidden from the model regardless, so path activation never advertises it.
 
 ## Add supporting files
 
@@ -144,6 +165,14 @@ To view available Skills, ask Qwen Code directly:
 
 ```text
 What Skills are available?
+```
+
+> **Heads up — model vs. user view.** Asking the model only surfaces Skills the model can currently see. If a Skill uses `paths:` (see "Optional: gate a Skill on file paths" above), it stays out of that listing until a matching file has been touched. The full set is always visible to you via the `/skills` slash command and on disk.
+
+Or browse the full list with the slash command (always shows every Skill, including path-gated ones that have not activated yet):
+
+```text
+/skills
 ```
 
 Or inspect the filesystem:

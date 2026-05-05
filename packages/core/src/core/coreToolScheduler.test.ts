@@ -26,11 +26,15 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '../index.js';
+import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
   convertToFunctionResponse,
+  extractToolFilePaths,
 } from './coreToolScheduler.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
@@ -4310,5 +4314,742 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     const msg = getLastErrorMessage(onToolCallsUpdate);
     expect(msg).toBeDefined();
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+});
+
+describe('extractToolFilePaths', () => {
+  // 'read_file' is the canonical FS tool name and is on the allowlist;
+  // most cases below use it so the field-extraction logic itself runs.
+  const FS_TOOL = 'read_file';
+
+  it('returns empty for non-object inputs', () => {
+    expect(extractToolFilePaths(FS_TOOL, undefined)).toEqual([]);
+    expect(extractToolFilePaths(FS_TOOL, null)).toEqual([]);
+    expect(extractToolFilePaths(FS_TOOL, 'string')).toEqual([]);
+    expect(extractToolFilePaths(FS_TOOL, 42)).toEqual([]);
+  });
+
+  it('extracts file_path (read-file / edit / write-file convention)', () => {
+    expect(extractToolFilePaths(FS_TOOL, { file_path: '/proj/a.ts' })).toEqual([
+      '/proj/a.ts',
+    ]);
+  });
+
+  it('extracts filePath for lsp (camelCase convention)', () => {
+    expect(extractToolFilePaths('lsp', { filePath: '/proj/b.ts' })).toEqual([
+      '/proj/b.ts',
+    ]);
+  });
+
+  it('extracts path for list_directory', () => {
+    expect(
+      extractToolFilePaths('list_directory', { path: '/proj/dir' }),
+    ).toEqual(['/proj/dir']);
+  });
+
+  it('drops empty / non-string file_path on read_file', () => {
+    expect(extractToolFilePaths(FS_TOOL, { file_path: '' })).toEqual([]);
+    expect(extractToolFilePaths(FS_TOOL, { file_path: undefined })).toEqual([]);
+    expect(extractToolFilePaths(FS_TOOL, { file_path: 42 })).toEqual([]);
+  });
+
+  it('ignores file_path with the wrong shape on read_file', () => {
+    expect(
+      extractToolFilePaths(FS_TOOL, { file_path: { not: 'a string' } }),
+    ).toEqual([]);
+  });
+
+  it('ignores irrelevant fields on the wrong tool', () => {
+    // Realistic per-tool dispatch: read_file does not look at `path`,
+    // `filePath`, or `paths`; grep_search does not look at `filePath`
+    // or `paths`. The previous generic extractor accepted everything for
+    // every FS tool — overly permissive given that the field names mean
+    // different things across tools.
+    expect(
+      extractToolFilePaths(FS_TOOL, {
+        file_path: '/correct',
+        path: '/wrong-for-read',
+        filePath: '/wrong-for-read',
+      }),
+    ).toEqual(['/correct']);
+    expect(
+      extractToolFilePaths('grep_search', {
+        filePath: '/wrong-for-grep',
+        paths: ['/wrong-for-grep'],
+      }),
+    ).toEqual([]);
+  });
+
+  it('extracts grep_search.glob as a path-shaped file filter', () => {
+    // GrepToolParams.glob is a path-shaped selector; `pattern` is a
+    // regex on contents and intentionally NOT extracted. Without this
+    // branch, `grep_search({ pattern: 'TODO', glob: 'src/**/*.ts' })`
+    // produces no candidate even though the call walks every file under
+    // `src/**/*.ts`.
+    expect(
+      extractToolFilePaths('grep_search', { glob: 'src/**/*.ts' }),
+    ).toEqual(['src/**/*.ts']);
+    expect(
+      extractToolFilePaths('grep_search', {
+        path: 'packages/core',
+        glob: '**/*.ts',
+        pattern: 'TODO|FIXME',
+      }),
+    ).toEqual(['packages/core', 'packages/core/**/*.ts']);
+  });
+
+  it('decodes file:// URIs for lsp via fileURLToPath', () => {
+    // Regression: LSP `filePath` is allowed to be a `file://` URI.
+    // Forwarding the URI as-is to the activation registry would never
+    // match a project-relative skill glob (the leading `file:///`
+    // never occurs inside project-relative path strings).
+    //
+    // Construct the URI from a real absolute path via `pathToFileURL`
+    // so the test is portable across POSIX and Windows: a hand-rolled
+    // `file:///proj/...` URI throws on Windows because there's no
+    // drive letter, which Node treats as a malformed file URL.
+    const absolutePath = path.resolve('/tmp/lsp-test/src/App.ts');
+    const fileUri = pathToFileURL(absolutePath).href;
+    expect(extractToolFilePaths('lsp', { filePath: fileUri })).toEqual([
+      absolutePath,
+    ]);
+  });
+
+  it('drops non-file URI schemes for lsp (http://, git://, etc.)', () => {
+    // Regression: forwarding `http://api/x` or `git://repo/foo` into
+    // the activation pipeline would let an LSP call against a
+    // non-file resource activate path-gated skills without the model
+    // having touched a real project file.
+    expect(extractToolFilePaths('lsp', { filePath: 'http://api/x' })).toEqual(
+      [],
+    );
+    expect(extractToolFilePaths('lsp', { filePath: 'git://repo/foo' })).toEqual(
+      [],
+    );
+  });
+
+  it('extracts callHierarchyItem.uri for lsp (incomingCalls / outgoingCalls)', () => {
+    // Regression: incomingCalls / outgoingCalls operate on
+    // `callHierarchyItem.uri`, NOT the top-level `filePath`. Following
+    // the call hierarchy through a project file would otherwise never
+    // contribute an activation candidate.
+    //
+    // Same portability concern as the filePath URI test above: build
+    // the URI from a real absolute path via pathToFileURL so the test
+    // works on both POSIX and Windows runners.
+    const absolutePath = path.resolve('/tmp/lsp-test/src/App.ts');
+    const fileUri = pathToFileURL(absolutePath).href;
+    expect(
+      extractToolFilePaths('lsp', {
+        method: 'incomingCalls',
+        callHierarchyItem: { uri: fileUri },
+      }),
+    ).toEqual([absolutePath]);
+    // Plain absolute path also accepted.
+    expect(
+      extractToolFilePaths('lsp', {
+        callHierarchyItem: { uri: absolutePath },
+      }),
+    ).toEqual([absolutePath]);
+    // Non-file URI on the item is also dropped.
+    expect(
+      extractToolFilePaths('lsp', {
+        callHierarchyItem: { uri: 'http://api/x' },
+      }),
+    ).toEqual([]);
+  });
+
+  it('extracts pattern for glob (path-shaped selector, glob-only)', () => {
+    // Regression: `glob({ pattern: 'src/**/*.tsx' })` with no `path` is a
+    // common shape that previously produced an empty candidate set, so a
+    // skill keyed on `paths: ['src/**/*.tsx']` would never activate from
+    // a glob call.
+    expect(extractToolFilePaths('glob', { pattern: 'src/**/*.tsx' })).toEqual([
+      'src/**/*.tsx',
+    ]);
+  });
+
+  it('joins glob.path + glob.pattern into the effective selector', () => {
+    // Regression: glob({ path: 'src', pattern: '**/*.ts' }) actually
+    // searches src/**/*.ts. Emitting them as separate candidates
+    // ('src', '**/*.ts') would NOT activate a skill keyed on
+    // `paths: ['src/**/*.ts']`, because neither component matches the
+    // skill glob in isolation. Join them with path.join so the
+    // effective-selector candidate reflects what the tool really
+    // touched. (The standalone `path` candidate is still emitted by the
+    // generic block above so a broad skill keyed on `paths: ['src/**']`
+    // still matches.)
+    expect(
+      extractToolFilePaths('glob', { path: 'src', pattern: '**/*.ts' }),
+    ).toEqual(['src', 'src/**/*.ts']);
+  });
+
+  it('joins absolute glob.path with pattern (registry guard rejects downstream)', () => {
+    // glob({ path: '/tmp/external', pattern: '**/*.ts' }) joins to an
+    // absolute path. SkillActivationRegistry's project-root guard
+    // rejects it; the test pins the joined shape so absolute roots
+    // stay distinguishable from project-relative ones.
+    expect(
+      extractToolFilePaths('glob', {
+        path: '/tmp/external',
+        pattern: '**/*.ts',
+      }),
+    ).toEqual(['/tmp/external', '/tmp/external/**/*.ts']);
+  });
+
+  it('preserves `..` in glob.pattern instead of normalizing it away', () => {
+    // Regression: `path.join('src', '../*.ts')` collapses to `*.ts`,
+    // losing the information that the glob escaped its `path` root and
+    // searched files at the parent level. Plain string concat keeps the
+    // selector verbatim so the registry can match against it as-is.
+    expect(
+      extractToolFilePaths('glob', { path: 'src', pattern: '../*.ts' }),
+    ).toEqual(['src', 'src/../*.ts']);
+  });
+
+  it('uses forward slashes regardless of host OS', () => {
+    // Regression: `path.join` is OS-aware — on Windows it emits
+    // backslashes and silently diverges from the forward-slash form
+    // the registry matches against. Plain concat with a literal `/`
+    // keeps the candidate cross-platform consistent.
+    expect(
+      extractToolFilePaths('glob', { path: 'src', pattern: '**/*.ts' }),
+    ).toEqual(['src', 'src/**/*.ts']);
+  });
+
+  it('trims a trailing slash on glob.path before concatenating', () => {
+    // Authors sometimes write `path: 'src/'`; we want one separator,
+    // not `src//pattern`.
+    expect(
+      extractToolFilePaths('glob', { path: 'src/', pattern: '**/*.ts' }),
+    ).toEqual(['src/', 'src/**/*.ts']);
+    // Same with a Windows-style trailing backslash.
+    expect(
+      extractToolFilePaths('glob', { path: 'src\\', pattern: '**/*.ts' }),
+    ).toEqual(['src\\', 'src/**/*.ts']);
+  });
+
+  it('does not extract pattern for non-glob tools', () => {
+    // Grep's `pattern` is a regex, not a path glob; treating it as a
+    // path would false-match. Pattern is only path-shaped for `glob`.
+    expect(
+      extractToolFilePaths('grep_search', {
+        pattern: 'TODO|FIXME',
+        path: 'src',
+      }),
+    ).toEqual(['src']);
+  });
+
+  it('canonicalizes legacy tool-name aliases before the allowlist check', () => {
+    // Regression: the tool registry resolves `replace` → `edit`,
+    // `search_file_content` → `grep_search`, etc. at execution time, so
+    // a model call like `replace({ file_path: 'src/App.tsx' })` actually
+    // runs EditTool. If the activation pipeline gates on the raw alias
+    // name, conditional rules and skill activation silently skip every
+    // tool call that uses a legacy name.
+    expect(
+      extractToolFilePaths('replace', { file_path: '/proj/a.ts' }),
+    ).toEqual(['/proj/a.ts']);
+    // search_file_content canonicalizes to grep_search; use its actual
+    // shape (`path` / `glob`).
+    expect(
+      extractToolFilePaths('search_file_content', { path: 'src' }),
+    ).toEqual(['src']);
+  });
+
+  it('returns empty for tool names outside the FS allowlist', () => {
+    // Regression: MCP tools and other non-FS tools that happen to use
+    // `path` / `paths` for non-filesystem semantics (e.g. URL routes,
+    // JSON keys) must not feed those values into the activation pipeline.
+    expect(
+      extractToolFilePaths('mcp_some_tool', {
+        path: 'https://api.example.com/users/123',
+      }),
+    ).toEqual([]);
+    expect(
+      extractToolFilePaths('web_fetch', {
+        paths: ['https://x.example.com', 'a.com/b'],
+      }),
+    ).toEqual([]);
+    expect(extractToolFilePaths('skill', { skill: 'review' })).toEqual([]);
+  });
+});
+
+describe('CoreToolScheduler activation wiring', () => {
+  // Integration coverage for the scheduler-side hook that ties
+  // extractToolFilePaths → matchAndActivateByPaths → system-reminder
+  // append. Unit tests on extractToolFilePaths alone don't catch
+  // wiring regressions (e.g. forgetting the await, dropping the
+  // SkillTool gate, posting the reminder before the listener chain
+  // settled).
+
+  function buildSchedulerWithSkillManager(opts: {
+    matchAndActivateByPaths: ReturnType<typeof vi.fn>;
+    skillToolPresent: boolean;
+  }): {
+    scheduler: CoreToolScheduler;
+    onAllToolCallsComplete: ReturnType<typeof vi.fn>;
+  } {
+    const fsTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      }),
+    });
+    const mockToolRegistry = {
+      // Return the fs tool when asked by name; for SkillTool, mirror the
+      // configured presence so the scheduler's reminder gate sees what
+      // the test wants.
+      getTool: (n: string) => {
+        if (n === ToolNames.SKILL)
+          return opts.skillToolPresent ? fsTool : undefined;
+        return fsTool;
+      },
+      ensureTool: async () => fsTool,
+      getToolByName: () => fsTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => fsTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getConditionalRulesRegistry: () => undefined,
+      getSkillManager: () => ({
+        matchAndActivateByPaths: opts.matchAndActivateByPaths,
+      }),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    return { scheduler, onAllToolCallsComplete };
+  }
+
+  function getResponseText(call: ToolCall): string {
+    const r = call as unknown as {
+      response?: { responseParts?: unknown };
+    };
+    return JSON.stringify(r.response?.responseParts ?? null);
+  }
+
+  it('invokes matchAndActivateByPaths with extracted candidates and appends the reminder when SkillTool is present', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(matchAndActivateByPaths).toHaveBeenCalledWith(['/proj/src/App.tsx']);
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    const responseText = getResponseText(completed[0]);
+    expect(responseText).toContain('tsx-helper');
+    expect(responseText).toContain('now available via the Skill tool');
+  });
+
+  it('suppresses the activation reminder when SkillTool is absent (subagent without skill in toolslist)', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // Activation registry still mutates (correct — model in another
+    // context might want it), but the reminder is suppressed for this
+    // subagent's tool result because invoking the announced skill from
+    // here would fail.
+    expect(matchAndActivateByPaths).toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const responseText = getResponseText(completed[0]);
+    expect(responseText).not.toContain('now available via the Skill tool');
+    expect(responseText).not.toContain('tsx-helper');
+  });
+
+  it('coalesces rules + activation reminders into a single <system-reminder> envelope', async () => {
+    // Regression: previously each matching rule emitted its own
+    // `<system-reminder>` and skill activation emitted another — a
+    // multi-path tool could produce N+1 envelopes. Coalesce so the
+    // model gets one block per tool call.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const rulesRegistry = {
+      matchAndConsume: vi
+        .fn()
+        .mockReturnValueOnce('Rule 1 body.')
+        .mockReturnValueOnce('Rule 2 body.'),
+    };
+
+    const grepTool = new MockTool({
+      name: ToolNames.GREP,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'grep results',
+        returnDisplay: 'grep results',
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: () => grepTool,
+      ensureTool: async () => grepTool,
+      getToolByName: () => grepTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => grepTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getConditionalRulesRegistry: () => rulesRegistry,
+      getSkillManager: () => ({ matchAndActivateByPaths }),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // grep_search with `path` + `glob` produces TWO candidate paths
+    // (the search root and the joined effective selector), so the
+    // rules registry gets two matchAndConsume calls and two reminder
+    // blocks. Plus one for skill activation = three blocks; coalesce
+    // into a single envelope.
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.GREP,
+          args: { pattern: 'TODO', path: 'src', glob: '**/*.ts' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const responseText = JSON.stringify(
+      (completed[0] as unknown as { response?: { responseParts?: unknown } })
+        .response?.responseParts ?? null,
+    );
+    // All three reminder blocks land but inside ONE envelope.
+    const envelopeCount = (responseText.match(/<system-reminder>/g) || [])
+      .length;
+    expect(envelopeCount).toBe(1);
+    expect(responseText).toContain('Rule 1 body.');
+    expect(responseText).toContain('Rule 2 body.');
+    expect(responseText).toContain('tsx-helper');
+  });
+
+  it('escapes activated skill names in the activation reminder', async () => {
+    // Regression: validateSkillName excludes `<>&` for parsed skills,
+    // but extension skills bypass it. A crafted extension name would
+    // otherwise close the <system-reminder> envelope early when emitted
+    // as part of "skill X is now available".
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['evil<inject>']);
+
+    const fsTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: () => fsTool,
+      ensureTool: async () => fsTool,
+      getToolByName: () => fsTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => fsTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getConditionalRulesRegistry: () => undefined,
+      getSkillManager: () => ({ matchAndActivateByPaths }),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/a.ts' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const responseText = JSON.stringify(
+      (completed[0] as unknown as { response?: { responseParts?: unknown } })
+        .response?.responseParts ?? null,
+    );
+    expect(responseText).toContain('evil&lt;inject&gt;');
+    // Raw tag must NOT appear (would close the envelope early).
+    expect(responseText).not.toContain('evil<inject>');
+  });
+
+  it('scrubs literal </system-reminder> in rule content to prevent envelope breakout', async () => {
+    // A rule body containing literal `</system-reminder>` (e.g. a
+    // documentation rule about how reminders work) would close our
+    // envelope early. Scrub the closing-tag literal — minimal escape
+    // needed to keep the wrapper intact, without mangling code blocks.
+    const rulesRegistry = {
+      matchAndConsume: vi
+        .fn()
+        .mockReturnValueOnce(
+          'Rule about reminders: never write </system-reminder> in your output.',
+        ),
+    };
+
+    const fsTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: () => fsTool,
+      ensureTool: async () => fsTool,
+      getToolByName: () => fsTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => fsTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getConditionalRulesRegistry: () => rulesRegistry,
+      getSkillManager: () => ({
+        matchAndActivateByPaths: vi.fn().mockResolvedValue([]),
+      }),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/a.ts' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const responseText = JSON.stringify(
+      (completed[0] as unknown as { response?: { responseParts?: unknown } })
+        .response?.responseParts ?? null,
+    );
+    // Exactly one closing tag — the envelope's. The literal in the
+    // body is rewritten to <\/system-reminder> so it doesn't close
+    // the wrapper.
+    const closeCount = (responseText.match(/<\/system-reminder>/g) || [])
+      .length;
+    expect(closeCount).toBe(1);
+    // The rewritten form of the body literal still appears verbatim
+    // (escaped form), so the rule content survives.
+    expect(responseText).toContain('<\\\\/system-reminder>');
+  });
+
+  it('does not call matchAndActivateByPaths for non-FS tools', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue([]);
+    const { scheduler } = buildSchedulerWithSkillManager({
+      matchAndActivateByPaths,
+      skillToolPresent: true,
+    });
+
+    // Use a tool name outside FS_PATH_TOOL_NAMES; the mock fsTool above
+    // is registered under read_file, but the scheduler will look up by
+    // request.name. We override request.name to a non-FS name and
+    // confirm the activation hook never fires.
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'web_fetch',
+          args: { url: 'https://example.com' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(matchAndActivateByPaths).not.toHaveBeenCalled();
   });
 });

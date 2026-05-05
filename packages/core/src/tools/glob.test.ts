@@ -361,6 +361,22 @@ describe('GlobTool', () => {
         'Path is not a directory',
       );
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped path',
+      async () => {
+        // Create a directory with a space so the unescaped path exists
+        const dirWithSpace = path.join(tempRootDir, 'sub dir');
+        await fs.mkdir(dirWithSpace);
+        const params: GlobToolParams = {
+          pattern: '*.ts',
+          path: path.join(tempRootDir, 'sub\\ dir'),
+        };
+        expect(globTool.validateToolParams(params)).toBeNull();
+        // Path should be normalized in place
+        expect(params.path).toBe(dirWithSpace);
+      },
+    );
   });
 
   describe('workspace boundary validation', () => {

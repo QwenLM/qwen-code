@@ -16,6 +16,7 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('MONITOR_REGISTRY');
 
@@ -23,18 +24,6 @@ const EVENT_LINE_TRUNCATE = 2000;
 const MAX_DESCRIPTION_LENGTH = 80;
 export const MAX_CONCURRENT_MONITORS = 16;
 export const MAX_RETAINED_TERMINAL_MONITORS = 128;
-
-function escapeXml(text: string): string {
-  // Escape all five XML metacharacters. `"` and `'` are not strictly
-  // required in element content today, but escaping them defensively keeps
-  // the helper safe to reuse in any future attribute context.
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
 
 /**
  * Strip C0 control characters (except tab) and C1 control characters from a
@@ -193,8 +182,11 @@ export class MonitorRegistry {
         `Monitor ${monitorId} reached max events (${entry.maxEvents}), stopping`,
       );
       // Persist the reason so the dialog's detail view can surface it
-      // after the monitor terminates (the chat-history notification is
-      // separate and not visible from /tasks dialog reopens).
+      // after the monitor terminates. The chat-history notification is
+      // separate from the registry's persistent state, so reopening the
+      // Background tasks dialog or running `/tasks` later won't surface
+      // it on its own — the persisted `entry.error` is what those
+      // surfaces actually read.
       entry.error = 'Max events reached';
       this.settle(entry, 'completed');
       entry.abortController.abort();

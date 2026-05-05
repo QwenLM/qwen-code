@@ -390,6 +390,26 @@ describe('MonitorTool', () => {
         'Monitor(tail -f /tmp/app.log)',
       ]);
     });
+
+    it('keeps sub-command in confirmation scope when AST read-only check fails', async () => {
+      mockIsShellCommandReadOnlyAST.mockRejectedValueOnce(
+        new Error('AST parse failure'),
+      );
+
+      const invocation = createInvocation({
+        command: 'tail -f /tmp/app.log',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        permissionRules?: string[];
+      };
+
+      // Sub-command should still be in confirmation scope (not dropped)
+      expect(details.permissionRules).toBeDefined();
+      expect(details.permissionRules!.length).toBeGreaterThan(0);
+    });
   });
 
   describe('getDefaultPermission', () => {
@@ -983,6 +1003,30 @@ describe('MonitorTool', () => {
       expect(all[0].status).toBe('failed');
     });
 
+    it('settles as completed when exit and close both report null code and null signal', async () => {
+      const callback = vi.fn();
+      monitorRegistry.setNotificationCallback(callback);
+
+      const invocation = createInvocation({
+        command: 'some-cmd',
+      });
+
+      await invocation.execute(new AbortController().signal);
+      mockChild._emitExit(null, null);
+      mockChild._emitClose(null, null);
+
+      const all = monitorRegistry.getAll();
+      expect(all[0].status).toBe('completed');
+      // Terminal notification should not include a result tag (exitCode is null)
+      const terminalCall = callback.mock.calls.find(
+        (args) =>
+          typeof args[1] === 'string' &&
+          (args[1] as string).includes('<status>completed</status>'),
+      );
+      expect(terminalCall).toBeDefined();
+      expect(terminalCall![1]).not.toContain('<result>');
+    });
+
     it('does not kill monitor on turn signal abort', async () => {
       const turnAc = new AbortController();
       const invocation = createInvocation({
@@ -1225,6 +1269,56 @@ describe('MonitorTool', () => {
       } finally {
         monitorRegistry.abortAll({ notify: false });
         vi.useRealTimers();
+      }
+    });
+
+    it('recovers token bucket when clock moves backwards (suspend/resume)', async () => {
+      const realDateNow = Date.now;
+      let mockTime = 0;
+      Date.now = () => mockTime;
+      try {
+        mockTime = 0;
+        const callback = vi.fn();
+        monitorRegistry.setNotificationCallback(callback);
+
+        const invocation = createInvocation({ command: 'noisy-cmd' });
+        await invocation.execute(new AbortController().signal);
+
+        // Burn the entire burst at t=0.
+        mockChild.stdout.emit('data', Buffer.from('l1\nl2\nl3\nl4\nl5\n'));
+        expect(callback).toHaveBeenCalledTimes(5);
+
+        // Advance to t=5000, drain 5 refilled tokens, then confirm bucket
+        // is empty by emitting a line that gets dropped.
+        mockTime = 5000;
+        mockChild.stdout.emit('data', Buffer.from('l6\nl7\nl8\nl9\nl10\n'));
+        expect(callback).toHaveBeenCalledTimes(10);
+        mockChild.stdout.emit('data', Buffer.from('l11\n'));
+        expect(callback).toHaveBeenCalledTimes(10); // l11 dropped
+
+        // Simulate clock going backwards (suspend/resume, NTP rollback).
+        // At this point lastRefill=5000. Setting time to 2000 makes
+        // elapsed = 2000-5000 = -3000. Without the guard, the bucket
+        // stays starved. With the guard, lastRefill resets to 2000.
+        mockTime = 2000;
+
+        // Emit while clock is in the past — guard has just reset
+        // lastRefill to 2000, so elapsed = 0, no refill, bucket still 0.
+        // l12a is dropped (confirming bucket is empty after the reset).
+        mockChild.stdout.emit('data', Buffer.from('l12a\n'));
+        expect(callback).toHaveBeenCalledTimes(10);
+
+        // Advance 1s past the reset point — one token refills.
+        mockTime = 3000;
+        mockChild.stdout.emit('data', Buffer.from('l12b\n'));
+        expect(callback).toHaveBeenCalledTimes(11);
+
+        // This final assertion is the regression check: without the guard,
+        // lastRefill would still be 5000, elapsed = 3000-5000 = -2000,
+        // and l12b would be dropped (callback still 10).
+      } finally {
+        Date.now = realDateNow;
+        monitorRegistry.abortAll({ notify: false });
       }
     });
   });

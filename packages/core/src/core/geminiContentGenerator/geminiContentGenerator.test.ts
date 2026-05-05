@@ -206,6 +206,32 @@ describe('GeminiContentGenerator', () => {
     );
   });
 
+  it("maps reasoning effort 'max' to HIGH (Gemini has no higher tier)", async () => {
+    // 'max' is a DeepSeek-specific extension. Gemini caps at HIGH, so the
+    // converter must clamp instead of falling through to UNSPECIFIED.
+    const generatorWithMax = new GeminiContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-2.5-pro',
+      reasoning: { effort: 'max' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await generatorWithMax.generateContent(
+      { model: 'gemini-2.5-pro', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: 'HIGH',
+          },
+        }),
+      }),
+    );
+  });
+
   it('should strip displayName from inlineData and fileData before sending to API', async () => {
     const request = {
       model: 'gemini-1.5-flash',
