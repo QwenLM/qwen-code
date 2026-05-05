@@ -5,57 +5,152 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { BackgroundTaskEntry } from '@qwen-code/qwen-code-core';
+import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
 import { getPillLabel } from './BackgroundTasksPill.js';
 
-function entry(overrides: Partial<BackgroundTaskEntry>): BackgroundTaskEntry {
+function agentEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
   return {
+    kind: 'agent',
     agentId: 'a',
     description: 'desc',
     status: 'running',
     startTime: 0,
     abortController: new AbortController(),
     ...overrides,
-  };
+  } as DialogEntry;
+}
+
+function shellEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
+  return {
+    kind: 'shell',
+    shellId: 'bg_x',
+    command: 'sleep 60',
+    cwd: '/tmp',
+    status: 'running',
+    startTime: 0,
+    outputPath: '/tmp/x.out',
+    abortController: new AbortController(),
+    ...overrides,
+  } as DialogEntry;
+}
+
+function monitorEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
+  return {
+    kind: 'monitor',
+    monitorId: 'mon-1',
+    command: 'tail -f app.log',
+    description: 'watch app logs',
+    status: 'running',
+    startTime: 0,
+    abortController: new AbortController(),
+    eventCount: 0,
+    lastEventTime: 0,
+    maxEvents: 1000,
+    idleTimeoutMs: 300_000,
+    droppedLines: 0,
+    ...overrides,
+  } as DialogEntry;
 }
 
 describe('getPillLabel', () => {
   it('uses singular form for one running agent', () => {
-    expect(getPillLabel([entry({ agentId: 'a' })])).toBe('1 local agent');
+    expect(getPillLabel([agentEntry({ agentId: 'a' })])).toBe('1 local agent');
   });
 
   it('uses plural form for multiple running agents', () => {
     expect(
       getPillLabel([
-        entry({ agentId: 'a' }),
-        entry({ agentId: 'b' }),
-        entry({ agentId: 'c' }),
+        agentEntry({ agentId: 'a' }),
+        agentEntry({ agentId: 'b' }),
+        agentEntry({ agentId: 'c' }),
       ]),
     ).toBe('3 local agents');
+  });
+
+  it('uses singular form for one running shell', () => {
+    expect(getPillLabel([shellEntry({ shellId: 'bg_a' })])).toBe('1 shell');
+  });
+
+  it('uses plural form for multiple running shells', () => {
+    expect(
+      getPillLabel([
+        shellEntry({ shellId: 'bg_a' }),
+        shellEntry({ shellId: 'bg_b' }),
+      ]),
+    ).toBe('2 shells');
+  });
+
+  it('groups by kind when both kinds are running, shells first', () => {
+    expect(
+      getPillLabel([
+        agentEntry({ agentId: 'a' }),
+        shellEntry({ shellId: 'bg_a' }),
+        shellEntry({ shellId: 'bg_b' }),
+      ]),
+    ).toBe('2 shells, 1 local agent');
+  });
+
+  it('uses singular form for one running monitor', () => {
+    expect(getPillLabel([monitorEntry({ monitorId: 'mon-a' })])).toBe(
+      '1 monitor',
+    );
+  });
+
+  it('uses plural form for multiple running monitors', () => {
+    expect(
+      getPillLabel([
+        monitorEntry({ monitorId: 'mon-a' }),
+        monitorEntry({ monitorId: 'mon-b' }),
+      ]),
+    ).toBe('2 monitors');
+  });
+
+  it('groups all three kinds with shells → agents → monitors order', () => {
+    expect(
+      getPillLabel([
+        agentEntry({ agentId: 'a' }),
+        shellEntry({ shellId: 'bg_a' }),
+        monitorEntry({ monitorId: 'mon-a' }),
+        monitorEntry({ monitorId: 'mon-b' }),
+      ]),
+    ).toBe('1 shell, 1 local agent, 2 monitors');
+  });
+
+  it('counts only running entries when monitors mix with terminal entries', () => {
+    expect(
+      getPillLabel([
+        monitorEntry({ monitorId: 'mon-a', status: 'running' }),
+        monitorEntry({ monitorId: 'mon-b', status: 'completed' }),
+        monitorEntry({ monitorId: 'mon-c', status: 'cancelled' }),
+      ]),
+    ).toBe('1 monitor');
   });
 
   it('counts only running entries when running and terminal mix', () => {
     expect(
       getPillLabel([
-        entry({ agentId: 'a', status: 'running' }),
-        entry({ agentId: 'b', status: 'completed' }),
-        entry({ agentId: 'c', status: 'cancelled' }),
+        agentEntry({ agentId: 'a', status: 'running' }),
+        agentEntry({ agentId: 'b', status: 'completed' }),
+        shellEntry({ shellId: 'bg_a', status: 'cancelled' }),
       ]),
     ).toBe('1 local agent');
   });
 
-  it('uses singular done form for one terminal-only entry', () => {
-    expect(getPillLabel([entry({ agentId: 'a', status: 'completed' })])).toBe(
-      '1 local agent done',
+  it('uses paused form when only paused entries remain', () => {
+    expect(getPillLabel([agentEntry({ agentId: 'a', status: 'paused' })])).toBe(
+      '1 local agent paused',
     );
   });
 
-  it('uses plural done form when all entries are terminal', () => {
+  it('uses generic done form when all entries are terminal', () => {
+    expect(
+      getPillLabel([agentEntry({ agentId: 'a', status: 'completed' })]),
+    ).toBe('1 task done');
     expect(
       getPillLabel([
-        entry({ agentId: 'a', status: 'completed' }),
-        entry({ agentId: 'b', status: 'failed' }),
+        agentEntry({ agentId: 'a', status: 'completed' }),
+        shellEntry({ shellId: 'bg_a', status: 'failed' }),
       ]),
-    ).toBe('2 local agents done');
+    ).toBe('2 tasks done');
   });
 });

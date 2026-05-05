@@ -9,7 +9,7 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
-import { resolveAndValidatePath } from '../utils/paths.js';
+import { resolveAndValidatePath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
@@ -424,6 +424,7 @@ export class RipGrepTool extends BaseDeclarativeTool<
 
     // Only validate path if one is provided
     if (params.path) {
+      params.path = unescapePath(params.path.trim());
       try {
         resolveAndValidatePath(this.config, params.path, {
           allowFiles: true,

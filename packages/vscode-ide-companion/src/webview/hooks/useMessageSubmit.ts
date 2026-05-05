@@ -101,8 +101,11 @@ export const useMessageSubmit = ({
         return;
       }
 
-      // Handle /login command - show inline loading while extension authenticates
-      if (textToSend.trim() === '/login') {
+      // Handle /auth (and its legacy alias /login) — trigger interactive
+      // auth flow directly in the extension instead of sending the command
+      // to the agent.
+      const trimmedInput = textToSend.trim();
+      if (trimmedInput === '/auth' || trimmedInput === '/login') {
         setInputText('');
         if (inputFieldRef.current) {
           inputFieldRef.current.textContent = ZERO_WIDTH_SPACE;
@@ -112,7 +115,6 @@ export const useMessageSubmit = ({
           type: 'auth',
           data: {},
         });
-        // Show a friendly loading message in the chat while authenticating
         try {
           messageHandling.setWaitingForResponse('Authenticating Qwen Code...');
         } catch (_err) {

@@ -22,6 +22,7 @@ describe('SettingsSchema', () => {
         'ide',
         'privacy',
         'telemetry',
+        'proxy',
         'model',
         'context',
         'tools',
@@ -117,6 +118,15 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().tools.properties.sandboxImage.default).toBe(
         undefined,
       );
+    });
+
+    it('should have top-level proxy setting in schema', () => {
+      expect(getSettingsSchema().proxy).toBeDefined();
+      expect(getSettingsSchema().proxy.type).toBe('string');
+      expect(getSettingsSchema().proxy.category).toBe('Advanced');
+      expect(getSettingsSchema().proxy.requiresRestart).toBe(true);
+      expect(getSettingsSchema().proxy.default).toBe(undefined);
+      expect(getSettingsSchema().proxy.showInDialog).toBe(false);
     });
 
     it('should have unique categories', () => {
@@ -241,6 +251,7 @@ describe('SettingsSchema', () => {
           includeDirectories: ['/path/to/dir'],
           loadFromIncludeDirectories: true,
         },
+        proxy: 'http://localhost:7890',
       };
 
       // TypeScript should not complain about these properties
@@ -248,6 +259,7 @@ describe('SettingsSchema', () => {
       expect(settings.ui?.renderMode).toBe('raw');
       expect(settings.context?.includeDirectories).toEqual(['/path/to/dir']);
       expect(settings.context?.loadFromIncludeDirectories).toBe(true);
+      expect(settings.proxy).toBe('http://localhost:7890');
     });
 
     it('should have includeDirectories setting in schema', () => {

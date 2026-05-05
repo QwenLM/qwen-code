@@ -287,6 +287,17 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
+  proxy: {
+    type: 'string',
+    label: 'Proxy',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as string | undefined,
+    description:
+      'Proxy URL for CLI HTTP requests. Takes precedence over proxy environment variables when --proxy is not provided.',
+    showInDialog: false,
+  },
+
   general: {
     type: 'object',
     label: 'General',
@@ -978,6 +989,25 @@ const SETTINGS_SCHEMA = {
         },
       },
     },
+  },
+
+  modelPricing: {
+    type: 'object',
+    label: 'Model Pricing',
+    category: 'Model',
+    requiresRestart: false,
+    default: undefined as
+      | Record<
+          string,
+          {
+            inputPerMillionTokens?: number;
+            outputPerMillionTokens?: number;
+          }
+        >
+      | undefined,
+    description:
+      'Optional per-model pricing for cost estimation in /stats model. Example: {"qwen3-coder": {"inputPerMillionTokens": 0.30, "outputPerMillionTokens": 1.20}}',
+    showInDialog: false,
   },
 
   context: {

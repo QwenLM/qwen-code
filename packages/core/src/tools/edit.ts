@@ -17,7 +17,7 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
+import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -420,6 +420,25 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         });
       }
 
+      // Mark the cache entry written, capturing the post-write stats
+      // so a follow-up Read sees `lastReadAt < lastWriteAt` and falls
+      // through to the full pipeline instead of returning the
+      // pre-edit placeholder. Best-effort: a stat failure here does
+      // not undo the successful write — the next Read will simply
+      // re-stat and treat the cache entry as stale.
+      try {
+        const postWriteStats = fs.statSync(this.params.file_path);
+        this.config
+          .getFileReadCache()
+          .recordWrite(this.params.file_path, postWriteStats);
+      } catch {
+        // Non-fatal: leaving a stale entry is preferable to failing
+        // the user-visible Edit on a transient stat failure. The
+        // entry's mtime/size still does not match the on-disk bytes
+        // post-write, so the next ReadFile will report stale and
+        // refresh the entry.
+      }
+
       const fileName = path.basename(this.params.file_path);
       const originallyProposedContent =
         this.params.ai_proposed_content || editData.newContent;
@@ -572,6 +591,10 @@ Expectation for required parameters:
   protected override validateToolParamValues(
     params: EditToolParams,
   ): string | null {
+    // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
+    // that may reach the LLM via at-completion or manual typing.
+    params.file_path = unescapePath(params.file_path.trim());
+
     if (!params.file_path) {
       return "The 'file_path' parameter must be non-empty.";
     }

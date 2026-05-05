@@ -45,6 +45,10 @@ jobs:
         run: |-
           npm run build
 
+      - name: 'Bundle CLI for E2E tests'
+        run: |-
+          npm run bundle
+
       - name: 'Set up Docker'
         if: |-
           ${{ matrix.sandbox == 'sandbox:docker' }}
@@ -102,6 +106,10 @@ jobs:
       - name: 'Build project'
         run: |-
           npm run build
+
+      - name: 'Bundle CLI for E2E tests'
+        run: |-
+          npm run bundle
 
       - name: 'Run E2E tests'
         env:

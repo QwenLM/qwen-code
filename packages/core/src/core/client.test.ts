@@ -400,6 +400,9 @@ describe('Gemini Client (client.ts)', () => {
         warn: vi.fn(),
         error: vi.fn(),
       }),
+      getFileReadCache: vi.fn().mockReturnValue({
+        clear: vi.fn(),
+      }),
     } as unknown as Config;
 
     client = new GeminiClient(mockConfig);
@@ -454,7 +457,137 @@ describe('Gemini Client (client.ts)', () => {
       expect(newHistory.length).toBe(initialHistory.length);
       expect(JSON.stringify(newHistory)).not.toContain('some old message');
     });
+
+    it('clears the FileReadCache so post-reset Reads re-emit content', async () => {
+      const cacheClear = mockFileReadCacheClear();
+
+      await client.resetChat();
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
   });
+
+  describe('history mutation invalidates FileReadCache', () => {
+    it('setHistory clears the cache', () => {
+      const cacheClear = mockFileReadCacheClear();
+      client['chat'] = {
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+
+      client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    /**
+     * Test helper: mock a GeminiChat whose history length goes from
+     * `before` to `after` across truncateHistory(). The first
+     * getHistoryLength() call (pre-truncate) returns `before`; the
+     * second (post-truncate) returns `after`.
+     */
+    function mockChatWithLengths(before: number, after: number): GeminiChat {
+      return {
+        getHistoryLength: vi
+          .fn()
+          .mockReturnValueOnce(before)
+          .mockReturnValueOnce(after),
+        truncateHistory: vi.fn(),
+      } as unknown as GeminiChat;
+    }
+
+    it('truncateHistory clears the cache when entries are actually removed', () => {
+      const cacheClear = mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(3, 2);
+
+      client.truncateHistory(2);
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('truncateHistory does NOT clear the cache when nothing was removed (keepCount >= history length)', () => {
+      const cacheClear = mockFileReadCacheClear();
+
+      // keepCount equals history length — nothing dropped.
+      client['chat'] = mockChatWithLengths(2, 2);
+      client.truncateHistory(2);
+      expect(cacheClear).not.toHaveBeenCalled();
+
+      // keepCount exceeds history length — also a no-op.
+      client['chat'] = mockChatWithLengths(2, 2);
+      client.truncateHistory(99);
+      expect(cacheClear).not.toHaveBeenCalled();
+    });
+
+    it('truncateHistory clears the cache when a non-finite keepCount empties history (NaN regression)', () => {
+      // slice(0, NaN) returns [], but `NaN < prevLen` evaluates to
+      // false. Comparing the actual post-truncate length closes that
+      // hole — without this guard the cache would survive a history
+      // wipe and the file_unchanged placeholder bug returns.
+      const cacheClear = mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(3, 0);
+
+      client.truncateHistory(NaN);
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('truncateHistory uses O(1) getHistoryLength, not getHistory (avoids structuredClone)', () => {
+      mockFileReadCacheClear();
+      const getHistoryLength = vi.fn().mockReturnValue(5);
+      const getHistory = vi.fn();
+      client['chat'] = {
+        getHistoryLength,
+        getHistory,
+        truncateHistory: vi.fn(),
+      } as unknown as GeminiChat;
+
+      client.truncateHistory(3);
+
+      expect(getHistoryLength).toHaveBeenCalled();
+      expect(getHistory).not.toHaveBeenCalled();
+    });
+
+    it('retry strips orphaned trailing user entries and clears the cache', async () => {
+      const cacheClear = mockFileReadCacheClear();
+      const stripOrphanedUserEntriesFromHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripOrphanedUserEntriesFromHistory,
+      } as unknown as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'retry' }],
+        new AbortController().signal,
+        'prompt-retry-1',
+        { type: SendMessageType.Retry },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(cacheClear).toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Test helper: replace mockConfig.getFileReadCache to return a stub
+   * whose clear() is a fresh spy. Returned spy lets tests assert on
+   * whether a code path invalidated the cache.
+   */
+  function mockFileReadCacheClear(): ReturnType<typeof vi.fn> {
+    const clearMock = vi.fn();
+    vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+      clear: clearMock,
+    } as unknown as ReturnType<Config['getFileReadCache']>);
+    return clearMock;
+  }
 
   describe('thinking block idle cleanup and latch', () => {
     let mockChat: Partial<GeminiChat>;
@@ -471,7 +604,6 @@ describe('Gemini Client (client.ts)', () => {
       mockChat = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
     });
@@ -504,6 +636,100 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('microcompaction FileReadCache invalidation', () => {
+    function makeReadFileResponses(count: number): Content[] {
+      const out: Content[] = [];
+      for (let i = 0; i < count; i++) {
+        out.push({
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: `/x/${i}.ts` },
+              },
+            },
+          ],
+        });
+        out.push({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: `content of ${i}` },
+              },
+            },
+          ],
+        });
+      }
+      return out;
+    }
+
+    beforeEach(() => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+    });
+
+    it('clears the cache after microcompaction strips old read_file results', async () => {
+      // Default test fixture: toolResultsThresholdMinutes = 60,
+      // toolResultsNumToKeep = 5. Six read_file results + a 90-minute
+      // idle gap means the oldest one gets cleared, so the if-meta
+      // branch in sendMessageStream fires and must invalidate the cache.
+      const cacheClear = mockFileReadCacheClear();
+
+      const history = makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-1',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('does not clear the cache when the idle gap is below the threshold', async () => {
+      const cacheClear = mockFileReadCacheClear();
+
+      const history = makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      // Recent activity — microcompaction must not fire.
+      client['lastApiCompletionTimestamp'] = Date.now() - 30 * 1000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-2',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(cacheClear).not.toHaveBeenCalled();
+    });
+  });
+
   describe('tryCompressChat', () => {
     const mockGetHistory = vi.fn();
 
@@ -512,8 +738,6 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: mockGetHistory,
         addHistory: vi.fn(),
         setHistory: vi.fn(),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       } as unknown as GeminiChat;
     });
 
@@ -534,8 +758,6 @@ describe('Gemini Client (client.ts)', () => {
       const mockOriginalChat: Partial<GeminiChat> = {
         getHistory: vi.fn((_curated?: boolean) => chatHistory),
         setHistory: vi.fn(),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockOriginalChat as GeminiChat;
 
@@ -1227,8 +1449,6 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       } as unknown as GeminiChat;
       client['chat'] = mockChat;
 
@@ -1283,8 +1503,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1340,8 +1558,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1400,7 +1616,6 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1463,7 +1678,6 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1519,7 +1733,6 @@ hello
           { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
           { role: 'model', parts: [{ text: 'Done' }] },
         ]),
-        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1583,8 +1796,6 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1623,8 +1834,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1669,8 +1878,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1758,8 +1965,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1816,8 +2021,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1898,8 +2101,6 @@ Other open files:
             .mockReturnValue([
               { role: 'user', parts: [{ text: 'previous message' }] },
             ]),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
       });
@@ -2152,8 +2353,6 @@ Other open files:
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]), // Default empty history
           setHistory: vi.fn(),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -2492,8 +2691,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2530,8 +2727,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2571,8 +2766,6 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        stripThoughtsFromHistory: vi.fn(),
-        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2596,8 +2789,6 @@ Other open files:
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           setHistory: vi.fn(),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
@@ -2629,8 +2820,6 @@ Other open files:
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           setHistory: vi.fn(),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
@@ -2674,8 +2863,6 @@ Other open files:
         mockChat = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
-          stripThoughtsFromHistory: vi.fn(),
-          stripThoughtsFromHistoryKeepRecent: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
       });
