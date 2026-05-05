@@ -70,23 +70,43 @@ export interface Attachment {
 
 const debugLogger = createDebugLogger('INPUT_PROMPT');
 const EXPORT_COMMAND_INPUT = '/export';
+// Static fallback list used only during early renders before slashCommands
+// (which carries the canonical export sub-commands) are wired into the
+// component.  Once the /export command is present in slashCommands,
+// exportFormatSuggestions (useMemo) derives the active format list from
+// slashCommands.subCommands and this constant is no longer referenced.
 const EXPORT_FORMAT_COMPLETIONS = ['html', 'md', 'json', 'jsonl'] as const;
-type ExportFormatCompletion = (typeof EXPORT_FORMAT_COMPLETIONS)[number];
 
-const getExportFormatFromInput = (
+/**
+ * Parse a single export format from an input buffer.
+ *
+ * The valid-format list is passed in so that adding a new "/export <fmt>"
+ * sub-command to slashCommands automatically enables Phase-2 cycling for it,
+ * without requiring a synchronous hard-coded regex update.
+ *
+ * Uses a simple slice-based approach (no regex) for two reasons:
+ *   1. No escaping concerns when format names contain regex metacharacters.
+ *   2. O(1) cost after the cheap startsWith prefix guard.
+ */
+export const getExportFormatFromInput = (
   input: string,
-): ExportFormatCompletion | null => {
+  validFormats: readonly string[],
+): string | null => {
   const trimmed = input.trim();
-  // Cheap prefix guard so this runs O(1) for unrelated input instead of
-  // executing the regex every time handleInput / re-renders call it.
-  if (!trimmed.startsWith(EXPORT_COMMAND_INPUT)) {
+  // Require "/export " (with trailing space) so inputs like
+  // "/exportjson" or "/exporthtml" (no space) are not misidentified.
+  // Pure "/export" (no format) is also excluded by this guard.
+  if (!trimmed.startsWith(EXPORT_COMMAND_INPUT + ' ')) {
     return null;
   }
-  const match = trimmed.match(/^\/export\s+(html|md|json|jsonl)$/);
-  const format = match?.[1];
-  return EXPORT_FORMAT_COMPLETIONS.includes(format as ExportFormatCompletion)
-    ? (format as ExportFormatCompletion)
-    : null;
+  // +1 skips the space between "/export" and the format name.
+  const rest = trimmed.slice(EXPORT_COMMAND_INPUT.length + 1);
+  // Reject inputs with extra arguments (e.g. "/export html --verbose")
+  // so the cycling guard does not silently clobber them.
+  if (!rest || rest.includes(' ')) {
+    return null;
+  }
+  return validFormats.includes(rest) ? rest : null;
 };
 
 /**
@@ -261,9 +281,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   // Derive the canonical export format list from slashCommands so adding a new
   // "/export <fmt>" sub-command does not silently break the arrow/Tab cycle.
-  // EXPORT_FORMAT_COMPLETIONS is kept only as a type-safe whitelist for the
-  // format parser (getExportFormatFromInput); runtime display / cycle order
-  // follows whatever the export command declares.
+  // EXPORT_FORMAT_COMPLETIONS is kept only as a fallback for early renders
+  // before slashCommands are wired up; runtime display, cycling, and format
+  // parsing all follow whatever the export command declares.
   const exportFormatSuggestions = useMemo<Suggestion[]>(() => {
     const exportCommand = slashCommands.find(
       (command) => command.name === EXPORT_COMMAND_INPUT.slice(1),
@@ -915,13 +935,29 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // The two phases are mutually exclusive. Do NOT widen
       // `hasExportFormatSuggestions` to include the filled-in state — it would
       // short-circuit phase 2 cycling.
+      // Export-specific Phase-1 handling activates when *all* export formats
+      // are present somewhere in the completion suggestions (superset match).
+      // This avoids silently falling through to generic completion when the
+      // suggestion list happens to include extra non-export items alongside
+      // the export format entries.
       const hasExportFormatSuggestions =
         buffer.text.trim() === EXPORT_COMMAND_INPUT &&
         completion.suggestions.length > 0 &&
-        completion.suggestions.length === exportCycleFormats.length &&
-        completion.suggestions.every(
-          (suggestion, index) => suggestion.value === exportCycleFormats[index],
+        exportCycleFormats.length > 0 &&
+        exportCycleFormats.every((format) =>
+          completion.suggestions.some((s) => s.value === format),
         );
+
+      // Derive the active suggestion's corresponding exportCycleFormats index.
+      // Returns -1 when the active suggestion is not an export format, so
+      // callers can decide whether to default or fall through.
+      const getExportIndexForActiveSuggestion = (): number => {
+        const idx = completion.activeSuggestionIndex;
+        if (idx < 0 || idx >= completion.suggestions.length) {
+          return -1;
+        }
+        return exportCycleFormats.indexOf(completion.suggestions[idx].value);
+      };
 
       // Phase-2 cycling guard: require buffer to still look like an
       // "/export <fmt>" input so arrow/Tab keys can't clobber arbitrary text
@@ -929,9 +965,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Use the strict format parser rather than `startsWith('/export ')`, so
       // inputs like "/export html --verbose" (with extra arguments) fall
       // through to default handling instead of being overwritten.
+      const parsedFormat = getExportFormatFromInput(
+        buffer.text,
+        exportCycleFormats,
+      );
       if (
         exportCompletionSelectionIndexRef.current !== null &&
-        getExportFormatFromInput(buffer.text) !== null &&
+        parsedFormat !== null &&
         !key.ctrl &&
         !key.meta &&
         !key.paste &&
@@ -942,15 +982,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Derive the current index from the actual buffer text rather than
         // trusting exportCompletionSelectionIndexRef, which can go stale
         // when the user manually edits the buffer (e.g. typing a different
-        // export format).
-        // getExportFormatFromInput null was already ruled out by the guard
-        // above; the fallback to exportCompletionSelectionIndexRef is kept
-        // as belt-and-suspenders in case the guard is ever relaxed.
-        const currentFormat = getExportFormatFromInput(buffer.text);
-        const currentIndex =
-          currentFormat !== null
-            ? exportCycleFormats.indexOf(currentFormat)
-            : exportCompletionSelectionIndexRef.current;
+        // export format).  parsedFormat is already non-null from the guard.
+        // This design ensures that editing /export md → /export jsonl + Down
+        // correctly wraps to html rather than advancing from the stale md index.
+        const currentIndex = exportCycleFormats.indexOf(parsedFormat);
         const nextIndex = getNextExportCompletionIndex(
           exportCycleFormats,
           currentIndex,
@@ -1028,17 +1063,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         if (completion.suggestions.length > 1) {
           if (isCompletionUpKey) {
             if (hasExportFormatSuggestions) {
-              const activeIndex =
-                completion.activeSuggestionIndex === -1
-                  ? 0
-                  : completion.activeSuggestionIndex;
-              const nextIndex = getNextExportCompletionIndex(
-                exportCycleFormats,
-                activeIndex,
-                'up',
-              );
-              setExportCompletionInput(nextIndex);
-              return true;
+              const currentIndex = getExportIndexForActiveSuggestion();
+              // When the active suggestion is not an export format (e.g. a
+              // superset popup extra item), fall through to generic
+              // completion.navigateUp — consistent with how Tab/Enter
+              // already falls through for non-export items.
+              if (currentIndex !== -1) {
+                const nextIndex = getNextExportCompletionIndex(
+                  exportCycleFormats,
+                  currentIndex,
+                  'up',
+                );
+                setExportCompletionInput(nextIndex);
+                return true;
+              }
             }
 
             completion.navigateUp();
@@ -1048,17 +1086,19 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
           if (isCompletionDownKey) {
             if (hasExportFormatSuggestions) {
-              const activeIndex =
-                completion.activeSuggestionIndex === -1
-                  ? 0
-                  : completion.activeSuggestionIndex;
-              const nextIndex = getNextExportCompletionIndex(
-                exportCycleFormats,
-                activeIndex,
-                'down',
-              );
-              setExportCompletionInput(nextIndex);
-              return true;
+              const currentIndex = getExportIndexForActiveSuggestion();
+              // When the active suggestion is not an export format, fall
+              // through to generic completion.navigateDown — consistent with
+              // the Up-arrow and Tab/Enter handlers.
+              if (currentIndex !== -1) {
+                const nextIndex = getNextExportCompletionIndex(
+                  exportCycleFormats,
+                  currentIndex,
+                  'down',
+                );
+                setExportCompletionInput(nextIndex);
+                return true;
+              }
             }
 
             completion.navigateDown();
@@ -1073,12 +1113,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             // Mirror Up/Down export-specific handling so Tab/Enter in the
             // Phase-1 popup also seed `exportCompletionSelectionIndexRef`,
             // allowing Phase-2 cycling to continue from the selected format.
-            const activeIndex =
-              completion.activeSuggestionIndex === -1
-                ? 0
-                : completion.activeSuggestionIndex;
-            setExportCompletionInput(activeIndex);
-            return true;
+            // Only route to export-specific accept when the active suggestion
+            // is actually an export format; non-export items fall through to
+            // generic acceptActiveCompletionSuggestion.
+            const exportIndex = getExportIndexForActiveSuggestion();
+            if (exportIndex !== -1) {
+              setExportCompletionInput(exportIndex);
+              return true;
+            }
           }
           acceptActiveCompletionSuggestion();
           return true;
@@ -1502,13 +1544,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   };
 
   const activeCompletion = getActiveCompletion();
-  const selectedExportFormat = getExportFormatFromInput(buffer.text);
+  const selectedExportFormat = getExportFormatFromInput(
+    buffer.text,
+    exportCycleFormats,
+  );
   const selectedExportFormatIndex =
     selectedExportFormat === null
       ? -1
       : exportFormatSuggestions.findIndex(
           (s) => s.value === selectedExportFormat,
         );
+  // No defensive useEffect is needed to clear exportCompletionSelectionIndexRef
+  // when buffer.text drifts away from a valid export format —
+  // shouldKeepExportFormatSuggestions already gates on
+  // selectedExportFormatIndex !== -1 (derived from getExportFormatFromInput),
+  // so any edit that makes the buffer no longer look like "/export <fmt>"
+  // automatically hides the persistent suggestion panel.  The Phase-2 cycling
+  // guard in handleInput independently blocks arrow/Tab cycling for
+  // non-export input via the same parsedFormat !== null check.
   const shouldKeepExportFormatSuggestions =
     !reverseSearchActive &&
     !commandSearchActive &&

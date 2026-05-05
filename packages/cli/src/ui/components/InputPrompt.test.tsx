@@ -1231,6 +1231,129 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should trigger export-specific arrow navigation even when completion suggestions are a superset', async () => {
+    // Regression for PR #3701 review (hasExportFormatSuggestions superset
+    // matching): when extra non-export items appear alongside all export
+    // formats, Phase 1 must still route arrow keys to setExportCompletionInput
+    // instead of silently falling through to generic navigateDown.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+        { label: 'report', value: 'report' }, // extra suggestion
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[B]'); // Down
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md');
+    expect(mockCommandCompletion.navigateDown).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should fall through to generic accept when Tab targets a non-export item in the /export superset popup', async () => {
+    // Regression for PR #3701 review: when the active suggestion in the
+    // Phase 1 superset popup is a non-export item, ACCEPT_SUGGESTION must
+    // NOT call setExportCompletionInput — it must fall through to the
+    // generic acceptActiveCompletionSuggestion.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+        { label: 'report', value: 'report' },
+      ],
+      activeSuggestionIndex: 4, // the non-export item
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\t'); // Tab (ACCEPT_SUGGESTION)
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(4);
+    // Must NOT write "/export report" to the buffer.
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export report');
+    unmount();
+  });
+
+  it('should fall through to generic completion when suggestions are missing an export format', async () => {
+    // Regression for PR #3701 review: when completion suggestions do NOT
+    // include all export formats, hasExportFormatSuggestions must be false
+    // and arrow keys must go through the generic completion.navigateDown
+    // path instead of setExportCompletionInput.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        // jsonl intentionally missing
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[B]'); // Down
+    await wait();
+
+    expect(mockCommandCompletion.navigateDown).toHaveBeenCalled();
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export md');
+    expect(props.buffer.setText).not.toHaveBeenCalledWith('/export json');
+    unmount();
+  });
+
+  it('should trigger Phase 1 export popup even when /export has trailing spaces', async () => {
+    // Regression: trailing whitespace after "/export" must be treated the
+    // same as plain "/export" — trim() should normalise the buffer so
+    // hasExportFormatSuggestions activates and the popup triggers.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export  '); // trailing spaces
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[B]'); // Down
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('/export md');
+    expect(mockCommandCompletion.navigateDown).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should autocomplete on Enter when user arrow-navigated a perfect-match suggestion list', async () => {
     // Regression for PR #3701 review: the isPerfectMatch + navigated + Enter
     // branch was not covered by tests.
