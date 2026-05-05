@@ -385,6 +385,17 @@ export class MemoryManager {
   // propagates into runForkedAgent), and marks the record cancelled.
   // The runDream finally block clears the entry on settle.
   private readonly dreamAbortControllers = new Map<string, AbortController>();
+  // Set to true when releaseDreamLock() throws (e.g., Windows EPERM,
+  // ENOENT race, disk full). The lock file is then left on disk and
+  // dreamLockExists() sees a fresh-mtime lock owned by a still-alive
+  // PID (us!), suppressing every subsequent scheduleDream() call as
+  // `{status: 'skipped', skippedReason: 'locked'}` — invisible to the
+  // user once the surfacing UI just shows "Lock release failed" without
+  // re-firing. Setting this flag tells the next scheduleDream() to
+  // force-clean the leaked lock file before the existence check, so
+  // scheduling resumes within the same session instead of waiting for
+  // next session start's staleness sweep.
+  private dreamLockReleaseFailed = false;
   private readonly sessionScanner: SessionScannerFn;
 
   constructor(sessionScanner: SessionScannerFn = defaultSessionScanner) {
@@ -764,6 +775,22 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'min_sessions' };
     }
 
+    // If the previous dream's release failed (lockReleaseError surfaced
+    // on the dialog), the lock file is still on disk and dreamLockExists()
+    // would silently suppress every subsequent dream until next process
+    // start. Force-clean it here so the same session recovers.
+    if (this.dreamLockReleaseFailed) {
+      await fs
+        .rm(getAutoMemoryConsolidationLockPath(params.projectRoot), {
+          force: true,
+        })
+        .catch(() => {
+          // Best-effort recovery — if even the forced rm fails (truly
+          // unrecoverable filesystem state), fall through and let the
+          // existence check below report 'locked' as before.
+        });
+      this.dreamLockReleaseFailed = false;
+    }
     if (await dreamLockExists(params.projectRoot)) {
       return { status: 'skipped', skippedReason: 'locked' };
     }
@@ -1006,8 +1033,10 @@ export class MemoryManager {
           const message =
             lockError instanceof Error ? lockError.message : String(lockError);
           debugLogger.warn(
-            `Failed to release dream lock for task ${record.id}: ${message}`,
+            `Failed to release dream lock for task ${record.id}: ${message}. ` +
+              `Next scheduleDream() will force-clean the leaked lock.`,
           );
+          this.dreamLockReleaseFailed = true;
           this.update(record, {
             metadata: { lockReleaseError: message },
           });
