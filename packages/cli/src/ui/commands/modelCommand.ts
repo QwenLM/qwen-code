@@ -133,7 +133,7 @@ export const modelCommand: SlashCommand = {
     // Handle modelName argument: immediately switch to the provided model
     if (args !== '' && context.executionMode === 'interactive') {
       const modelName = args.trim().split(' ')[0];
-      if (modelName.trim()) {
+      if (modelName) {
         // Use first argument only, avoids later syntax confusion and/or use of model names with spaces
         // Ignore argument if it is empty, e.g. to avoid confusion with trailing whitespace
         if (!settings) {
