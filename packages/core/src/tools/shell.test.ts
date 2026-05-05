@@ -2200,10 +2200,12 @@ describe('ShellTool', () => {
         );
       });
 
-      // Bash's apostrophe-via-`'\''` form needs to be left alone — a
-      // naive single-quote rewrite would mid-insert the trailer and
-      // break the command's quoting.
-      it("should leave -m 'don'\\''t' (apostrophe-escape form) unrewritten", async () => {
+      // Bash's apostrophe-via-`'\''` form (close-escape-reopen) is a
+      // single logical body. The trailer must land at the FINAL
+      // closing `'` — not in the middle of the escape — so the regex
+      // body group has to recognise the escape sequence as a whole.
+      // Mirrors the bodySinglePattern in addAttributionToPR.
+      it("should append trailer after the final ' in -m 'don'\\''t' apostrophe-escape", async () => {
         const command = "git commit -m 'don'\\''t'";
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
@@ -2222,10 +2224,12 @@ describe('ShellTool', () => {
         await promise;
 
         const observed = mockShellExecutionService.mock.calls[0][0];
-        // The original command must be passed through unchanged.
-        expect(observed).toContain("'don'\\''t'");
-        // No trailer was injected mid-quote.
-        expect(observed).not.toContain('Co-authored-by:');
+        // The full apostrophe-escape body survives intact and the
+        // trailer lands AFTER it (before the closing `'`), not in the
+        // middle of `'\''`.
+        expect(observed).toMatch(
+          /git commit -m 'don'\\''t[\s\S]*Co-authored-by:[^']*'/,
+        );
       });
 
       it('should add co-author to git commit with multi-line message', async () => {

@@ -89,6 +89,21 @@ function escapeForBashSingleQuote(s: string): string {
 }
 
 /**
+ * Return the LAST match from a RegExp.matchAll iterator, or `null` if
+ * the iterator is empty. Used to find the final `-m` / `--body` flag
+ * in a command segment: git/gh both honour the LAST occurrence when
+ * multiple are passed, so the trailer has to land in that match to be
+ * picked up by the actual commit / PR body.
+ */
+function lastMatchOf<T extends RegExpMatchArray>(
+  matches: IterableIterator<T>,
+): T | null {
+  let result: T | null = null;
+  for (const m of matches) result = m;
+  return result;
+}
+
+/**
  * Tokenise a single shell-command segment via `shell-quote`. Returns
  * the parsed string tokens with leading env-var assignments and a
  * small allowlist of safe wrappers (`sudo`, `command`, with their
@@ -1148,11 +1163,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // commit creation by HEAD movement instead of trusting the shell
     // exit code (which is unreliable for compound commands).
     //
-    // The lookup is started concurrently so we don't block
-    // ShellExecutionService — `git rev-parse HEAD` is a few fs reads
-    // (low ms) while a real `git commit` involves staging, hooks, and
-    // object writes (50ms+), so in practice the snapshot resolves
-    // well before the user's command can move HEAD.
+    // Synchronous capture via `execFileSync`: a fire-and-forget async
+    // rev-parse can resolve AFTER a fast-cached `git commit` moves
+    // HEAD (real race seen on slow filesystems / heavy contention),
+    // leaving preHead === postHead and silently skipping the
+    // attribution note. ~10–50ms event-loop block per commit-shaped
+    // command, only when `commitCtx.hasCommit` is true.
     //
     // We act on `gitCommitContext` rather than a raw regex so quoted
     // text like `echo "git commit"` doesn't trigger snapshot/notes,
@@ -1165,9 +1181,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Without this, `cd subdir && git commit` (a real same-repo
     // commit) would skip attribution AND fail to clear pending
     // attributions, leaking them into the next foreground commit.
-    const preHeadPromise: Promise<string | null> = commitCtx.hasCommit
-      ? this.getGitHead(cwd)
-      : Promise.resolve(null);
+    const preHead: string | null = commitCtx.hasCommit
+      ? this.getGitHeadSync(cwd)
+      : null;
 
     let cumulativeOutput: string | AnsiOutput = '';
     let lastUpdateTime = Date.now();
@@ -1313,15 +1329,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // while the stale per-file attribution stays around for a later
     // unrelated commit. attachCommitAttribution already gates on HEAD
     // movement, so it's a no-op when no commit was actually created.
+    let attributionWarning: string | null = null;
     if (commitCtx.attributableInCwd) {
-      const preHead = await preHeadPromise;
       // `git commit --amend` rewrites HEAD in place, so the diff
       // `HEAD~1..HEAD` would span the entire amended commit (parent →
       // amended), not just what this amend changed. Detect the flag
       // so getCommittedFileInfo can switch to `HEAD@{1}..HEAD` and
       // attribute only the actual amend delta.
       const isAmend = isAmendCommit(strippedCommand);
-      await this.attachCommitAttribution(cwd, preHead, isAmend);
+      attributionWarning = await this.attachCommitAttribution(
+        cwd,
+        preHead,
+        isAmend,
+      );
     }
     // Intentionally NO `else if (commitCtx.hasCommit)` cleanup branch:
     // commands that match `hasCommit` but not `attributableInCwd`
@@ -1463,6 +1483,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // as a Part) would require deciding on a rendering convention,
       // and structured llmContent isn't on the roadmap. Revisit if
       // someone adds a non-string return path.
+    }
+
+    // Surface AI-attribution failures (note exec failure, payload too
+    // large, diff-analysis exception, shallow clone, etc.) on the tool
+    // result so the user knows their commit succeeded but the per-file
+    // git note didn't land. Without this, the only signal is a
+    // QWEN_DEBUG_LOG_FILE entry the user has likely never set up.
+    // Appended to BOTH llmContent (so the agent can react / report) and
+    // returnDisplayMessage (so the human sees it in the TUI). Skipped
+    // when null (intentional skips like a bare `git commit` with no
+    // tracked AI edits don't need user-visible feedback).
+    if (attributionWarning) {
+      if (typeof llmContent === 'string') {
+        llmContent += `\n\n${attributionWarning}`;
+      }
+      returnDisplayMessage +=
+        (returnDisplayMessage ? '\n\n' : '') + attributionWarning;
     }
 
     // When `result.error` is set, `coreToolScheduler` builds the
@@ -1769,6 +1806,35 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
+   * Synchronous companion to {@link getGitHead}. Captured BEFORE the
+   * user's shell command spawns so a fast `git commit` (hot-cached,
+   * no hooks) cannot move HEAD before our async rev-parse has a chance
+   * to read it — a real race seen on slow filesystems / heavy contention
+   * where preHead would otherwise resolve to the new SHA, postHead would
+   * match, and `attachCommitAttribution` would silently skip writing the
+   * attribution note even though the commit succeeded.
+   *
+   * Worst case is ~10–50 ms of event-loop block per commit-shaped shell
+   * command; acceptable trade for correctness of the post-command HEAD
+   * comparison.
+   */
+  private getGitHeadSync(cwd: string): string | null {
+    try {
+      const stdout = childProcess.execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd,
+        timeout: 2000,
+        // Discard stderr noise (e.g. "fatal: not a git repository") —
+        // the catch-or-empty-output path already covers failure.
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const sha = String(stdout).trim();
+      return sha.length > 0 ? sha : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * After a successful git commit, attach per-file AI attribution metadata
    * as git notes. Analyzes staged files via `git diff` to calculate real
    * AI vs human contribution percentages.
@@ -1787,7 +1853,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     cwd: string,
     preHead: string | null,
     isAmend: boolean,
-  ): Promise<void> {
+  ): Promise<string | null> {
+    // Returns a one-line warning suitable for appending to the tool's
+    // returnDisplay when a write that the user could plausibly fix
+    // (note exec failure, payload too large, exception during diff
+    // analysis) drops the AI-attribution note. Returns null when the
+    // skip is intentional / inherent to the situation (no commit
+    // landed, multi-commit chain, attribution toggle off, no tracked
+    // edits) — those don't need user-visible feedback.
     // Caller (`execute`) gates this with `commitCtx.attributableInCwd`,
     // so we don't re-parse the command here. Re-parsing would be dead
     // work and a maintenance trap — if the two checks ever drifted,
@@ -1809,7 +1882,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // none of them were committed. Leave attributions intact instead:
       // a later successful commit will overwrite the counters and the
       // accumulated aiContribution still represents real AI work.
-      return;
+      return null;
     }
 
     // Refuse to attribute when a single shell command produced more
@@ -1842,7 +1915,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             `${preHead ? preHead.slice(0, 12) : 'repo root'})`;
       debugLogger.warn(`Refusing AI attribution: ${reason}.`);
       attributionService.clearAttributions(true);
-      return;
+      return null;
     }
 
     // A new commit landed. Even when no per-file attribution was
@@ -1852,7 +1925,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // inflated N-shotted count spanning multiple commits.
     if (!attributionService.hasAttributions()) {
       attributionService.clearAttributions(true);
-      return;
+      return null;
     }
 
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
@@ -1862,10 +1935,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // starts a fresh window — otherwise the user would carry stale
       // counts forward forever.
       attributionService.clearAttributions(true);
-      return;
+      return null;
     }
 
     let committedAbsolutePaths: Set<string> | null = null;
+    let warning: string | null = null;
     try {
       // Analyze the just-committed files by diffing HEAD against its parent.
       // The commit already happened, so we diff HEAD~1..HEAD instead of --cached.
@@ -1878,7 +1952,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Skip the note write entirely — emitting a structurally valid
       // but factually wrong all-zero note is worse than no note.
       if (stagedInfo === null) {
-        return; // finally block still runs for cleanup
+        warning =
+          'AI attribution note skipped: could not analyze the commit ' +
+          'diff (shallow clone, missing reflog for --amend, or partial ' +
+          '`git diff` failure). Co-authored-by trailer is unaffected.';
+        return warning; // finally still runs for cleanup
       }
 
       // Pass the actual model name (e.g. `qwen3-coder-plus`) rather than the
@@ -1896,35 +1974,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // but the user didn't `git add` should still be tracked for a
       // later commit.
       //
-      // Canonicalise via the repo root rather than each leaf: deleted
-      // files don't exist at this point so `fs.realpathSync` on the
-      // leaf would fail. Realpath the directory once (which still
-      // exists) and resolve repo-relative paths against the canonical
-      // root — the resulting absolute path matches the canonical key
-      // recordEdit stored even when the file has since been deleted.
+      // Match against the canonical keys already stored in
+      // `fileAttributions` (recordEdit canonicalises every component
+      // via realpathSync) rather than re-resolving each diff path on
+      // the fly. Re-resolving fails for deleted files (realpathSync
+      // throws on a missing leaf) and for files behind intermediate
+      // symlinked directories (path.resolve only canonicalises the
+      // base) — both cases produced cleanup keys that didn't match
+      // the stored canonical keys, leaking stale per-file attribution
+      // into subsequent commits.
       let canonicalBase: string;
       try {
         canonicalBase = fs.realpathSync(baseDir);
       } catch {
         canonicalBase = baseDir;
       }
-      committedAbsolutePaths = new Set(
-        stagedInfo.files.map((rel) => {
-          const resolved = path.resolve(canonicalBase, rel);
-          // recordEdit canonicalises *every* component via realpathSync,
-          // so a file that lives behind an intermediate symlink (e.g.
-          // `repo/symlinked-dir/file.ts` where `symlinked-dir` -> elsewhere)
-          // gets stored under the realpath of the leaf. canonicalising
-          // only the base wouldn't follow the inner symlink and the lookup
-          // miss would silently zero attribution + leak the entry past
-          // commit. Try realpath on the full resolved path and fall back
-          // to the unresolved form if the file no longer exists (deletion).
-          try {
-            return fs.realpathSync(resolved);
-          } catch {
-            return resolved;
-          }
-        }),
+      committedAbsolutePaths = attributionService.matchCommittedFiles(
+        stagedInfo.files,
+        canonicalBase,
       );
 
       const note = attributionService.generateNotePayload(
@@ -1938,7 +2005,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         debugLogger.warn(
           'AI attribution note too large, skipping git notes attachment',
         );
-        return; // finally block still runs for cleanup
+        warning =
+          'AI attribution note skipped: payload exceeded the 30 KB ' +
+          'size cap (large generated-file exclusion list?). ' +
+          'Co-authored-by trailer is unaffected.';
+        return warning;
       }
 
       // Use execFile with argv (rather than ShellExecutionService) so the
@@ -1972,6 +2043,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       if (exitCode !== 0) {
         debugLogger.warn(`git notes exited with code ${exitCode}: ${output}`);
+        warning =
+          `AI attribution note skipped: \`git notes add\` exited ${exitCode}` +
+          (output ? ` (${output.trim().slice(0, 120)})` : '') +
+          '. Co-authored-by trailer is unaffected.';
       } else {
         debugLogger.debug(
           `Attached AI attribution note: ${note.summary.aiPercent}% AI, ${note.summary.totalFilesTouched} file(s)`,
@@ -1981,6 +2056,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       debugLogger.warn(
         `Failed to attach AI attribution note: ${getErrorMessage(err)}`,
       );
+      warning =
+        `AI attribution note skipped: ${getErrorMessage(err)}. ` +
+        'Co-authored-by trailer is unaffected.';
     } finally {
       // Partial clear: only drop tracking for the files that actually
       // landed in this commit. Files the AI edited but the user
@@ -1994,6 +2072,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         attributionService.clearAttributions(true);
       }
     }
+    return warning;
   }
 
   /**
@@ -2226,28 +2305,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     );
     // Bash single quotes can't be escaped, so apostrophes inside a
     // single-quoted message use the close-escape-reopen form `'\''`
-    // (e.g. `git commit -m 'don'\''t'`). The negative lookahead leaves
-    // those alone — rewriting them correctly needs a real shell parser
-    // and a wrong rewrite would mid-insert the trailer and break the
-    // command's quoting.
+    // (e.g. `git commit -m 'don'\''t'`). The inner alternation matches
+    // either a non-apostrophe character or that escape sequence as a
+    // whole, so the trailer lands at the true end of the body — at the
+    // FINAL closing `'` after the user's content — rather than after
+    // the first interior apostrophe. Mirrors `bodySinglePattern` in
+    // `addAttributionToPR`.
     const singleQuotePattern = new RegExp(
-      `(${FLAG_PREFIX})'([^']*)'(?!\\\\'')`,
+      `(${FLAG_PREFIX})'((?:[^']|'\\\\'')*)'`,
       'g',
     );
     const segment = command.slice(segmentRange.start, segmentRange.end);
     // Git concatenates multiple `-m` values with a blank line, so the
     // co-author trailer has to land in the *last* `-m` value to be
     // recognised by `git interpret-trailers`. matchAll → take the
-    // last match.
-    const lastMatch = <T extends RegExpMatchArray>(
-      matches: IterableIterator<T>,
-    ): T | null => {
-      let result: T | null = null;
-      for (const m of matches) result = m;
-      return result;
-    };
-    const doubleMatch = lastMatch(segment.matchAll(doubleQuotePattern));
-    const singleMatch = lastMatch(segment.matchAll(singleQuotePattern));
+    // last match (`lastMatchOf` is the shared helper).
+    const doubleMatch = lastMatchOf(segment.matchAll(doubleQuotePattern));
+    const singleMatch = lastMatchOf(segment.matchAll(singleQuotePattern));
 
     // Pick whichever match appears LAST in the segment, regardless of
     // quote style — but reject any candidate that's nested inside the
@@ -2401,16 +2475,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // gh ignores all but the last `--body`/`-b` flag, so the trailer
     // has to land in the final occurrence to actually appear in the PR.
     // matchAll → take the last match for each quote style, then pick
-    // whichever sits later in the segment (mirrors addCoAuthorToGitCommit).
-    const lastMatch = <T extends RegExpMatchArray>(
-      matches: IterableIterator<T>,
-    ): T | null => {
-      let result: T | null = null;
-      for (const m of matches) result = m;
-      return result;
-    };
-    const bodyDoubleMatch = lastMatch(segment.matchAll(bodyDoublePattern));
-    const bodySingleMatch = lastMatch(segment.matchAll(bodySinglePattern));
+    // whichever sits later in the segment (mirrors addCoAuthorToGitCommit;
+    // shares the `lastMatchOf` helper).
+    const bodyDoubleMatch = lastMatchOf(segment.matchAll(bodyDoublePattern));
+    const bodySingleMatch = lastMatchOf(segment.matchAll(bodySinglePattern));
     // Pick whichever match appears LAST in the segment, regardless of
     // quote style — but reject any candidate that's nested inside the
     // other's range. For `gh pr create --body "docs mention -b 'flag'"`

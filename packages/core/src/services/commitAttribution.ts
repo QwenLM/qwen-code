@@ -11,17 +11,15 @@
  * When a git commit is made, this data is combined with git diff analysis to
  * calculate real AI vs human contribution percentages, stored as git notes.
  *
- * Features aligned with Claude Code's attribution system:
+ * Features:
  * - Character-level prefix/suffix diff algorithm
  * - Real AI/human contribution ratio via git diff
  * - Surface tracking (cli/ide/api/sdk)
- * - Prompt & permission prompt counting
- * - Session baseline (content hash) for precise human edit detection
+ * - Prompt counting (since-last-commit window)
  * - Snapshot/restore for session persistence
  * - Generated file exclusion
  */
 
-import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isGeneratedFile } from './generatedFiles.js';
@@ -52,14 +50,6 @@ export interface FileAttribution {
   aiContribution: number;
   /** Whether the file was created by AI */
   aiCreated: boolean;
-  /** SHA-256 hash of the file content after AI's last edit */
-  contentHash: string;
-}
-
-/** Session baseline: snapshot of file state at session start or first AI touch */
-export interface FileBaseline {
-  contentHash: string;
-  mtime: number;
 }
 
 /** Per-file attribution detail in the git notes payload. */
@@ -136,7 +126,6 @@ export interface AttributionSnapshot {
   version?: number;
   surface: string;
   fileStates: Record<string, FileAttribution>;
-  baselines: Record<string, FileBaseline>;
   promptCount: number;
   promptCountAtLastCommit: number;
 }
@@ -168,10 +157,6 @@ function sanitizeModelName(name: string): string {
 // Utilities
 // ---------------------------------------------------------------------------
 
-export function computeContentHash(content: string): string {
-  return createHash('sha256').update(content).digest('hex');
-}
-
 /**
  * Defensive coercions for restoring snapshot fields. A snapshot can
  * arrive with `undefined` / wrong-type fields if the on-disk JSON was
@@ -188,15 +173,6 @@ function sanitiseAttribution(v: unknown): FileAttribution {
   return {
     aiContribution: sanitiseCount(obj.aiContribution),
     aiCreated: typeof obj.aiCreated === 'boolean' ? obj.aiCreated : false,
-    contentHash: typeof obj.contentHash === 'string' ? obj.contentHash : '',
-  };
-}
-
-function sanitiseBaseline(v: unknown): FileBaseline {
-  const obj = (v ?? {}) as Partial<FileBaseline>;
-  return {
-    contentHash: typeof obj.contentHash === 'string' ? obj.contentHash : '',
-    mtime: sanitiseCount(obj.mtime),
   };
 }
 
@@ -219,8 +195,6 @@ export class CommitAttributionService {
 
   /** Per-file AI contribution tracking (keyed by absolute path) */
   private fileAttributions: Map<string, FileAttribution> = new Map();
-  /** Baselines recorded when AI first touches a file */
-  private sessionBaselines: Map<string, FileBaseline> = new Map();
   /** Client surface (cli, ide, api, sdk, etc.) */
   private surface: string = getClientSurface();
 
@@ -249,7 +223,6 @@ export class CommitAttributionService {
   /**
    * Record an AI edit to a file.
    * Uses prefix/suffix matching for precise character-level contribution.
-   * On first edit of a file, saves a session baseline of the old content.
    *
    * `filePath` is canonicalised via `fs.realpathSync` before being used
    * as a key, so symlinked paths (e.g. `/var/...` ↔ `/private/var/...`
@@ -266,22 +239,12 @@ export class CommitAttributionService {
     const existing = this.fileAttributions.get(key) || {
       aiContribution: 0,
       aiCreated: false,
-      contentHash: '',
     };
-
-    // Save baseline on first AI touch (before AI modifies it)
-    if (!this.sessionBaselines.has(key) && oldContent !== null) {
-      this.sessionBaselines.set(key, {
-        contentHash: computeContentHash(oldContent),
-        mtime: Date.now(),
-      });
-    }
 
     const isNewFile = oldContent === null;
     const contribution = computeCharContribution(oldContent ?? '', newContent);
 
     existing.aiContribution += contribution;
-    existing.contentHash = computeContentHash(newContent);
     if (isNewFile && !existing.aiCreated) {
       existing.aiCreated = true;
     }
@@ -343,7 +306,6 @@ export class CommitAttributionService {
       this.promptCountAtLastCommit = this.promptCount;
     }
     this.fileAttributions.clear();
-    this.sessionBaselines.clear();
   }
 
   /**
@@ -364,8 +326,41 @@ export class CommitAttributionService {
     this.promptCountAtLastCommit = this.promptCount;
     for (const p of committedAbsolutePaths) {
       this.fileAttributions.delete(p);
-      this.sessionBaselines.delete(p);
     }
+  }
+
+  /**
+   * Resolve a set of repo-relative file paths to the canonical absolute
+   * keys actually stored in the attribution map. Used by cleanup to
+   * partial-clear only the files that just landed in a commit.
+   *
+   * Matching by walking `fileAttributions` (instead of resolving each
+   * relative path with `path.resolve` + `fs.realpathSync`) is the only
+   * approach that handles all of: deleted files (where realpathSync
+   * throws), intermediate-symlink directories (where path.resolve only
+   * canonicalises the base), and renamed files (where the diff-time
+   * relative path differs from the recordEdit-time absolute path —
+   * still no match here, that's a rename-tracking concern handled
+   * separately). Each tracked key is canonical (recordEdit ran it
+   * through `realpathOrSelf`), so its computed relative form against
+   * the canonical repo root is what generateNotePayload uses too.
+   */
+  matchCommittedFiles(
+    relativeFiles: Iterable<string>,
+    canonicalRepoRoot: string,
+  ): Set<string> {
+    const wanted = new Set(relativeFiles);
+    const matched = new Set<string>();
+    for (const key of this.fileAttributions.keys()) {
+      const rel = path
+        .relative(canonicalRepoRoot, key)
+        .split(path.sep)
+        .join('/');
+      if (wanted.has(rel)) {
+        matched.add(key);
+      }
+    }
+    return matched;
   }
 
   // -----------------------------------------------------------------------
@@ -378,16 +373,11 @@ export class CommitAttributionService {
     for (const [k, v] of this.fileAttributions) {
       fileStates[k] = { ...v };
     }
-    const baselines: Record<string, FileBaseline> = {};
-    for (const [k, v] of this.sessionBaselines) {
-      baselines[k] = { ...v };
-    }
     return {
       type: 'attribution-snapshot',
       version: ATTRIBUTION_SNAPSHOT_VERSION,
       surface: this.surface,
       fileStates,
-      baselines,
       promptCount: this.promptCount,
       promptCountAtLastCommit: this.promptCountAtLastCommit,
     };
@@ -404,7 +394,6 @@ export class CommitAttributionService {
       // changed semantics. Reset to a fresh state rather than
       // splice incompatible data.
       this.fileAttributions.clear();
-      this.sessionBaselines.clear();
       this.surface = getClientSurface();
       this.promptCount = 0;
       this.promptCountAtLastCommit = 0;
@@ -430,10 +419,6 @@ export class CommitAttributionService {
       // parallel records for the same file under symlink/canonical
       // forms.
       this.fileAttributions.set(realpathOrSelf(k), sanitiseAttribution(v));
-    }
-    this.sessionBaselines.clear();
-    for (const [k, v] of Object.entries(snapshot.baselines ?? {})) {
-      this.sessionBaselines.set(realpathOrSelf(k), sanitiseBaseline(v));
     }
   }
 

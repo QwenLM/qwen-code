@@ -88,7 +88,6 @@ describe('CommitAttributionService', () => {
     const attr = service.getFileAttribution('/project/src/file.ts');
     expect(attr!.aiCreated).toBe(true);
     expect(attr!.aiContribution).toBe(11);
-    expect(attr!.contentHash).toBeTruthy();
   });
 
   it('should NOT treat empty existing file as new file creation', () => {
@@ -368,10 +367,8 @@ describe('CommitAttributionService', () => {
           '/var/repo/src/legacy.ts': {
             aiContribution: 99,
             aiCreated: false,
-            contentHash: 'abc',
           },
         },
-        baselines: {},
         promptCount: 0,
         promptCountAtLastCommit: 0,
       });
