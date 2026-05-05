@@ -44,6 +44,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private flushTimer: ReturnType<typeof setInterval> | undefined;
   private inFlightExport: Promise<void> | undefined;
   private readonly flushIntervalMs: number;
+  private cachedSessionId: string | undefined;
+  private cachedTraceId: string | undefined;
 
   constructor(
     private readonly spanExporter: SpanExporter,
@@ -101,9 +103,17 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     // Derive traceId from session.id so all events in one session
     // appear under a single trace. spanId is random per event.
     const sessionId = logRecord.attributes?.['session.id'];
-    const traceId = sessionId
-      ? deriveTraceId(String(sessionId))
-      : randomHexString(32);
+    let traceId: string;
+    if (sessionId) {
+      const sid = String(sessionId);
+      if (sid !== this.cachedSessionId) {
+        this.cachedSessionId = sid;
+        this.cachedTraceId = deriveTraceId(sid);
+      }
+      traceId = this.cachedTraceId!;
+    } else {
+      traceId = randomHexString(32);
+    }
     const spanId = randomHexString(16);
 
     this.buffer.push({
