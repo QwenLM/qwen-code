@@ -503,7 +503,9 @@ describe('Gemini Client (client.ts)', () => {
       getAutoSkillEnabled: vi.fn().mockReturnValue(false),
       getModelsConfig: vi.fn().mockReturnValue({
         getResolvedModel: vi.fn().mockReturnValue(undefined),
+        getResolvedModelAcrossAuthTypes: vi.fn().mockReturnValue(undefined),
       }),
+
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -3781,8 +3783,12 @@ Other open files:
       };
 
       const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
+      const getResolvedModelAcrossAuthTypes = vi
+        .fn()
+        .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModel,
+        getResolvedModelAcrossAuthTypes,
       } as unknown as ModelsConfig);
 
       await client.generateContent(
@@ -3792,10 +3798,10 @@ Other open files:
         'fast-model',
       );
 
-      // Verify that getResolvedModel was called with the fast model ID
-      expect(getResolvedModel).toHaveBeenCalledWith(
-        expect.any(String),
+      // Verify that getResolvedModelAcrossAuthTypes was called to look up the model
+      expect(getResolvedModelAcrossAuthTypes).toHaveBeenCalledWith(
         'fast-model',
+        expect.any(String),
       );
 
       // The main content generator is used as fallback (since creating a new
@@ -3837,6 +3843,9 @@ Other open files:
       const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModel,
+        getResolvedModelAcrossAuthTypes: vi
+          .fn()
+          .mockReturnValue(mockResolvedModel),
       } as unknown as ModelsConfig);
 
       // Override createContentGenerator to return our test double (success path)
@@ -3879,6 +3888,7 @@ Other open files:
       const getResolvedModel = vi.fn();
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModel,
+        getResolvedModelAcrossAuthTypes: vi.fn().mockReturnValue(undefined),
       } as unknown as ModelsConfig);
 
       await client.generateContent(
@@ -3904,10 +3914,13 @@ Other open files:
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
 
-      // getResolvedModel returns undefined — model not found in registry
-      const getResolvedModel = vi.fn().mockReturnValue(undefined);
+      // getResolvedModelAcrossAuthTypes returns undefined — model not found in registry
+      const getResolvedModelAcrossAuthTypes = vi
+        .fn()
+        .mockReturnValue(undefined);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
-        getResolvedModel,
+        getResolvedModel: vi.fn().mockReturnValue(undefined),
+        getResolvedModelAcrossAuthTypes,
       } as unknown as ModelsConfig);
 
       // Should not throw — falls back to main generator
@@ -3920,10 +3933,10 @@ Other open files:
         ),
       ).resolves.toBeDefined();
 
-      // getResolvedModel was called to look up the model
-      expect(getResolvedModel).toHaveBeenCalledWith(
-        expect.any(String),
+      // getResolvedModelAcrossAuthTypes was called to look up the model
+      expect(getResolvedModelAcrossAuthTypes).toHaveBeenCalledWith(
         'unknown-model',
+        expect.any(String),
       );
 
       // The main content generator is used as fallback
@@ -3955,6 +3968,9 @@ Other open files:
       const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModel,
+        getResolvedModelAcrossAuthTypes: vi
+          .fn()
+          .mockReturnValue(mockResolvedModel),
       } as unknown as ModelsConfig);
 
       // Main config uses a different authType

@@ -313,6 +313,21 @@ export class ModelsConfig {
   }
 
   /**
+   * Look up a model across all authTypes.
+   * Tries the preferred authType first for early exit, then iterates all
+   * registered authTypes.
+   */
+  getResolvedModelAcrossAuthTypes(
+    modelId: string,
+    preferredAuthType?: AuthType,
+  ): ResolvedModelConfig | undefined {
+    return this.modelRegistry.getModelAcrossAuthTypes(
+      modelId,
+      preferredAuthType,
+    );
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Supports both registry models and raw model IDs.
    */

@@ -183,6 +183,32 @@ export class ModelRegistry {
   }
 
   /**
+   * Look up a model across all authTypes.
+   * Tries the preferred authType first for early exit, then iterates all
+   * registered authTypes. Returns the first match, or undefined if the model
+   * is not found in any authType.
+   */
+  getModelAcrossAuthTypes(
+    modelId: string,
+    preferredAuthType?: AuthType,
+  ): ResolvedModelConfig | undefined {
+    // Try preferred authType first for early exit
+    if (preferredAuthType) {
+      const resolved = this.getModel(preferredAuthType, modelId);
+      if (resolved) return resolved;
+    }
+
+    // Iterate all registered authTypes
+    for (const authType of this.modelsByAuthType.keys()) {
+      if (authType === preferredAuthType) continue;
+      const resolved = this.getModel(authType, modelId);
+      if (resolved) return resolved;
+    }
+
+    return undefined;
+  }
+
+  /**
    * Get default model for an authType.
    * For qwen-oauth, returns the coder model.
    * For others, returns the first configured model.

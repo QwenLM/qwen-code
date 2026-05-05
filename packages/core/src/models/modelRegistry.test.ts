@@ -881,4 +881,73 @@ describe('modelRegistryKey', () => {
     const key2 = modelRegistryKey('gpt-4', 'https://api.openai.com/v1');
     expect(key1).toBe(key2);
   });
+
+  describe('getModelAcrossAuthTypes', () => {
+    it('should find model in the preferred authType', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        anthropic: [{ id: 'claude-3', name: 'Claude 3' }],
+      });
+
+      const result = registry.getModelAcrossAuthTypes(
+        'gpt-4',
+        AuthType.USE_OPENAI,
+      );
+      expect(result?.id).toBe('gpt-4');
+      expect(result?.authType).toBe(AuthType.USE_OPENAI);
+    });
+
+    it('should find model across authTypes when not in preferred', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        anthropic: [{ id: 'claude-3', name: 'Claude 3' }],
+      });
+
+      // Preferred is QWEN_OAUTH (empty), but model is in anthropic
+      const result = registry.getModelAcrossAuthTypes(
+        'claude-3',
+        AuthType.QWEN_OAUTH,
+      );
+      expect(result?.id).toBe('claude-3');
+      expect(result?.authType).toBe(AuthType.USE_ANTHROPIC);
+    });
+
+    it('should return undefined when model is not in any authType', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      });
+
+      const result = registry.getModelAcrossAuthTypes(
+        'nonexistent',
+        AuthType.USE_OPENAI,
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it('should search all authTypes when no preferred is given', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        anthropic: [{ id: 'claude-3', name: 'Claude 3' }],
+      });
+
+      // No preferred authType — should find in any authType
+      const result = registry.getModelAcrossAuthTypes('claude-3');
+      expect(result?.id).toBe('claude-3');
+      expect(result?.authType).toBe(AuthType.USE_ANTHROPIC);
+    });
+
+    it('should not duplicate results when model exists in multiple authTypes', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'shared-model', name: 'Shared' }],
+        anthropic: [{ id: 'shared-model', name: 'Shared' }],
+      });
+
+      // Should return the first match (from the first authType that has it)
+      const result = registry.getModelAcrossAuthTypes(
+        'shared-model',
+        AuthType.QWEN_OAUTH,
+      );
+      expect(result?.id).toBe('shared-model');
+    });
+  });
 });

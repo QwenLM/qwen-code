@@ -2265,4 +2265,41 @@ describe('ModelsConfig', () => {
       expect(gc.samplingParams).toBeUndefined();
     });
   });
+
+  describe('getResolvedModelAcrossAuthTypes', () => {
+    it('should find model across authTypes when not in preferred', () => {
+      const modelProvidersConfig = {
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        anthropic: [{ id: 'claude-3', name: 'Claude 3' }],
+      };
+
+      const config = new ModelsConfig({
+        initialAuthType: AuthType.QWEN_OAUTH,
+        modelProvidersConfig,
+      });
+
+      // Preferred is QWEN_OAUTH, but model is in anthropic
+      const result = config.getResolvedModelAcrossAuthTypes(
+        'claude-3',
+        AuthType.QWEN_OAUTH,
+      );
+      expect(result?.id).toBe('claude-3');
+      expect(result?.authType).toBe(AuthType.USE_ANTHROPIC);
+    });
+
+    it('should return undefined when model is not in any authType', () => {
+      const config = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+      });
+
+      const result = config.getResolvedModelAcrossAuthTypes(
+        'nonexistent',
+        AuthType.USE_OPENAI,
+      );
+      expect(result).toBeUndefined();
+    });
+  });
 });
