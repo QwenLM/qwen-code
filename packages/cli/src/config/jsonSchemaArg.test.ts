@@ -145,26 +145,32 @@ describe('resolveJsonSchemaArg', () => {
     expect(schema).toBeDefined();
   });
 
-  it('rejects a bare root $ref without a sibling type:"object" anchor', () => {
-    // We don't follow $refs ourselves; without a sibling `type:"object"` we
-    // can't tell whether the resolved schema admits objects, so refuse to
-    // register a synthetic tool whose parameter contract is "whatever this
-    // $ref points to".
+  it('rejects any root $ref, even with a sibling type:"object" anchor', () => {
+    // Ajv applies `$ref` conjunctively with sibling keywords, so a sibling
+    // `type:"object"` is NOT enough to make the schema satisfiable — when
+    // the referenced subschema is non-object, the resulting AND is
+    // unsatisfiable at runtime. We reject root `$ref` outright rather than
+    // following the reference ourselves (local-only resolution would still
+    // have to handle remote / recursive refs).
     expect(() =>
       resolveJsonSchemaArg(
         '{"$ref":"#/$defs/Foo","$defs":{"Foo":{"type":"array"}}}',
       ),
     ).toThrow(/must accept object-typed values/);
-  });
-
-  it('accepts a root $ref when the user anchors it with type:"object"', () => {
-    // Sibling `type:"object"` is the explicit opt-out — the user is telling
-    // us the resolved schema describes an object. Trust that and let Ajv
-    // surface any deeper mismatch at runtime.
-    const schema = resolveJsonSchemaArg(
-      '{"type":"object","$ref":"#/$defs/Foo","$defs":{"Foo":{"type":"object","properties":{"a":{"type":"string"}}}}}',
-    );
-    expect(schema).toBeDefined();
+    expect(() =>
+      resolveJsonSchemaArg(
+        '{"type":"object","$ref":"#/$defs/Foo","$defs":{"Foo":{"type":"array"}}}',
+      ),
+    ).toThrow(/must accept object-typed values/);
+    // Even when the referenced schema IS object-shaped, we still reject —
+    // the contract for `--json-schema` is "the root schema describes the
+    // tool args directly", not "follow these refs". Users wanting
+    // composition should inline at the root or use `allOf`.
+    expect(() =>
+      resolveJsonSchemaArg(
+        '{"type":"object","$ref":"#/$defs/Foo","$defs":{"Foo":{"type":"object","properties":{"a":{"type":"string"}}}}}',
+      ),
+    ).toThrow(/must accept object-typed values/);
   });
 
   it('rejects allOf where any branch forbids object at the root', () => {

@@ -181,25 +181,29 @@ export interface CliArgs {
  *
  * For `anyOf` / `oneOf`, at least one branch must admit object (a value
  * only has to match one branch). For `allOf`, every branch must admit
- * object (a value has to match all of them). For root `$ref` we don't
- * follow the reference ourselves — local-only `$ref` resolution would
- * still need to handle remote/recursive refs, and getting it half-right
- * is worse than rejecting. So we require an explicit sibling
- * `type: "object"` to opt out of the check; otherwise the schema is
- * rejected at parse time.
+ * object (a value has to match all of them). Root `$ref` is rejected
+ * unconditionally — Ajv applies `$ref` conjunctively with sibling
+ * keywords, so even `{type:"object", $ref:"#/$defs/Foo"}` is
+ * unsatisfiable when `Foo` resolves to a non-object schema. We don't
+ * follow refs ourselves (local-only resolution would still need to
+ * handle remote / recursive refs) so users wanting composition should
+ * inline the schema at the root or use `allOf`.
  */
 function schemaRootAcceptsObject(schema: Record<string, unknown>): boolean {
+  if (typeof schema['$ref'] === 'string') {
+    // Reject any root `$ref`. The previous "accept when sibling
+    // `type:"object"` is present" carve-out was unsound: Ajv applies
+    // both keywords, so `{type:"object", $ref:"#/$defs/Foo",
+    // $defs:{Foo:{type:"array"}}}` parses fine but no object argument
+    // can satisfy both at runtime — the model would loop forever on
+    // validation failures.
+    return false;
+  }
+
   const rawType = schema['type'];
   const typeIncludesObject =
     rawType !== undefined &&
     (Array.isArray(rawType) ? rawType : [rawType]).includes('object');
-
-  if (typeof schema['$ref'] === 'string' && !typeIncludesObject) {
-    // Bare root `$ref` with no anchoring `type:"object"` — we can't tell
-    // what it resolves to, so refuse to register a synthetic tool whose
-    // parameter contract is "whatever this $ref points to".
-    return false;
-  }
 
   if (rawType !== undefined && !typeIncludesObject) {
     return false;

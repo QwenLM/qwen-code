@@ -189,7 +189,19 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
     this.function_name = call.request.name;
-    this.function_args = call.request.args;
+    // structured_output args ARE the user's final structured payload (the
+    // command's actual answer, already emitted in stdout `result` /
+    // `structured_result`). Recording them again as ordinary tool-call
+    // function_args duplicates that data into telemetry surfaces (OTLP
+    // exports, QwenLogger, ui-telemetry stream, the chat-recording UI
+    // event mirror) where it can leak off-device. Replace with a
+    // placeholder so consumers still see the call happened — duration,
+    // success, decision metrics are preserved — but the payload itself
+    // doesn't ride along.
+    this.function_args =
+      call.request.name === ToolNames.STRUCTURED_OUTPUT
+        ? { __redacted: 'structured_output payload (see stdout result)' }
+        : call.request.args;
     this.duration_ms = call.durationMs ?? 0;
     this.status = call.status;
     this.success = call.status === 'success'; // Keep for backward compatibility
