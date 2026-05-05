@@ -86,6 +86,16 @@ jobs:
             exit 1
           fi
 
+          comments_json="$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/issues/${SMOKE_ISSUE_NUMBER}/comments?per_page=100")"
+          duplicate_comment_ids="$(echo "${comments_json}" | jq -r \
+            '[.[] | select(.body | contains("<!-- qwen-issue-bot:needs-info -->"))] | sort_by(.created_at) | .[0:-1][]?.id')"
+
+          for comment_id in ${duplicate_comment_ids}; do
+            gh api --method DELETE \
+              "/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}"
+          done
+
           node .github/scripts/issue-followup-bot.mjs \
             --mode single \
             --issue "${SMOKE_ISSUE_NUMBER}"
@@ -122,10 +132,11 @@ jobs:
             fi
           done
 
-          if ! echo "${issue_json}" | jq -e \
-            '.comments[] | select(.body | contains("<!-- qwen-issue-bot:needs-info -->")) | select(.author.login == "qwen-code-ci-bot")' >/dev/null
+          marker_comment_count="$(echo "${issue_json}" | jq \
+            '[.comments[] | select(.body | contains("<!-- qwen-issue-bot:needs-info -->")) | select(.author.login == "qwen-code-ci-bot")] | length')"
+          if [[ "${marker_comment_count}" != '1' ]]
           then
-            echo "::error::Expected canary issue #${SMOKE_ISSUE_NUMBER} to have a qwen-code-ci-bot needs-info comment."
+            echo "::error::Expected canary issue #${SMOKE_ISSUE_NUMBER} to have exactly one qwen-code-ci-bot needs-info comment."
             exit 1
           fi
 

@@ -507,13 +507,22 @@ ${relatedList}
 These are not marked as duplicates automatically; they are linked here so the discussion can be compared before maintainers decide the next step.`;
 }
 
+function isAutomationComment(comment) {
+  const login = comment.user?.login || '';
+  return (
+    comment.user?.type === 'Bot' ||
+    login.endsWith('[bot]') ||
+    login === 'qwen-code-ci-bot'
+  );
+}
+
 function findBotComment(comments, marker, fallbackPredicate) {
   return comments.find((comment) => {
-    if (comment.user?.type !== 'Bot') {
-      return false;
-    }
     if (comment.body?.includes(marker)) {
       return true;
+    }
+    if (!isAutomationComment(comment)) {
+      return false;
     }
     return fallbackPredicate?.(comment) || false;
   });

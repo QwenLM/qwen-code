@@ -211,6 +211,40 @@ dsas`,
     );
   });
 
+  it('updates marker comments from bot token accounts that are typed as users', () => {
+    const result = analyzeIssue({
+      issue: {
+        number: 4000,
+        title: 'VS Code companion overwrites settings.json',
+        body: 'The VS Code companion overwrites my settings.json.',
+        labels: ['type/bug'],
+        state: 'open',
+      },
+      labelNames,
+      relatedIssues: [
+        {
+          number: 3843,
+          title: 'settings.json overwritten after using qwen',
+          url: 'https://github.com/QwenLM/qwen-code/issues/3843',
+          state: 'open',
+        },
+      ],
+      comments: [
+        {
+          id: 100,
+          body: `${NEEDS_INFO_COMMENT_MARKER}\nold body`,
+          user: { login: 'qwen-code-ci-bot', type: 'User' },
+        },
+      ],
+    });
+
+    assert.equal(result.commentsToCreate.length, 1);
+    assert.deepEqual(
+      result.commentsToUpdate.map((comment) => comment.id),
+      [100],
+    );
+  });
+
   it('does not link weak body-only matches as related issues', () => {
     const result = analyzeIssue({
       issue: {
