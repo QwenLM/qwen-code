@@ -135,6 +135,15 @@ describe('classifyRetryError', () => {
       statusCode: 401,
       reason: 'auth-error',
     });
+
+    expect(
+      classifyRetryError({ status: 403, message: 'Forbidden' }),
+    ).toMatchObject({
+      kind: 'http',
+      decision: 'fail-fast',
+      statusCode: 403,
+      reason: 'auth-error',
+    });
   });
 
   it('classifies 529 as fallback-eligible capacity overload', () => {

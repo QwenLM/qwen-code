@@ -264,7 +264,8 @@ export async function retryWithBackoff<T>(
         debugLogger.warn(
           `[Persistent] Attempt ${reportedAttempt} failed with status ${errorStatus ?? 'unknown'}. ` +
             `Retrying in ${Math.ceil(delayMs / 1000)}s...`,
-          { ...retryClassification, error },
+          retryClassification,
+          error,
         );
 
         // Heartbeat sleep — chunked to keep CI alive
@@ -296,7 +297,8 @@ export async function retryWithBackoff<T>(
           });
           debugLogger.warn(
             `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${delayMs}ms...`,
-            { ...retryClassification, error },
+            retryClassification,
+            error,
           );
           await delay(delayMs);
           currentDelay = initialDelayMs;
@@ -336,10 +338,10 @@ function logRetryAttempt(
     : `Attempt ${attempt} failed. Retrying with backoff...`;
 
   if (errorStatus === 429) {
-    debugLogger.warn(message, { ...retryClassification, error });
+    debugLogger.warn(message, retryClassification, error);
   } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
-    debugLogger.error(message, { ...retryClassification, error });
+    debugLogger.error(message, retryClassification, error);
   } else {
-    debugLogger.warn(message, { ...retryClassification, error });
+    debugLogger.warn(message, retryClassification, error);
   }
 }
