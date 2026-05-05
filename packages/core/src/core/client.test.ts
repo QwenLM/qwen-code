@@ -1749,6 +1749,170 @@ hello
       );
     });
 
+    it('should not block the main request when auto-memory recall is slow', async () => {
+      // Simulate a recall that takes longer than the 2.5s deadline
+      mockMemoryManager.recall.mockReturnValue(
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                prompt: '## Relevant memory\n\nSlow memory result.',
+                selectedDocs: [],
+                strategy: 'model',
+              }),
+            10_000,
+          ),
+        ),
+      );
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      vi.useFakeTimers();
+      try {
+        const streamPromise = (async () => {
+          const stream = client.sendMessageStream(
+            [{ text: 'Quick question' }],
+            new AbortController().signal,
+            'prompt-id-slow-memory',
+          );
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })();
+
+        // Advance past the 2.5s deadline — the main request should proceed
+        await vi.advanceTimersByTimeAsync(3_000);
+        await streamPromise;
+
+        // The main request should have been called without the slow memory
+        expect(mockTurnRunFn).toHaveBeenCalledWith(
+          'test-model',
+          expect.not.arrayContaining([
+            expect.stringContaining('Slow memory result'),
+          ]),
+          expect.any(AbortSignal),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should include auto-memory prompt when recall completes within deadline', async () => {
+      // Simulate a fast recall that completes well within the deadline
+      mockMemoryManager.recall.mockResolvedValue({
+        prompt: '## Relevant memory\n\nFast memory result.',
+        selectedDocs: [],
+        strategy: 'heuristic',
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-fast-memory',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining(['## Relevant memory\n\nFast memory result.']),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should proceed without auto-memory when managed auto-memory is disabled', async () => {
+      // When getManagedAutoMemoryEnabled returns false, no recall is initiated
+      // and sendMessageStream completes without memory content
+      vi.mocked(mockConfig.getManagedAutoMemoryEnabled).mockReturnValue(false);
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-no-memory',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      // recall should never have been called
+      expect(mockMemoryManager.recall).not.toHaveBeenCalled();
+
+      // The main request should have been called without any memory content
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        ['Quick question'],
+        expect.any(AbortSignal),
+      );
+
+      // Restore default
+      vi.mocked(mockConfig.getManagedAutoMemoryEnabled).mockReturnValue(true);
+    });
+
+    it('should proceed normally when recall rejects', async () => {
+      // Simulate a recall that throws — the .catch() handler should swallow
+      // the error and the main request should complete without memory content
+      mockMemoryManager.recall.mockRejectedValue(new Error('recall failed'));
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-recall-fail',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      // The main request should have been called without any memory content
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        ['Quick question'],
+        expect.any(AbortSignal),
+      );
+    });
+
     it('should run managed auto-memory extraction after a completed user query', async () => {
       mockMemoryManager.scheduleExtract.mockResolvedValue({
         touchedTopics: ['user'],
@@ -2034,6 +2198,89 @@ Other open files:
 
       expect(events).toEqual([{ type: GeminiEventType.MaxSessionTurns }]);
       expect(mockTurnRunFn).toHaveBeenCalledTimes(MAX_SESSION_TURNS);
+    });
+
+    it('should abort the pending recall when MaxSessionTurns is hit', async () => {
+      vi.spyOn(client['config'], 'getMaxSessionTurns').mockReturnValue(1);
+      client['sessionTurnCount'] = 1; // already at limit; next call exceeds it
+
+      const abortHandler = vi.fn();
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', abortHandler);
+        return new Promise(() => {}); // never resolves
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'over the limit' }],
+        new AbortController().signal,
+        'prompt-id-over-limit',
+      );
+      const events = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([{ type: GeminiEventType.MaxSessionTurns }]);
+      expect(abortHandler).toHaveBeenCalledTimes(1);
+    });
+
+    it('should abort the pending recall when SessionTokenLimitExceeded', async () => {
+      // Use a very low token limit so the (uncompressed) history exceeds it
+      vi.spyOn(client['config'], 'getSessionTokenLimit').mockReturnValue(1);
+
+      // Force token count to be above the limit
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        9999,
+      );
+
+      const abortHandler = vi.fn();
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', abortHandler);
+        return new Promise(() => {}); // never resolves
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'token limit test' }],
+        new AbortController().signal,
+        'prompt-id-token-limit',
+      );
+      const events = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.SessionTokenLimitExceeded,
+          value: expect.objectContaining({
+            currentTokens: 9999,
+            limit: 1,
+          }),
+        },
+      ]);
+      expect(abortHandler).toHaveBeenCalledTimes(1);
     });
 
     it('should respect MAX_TURNS limit even when turns parameter is set to a large value', async () => {

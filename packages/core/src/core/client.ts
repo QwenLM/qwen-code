@@ -130,6 +130,43 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
   strategy: 'none',
 };
 
+/**
+ * Resolve the auto-memory recall promise with a hard deadline.
+ * If the recall (model-driven selection + heuristic fallback) does not complete
+ * within the deadline, return an empty result so the main request is not delayed.
+ *
+ * The deadline is set slightly above the model-driven selector's own
+ * AbortSignal.timeout (2s) to give the heuristic fallback time to complete,
+ * but low enough that the user does not perceive a delay on every turn.
+ */
+async function resolveAutoMemoryWithDeadline(
+  promise: Promise<RelevantAutoMemoryPromptResult> | undefined,
+  onDeadline: () => void,
+): Promise<RelevantAutoMemoryPromptResult> {
+  if (!promise) {
+    return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<RelevantAutoMemoryPromptResult>((resolve) => {
+    timer = setTimeout(() => {
+      try {
+        onDeadline();
+      } finally {
+        resolve(EMPTY_RELEVANT_AUTO_MEMORY_RESULT);
+      }
+    }, 2_500);
+  });
+
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
@@ -139,6 +176,7 @@ export class GeminiClient {
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
+  private pendingRecallAbortController: AbortController | undefined;
 
   /**
    * Cache of per-model ContentGenerators keyed by model ID.
@@ -285,6 +323,12 @@ export class GeminiClient {
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
     this.perModelGeneratorCache.clear();
+    // Abort any in-flight auto-memory recall so the stale controller
+    // does not leak into the next session.
+    if (this.pendingRecallAbortController) {
+      this.pendingRecallAbortController.abort();
+      this.pendingRecallAbortController = undefined;
+    }
     await this.startChat();
   }
 
@@ -711,19 +755,36 @@ export class GeminiClient {
       messageType === SendMessageType.Cron
     ) {
       if (this.config.getManagedAutoMemoryEnabled()) {
-        relevantAutoMemoryPromise = this.config
+        const recallAbortController = new AbortController();
+        const rawRecallPromise = this.config
           .getMemoryManager()
           .recall(this.config.getProjectRoot(), partToString(request), {
             config: this.config,
             excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+            abortSignal: recallAbortController.signal,
           })
           .catch((error: unknown) => {
-            debugLogger.warn(
-              'Managed auto-memory recall prefetch failed.',
-              error,
-            );
+            if (error instanceof DOMException && error.name === 'AbortError') {
+              debugLogger.debug(
+                'Auto-memory recall aborted by deadline.',
+                error,
+              );
+            } else {
+              debugLogger.warn(
+                'Managed auto-memory recall prefetch failed.',
+                error,
+              );
+            }
             return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
           });
+        this.pendingRecallAbortController = recallAbortController;
+        // Race the recall against the deadline at initiation time so the 2.5s
+        // budget is not consumed by intermediate work (microcompact, compression,
+        // token checks, IDE context) between initiation and consumption.
+        relevantAutoMemoryPromise = resolveAutoMemoryWithDeadline(
+          rawRecallPromise,
+          () => recallAbortController.abort(),
+        );
       }
 
       // record user/cron message for session management
@@ -771,6 +832,8 @@ export class GeminiClient {
         this.config.getMaxSessionTurns() > 0 &&
         this.sessionTurnCount > this.config.getMaxSessionTurns()
       ) {
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         yield { type: GeminiEventType.MaxSessionTurns };
         return new Turn(this.getChat(), prompt_id);
       }
@@ -779,6 +842,8 @@ export class GeminiClient {
     // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
     const boundedTurns = Math.min(turns, MAX_TURNS);
     if (!boundedTurns) {
+      this.pendingRecallAbortController?.abort();
+      this.pendingRecallAbortController = undefined;
       return new Turn(this.getChat(), prompt_id);
     }
 
@@ -794,6 +859,8 @@ export class GeminiClient {
     if (sessionTokenLimit > 0) {
       const lastPromptTokenCount = uiTelemetryService.getLastPromptTokenCount();
       if (lastPromptTokenCount > sessionTokenLimit) {
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         yield {
           type: GeminiEventType.SessionTokenLimitExceeded,
           value: {
@@ -844,6 +911,8 @@ export class GeminiClient {
           `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
         );
         await arenaAgentClient.reportCancelled();
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         return new Turn(this.getChat(), prompt_id);
       }
     }
@@ -860,6 +929,9 @@ export class GeminiClient {
       messageType === SendMessageType.Cron
     ) {
       const systemReminders = [];
+      // The recall promise was already raced against the 2.5s deadline at
+      // initiation time; this await just collects the result.
+      this.pendingRecallAbortController = undefined;
       const relevantAutoMemory = relevantAutoMemoryPromise
         ? await relevantAutoMemoryPromise
         : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
