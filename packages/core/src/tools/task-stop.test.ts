@@ -351,11 +351,13 @@ describe('TaskStopTool', () => {
       expect(result.llmContent).toContain('completed');
     });
 
-    it('does NOT route extract tasks through cancellation (dream-only)', async () => {
+    it('returns NOT_CANCELLABLE when the task id resolves to an extract record', async () => {
       // Extract is short-lived and runs on the request path; cancelling
-      // it would interfere with the user's own turn. The 4th-route
-      // dispatch is dream-only and falls through to NOT_FOUND for
-      // anything else.
+      // it would interfere with the user's own turn. The dispatch must
+      // distinguish "task exists but isn't cancellable" from "task
+      // doesn't exist" — without the distinct error type, a model
+      // retrying against an extract id would incorrectly conclude the
+      // id was never valid.
       const extractRecord = {
         id: 'extract-running-1',
         taskType: 'extract' as const,
@@ -384,7 +386,46 @@ describe('TaskStopTool', () => {
       );
 
       expect(cancelTask).not.toHaveBeenCalled();
-      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_FOUND);
+      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_CANCELLABLE);
+      expect(result.llmContent).toContain('extract');
+      expect(result.llmContent).toContain('not cancellable');
+    });
+
+    it('returns an error when cancelTask returns false (missing AbortController)', async () => {
+      // The MemoryManager.cancelTask contract returns false when the
+      // AbortController is missing for a running record — a logic-
+      // level invariant violation. task_stop must surface the failure
+      // rather than report a phantom success, otherwise the model
+      // believes the dream is being aborted while it actually keeps
+      // burning tokens.
+      const dreamRecord = {
+        id: 'dream-broken-1',
+        taskType: 'dream' as const,
+        projectRoot: '/p',
+        status: 'running' as const,
+        createdAt: '2026-05-04T12:00:00.000Z',
+        updatedAt: '2026-05-04T12:00:00.000Z',
+      };
+      const memoryManager = {
+        getTask: vi.fn(() => dreamRecord),
+        cancelTask: vi.fn(() => false),
+      };
+      const localConfig = {
+        getBackgroundTaskRegistry: () => registry,
+        abandonBackgroundAgent,
+        getBackgroundShellRegistry: () => shellRegistry,
+        getMonitorRegistry: () => monitorRegistry,
+        getMemoryManager: () => memoryManager,
+      } as unknown as Config;
+      const localTool = new TaskStopTool(localConfig);
+
+      const result = await localTool.validateBuildAndExecute(
+        { task_id: 'dream-broken-1' },
+        new AbortController().signal,
+      );
+
+      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_RUNNING);
+      expect(result.llmContent).toContain('could not be cancelled');
     });
   });
 });

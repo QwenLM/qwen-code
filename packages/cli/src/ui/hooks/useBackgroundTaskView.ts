@@ -11,8 +11,9 @@
  * into a single ordered snapshot of `DialogEntry`s. Each registry fires
  * `statusChange` on register too, so a single subscription per registry
  * is enough to keep the snapshot fresh for new + transitioning entries.
- * `MemoryManager.subscribe` (multi-listener Set, not single-slot)
- * carries dream task transitions on the same refresh path.
+ * The `MemoryManager.subscribe({ taskType: 'dream' })` filter routes
+ * dream-task transitions to the same refresh path while skipping the
+ * per-UserQuery extract notifies that have no dialog surface.
  *
  * Surfaces that only care about live work (the footer pill, the
  * composer's Down-arrow route) filter for `running` themselves.
@@ -59,6 +60,15 @@ export type DreamDialogEntry = {
   dreamId: string;
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   startTime: number;
+  /**
+   * Wall-clock instant the record's `status` last changed. For
+   * `completed` / `failed` this is when the dream actually finished;
+   * for `cancelled` this is the moment `cancelTask` ran (NOT when
+   * the fork agent finishes unwinding — that can lag by seconds for
+   * agents mid-tool-call). The dialog renders elapsed from this
+   * value, so a freshly-cancelled record snaps to "Stopped · Ns"
+   * even while the underlying fork is still releasing the lock.
+   */
   endTime?: number;
   progressText?: string;
   error?: string;
@@ -116,14 +126,11 @@ export function useBackgroundTaskView(
     const monitorRegistry = config.getMonitorRegistry();
     const memoryManager = config.getMemoryManager();
     const projectRoot = config.getProjectRoot();
-    // Dream snapshot signature for the memory-subscribe path. The
-    // manager's subscribe() fires on ALL task transitions (including
-    // extract, which has no dialog surface — multiple notifies per
-    // UserQuery on heavy auto-memory builds). Without this guard each
-    // extract notify would force a full re-merge + setEntries with a
-    // fresh array reference, re-rendering the dialog and pill on
-    // entries that didn't change. The other 3 registries already only
-    // fire on their own changes, so this dedup is dream-specific.
+    // Dream snapshot signature, kept as a defense-in-depth dedup for
+    // the dream-filtered memory listener below. The taskType filter
+    // already skips the listener entirely on extract notifies; this
+    // signature additionally absorbs the rare case where dream
+    // metadata is updated without an observable dialog change.
     let lastDreamSig = '';
 
     // refresh accepts a pre-fetched dream snapshot so the memory
@@ -221,10 +228,14 @@ export function useBackgroundTaskView(
     shellRegistry.setStatusChangeCallback(refreshFromRegistry);
     monitorRegistry.setStatusChangeCallback(refreshFromRegistry);
 
-    // Memory listener gates refresh on dream-content changes — see the
-    // `lastDreamSig` rationale above. Extract notifies hit this path
-    // with an unchanged dream signature and short-circuit before the
-    // full re-merge. The fetched snapshot is forwarded to refresh so
+    // Memory listener fires only on dream-task transitions —
+    // `subscribe({ taskType: 'dream' })` skips the per-extract notify
+    // entirely so we don't pay the per-UserQuery O(n) signature cost
+    // for transitions we have no surface for. The dream-content
+    // signature dedup remains as a second-line guard against the rare
+    // case where dream metadata is updated without observable changes
+    // to the dialog (e.g. a future progressText-only patch on the
+    // same status). The fetched snapshot is forwarded to refresh so
     // both the gate and the rendered dreamEntries come from one read.
     const memoryListener = () => {
       const dreams = memoryManager.listTasksByType('dream', projectRoot);
@@ -232,7 +243,9 @@ export function useBackgroundTaskView(
       if (sig === lastDreamSig) return;
       refresh(dreams);
     };
-    const unsubscribeMemory = memoryManager.subscribe(memoryListener);
+    const unsubscribeMemory = memoryManager.subscribe(memoryListener, {
+      taskType: 'dream',
+    });
 
     return () => {
       agentRegistry.setStatusChangeCallback(undefined);

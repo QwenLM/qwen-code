@@ -39,7 +39,10 @@ import { randomUUID } from 'node:crypto';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { logMemoryExtract, MemoryExtractEvent } from '../telemetry/index.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
 import { isAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
@@ -347,7 +350,17 @@ export class MemoryManager {
   // ── Task records ────────────────────────────────────────────────────────────
   private readonly tasks = new Map<string, MemoryTaskRecord>();
   // ── Subscribers (useSyncExternalStore / custom listeners) ────────────────
+  // Subscribers without a taskType filter receive every notify; those
+  // with a filter receive only notifies whose changed record matches
+  // (extract OR dream). Filtered subscribers exist so high-frequency
+  // consumers (e.g. the bg-tasks UI hook, which only cares about
+  // dream) can skip the per-extract O(n) work that would otherwise
+  // run on every UserQuery.
   private readonly subscribers = new Set<() => void>();
+  private readonly subscribersByType = new Map<
+    'extract' | 'dream',
+    Set<() => void>
+  >();
   // ── In-flight promises (for drain) ──────────────────────────────────────────
   private readonly inFlight = new Map<string, Promise<unknown>>();
 
@@ -378,14 +391,42 @@ export class MemoryManager {
    * Register a listener that is called whenever any task record changes.
    * Compatible with React’s `useSyncExternalStore`.
    * Returns an unsubscribe function.
+   *
+   * Pass `{ taskType: 'dream' }` (or `'extract'`) to receive only
+   * notifies whose changed record matches that type. Filtered
+   * subscribers skip the wakeup entirely for unrelated transitions —
+   * the dream-only UI hook uses this to avoid doing O(n) signature
+   * work on every per-UserQuery extract notify.
    */
-  subscribe(listener: () => void): () => void {
+  subscribe(
+    listener: () => void,
+    opts?: { taskType?: 'extract' | 'dream' },
+  ): () => void {
+    if (opts?.taskType) {
+      const type = opts.taskType;
+      let set = this.subscribersByType.get(type);
+      if (!set) {
+        set = new Set();
+        this.subscribersByType.set(type, set);
+      }
+      set.add(listener);
+      return () => set!.delete(listener);
+    }
     this.subscribers.add(listener);
     return () => this.subscribers.delete(listener);
   }
 
-  private notify(): void {
+  /**
+   * Notify subscribers. Pass the changed task's type so type-filtered
+   * subscribers can be reached too; the unfiltered subscriber set
+   * always receives the wakeup either way.
+   */
+  private notify(taskType?: 'extract' | 'dream'): void {
     for (const fn of this.subscribers) fn();
+    if (taskType) {
+      const typed = this.subscribersByType.get(taskType);
+      if (typed) for (const fn of typed) fn();
+    }
   }
 
   /** Update a record and notify subscribers. */
@@ -396,7 +437,7 @@ export class MemoryManager {
     >,
   ): void {
     updateRecord(record, patch);
-    this.notify();
+    this.notify(record.taskType);
   }
 
   /**
@@ -405,7 +446,7 @@ export class MemoryManager {
    */
   private store(record: MemoryTaskRecord): void {
     this.tasks.set(record.id, record);
-    this.notify();
+    this.notify(record.taskType);
   }
 
   /**
@@ -420,7 +461,7 @@ export class MemoryManager {
   ): void {
     updateRecord(record, patch);
     this.tasks.set(record.id, record);
-    this.notify();
+    this.notify(record.taskType);
   }
   // ─── Task record query ────────────────────────────────────────────────────────
 
@@ -782,9 +823,20 @@ export class MemoryManager {
     // missing-controller case as a contract violation: don't flip
     // status (a cancelled record without an aborted fork would leak
     // the consolidation lock until the agent finishes naturally) and
-    // return false so the caller knows the abort didn't take.
+    // return false so the caller knows the abort didn't take. Log at
+    // warn level so the inconsistency is observable in debug bundles
+    // — silent failure here would leave a runaway dream burning tokens
+    // with no signal to the user or to telemetry.
     const ac = this.dreamAbortControllers.get(taskId);
-    if (!ac) return false;
+    if (!ac) {
+      debugLogger.warn(
+        `cancelTask: AbortController missing for running dream task ${taskId}; ` +
+          `not flipping status. This indicates a logic bug — the controller ` +
+          `should have been registered in scheduleDream and only cleared ` +
+          `after a terminal status transition.`,
+      );
+      return false;
+    }
 
     // Mark cancelled BEFORE aborting so the runDream catch path can
     // detect the user-cancel intent (signal.aborted + status already
@@ -838,10 +890,25 @@ export class MemoryManager {
           return record;
         }
         const nextMetadata = await readDreamMetadata(params.projectRoot);
+        // Re-check the abort signal between awaits in the success
+        // path. The metadata read/write straddle ~tens of milliseconds
+        // of disk I/O during which the user can press `x` in the
+        // dialog (or the model can call task_stop). Without this
+        // re-check, a "user cancelled too late" abort would silently
+        // lose: cancelTask flips status to 'cancelled', the success
+        // continuation overwrites it with 'completed', and the dream
+        // metadata gets bumped for what the user thinks is an aborted
+        // run.
+        if (abortSignal.aborted) {
+          return record;
+        }
         nextMetadata.lastDreamAt = now.toISOString();
         nextMetadata.lastDreamSessionId = params.sessionId;
         nextMetadata.updatedAt = now.toISOString();
         await writeDreamMetadata(params.projectRoot, nextMetadata);
+        if (abortSignal.aborted) {
+          return record;
+        }
 
         this.update(record, {
           status: 'completed',

@@ -28,21 +28,34 @@ function makeFakeRegistry(): FakeRegistry {
 interface FakeMemoryManager {
   subscribe: ReturnType<typeof vi.fn>;
   unsubscribe: ReturnType<typeof vi.fn>;
+  /** Captured opts from the most recent subscribe() call (the hook
+   * passes `{ taskType: 'dream' }` to skip per-extract notifies). */
+  lastSubscribeOpts: { taskType?: 'extract' | 'dream' } | undefined;
   /** Test helper — invokes the currently-subscribed listener. */
   fire: () => void;
 }
 
 function makeFakeMemoryManager(): FakeMemoryManager {
   let listener: (() => void) | undefined;
+  const ref: { lastSubscribeOpts: FakeMemoryManager['lastSubscribeOpts'] } = {
+    lastSubscribeOpts: undefined,
+  };
   const unsubscribe = vi.fn(() => {
     listener = undefined;
   });
-  return {
-    subscribe: vi.fn((next: () => void) => {
+  const subscribe = vi.fn(
+    (next: () => void, opts?: { taskType?: 'extract' | 'dream' }) => {
       listener = next;
+      ref.lastSubscribeOpts = opts;
       return unsubscribe;
-    }),
+    },
+  );
+  return {
+    subscribe,
     unsubscribe,
+    get lastSubscribeOpts() {
+      return ref.lastSubscribeOpts;
+    },
     fire: () => listener?.(),
   };
 }
@@ -328,6 +341,24 @@ describe('useBackgroundTaskView', () => {
     const [only] = result.current.entries;
     expect(only.kind).toBe('dream');
     expect(only.status).toBe('cancelled');
+  });
+
+  it('subscribes to MemoryManager with a dream taskType filter so extract notifies are skipped at the source', () => {
+    // The taskType filter on MemoryManager.subscribe() is the
+    // primary perf guard — it prevents the per-UserQuery extract
+    // notify from waking the bg-tasks UI listener at all (avoids the
+    // O(n) dream-snapshot fetch + signature compare that would
+    // otherwise run on every extract transition). Pin the filter so
+    // a future refactor that drops the opts arg fails the test
+    // rather than silently re-introducing the wakeups.
+    const { config, memoryMgr } = makeConfig({
+      agents: () => [],
+      shells: () => [],
+      monitors: () => [],
+    });
+    renderHook(() => useBackgroundTaskView(config));
+    expect(memoryMgr.subscribe).toHaveBeenCalledTimes(1);
+    expect(memoryMgr.lastSubscribeOpts).toEqual({ taskType: 'dream' });
   });
 
   it('skips setEntries when the memory listener fires with unchanged dream content', () => {
