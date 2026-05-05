@@ -71,6 +71,7 @@ Optional environment variables:
 | `QWEN_CODE_MERMAID_ALLOW_LOCAL_RENDERERS=1` | Allows project-local renderer binaries under `node_modules/.bin`.                   |
 | `QWEN_CODE_MERMAID_RENDER_WIDTH=1200`       | Overrides the PNG render width.                                                     |
 | `QWEN_CODE_MERMAID_RENDER_TIMEOUT_MS=10000` | Overrides the external render timeout.                                              |
+| `QWEN_CODE_MERMAID_CELL_ASPECT_RATIO=0.5`   | Adjusts image row fitting for terminal font cell geometry.                          |
 
 The first image render can be slow, especially when `npx` needs to resolve or
 download Mermaid CLI. During streaming, Qwen Code shows a bounded text preview
@@ -112,6 +113,11 @@ $$
 The renderer focuses on common symbols and readable terminal output. It is not
 a full TeX engine; complex layouts such as matrices, aligned equations, and
 large nested expressions may be simplified.
+
+Inline `$...$` expressions are intentionally bounded to 1024 characters per
+line so malformed or very large generated Markdown cannot stall terminal
+rendering. Longer formulas remain visible as source text and can still be
+copied from raw mode or the original response.
 
 ### LaTeX Source Copy
 

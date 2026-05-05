@@ -19,8 +19,11 @@ const INLINE_CODE_MARKER_LENGTH = 1; // For "`"
 const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
 const INLINE_MATH_MARKER_LENGTH = 1; // For "$"
-const INLINE_MATH_PATTERN =
-  /(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,240}\S\$)[^$\n]{1,240}\$(?![\w$])/g;
+const INLINE_MATH_MAX_CHARS = 1024;
+const INLINE_MATH_PATTERN = new RegExp(
+  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
+  'g',
+);
 
 const debugLogger = createDebugLogger('INLINE_MARKDOWN');
 
@@ -46,7 +49,11 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
   const inlineRegex = enableInlineMath
-    ? /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,240}\S\$)[^$\n]{1,240}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)/g
+    ? new RegExp(
+        String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|` +
+          String.raw`\`+.+?\`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)`,
+        'g',
+      )
     : /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
   let match;
 

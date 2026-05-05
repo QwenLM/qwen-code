@@ -20,6 +20,7 @@ import { OverflowProvider } from '../contexts/OverflowContext.js';
 
 const staticPropsSpy = vi.fn();
 const staticItemsSpy = vi.fn();
+const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
 
 vi.mock('ink', async () => {
@@ -47,9 +48,10 @@ vi.mock('./AppHeader.js', () => ({
 }));
 
 vi.mock('./HistoryItemDisplay.js', () => ({
-  HistoryItemDisplay: ({ item }: { item: { id: number } }) => (
-    <Text>{`HISTORY:${item.id}`}</Text>
-  ),
+  HistoryItemDisplay: (props: { item: { id: number } }) => {
+    historyItemDisplayPropsSpy(props);
+    return <Text>{`HISTORY:${props.item.id}`}</Text>;
+  },
 }));
 
 vi.mock('./ShowMoreLines.js', () => ({
@@ -201,6 +203,7 @@ describe('<MainContent />', () => {
   it('renders AppHeader inside Static at the top of the static content', () => {
     staticPropsSpy.mockClear();
     staticItemsSpy.mockClear();
+    historyItemDisplayPropsSpy.mockClear();
     appHeaderSpy.mockClear();
 
     const { lastFrame, rerender } = renderMainContent(
@@ -242,5 +245,56 @@ describe('<MainContent />', () => {
 
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(3);
     expect(appHeaderSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('continues source copy numbering from static history into pending chunks', () => {
+    historyItemDisplayPropsSpy.mockClear();
+
+    renderMainContent(
+      createUIState({
+        history: [
+          {
+            id: 1,
+            type: 'gemini_content',
+            text: [
+              '```mermaid',
+              'flowchart TD',
+              '  A --> B',
+              '```',
+              '$$',
+              '\\alpha',
+              '$$',
+            ].join('\n'),
+          },
+        ],
+        pendingHistoryItems: [
+          {
+            type: 'gemini_content',
+            text: [
+              '```mermaid',
+              'sequenceDiagram',
+              '  A->>B: hi',
+              '```',
+              '$$',
+              '\\beta',
+              '$$',
+            ].join('\n'),
+          },
+        ],
+      }),
+    );
+
+    const pendingProps = historyItemDisplayPropsSpy.mock.calls
+      .map((call) => call[0])
+      .find((props) => props.isPending);
+
+    expect(pendingProps?.sourceCopyIndexOffsets).toMatchObject({
+      mathBlockCount: 1,
+    });
+    expect(
+      pendingProps?.sourceCopyIndexOffsets?.codeBlockLanguageCounts.get(
+        'mermaid',
+      ),
+    ).toBe(1);
   });
 });

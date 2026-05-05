@@ -204,6 +204,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             content={mathBlockContent}
             sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
             contentWidth={contentWidth}
+            isPending={isPending}
+            availableTerminalHeight={availableTerminalHeight}
           />,
         );
         inMathBlock = false;
@@ -331,7 +333,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           <Text dimColor>---</Text>
         </Box>,
       );
-    } else if (blockquoteMatch) {
+    } else if (blockquoteMatch && renderVisualBlocks) {
       addContentBlock(
         <RenderBlockquote
           key={key}
@@ -478,6 +480,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         content={mathBlockContent}
         sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
         contentWidth={contentWidth}
+        isPending={isPending}
+        availableTerminalHeight={availableTerminalHeight}
       />,
     );
   }
@@ -646,13 +650,46 @@ interface RenderMathBlockProps {
   content: string[];
   sourceCopyCommand: string;
   contentWidth: number;
+  isPending: boolean;
+  availableTerminalHeight?: number;
 }
 
 const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
   content,
   sourceCopyCommand,
   contentWidth,
+  isPending,
+  availableTerminalHeight,
 }) => {
+  const RESERVED_LINES = 3;
+  if (isPending && availableTerminalHeight !== undefined) {
+    const maxPreviewLines = Math.max(
+      0,
+      availableTerminalHeight - RESERVED_LINES,
+    );
+    if (content.length > maxPreviewLines) {
+      const previewLines = content.slice(0, maxPreviewLines);
+      return (
+        <Box
+          paddingLeft={MATH_BLOCK_PREFIX_PADDING}
+          flexDirection="column"
+          width={contentWidth}
+          flexShrink={0}
+        >
+          <Text bold color={theme.text.accent}>
+            LaTeX block · source: {sourceCopyCommand}
+          </Text>
+          {previewLines.map((line, index) => (
+            <Text key={index} color={theme.text.secondary} wrap="truncate-end">
+              {line || ' '}
+            </Text>
+          ))}
+          <Text color={theme.text.secondary}>... generating more ...</Text>
+        </Box>
+      );
+    }
+  }
+
   const rendered = renderInlineLatex(content.join(' '));
   return (
     <Box
@@ -718,9 +755,9 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
   enableInlineMath = true,
 }) => {
   const taskMatch = itemText.match(/^\[([ xX])\]\s+(.*)$/);
-  const isTaskItem = taskMatch !== null;
+  const isTaskItem = taskMatch !== null && enableInlineMath;
   const isTaskChecked = taskMatch?.[1]?.toLowerCase() === 'x';
-  const effectiveItemText = taskMatch?.[2] ?? itemText;
+  const effectiveItemText = isTaskItem ? taskMatch[2] : itemText;
   const prefix = isTaskItem
     ? `${isTaskChecked ? '✓' : '○'} `
     : type === 'ol'

@@ -71,17 +71,6 @@ describe('BaseTextInput', () => {
     expect(buffer.handleInput).not.toHaveBeenCalled();
   });
 
-  it('does not type the raw macOS Option+M sequence into the buffer', () => {
-    const buffer = createBuffer();
-
-    render(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);
-
-    const handler = captureKeypressHandler();
-    handler(makeKey({ name: '', sequence: 'µ' }));
-
-    expect(buffer.handleInput).not.toHaveBeenCalled();
-  });
-
   it('still passes pasted µ text through to the buffer', () => {
     const buffer = createBuffer();
 

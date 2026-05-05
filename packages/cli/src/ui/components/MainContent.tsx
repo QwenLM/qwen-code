@@ -17,7 +17,6 @@ import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
-import { useRenderMode } from '../contexts/RenderModeContext.js';
 import {
   countMarkdownSourceBlocks,
   type MarkdownSourceCopyIndexOffsets,
@@ -66,7 +65,6 @@ export const MainContent = () => {
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { compactMode } = useCompactMode();
-  const { renderMode } = useRenderMode();
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -211,10 +209,41 @@ export const MainContent = () => {
     prevMergedLengthRef.current = currMLen;
   }, [compactMode, uiState.history, mergedHistory, uiActions]);
 
-  const historyItemsWithSourceCopyOffsets = useMemo(() => {
-    let runningOffsets = createEmptySourceCopyOffsets();
+  const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
+    useMemo(() => {
+      let runningOffsets = createEmptySourceCopyOffsets();
 
-    return mergedHistory.map((item) => {
+      const items = mergedHistory.map((item) => {
+        if (item.type === 'gemini') {
+          runningOffsets = createEmptySourceCopyOffsets();
+          const offsets = cloneSourceCopyOffsets(runningOffsets);
+          addSourceBlockCounts(runningOffsets, item.text);
+          return { item, sourceCopyIndexOffsets: offsets };
+        }
+
+        if (item.type === 'gemini_content') {
+          const offsets = cloneSourceCopyOffsets(runningOffsets);
+          addSourceBlockCounts(runningOffsets, item.text);
+          return { item, sourceCopyIndexOffsets: offsets };
+        }
+
+        if (item.type === 'user') {
+          runningOffsets = createEmptySourceCopyOffsets();
+        }
+
+        return { item, sourceCopyIndexOffsets: undefined };
+      });
+
+      return {
+        historyItemsWithSourceCopyOffsets: items,
+        pendingStartSourceCopyOffsets: cloneSourceCopyOffsets(runningOffsets),
+      };
+    }, [mergedHistory]);
+
+  const pendingHistoryItemsWithSourceCopyOffsets = useMemo(() => {
+    let runningOffsets = cloneSourceCopyOffsets(pendingStartSourceCopyOffsets);
+
+    return pendingHistoryItems.map((item) => {
       if (item.type === 'gemini') {
         runningOffsets = createEmptySourceCopyOffsets();
         const offsets = cloneSourceCopyOffsets(runningOffsets);
@@ -234,12 +263,12 @@ export const MainContent = () => {
 
       return { item, sourceCopyIndexOffsets: undefined };
     });
-  }, [mergedHistory]);
+  }, [pendingHistoryItems, pendingStartSourceCopyOffsets]);
 
   return (
     <>
       <Static
-        key={`${historyRemountKey}-${uiState.currentModel}-${renderMode}`}
+        key={`${historyRemountKey}-${uiState.currentModel}`}
         items={[
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,
@@ -267,23 +296,26 @@ export const MainContent = () => {
       </Static>
       <OverflowProvider>
         <Box flexDirection="column">
-          {pendingHistoryItems.map((item, i) => (
-            <HistoryItemDisplay
-              key={i}
-              availableTerminalHeight={
-                uiState.constrainHeight ? availableTerminalHeight : undefined
-              }
-              terminalWidth={terminalWidth}
-              mainAreaWidth={mainAreaWidth}
-              item={{ ...item, id: 0 }}
-              isPending={true}
-              isFocused={!uiState.isEditorDialogOpen}
-              activeShellPtyId={uiState.activePtyId}
-              embeddedShellFocused={uiState.embeddedShellFocused}
-              compactLabel={getCompactLabel(item)}
-              summaryAbsorbed={isSummaryAbsorbed(item)}
-            />
-          ))}
+          {pendingHistoryItemsWithSourceCopyOffsets.map(
+            ({ item, sourceCopyIndexOffsets }, i) => (
+              <HistoryItemDisplay
+                key={i}
+                availableTerminalHeight={
+                  uiState.constrainHeight ? availableTerminalHeight : undefined
+                }
+                terminalWidth={terminalWidth}
+                mainAreaWidth={mainAreaWidth}
+                item={{ ...item, id: 0 }}
+                isPending={true}
+                isFocused={!uiState.isEditorDialogOpen}
+                activeShellPtyId={uiState.activePtyId}
+                embeddedShellFocused={uiState.embeddedShellFocused}
+                compactLabel={getCompactLabel(item)}
+                summaryAbsorbed={isSummaryAbsorbed(item)}
+                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+              />
+            ),
+          )}
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </Box>
       </OverflowProvider>

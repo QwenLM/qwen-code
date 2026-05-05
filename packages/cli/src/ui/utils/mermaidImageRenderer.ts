@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 export type TerminalImageProtocol = 'kitty' | 'iterm2';
 
@@ -299,9 +299,13 @@ export function buildKittyPlaceholder(
   rows: number,
 ): KittyImagePlaceholder {
   const clampedRows = Math.min(rows, KITTY_PLACEHOLDER_DIACRITICS.length);
+  const clampedWidth = Math.min(
+    widthCells,
+    KITTY_PLACEHOLDER_DIACRITICS.length,
+  );
   const lines = Array.from({ length: clampedRows }, (_, row) => {
     const rowDiacritic = KITTY_PLACEHOLDER_DIACRITICS[row];
-    const cells = Array.from({ length: widthCells }, (_, column) => {
+    const cells = Array.from({ length: clampedWidth }, (_, column) => {
       const columnDiacritic = KITTY_PLACEHOLDER_DIACRITICS[column];
       return `${KITTY_PLACEHOLDER}${rowDiacritic}${columnDiacritic}`;
     });
@@ -371,12 +375,13 @@ export function renderMermaidImageSync({
     availableTerminalHeight,
     protocol ?? `chafa:${chafa}`,
     mmdc,
+    env,
   );
-  const cached = cachedResults.get(cacheKey);
+  const cached = getResultCache(cacheKey);
   if (cached) return cached;
 
   const pngCacheKey = createPngCacheKey(source, mmdc, env);
-  const cachedPng = cachedPngResults.get(pngCacheKey);
+  const cachedPng = getPngCache(pngCacheKey);
   const rendered =
     cachedPng ?? rememberPng(pngCacheKey, renderPngWithMmdc(source, mmdc, env));
   if (!rendered.ok) {
@@ -398,6 +403,7 @@ export function renderMermaidImageSync({
     pngSize,
     contentWidth,
     availableTerminalHeight,
+    env,
   );
 
   if (protocol) {
@@ -456,6 +462,139 @@ export function renderMermaidImageSync({
   });
 }
 
+export async function renderMermaidImageAsync({
+  source,
+  contentWidth,
+  availableTerminalHeight,
+  env = process.env,
+}: MermaidImageRenderOptions): Promise<MermaidImageRenderResult> {
+  const imageRendering = env['QWEN_CODE_MERMAID_IMAGE_RENDERING'];
+  if (
+    imageRendering !== '1' &&
+    imageRendering?.toLowerCase() !== 'on' &&
+    imageRendering?.toLowerCase() !== 'true'
+  ) {
+    return {
+      kind: 'unavailable',
+      reason:
+        'Mermaid image rendering is disabled by default. Set QWEN_CODE_MERMAID_IMAGE_RENDERING=1 to enable external renderers.',
+      showReason: false,
+    };
+  }
+
+  const protocol = detectTerminalImageProtocol(env);
+  const chafa = protocol ? null : findExecutable('chafa', env);
+  if (!protocol && !chafa) {
+    return {
+      kind: 'unavailable',
+      reason:
+        'No supported terminal image protocol or chafa renderer was detected.',
+    };
+  }
+
+  const mmdc = findMmdc(env);
+  if (!mmdc) {
+    return {
+      kind: 'unavailable',
+      reason:
+        'Mermaid CLI (mmdc) was not found. Install @mermaid-js/mermaid-cli, set QWEN_CODE_MERMAID_MMD_CLI, or set QWEN_CODE_MERMAID_ALLOW_NPX=1.',
+    };
+  }
+
+  const cacheKey = createCacheKey(
+    source,
+    contentWidth,
+    availableTerminalHeight,
+    protocol ?? `chafa:${chafa}`,
+    mmdc,
+    env,
+  );
+  const cached = getResultCache(cacheKey);
+  if (cached) return cached;
+
+  const pngCacheKey = createPngCacheKey(source, mmdc, env);
+  const cachedPng = getPngCache(pngCacheKey);
+  const rendered =
+    cachedPng ??
+    rememberPng(pngCacheKey, await renderPngWithMmdcAsync(source, mmdc, env));
+  if (!rendered.ok) {
+    return remember(cacheKey, {
+      kind: 'unavailable',
+      reason: rendered.error,
+    });
+  }
+
+  const pngSize = readPngSize(rendered.png);
+  if (!pngSize) {
+    return remember(cacheKey, {
+      kind: 'unavailable',
+      reason: 'Mermaid CLI did not produce a valid PNG.',
+    });
+  }
+
+  const imageShape = fitImageToTerminal(
+    pngSize,
+    contentWidth,
+    availableTerminalHeight,
+    env,
+  );
+
+  if (protocol) {
+    const imageId =
+      protocol === 'kitty'
+        ? createKittyImageId(rendered.png, imageShape)
+        : undefined;
+    const sequence =
+      protocol === 'kitty'
+        ? encodeKittyVirtualImage(
+            rendered.png,
+            imageId!,
+            imageShape.widthCells,
+            imageShape.rows,
+          )
+        : encodeITerm2InlineImage(
+            rendered.png,
+            imageShape.widthCells,
+            imageShape.rows,
+          );
+    return remember(cacheKey, {
+      kind: 'terminal-image',
+      title: `Mermaid diagram image (${protocol})`,
+      sequence,
+      rows: imageShape.rows,
+      protocol,
+      placeholder:
+        protocol === 'kitty'
+          ? buildKittyPlaceholder(
+              imageId!,
+              imageShape.widthCells,
+              imageShape.rows,
+            )
+          : undefined,
+    });
+  }
+
+  const ansi = await renderPngWithChafaAsync(
+    rendered.png,
+    imageShape.widthCells,
+    imageShape.rows,
+    chafa!,
+    env,
+  );
+  if (!ansi.ok) {
+    return remember(cacheKey, {
+      kind: 'unavailable',
+      reason: ansi.error,
+    });
+  }
+
+  return remember(cacheKey, {
+    kind: 'ansi',
+    title: 'Mermaid diagram image (ANSI)',
+    lines: ansi.output.split(/\r?\n/).filter((line) => line.length > 0),
+  });
+}
+
 function createKittyImageId(
   png: Buffer,
   imageShape: { widthCells: number; rows: number },
@@ -470,6 +609,26 @@ function createKittyImageId(
     .digest();
   const id = hash.readUIntBE(0, 3);
   return id === 0 ? 1 : id;
+}
+
+function getResultCache(key: string): MermaidImageRenderResult | undefined {
+  const cached = cachedResults.get(key);
+  if (cached) {
+    cachedResults.delete(key);
+    cachedResults.set(key, cached);
+  }
+  return cached;
+}
+
+function getPngCache(
+  key: string,
+): { ok: true; png: Buffer } | { ok: false; error: string } | undefined {
+  const cached = cachedPngResults.get(key);
+  if (cached) {
+    cachedPngResults.delete(key);
+    cachedPngResults.set(key, cached);
+  }
+  return cached;
 }
 
 function createPngCacheKey(
@@ -493,6 +652,7 @@ function createCacheKey(
   availableTerminalHeight: number | undefined,
   renderer: string,
   mmdc: string,
+  env: NodeJS.ProcessEnv,
 ): string {
   return crypto
     .createHash('sha256')
@@ -505,6 +665,8 @@ function createCacheKey(
     .update(renderer)
     .update('\0')
     .update(mmdc)
+    .update('\0')
+    .update(String(getMermaidCellAspectRatio(env)))
     .digest('hex');
 }
 
@@ -741,6 +903,75 @@ function renderPngWithMmdc(
   }
 }
 
+async function renderPngWithMmdcAsync(
+  source: string,
+  mmdc: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ ok: true; png: Buffer } | { ok: false; error: string }> {
+  const tempDir = await fs.promises.mkdtemp(
+    path.join(os.tmpdir(), 'qwen-mermaid-'),
+  );
+  const inputPath = path.join(tempDir, 'diagram.mmd');
+  const outputPath = path.join(tempDir, 'diagram.png');
+  const renderWidth = getMermaidRenderWidth(env);
+
+  try {
+    await fs.promises.writeFile(inputPath, source, 'utf8');
+    const mmdcArgs = [
+      '-i',
+      inputPath,
+      '-o',
+      outputPath,
+      '-b',
+      'transparent',
+      '-w',
+      String(renderWidth),
+    ];
+    const command =
+      mmdc === NPX_MERMAID_CLI ? findExecutable('npx', env)! : mmdc;
+    const args =
+      mmdc === NPX_MERMAID_CLI
+        ? ['-y', '@mermaid-js/mermaid-cli@11.12.0', ...mmdcArgs]
+        : mmdcArgs;
+    const result = await runCommand(command, args, {
+      env: {
+        ...process.env,
+        ...env,
+      },
+      shell: shouldRunThroughShell(command),
+      timeout: getMermaidRenderTimeout(env),
+    });
+
+    if (result.error) {
+      return { ok: false, error: result.error };
+    }
+    if (result.status !== 0) {
+      const stderr = result.stderr.trim();
+      return {
+        ok: false,
+        error: stderr || `Mermaid CLI exited with status ${result.status}.`,
+      };
+    }
+
+    let outputSize: number;
+    try {
+      outputSize = (await fs.promises.stat(outputPath)).size;
+    } catch {
+      return { ok: false, error: 'Mermaid CLI did not write an output file.' };
+    }
+    if (outputSize > MAX_MERMAID_PNG_BYTES) {
+      return {
+        ok: false,
+        error: `Mermaid CLI output exceeded ${MAX_MERMAID_PNG_BYTES} bytes.`,
+      };
+    }
+
+    return { ok: true, png: await fs.promises.readFile(outputPath) };
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
 function shouldRunThroughShell(command: string): boolean {
   return process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
 }
@@ -759,6 +990,16 @@ function getMermaidRenderTimeout(env: NodeJS.ProcessEnv): number {
     return Math.round(configuredTimeout);
   }
   return DEFAULT_RENDER_TIMEOUT_MS;
+}
+
+function getMermaidCellAspectRatio(env: NodeJS.ProcessEnv): number {
+  const configuredAspectRatio = Number(
+    env['QWEN_CODE_MERMAID_CELL_ASPECT_RATIO'],
+  );
+  if (Number.isFinite(configuredAspectRatio) && configuredAspectRatio > 0) {
+    return Math.max(0.2, Math.min(configuredAspectRatio, 2));
+  }
+  return 0.5;
 }
 
 function renderPngWithChafa(
@@ -809,13 +1050,125 @@ function renderPngWithChafa(
   }
 }
 
+async function renderPngWithChafaAsync(
+  png: Buffer,
+  widthCells: number,
+  rows: number,
+  chafa: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
+  const tempDir = await fs.promises.mkdtemp(
+    path.join(os.tmpdir(), 'qwen-mermaid-'),
+  );
+  const imagePath = path.join(tempDir, 'diagram.png');
+
+  try {
+    await fs.promises.writeFile(imagePath, png);
+    const result = await runCommand(
+      chafa,
+      [
+        '--animate=off',
+        '--format=symbols',
+        '--symbols=block',
+        `--size=${widthCells}x${rows}`,
+        imagePath,
+      ],
+      {
+        env: {
+          ...process.env,
+          ...env,
+        },
+        timeout: 2000,
+      },
+    );
+
+    if (result.error) {
+      return { ok: false, error: result.error };
+    }
+    if (result.status !== 0) {
+      return {
+        ok: false,
+        error:
+          result.stderr.trim() || `chafa exited with status ${result.status}.`,
+      };
+    }
+
+    return { ok: true, output: result.stdout };
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+interface CommandResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: string;
+}
+
+function runCommand(
+  command: string,
+  args: string[],
+  options: {
+    env: NodeJS.ProcessEnv;
+    shell?: boolean;
+    timeout: number;
+  },
+): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      env: options.env,
+      shell: options.shell,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      resolve({
+        status: null,
+        stdout,
+        stderr,
+        error: `Command timed out after ${options.timeout}ms.`,
+      });
+    }, options.timeout);
+
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status: null, stdout, stderr, error: error.message });
+    });
+    child.on('close', (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
 function fitImageToTerminal(
   size: PngSize,
   contentWidth: number,
   availableTerminalHeight: number | undefined,
+  env: NodeJS.ProcessEnv = process.env,
 ): { widthCells: number; rows: number } {
   const widthCells = Math.max(16, Math.min(contentWidth, 120));
-  const naturalRows = Math.ceil((size.height / size.width) * widthCells * 0.5);
+  const naturalRows = Math.ceil(
+    (size.height / size.width) * widthCells * getMermaidCellAspectRatio(env),
+  );
   const maxRows = Math.max(4, Math.min(availableTerminalHeight ?? 32, 60));
 
   return {

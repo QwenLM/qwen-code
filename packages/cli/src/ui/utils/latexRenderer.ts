@@ -10,6 +10,7 @@ const COMMAND_REPLACEMENTS: Record<string, string> = {
   '\\gamma': 'γ',
   '\\delta': 'δ',
   '\\epsilon': 'ε',
+  '\\varepsilon': 'ε',
   '\\theta': 'θ',
   '\\lambda': 'λ',
   '\\mu': 'μ',
@@ -18,6 +19,7 @@ const COMMAND_REPLACEMENTS: Record<string, string> = {
   '\\sigma': 'σ',
   '\\tau': 'τ',
   '\\phi': 'φ',
+  '\\varphi': 'φ',
   '\\omega': 'ω',
   '\\Gamma': 'Γ',
   '\\Delta': 'Δ',
@@ -41,6 +43,7 @@ const COMMAND_REPLACEMENTS: Record<string, string> = {
   '\\neq': '≠',
   '\\approx': '≈',
   '\\rightarrow': '→',
+  '\\to': '→',
   '\\leftarrow': '←',
   '\\Rightarrow': '⇒',
   '\\Leftarrow': '⇐',
@@ -138,7 +141,6 @@ export function renderInlineLatex(input: string): string {
   return output
     .replace(/\\left|\\right/g, '')
     .replace(/\\,/g, ' ')
-    .replace(/\\([A-Za-z]+)/g, '$1')
     .replace(/\s+/g, ' ')
     .trim();
 }

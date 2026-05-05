@@ -41,8 +41,11 @@ interface SelectedInlineLatexExpression {
   label: string;
 }
 
-const INLINE_MATH_REGEX =
-  /(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,240}\S\$)([^$\n]{1,240})\$(?![\w$])/g;
+const INLINE_MATH_MAX_CHARS = 1024;
+const INLINE_MATH_REGEX = new RegExp(
+  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)([^$\n]{1,${INLINE_MATH_MAX_CHARS}})\$(?![\w$])`,
+  'g',
+);
 
 function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   const blocks: FencedCodeBlock[] = [];

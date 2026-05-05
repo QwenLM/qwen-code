@@ -15,6 +15,7 @@ import {
   encodeKittyImage,
   encodeKittyVirtualImage,
   readPngSize,
+  renderMermaidImageAsync,
   renderMermaidImageSync,
 } from './mermaidImageRenderer.js';
 
@@ -188,6 +189,13 @@ describe('mermaid image renderer', () => {
     ]);
   });
 
+  it('clamps Kitty placeholder width to the available diacritic alphabet', () => {
+    const placeholder = buildKittyPlaceholder(42, 200, 1);
+
+    expect(placeholder.lines[0]).not.toContain('undefined');
+    expect(Array.from(placeholder.lines[0] ?? '').length).toBeLessThan(200 * 3);
+  });
+
   it('renders Mermaid through mmdc when terminal images are available', () => {
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
     tempDirs.push(binDir);
@@ -209,6 +217,46 @@ describe('mermaid image renderer', () => {
     expect(result.kind === 'terminal-image' && result.sequence).toContain(
       '\u001b]1337;File=inline=1;',
     );
+  });
+
+  it('renders Mermaid through mmdc asynchronously for interactive UI callers', async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+
+    const result = await renderMermaidImageAsync({
+      source: 'flowchart TD\n  A[Start] --> B[End async]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'iterm2',
+      },
+    });
+
+    expect(result.kind).toBe('terminal-image');
+    expect(result.kind === 'terminal-image' && result.protocol).toBe('iterm2');
+  });
+
+  it('honors the configured terminal cell aspect ratio when fitting images', () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+
+    const result = renderMermaidImageSync({
+      source: 'flowchart TD\n  A[Start] --> B[Aspect]',
+      contentWidth: 80,
+      availableTerminalHeight: 60,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'iterm2',
+        QWEN_CODE_MERMAID_CELL_ASPECT_RATIO: '1',
+      },
+    });
+
+    expect(result.kind === 'terminal-image' && result.rows).toBe(60);
   });
 
   it('falls back to the default render timeout when configured timeout is invalid', () => {

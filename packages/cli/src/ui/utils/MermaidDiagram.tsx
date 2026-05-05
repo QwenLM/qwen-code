@@ -5,11 +5,15 @@
  */
 
 import React from 'react';
-import { Box, Text, useStdout } from 'ink';
+import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { MaxSizedBox } from '../components/shared/MaxSizedBox.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
-import { renderMermaidImageSync } from './mermaidImageRenderer.js';
+import {
+  renderMermaidImageAsync,
+  type MermaidImageRenderResult,
+} from './mermaidImageRenderer.js';
+import { useTerminalOutput } from '../contexts/TerminalOutputContext.js';
 
 interface MermaidDiagramProps {
   source: string;
@@ -28,24 +32,39 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
   isPending,
   availableTerminalHeight,
 }) => {
-  const { write } = useStdout();
-  const preparedKittySequence = React.useRef<string | null>(null);
+  const writeRaw = useTerminalOutput();
+  const preparedTerminalImageSequence = React.useRef<string | null>(null);
+  const [image, setImage] = React.useState<MermaidImageRenderResult | null>(
+    null,
+  );
   const innerWidth = Math.max(8, contentWidth - MERMAID_PADDING);
   const visual = React.useMemo(
     () => renderMermaidVisual(source, innerWidth),
     [source, innerWidth],
   );
-  const image = React.useMemo(
-    () =>
-      isPending
-        ? null
-        : renderMermaidImageSync({
-            source,
-            contentWidth: innerWidth,
-            availableTerminalHeight,
-          }),
-    [availableTerminalHeight, innerWidth, isPending, source],
-  );
+
+  React.useEffect(() => {
+    if (isPending) {
+      setImage(null);
+      return;
+    }
+
+    let cancelled = false;
+    setImage(null);
+    void renderMermaidImageAsync({
+      source,
+      contentWidth: innerWidth,
+      availableTerminalHeight,
+    }).then((result) => {
+      if (!cancelled) {
+        setImage(result);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [availableTerminalHeight, innerWidth, isPending, source]);
 
   const kittySequence =
     image?.kind === 'terminal-image' &&
@@ -55,12 +74,28 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
       : null;
 
   React.useEffect(() => {
-    if (!kittySequence || preparedKittySequence.current === kittySequence) {
+    if (
+      !kittySequence ||
+      preparedTerminalImageSequence.current === kittySequence
+    ) {
       return;
     }
-    preparedKittySequence.current = kittySequence;
-    write(kittySequence);
-  }, [kittySequence, write]);
+    preparedTerminalImageSequence.current = kittySequence;
+    writeRaw(kittySequence);
+  }, [kittySequence, writeRaw]);
+
+  React.useEffect(() => {
+    if (
+      !image ||
+      image.kind !== 'terminal-image' ||
+      image.protocol !== 'iterm2' ||
+      preparedTerminalImageSequence.current === image.sequence
+    ) {
+      return;
+    }
+    preparedTerminalImageSequence.current = image.sequence;
+    writeRaw(image.sequence);
+  }, [image, writeRaw]);
 
   const titleWithSourceHint = (title: string) =>
     `${title} · source: ${sourceCopyCommand}`;
@@ -109,7 +144,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
           {titleWithSourceHint(visual.title)}
         </Text>
         <Box flexDirection="column" height={image.rows}>
-          <Text>{image.sequence}</Text>
+          <Text> </Text>
         </Box>
       </Box>
     );

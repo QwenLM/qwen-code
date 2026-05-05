@@ -136,6 +136,7 @@ import {
   RenderModeProvider,
   type RenderMode,
 } from './contexts/RenderModeContext.js';
+import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -2740,9 +2741,11 @@ export const AppContainer = (props: AppContainerProps) => {
           >
             <CompactModeProvider value={compactModeValue}>
               <RenderModeProvider value={renderModeValue}>
-                <ShellFocusContext.Provider value={isFocused}>
-                  <App />
-                </ShellFocusContext.Provider>
+                <TerminalOutputProvider value={writeRaw}>
+                  <ShellFocusContext.Provider value={isFocused}>
+                    <App />
+                  </ShellFocusContext.Provider>
+                </TerminalOutputProvider>
               </RenderModeProvider>
             </CompactModeProvider>
           </AppContext.Provider>

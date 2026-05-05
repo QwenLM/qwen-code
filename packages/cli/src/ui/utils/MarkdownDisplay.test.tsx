@@ -500,6 +500,9 @@ flowchart LR
 $$
 \\alpha + \\beta
 $$
+
+- [x] Done
+> Important
 `.replace(/\n/g, eol);
       const { lastFrame } = renderWithProviders(
         <RenderModeProvider
@@ -518,9 +521,13 @@ $$
       expect(output).toContain('$x^2$');
       expect(output).toContain('$$');
       expect(output).toContain('\\alpha + \\beta');
+      expect(output).toContain('- [x] Done');
+      expect(output).toContain('> Important');
       expect(output).not.toContain('┌');
       expect(output).not.toContain('x²');
       expect(output).not.toContain('α + β');
+      expect(output).not.toContain('✓ Done');
+      expect(output).not.toContain('│ Important');
     });
 
     it('applies source copy offsets from previous assistant chunks', () => {
@@ -691,6 +698,73 @@ pie title Pets
       expect(piePreview.title).toBe('Mermaid pie chart');
       expect(piePreview.lines.join('\n')).toContain('Dogs');
       expect(piePreview.lines.join('\n')).toContain('Cats');
+    });
+
+    it('renders additional basic mermaid diagram families as readable previews', () => {
+      const statePreview = renderMermaidVisual(
+        `
+stateDiagram-v2
+  [*] --> Idle
+  Idle --> Running : start
+`,
+        80,
+      );
+      const ganttPreview = renderMermaidVisual(
+        `
+gantt
+  title Release
+  section Build
+  Bundle :done, 2026-01-01, 1d
+`,
+        80,
+      );
+      const journeyPreview = renderMermaidVisual(
+        `
+journey
+  title Signup
+  section Start
+  Open app: 5: User
+`,
+        80,
+      );
+      const mindmapPreview = renderMermaidVisual(
+        `
+mindmap
+  Root
+    Child
+`,
+        80,
+      );
+      const gitPreview = renderMermaidVisual(
+        `
+gitGraph
+  commit
+  branch feature
+`,
+        80,
+      );
+      const requirementPreview = renderMermaidVisual(
+        `
+requirementDiagram
+  requirement login {
+    id: 1
+  }
+`,
+        80,
+      );
+
+      expect(statePreview.title).toBe('Mermaid state diagram');
+      expect(statePreview.lines.join('\n')).toContain('Idle → Running');
+      expect(ganttPreview.title).toBe('Mermaid gantt chart');
+      expect(ganttPreview.lines.join('\n')).toContain('Bundle');
+      expect(journeyPreview.title).toBe('Mermaid journey diagram');
+      expect(journeyPreview.lines.join('\n')).toContain('Open app');
+      expect(mindmapPreview.title).toBe('Mermaid mindmap');
+      expect(mindmapPreview.lines.join('\n')).toContain('Child');
+      expect(gitPreview.title).toBe('Mermaid git graph');
+      expect(gitPreview.lines.join('\n')).toContain('branch feature');
+      expect(requirementPreview.title).toBe('Mermaid requirement diagram');
+      expect(requirementPreview.lines.join('\n')).toContain('id: 1');
     });
 
     it('falls back to mermaid source for unsupported diagrams', () => {
