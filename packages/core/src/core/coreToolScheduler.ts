@@ -1890,6 +1890,10 @@ export class CoreToolScheduler {
                 'User cancelled tool execution.',
               );
             }
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: 'User cancelled tool execution.',
+            });
             return; // Both code paths should return here
           }
 
@@ -2104,6 +2108,10 @@ export class CoreToolScheduler {
                 'User cancelled tool execution.',
               );
             }
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: 'User cancelled tool execution.',
+            });
             return;
           } else {
             // PostToolUseFailure Hook

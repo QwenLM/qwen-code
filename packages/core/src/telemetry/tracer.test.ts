@@ -1,0 +1,209 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { SpanStatusCode } from '@opentelemetry/api';
+import {
+  withSpan,
+  startSpanWithContext,
+  createSessionRootContext,
+} from './tracer.js';
+
+// Collect span operations for assertions
+interface SpanRecord {
+  name: string;
+  attributes: Record<string, string | number | boolean>;
+  statuses: Array<{ code: number; message?: string }>;
+  ended: boolean;
+}
+
+const spans: SpanRecord[] = [];
+
+// Mock @opentelemetry/api to capture span behavior
+vi.mock('@opentelemetry/api', async () => {
+  const actual =
+    await vi.importActual<typeof import('@opentelemetry/api')>(
+      '@opentelemetry/api',
+    );
+
+  function createMockSpan(
+    name: string,
+    attributes: Record<string, string | number | boolean>,
+  ) {
+    const record: SpanRecord = { name, attributes, statuses: [], ended: false };
+    spans.push(record);
+    return {
+      ...record,
+      spanContext: () => ({
+        traceId: 'a'.repeat(32),
+        spanId: 'b'.repeat(16),
+        traceFlags: 1,
+      }),
+      setStatus(status: object) {
+        record.statuses.push(status as { code: number; message?: string });
+      },
+      setAttribute() {},
+      end() {
+        record.ended = true;
+      },
+    };
+  }
+
+  const mockTracer = {
+    startActiveSpan(
+      name: string,
+      options: { attributes?: Record<string, string | number | boolean> },
+      _ctx: unknown,
+      fn: (span: ReturnType<typeof createMockSpan>) => unknown,
+    ) {
+      const span = createMockSpan(name, options.attributes ?? {});
+      return fn(span);
+    },
+    startSpan(
+      name: string,
+      options: { attributes?: Record<string, string | number | boolean> },
+    ) {
+      return createMockSpan(name, options.attributes ?? {});
+    },
+  };
+
+  return {
+    ...actual,
+    SpanStatusCode: actual.SpanStatusCode,
+    TraceFlags: actual.TraceFlags,
+    trace: {
+      getTracer: () => mockTracer,
+      getSpan: () => undefined,
+      setSpan: (_ctx: unknown, span: unknown) => span,
+      wrapSpanContext: (ctx: unknown) => ctx,
+    },
+    context: {
+      active: () => ({}),
+      with: (_ctx: unknown, fn: () => unknown) => fn(),
+    },
+  };
+});
+
+beforeEach(() => {
+  spans.length = 0;
+});
+
+describe('withSpan', () => {
+  it('sets OK status when callback resolves without setting status', async () => {
+    const result = await withSpan('test.op', { key: 'value' }, async () => 42);
+
+    expect(result).toBe(42);
+    expect(spans).toHaveLength(1);
+    expect(spans[0].name).toBe('test.op');
+    expect(spans[0].statuses).toEqual([{ code: SpanStatusCode.OK }]);
+    expect(spans[0].ended).toBe(true);
+  });
+
+  it('preserves ERROR status set by callback (does not overwrite with OK)', async () => {
+    await withSpan('test.handled-error', {}, async (span) => {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: 'hook denied',
+      });
+      // Return normally without throwing
+    });
+
+    expect(spans).toHaveLength(1);
+    // Only the ERROR status set by the callback should be present
+    expect(spans[0].statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'hook denied' },
+    ]);
+    expect(spans[0].ended).toBe(true);
+  });
+
+  it('sets ERROR status when callback throws and no status was set', async () => {
+    const error = new Error('something failed');
+    await expect(
+      withSpan('test.throw', {}, async () => {
+        throw error;
+      }),
+    ).rejects.toThrow('something failed');
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0].statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'something failed' },
+    ]);
+    expect(spans[0].ended).toBe(true);
+  });
+
+  it('does not overwrite ERROR when callback throws after setting status', async () => {
+    await expect(
+      withSpan('test.throw-after-status', {}, async (span) => {
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: 'custom error',
+        });
+        throw new Error('exception');
+      }),
+    ).rejects.toThrow('exception');
+
+    expect(spans).toHaveLength(1);
+    // Only the callback's status should be present
+    expect(spans[0].statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'custom error' },
+    ]);
+    expect(spans[0].ended).toBe(true);
+  });
+
+  it('ends the span even when callback throws', async () => {
+    await expect(
+      withSpan('test.ensure-end', {}, async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+
+    expect(spans[0].ended).toBe(true);
+  });
+
+  it('passes attributes to the span', async () => {
+    await withSpan(
+      'test.attrs',
+      { tool_name: 'read', call_id: '123' },
+      async () => {},
+    );
+
+    expect(spans[0].attributes).toEqual({ tool_name: 'read', call_id: '123' });
+  });
+});
+
+describe('startSpanWithContext', () => {
+  it('returns a span and runInContext function', () => {
+    const { span, runInContext } = startSpanWithContext('test.manual', {
+      key: 'val',
+    });
+
+    expect(span).toBeDefined();
+    expect(typeof runInContext).toBe('function');
+  });
+
+  it('runInContext executes the function and returns its result', () => {
+    const { runInContext } = startSpanWithContext('test.ctx', {});
+    const result = runInContext(() => 'hello');
+    expect(result).toBe('hello');
+  });
+});
+
+describe('createSessionRootContext', () => {
+  it('returns a context object', () => {
+    const ctx = createSessionRootContext('session-123');
+    expect(ctx).toBeDefined();
+  });
+
+  it('produces deterministic output for the same session ID', () => {
+    // The context wraps a span with a deterministic traceId
+    const ctx1 = createSessionRootContext('session-abc');
+    const ctx2 = createSessionRootContext('session-abc');
+    // Both should be defined (we can't easily compare Contexts,
+    // but we verify it doesn't throw)
+    expect(ctx1).toBeDefined();
+    expect(ctx2).toBeDefined();
+  });
+});

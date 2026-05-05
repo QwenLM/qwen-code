@@ -27,9 +27,31 @@ function getParentContext(): Context {
 }
 
 /**
+ * Wraps a Span to track whether setStatus has been called by the callback.
+ * This prevents withSpan from overwriting an ERROR status that the caller
+ * has already set on handled-failure paths (e.g. tool hook denial).
+ */
+function wrapSpanWithStatusTracking(span: Span): {
+  wrappedSpan: Span;
+  wasStatusSet: () => boolean;
+} {
+  let statusSet = false;
+  const originalSetStatus = span.setStatus.bind(span);
+  span.setStatus = (...args: Parameters<Span['setStatus']>) => {
+    statusSet = true;
+    return originalSetStatus(...args);
+  };
+  return { wrappedSpan: span, wasStatusSet: () => statusSet };
+}
+
+/**
  * Run an async function within a new OTel span.
  * The span inherits the session root traceId when no parent span is active.
  * When the OTel SDK is not initialized, the tracer is a noop.
+ *
+ * If the callback sets a status explicitly (e.g. ERROR on a handled failure),
+ * withSpan will not overwrite it. Only when no status has been set and the
+ * callback resolves without throwing will the span be marked OK.
  */
 export async function withSpan<T>(
   name: string,
@@ -42,15 +64,20 @@ export async function withSpan<T>(
     { attributes },
     parentCtx,
     async (span) => {
+      const { wrappedSpan, wasStatusSet } = wrapSpanWithStatusTracking(span);
       try {
-        const result = await fn(span);
-        span.setStatus({ code: SpanStatusCode.OK });
+        const result = await fn(wrappedSpan);
+        if (!wasStatusSet()) {
+          span.setStatus({ code: SpanStatusCode.OK });
+        }
         return result;
       } catch (error) {
-        span.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: error instanceof Error ? error.message : String(error),
-        });
+        if (!wasStatusSet()) {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
         throw error;
       } finally {
         span.end();

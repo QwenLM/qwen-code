@@ -20,7 +20,13 @@ import {
   type FinishReason,
 } from '@google/genai';
 import type OpenAI from 'openai';
-import { SpanStatusCode, type Span } from '@opentelemetry/api';
+import {
+  SpanStatusCode,
+  context,
+  trace,
+  type Context,
+  type Span,
+} from '@opentelemetry/api';
 import {
   ApiRequestEvent,
   ApiResponseEvent,
@@ -171,7 +177,10 @@ export class LoggingContentGenerator implements ContentGenerator {
           ? undefined
           : await this.buildOpenAIRequestForLogging(req);
         try {
-          const response = await this.wrapped.generateContent(req, userPromptId);
+          const response = await this.wrapped.generateContent(
+            req,
+            userPromptId,
+          );
           const durationMs = Date.now() - startTime;
           this._logApiResponse(
             response.responseId ?? '',
@@ -204,6 +213,10 @@ export class LoggingContentGenerator implements ContentGenerator {
       'api.generateContentStream',
       { model: req.model, prompt_id: userPromptId },
     );
+
+    // Capture the span context so the stream wrapper can activate it
+    // during iteration — not just during generator creation.
+    const spanContext = trace.setSpan(context.active(), span);
 
     const startTime = Date.now();
     const isInternal = isInternalPromptId(userPromptId);
@@ -242,6 +255,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         req.model,
         openaiRequest,
         span,
+        spanContext,
       ),
     );
   }
@@ -253,6 +267,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     model: string,
     openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
     span?: Span,
+    spanContext?: Context,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // For internal prompts we only need the last usage metadata (for /stats);
@@ -264,6 +279,13 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstResponseId = '';
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
+
+    // Helper to run code within the span context during iteration.
+    // This ensures debug log lines emitted during stream processing
+    // see the stream span as the active span.
+    const runInSpan = <T>(fn: () => T): T =>
+      spanContext ? context.with(spanContext, fn) : fn();
+
     try {
       for await (const response of stream) {
         if (!firstResponseId && response.responseId) {
@@ -282,12 +304,14 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       // Only log successful API response if no error occurred
       const durationMs = Date.now() - startTime;
-      this._logApiResponse(
-        firstResponseId,
-        durationMs,
-        firstModelVersion || model,
-        userPromptId,
-        lastUsageMetadata,
+      runInSpan(() =>
+        this._logApiResponse(
+          firstResponseId,
+          durationMs,
+          firstModelVersion || model,
+          userPromptId,
+          lastUsageMetadata,
+        ),
       );
       if (!isInternal) {
         const consolidatedResponse =
@@ -297,12 +321,14 @@ export class LoggingContentGenerator implements ContentGenerator {
       span?.setStatus({ code: SpanStatusCode.OK });
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      this._logApiError(
-        firstResponseId,
-        durationMs,
-        error,
-        firstModelVersion || model,
-        userPromptId,
+      runInSpan(() =>
+        this._logApiError(
+          firstResponseId,
+          durationMs,
+          error,
+          firstModelVersion || model,
+          userPromptId,
+        ),
       );
       if (!isInternal) {
         await this.logOpenAIInteraction(openaiRequest, undefined, error);

@@ -278,6 +278,16 @@ export function initializeTelemetry(config: Config): void {
   }
 }
 
+/**
+ * Refresh the session root context with a new session ID.
+ * Must be called whenever the session changes (e.g. /clear, /resume)
+ * so that new spans inherit the correct traceId.
+ */
+export function refreshSessionContext(sessionId: string): void {
+  if (!telemetryInitialized) return;
+  setSessionContext(createSessionRootContext(sessionId));
+}
+
 export async function shutdownTelemetry(): Promise<void> {
   if (telemetryShutdownPromise) {
     return telemetryShutdownPromise;
