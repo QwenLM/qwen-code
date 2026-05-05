@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { EOL } from 'node:os';
@@ -302,37 +301,10 @@ class GrepToolInvocation extends BaseToolInvocation<
    * @param {string} basePath The absolute directory the search was run from, for relative paths.
    * @returns {GrepMatch[]} Array of match objects.
    */
-  private shouldIncludeParsedResultPath(
-    absoluteFilePath: string,
-    lineNumber: number,
-    lineContent: string,
-    fileLineCache: Map<string, string[]>,
-    lineCacheStats?: { reads: Map<string, number> },
-  ): boolean {
-    try {
-      let lines = fileLineCache.get(absoluteFilePath);
-      if (lines === undefined) {
-        lines = fs.readFileSync(absoluteFilePath, 'utf8').split(/\r?\n/);
-        fileLineCache.set(absoluteFilePath, lines);
-        const reads = lineCacheStats?.reads;
-        reads?.set(absoluteFilePath, (reads.get(absoluteFilePath) ?? 0) + 1);
-      }
-      return lines[lineNumber - 1] === lineContent.replace(/\r$/, '');
-    } catch {
-      return false;
-    }
-  }
-
-  private parseGrepOutput(
-    output: string,
-    basePath: string,
-    includeResultFilePaths: boolean,
-    lineCacheStats?: { reads: Map<string, number> },
-  ): GrepMatch[] {
+  private parseGrepOutput(output: string, basePath: string): GrepMatch[] {
     const results: GrepMatch[] = [];
     if (!output) return results;
 
-    const fileLineCache = new Map<string, string[]>();
     const lines = output.split(EOL); // Use OS-specific end-of-line
 
     for (const line of lines) {
@@ -362,19 +334,9 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         results.push({
           filePath: relativeFilePath || path.basename(absoluteFilePath),
-          absoluteFilePath:
-            includeResultFilePaths &&
-            this.shouldIncludeParsedResultPath(
-              absoluteFilePath,
-              lineNumber,
-              lineContent,
-              fileLineCache,
-              lineCacheStats,
-            )
-              ? absoluteFilePath
-              : '',
+          absoluteFilePath,
           lineNumber,
-          line: lineContent,
+          line: lineContent.replace(/\r$/, ''),
         });
       }
     }
@@ -453,7 +415,7 @@ class GrepToolInvocation extends BaseToolInvocation<
                 );
             });
           });
-          return this.parseGrepOutput(output, absolutePath, true);
+          return this.parseGrepOutput(output, absolutePath);
         } catch (gitError: unknown) {
           debugLogger.debug(
             `GrepLogic: git grep failed: ${getErrorMessage(
@@ -555,7 +517,7 @@ class GrepToolInvocation extends BaseToolInvocation<
             child.on('error', onError);
             child.on('close', onClose);
           });
-          return this.parseGrepOutput(output, absolutePath, true);
+          return this.parseGrepOutput(output, absolutePath);
         } catch (grepError: unknown) {
           debugLogger.debug(
             `GrepLogic: System grep failed: ${getErrorMessage(
