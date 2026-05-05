@@ -21,9 +21,20 @@ import {
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 const { Terminal } = pkg;
 
+const debugLogger = createDebugLogger('SHELL_EXECUTION');
+
 const SIGKILL_TIMEOUT_MS = 200;
+/**
+ * Bound on how long the background-promote drain waits for in-flight
+ * processingChain callbacks to finish writing into the headless terminal
+ * before snapshotting it. Kept separate from SIGKILL_TIMEOUT_MS so that
+ * tuning kill escalation doesn't silently change drain behavior; same
+ * 200ms default today, but the two have unrelated reasons-to-change.
+ */
+const PROMOTE_DRAIN_TIMEOUT_MS = 200;
 
 /**
  * On Windows with PowerShell, prefix the command with a statement that forces
@@ -567,54 +578,78 @@ export class ShellExecutionService {
           child.off('exit', exitHandler);
         };
 
-        const abortHandler = async () => {
-          // Background-promote takeover: skip kill, detach our listeners (so
-          // post-promote output doesn't leak into the foreground onOutputEvent
-          // or the now-finalized text decoder), drop the child from our active
-          // set (so cleanup() won't kill it later), flush our text buffers
-          // into a snapshot, and resolve immediately with `promoted: true` so
-          // the awaiting caller unblocks. The caller has attached its own
-          // listeners to the live child by this point and now owns the child.
-          const reason = abortSignal.reason as ShellAbortReason | undefined;
-          if (reason?.kind === 'background' && child.pid && !exited) {
-            this.activeChildProcesses.delete(child.pid);
-            detachServiceListeners();
-            const {
-              stdout: snapStdout,
-              stderr: snapStderr,
-              finalBuffer,
-            } = cleanup();
-            const separator = snapStdout.endsWith('\n') ? '' : '\n';
-            const combined =
-              snapStdout +
-              (snapStderr ? (snapStdout ? separator : '') + snapStderr : '');
-            resolve({
-              rawOutput: finalBuffer,
-              output: stripAnsi(combined).trim(),
-              exitCode: null,
-              signal: null,
-              error: null,
-              aborted: true,
-              promoted: true,
-              pid: child.pid,
-              executionMethod: 'child_process',
-            });
-            return;
-          }
+        const performBackgroundPromote = (): void => {
+          if (!child.pid || exited) return;
+          // Detach our listeners (so post-promote output doesn't leak
+          // into the foreground onOutputEvent or the now-finalized text
+          // decoder), drop the child from our active set (so cleanup()
+          // won't kill it later), flush our text buffers into a snapshot,
+          // and resolve immediately with `promoted: true` so the awaiting
+          // caller unblocks. The caller has attached its own listeners
+          // by this point and now owns the child.
+          this.activeChildProcesses.delete(child.pid);
+          detachServiceListeners();
+          const {
+            stdout: snapStdout,
+            stderr: snapStderr,
+            finalBuffer,
+          } = cleanup();
+          const separator = snapStdout.endsWith('\n') ? '' : '\n';
+          const combined =
+            snapStdout +
+            (snapStderr ? (snapStdout ? separator : '') + snapStderr : '');
+          resolve({
+            rawOutput: finalBuffer,
+            output: stripAnsi(combined).trim(),
+            exitCode: null,
+            signal: null,
+            error: null,
+            aborted: true,
+            promoted: true,
+            pid: child.pid,
+            executionMethod: 'child_process',
+          });
+        };
 
-          if (child.pid && !exited) {
-            if (isWindows) {
-              cpSpawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
-            } else {
-              try {
-                process.kill(-child.pid, 'SIGTERM');
-                await new Promise((res) => setTimeout(res, SIGKILL_TIMEOUT_MS));
-                if (!exited) {
-                  process.kill(-child.pid, 'SIGKILL');
-                }
-              } catch (_e) {
-                if (!exited) child.kill('SIGKILL');
+        const performCancelKill = async (): Promise<void> => {
+          if (!child.pid || exited) return;
+          if (isWindows) {
+            cpSpawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
+          } else {
+            try {
+              process.kill(-child.pid, 'SIGTERM');
+              await new Promise((res) => setTimeout(res, SIGKILL_TIMEOUT_MS));
+              if (!exited) {
+                process.kill(-child.pid, 'SIGKILL');
               }
+            } catch (_e) {
+              if (!exited) child.kill('SIGKILL');
+            }
+          }
+        };
+
+        const abortHandler = async () => {
+          // Default reason (none set) is treated as cancel — historical
+          // behavior. Switch on `kind` so any future ShellAbortReason
+          // variant fails the type-check at the `never` default rather
+          // than silently falling through to the kill path. (Earlier
+          // if-else form would have silently killed the process for
+          // e.g. a future `{ kind: 'suspend' }` — review feedback.)
+          const reason = abortSignal.reason as ShellAbortReason | undefined;
+          const kind: ShellAbortReason['kind'] = reason?.kind ?? 'cancel';
+          switch (kind) {
+            case 'background':
+              performBackgroundPromote();
+              return;
+            case 'cancel':
+              await performCancelKill();
+              return;
+            default: {
+              const _exhaustive: never = kind;
+              debugLogger.warn(
+                `Unknown ShellAbortReason kind, falling back to cancel/kill: ${String(_exhaustive)}`,
+              );
+              await performCancelKill();
             }
           }
         };
@@ -1000,89 +1035,162 @@ export class ShellExecutionService {
           },
         );
 
-        const abortHandler = async () => {
-          // Background-promote takeover: skip kill, dispose all our
-          // listeners on the live PTY (so post-promote data/exit/error don't
-          // leak into our foreground onOutputEvent or crash via the error
-          // handler's `throw err`), set the listenersDetached guard so any
-          // already-enqueued processingChain callback's onOutputEvent emits
-          // are suppressed (in-flight writes still LAND in headlessTerminal
-          // so the snapshot below reflects them), drain pending chain work,
-          // drop the PTY from the active set (so cleanup() won't kill it
-          // later), serialize the terminal as the snapshot, and resolve
-          // immediately with `promoted: true` so the awaiting caller
-          // unblocks. The caller has attached its own listeners to the live
-          // PTY by this point and owns its lifecycle from here on.
-          const reason = abortSignal.reason as ShellAbortReason | undefined;
-          if (reason?.kind === 'background' && ptyProcess.pid && !exited) {
-            exited = true;
-            listenersDetached = true;
-            abortSignal.removeEventListener('abort', abortHandler);
+        const performBackgroundPromote = async (): Promise<void> => {
+          if (!ptyProcess.pid || exited) return;
+          // Skip kill, dispose all our listeners on the live PTY (so
+          // post-promote data/exit/error don't leak into our foreground
+          // onOutputEvent or crash via the error handler's `throw err`),
+          // set the listenersDetached guard so any already-enqueued
+          // processingChain callback's onOutputEvent emits are
+          // suppressed (in-flight writes still LAND in headlessTerminal
+          // so the snapshot below reflects them), drain pending chain
+          // work, drop the PTY from the active set (so cleanup() won't
+          // kill it later), serialize the terminal as the snapshot, and
+          // resolve immediately with `promoted: true` so the awaiting
+          // caller unblocks. The caller has attached its own listeners
+          // by this point and owns the PTY's lifecycle.
+          exited = true;
+          listenersDetached = true;
+          abortSignal.removeEventListener('abort', abortHandler);
+          // Each dispose() in its own try/catch — node-pty's IDisposable
+          // contract doesn't guarantee no-throw, and we must run all
+          // teardown steps even if one throws (otherwise activePtys.delete
+          // / drain / resolve could be skipped and the caller would hang).
+          try {
             dataDisposable.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `dataDisposable.dispose() threw during background-promote: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
             exitDisposable.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `exitDisposable.dispose() threw during background-promote: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
             ptyProcess.off('error', ptyErrorHandler);
-            if (renderTimeout) {
-              clearTimeout(renderTimeout);
-              renderTimeout = null;
-            }
-            this.activePtys.delete(ptyProcess.pid);
+          } catch (e) {
+            debugLogger.warn(
+              `ptyProcess.off('error') threw during background-promote: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          if (renderTimeout) {
+            clearTimeout(renderTimeout);
+            renderTimeout = null;
+          }
+          this.activePtys.delete(ptyProcess.pid);
 
-            // Drain in-flight chain work (already-enqueued
-            // headlessTerminal.write callbacks) so the snapshot reflects
-            // the last batch of bytes the PTY emitted before promote.
-            // Bounded by SIGKILL_TIMEOUT_MS so the caller's await never
-            // blocks indefinitely if a write callback is stuck.
-            const drain = () =>
-              new Promise<void>((res) => setImmediate(res)).then(
-                () => processingChain,
-              );
-            await Promise.race([
-              processingChain.then(drain).then(drain),
-              new Promise<void>((res) => setTimeout(res, SIGKILL_TIMEOUT_MS)),
-            ]);
-
-            const finalBuffer = Buffer.concat(outputChunks);
-            let snapshot = '';
-            try {
-              snapshot = serializeTerminalToText(headlessTerminal) ?? '';
-            } catch {
-              // Best-effort snapshot — terminal serialization may fail if the
-              // PTY is mid-render; an empty snapshot is acceptable since the
-              // caller already has the rawOutput buffer below.
-            }
-            resolve({
-              rawOutput: finalBuffer,
-              output: snapshot,
-              exitCode: null,
-              signal: null,
-              error,
-              aborted: true,
-              promoted: true,
-              pid: ptyProcess.pid,
-              executionMethod:
-                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
-            });
-            return;
+          // Drain in-flight chain work (already-enqueued
+          // headlessTerminal.write callbacks) so the snapshot reflects
+          // the last batch of bytes the PTY emitted before promote.
+          // Bounded by PROMOTE_DRAIN_TIMEOUT_MS so the caller's await
+          // never blocks indefinitely if a write callback is stuck.
+          // The drain side may reject (a prior chain item threw); swallow
+          // via .catch — abort handlers run via addEventListener which
+          // doesn't await our return, so a leaked rejection here would
+          // become unhandled and the caller would hang waiting on resolve.
+          // Race result is observed (not just discarded) so we can warn
+          // when the timeout side won — without that the snapshot may be
+          // truncated with no diagnostic trail.
+          const TIMEOUT_SENTINEL = Symbol('drain-timeout');
+          const drain = () =>
+            new Promise<void>((res) => setImmediate(res)).then(
+              () => processingChain,
+            );
+          const winner = await Promise.race<unknown>([
+            processingChain
+              .then(drain)
+              .then(drain)
+              .catch(() => undefined),
+            new Promise<symbol>((res) =>
+              setTimeout(() => res(TIMEOUT_SENTINEL), PROMOTE_DRAIN_TIMEOUT_MS),
+            ),
+          ]);
+          if (winner === TIMEOUT_SENTINEL) {
+            debugLogger.warn(
+              `Background-promote drain hit the ${PROMOTE_DRAIN_TIMEOUT_MS}ms ` +
+                `timeout before processingChain settled. The output snapshot ` +
+                `may be missing the very last batch of bytes the PTY emitted ` +
+                `before promote (rawOutput in the result still has the full ` +
+                `buffer the caller can re-render).`,
+            );
           }
 
-          if (ptyProcess.pid && !exited) {
-            if (os.platform() === 'win32') {
-              ptyProcess.kill();
-            } else {
-              try {
-                // Send SIGTERM first to allow graceful shutdown
-                process.kill(-ptyProcess.pid, 'SIGTERM');
-                await new Promise((res) => setTimeout(res, SIGKILL_TIMEOUT_MS));
-                if (!exited) {
-                  // Escalate to SIGKILL if still running
-                  process.kill(-ptyProcess.pid, 'SIGKILL');
-                }
-              } catch (_e) {
-                // Fallback to killing just the process if the group kill fails
-                if (!exited) {
-                  ptyProcess.kill();
-                }
+          const finalBuffer = Buffer.concat(outputChunks);
+          let snapshot = '';
+          try {
+            snapshot = serializeTerminalToText(headlessTerminal) ?? '';
+          } catch (serErr) {
+            // Best-effort snapshot — terminal serialization may fail if
+            // the PTY is mid-render. Empty snapshot is acceptable since
+            // the caller has rawOutput, but log so the failure leaves a
+            // diagnostic trail (otherwise an empty `output` is
+            // indistinguishable from "command produced no output").
+            debugLogger.warn(
+              `Background-promote snapshot serialization failed: ${serErr instanceof Error ? serErr.message : String(serErr)}. ` +
+                `Result.output will be empty; caller should fall back to rawOutput.`,
+            );
+          }
+          resolve({
+            rawOutput: finalBuffer,
+            output: snapshot,
+            exitCode: null,
+            signal: null,
+            error,
+            aborted: true,
+            promoted: true,
+            pid: ptyProcess.pid,
+            executionMethod:
+              (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+          });
+        };
+
+        const performCancelKill = async (): Promise<void> => {
+          if (!ptyProcess.pid || exited) return;
+          if (os.platform() === 'win32') {
+            ptyProcess.kill();
+          } else {
+            try {
+              // Send SIGTERM first to allow graceful shutdown
+              process.kill(-ptyProcess.pid, 'SIGTERM');
+              await new Promise((res) => setTimeout(res, SIGKILL_TIMEOUT_MS));
+              if (!exited) {
+                // Escalate to SIGKILL if still running
+                process.kill(-ptyProcess.pid, 'SIGKILL');
               }
+            } catch (_e) {
+              // Fallback to killing just the process if the group kill fails
+              if (!exited) {
+                ptyProcess.kill();
+              }
+            }
+          }
+        };
+
+        const abortHandler = async () => {
+          // Switch on the discriminated `kind` so any future
+          // ShellAbortReason variant fails the type-check at the
+          // `never` default rather than silently falling through to the
+          // kill path (review feedback — earlier if-else form would have
+          // silently killed for e.g. a future `{ kind: 'suspend' }`).
+          const reason = abortSignal.reason as ShellAbortReason | undefined;
+          const kind: ShellAbortReason['kind'] = reason?.kind ?? 'cancel';
+          switch (kind) {
+            case 'background':
+              await performBackgroundPromote();
+              return;
+            case 'cancel':
+              await performCancelKill();
+              return;
+            default: {
+              const _exhaustive: never = kind;
+              debugLogger.warn(
+                `Unknown ShellAbortReason kind, falling back to cancel/kill: ${String(_exhaustive)}`,
+              );
+              await performCancelKill();
             }
           }
         };
