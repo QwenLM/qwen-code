@@ -81,17 +81,19 @@ async function main() {
     await downloadFile(`${nodeDistUrl}/SHASUMS256.txt`, checksumsPath);
     const checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
 
-    for (const target of RELEASE_TARGETS) {
-      await packageTarget({
-        ...target,
-        nodeDistUrl,
-        nodeVersion,
-        outDir,
-        releaseVersion: args.version,
-        runtimeDir,
-        checksums,
-      });
-    }
+    await Promise.all(
+      RELEASE_TARGETS.map((target) =>
+        packageTarget({
+          ...target,
+          nodeDistUrl,
+          nodeVersion,
+          outDir,
+          releaseVersion: args.version,
+          runtimeDir,
+          checksums,
+        }),
+      ),
+    );
 
     await writeSha256Sums(outDir);
     assertStandaloneOutput(outDir);
