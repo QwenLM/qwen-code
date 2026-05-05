@@ -206,15 +206,47 @@ export class GeminiClient {
 
   private stripOrphanedUserEntriesFromHistory() {
     this.getChat().stripOrphanedUserEntriesFromHistory();
+    // Stripped trailing user entries can include read_file
+    // functionResponses from a failed-then-retried request. The
+    // FileReadCache would still record those reads, so the retry's
+    // re-issued Read could hit the file_unchanged placeholder while
+    // the model has nothing to fall back on. Clear to be safe.
+    debugLogger.debug(
+      '[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory',
+    );
+    this.config.getFileReadCache().clear();
   }
 
   setHistory(history: Content[]) {
     this.getChat().setHistory(history);
+    // Replacing history wholesale drops any prior read_file tool
+    // results the FileReadCache still believes the model has seen.
+    // Without clearing, a follow-up Read of an unchanged file would
+    // return the file_unchanged placeholder for bytes that no longer
+    // exist in the new history.
+    debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
+    this.config.getFileReadCache().clear();
     this.forceFullIdeContext = true;
   }
 
   truncateHistory(keepCount: number) {
+    // Use the O(1) length getter rather than getHistory() — the latter
+    // structuredClone's the entire history just to read .length, which
+    // gets expensive in long-running sessions.
+    const prevLen = this.getChat().getHistoryLength();
     this.getChat().truncateHistory(keepCount);
+    // Decide whether to invalidate based on the *actual* post-truncate
+    // length, not on the keepCount argument. Comparing keepCount alone
+    // misses pathological inputs (e.g. NaN: slice(0, NaN) returns [],
+    // emptying history, but `NaN < prevLen` is false and would skip
+    // the clear, reintroducing the file_unchanged placeholder bug).
+    const newLen = this.getChat().getHistoryLength();
+    if (newLen < prevLen) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
+      );
+      this.config.getFileReadCache().clear();
+    }
     this.forceFullIdeContext = true;
   }
 
@@ -233,6 +265,12 @@ export class GeminiClient {
   async resetChat(): Promise<void> {
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.lastApiCompletionTimestamp = null;
+    // startChat() rewrites the chat to its initial state. Any prior
+    // read_file tool results the FileReadCache still tracks are no
+    // longer in history, so a follow-up Read would serve a placeholder
+    // pointing at content the model can no longer retrieve.
+    debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
+    this.config.getFileReadCache().clear();
     await this.startChat();
   }
 
@@ -694,6 +732,16 @@ export class GeminiClient {
       );
       if (mcResult.meta) {
         this.getChat().setHistory(mcResult.history);
+        // Microcompaction replaces old compactable tool outputs
+        // (including read_file) with a placeholder, but the
+        // FileReadCache still records the prior full Reads as "seen in
+        // this conversation". A follow-up Read of an unchanged file
+        // would then return the file_unchanged placeholder pointing at
+        // bytes the model can no longer retrieve from history. Drop the
+        // cache so post-microcompaction Reads re-emit the bytes,
+        // mirroring the post-compaction clear in tryCompressChat.
+        debugLogger.debug('[FILE_READ_CACHE] clear after microcompaction');
+        this.config.getFileReadCache().clear();
         const m = mcResult.meta;
         debugLogger.debug(
           `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
@@ -1166,6 +1214,7 @@ export class GeminiClient {
         // placeholder pointing at content the model can no longer
         // retrieve from its own context. Clear the cache so post-
         // compaction Reads re-emit the bytes.
+        debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
         this.config.getFileReadCache().clear();
         uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
         this.forceFullIdeContext = true;

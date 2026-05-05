@@ -67,6 +67,11 @@ export function resolveHttpOtlpUrl(
   return url.href;
 }
 
+// Ceiling for sdk.shutdown() when called directly (e.g. non-interactive mode).
+// In interactive mode, runExitCleanup() imposes its own tighter per-function
+// (2s) and overall (5s) timeouts, so this value is effectively unreachable there.
+const SHUTDOWN_TIMEOUT_MS = 10_000;
+
 let sdk: NodeSDK | undefined;
 let telemetryInitialized = false;
 let telemetryShutdownPromise: Promise<void> | undefined;
@@ -133,7 +138,8 @@ export function initializeTelemetry(config: Config): void {
   const debugLogger = createDebugLogger('OTEL');
   const resource = resourceFromAttributes({
     [SemanticResourceAttributes.SERVICE_NAME]: SERVICE_NAME,
-    [SemanticResourceAttributes.SERVICE_VERSION]: process.version,
+    [SemanticResourceAttributes.SERVICE_VERSION]:
+      config.getCliVersion() || 'unknown',
     'session.id': config.getSessionId(),
   });
 
@@ -279,10 +285,45 @@ export async function shutdownTelemetry(): Promise<void> {
   const currentSdk = sdk;
   const debugLogger = createDebugLogger('OTEL');
   telemetryShutdownPromise = (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     try {
-      await currentSdk.shutdown();
-      debugLogger.debug('OpenTelemetry SDK shut down successfully.');
+      // Wrap in Promise.resolve for safety — auto-mocked shutdown()
+      // may return undefined in test environments.
+      const sdkShutdown = Promise.resolve(currentSdk.shutdown());
+      // Prevent unhandled rejection if sdk.shutdown() rejects after the
+      // timeout wins the race — the process is exiting anyway.
+      // Only log when the timeout actually won; otherwise the catch block
+      // below handles the rejection with full diag.error logging.
+      sdkShutdown.catch((err) => {
+        if (timedOut) {
+          debugLogger.warn(
+            'SDK shutdown rejected after timeout:',
+            err instanceof Error ? err.message : err,
+          );
+        }
+        // If not timed out, the rejection will be caught by the
+        // try/catch below via the Promise.race await.
+      });
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve('timeout');
+        }, SHUTDOWN_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      const result = await Promise.race([sdkShutdown, timeout]);
+      clearTimeout(timer);
+      if (result === 'timeout') {
+        const msg = `Telemetry shutdown timed out after ${SHUTDOWN_TIMEOUT_MS}ms.`;
+        diag.warn(msg);
+        debugLogger.warn(msg);
+      } else {
+        debugLogger.debug('OpenTelemetry SDK shut down successfully.');
+      }
     } catch (error) {
+      clearTimeout(timer);
+      diag.error('Error shutting down SDK:', error);
       debugLogger.error('Error shutting down SDK:', error);
     } finally {
       telemetryInitialized = false;

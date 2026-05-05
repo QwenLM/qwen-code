@@ -10,6 +10,7 @@ import {
   matchesRule,
   resolveToolName,
   splitCompoundCommand,
+  SHELL_TOOL_NAMES,
 } from './rule-parser.js';
 import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperations } from './shell-semantics.js';
@@ -31,13 +32,6 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
-
-/**
- * Tools that spawn shell commands and share the same permission evaluation
- * semantics: compound-command splitting, AST read-only analysis, and
- * virtual file/network operation matching.
- */
-const SHELL_LIKE_TOOLS = new Set(['run_shell_command', 'monitor']);
 
 /**
  * Numeric priority for each PermissionDecision.
@@ -189,7 +183,7 @@ export class PermissionManager {
     // a concrete permission (deny/ask/allow) based on the command's readonly status.
     if (
       decision === 'default' &&
-      SHELL_LIKE_TOOLS.has(toolName) &&
+      SHELL_TOOL_NAMES.has(toolName) &&
       command !== undefined
     ) {
       return this.resolveDefaultPermission(command);
@@ -267,7 +261,7 @@ export class PermissionManager {
     // must never downgrade an explicit 'allow' decision from a Bash rule.
     // Example: `git status` has no file ops; an allow rule for `Bash(git *)`
     // should return 'allow', not be downgraded to 'default'.
-    if (SHELL_LIKE_TOOLS.has(toolName) && command !== undefined) {
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
       const cwd = pathCtx?.cwd ?? process.cwd();
       const virtualDecision = this.evaluateShellVirtualOps(
         extractShellOperations(command, cwd),
@@ -584,7 +578,7 @@ export class PermissionManager {
     ctx = this.normalizePermissionContext(ctx);
     const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
-    if (SHELL_LIKE_TOOLS.has(ctx.toolName) && command !== undefined) {
+    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
@@ -625,7 +619,7 @@ export class PermissionManager {
     // extracted from the command has a relevant rule. This ensures the PM is
     // consulted (and the confirmation dialog shown) when Read/Edit/etc. rules
     // would match equivalent shell commands.
-    if (SHELL_LIKE_TOOLS.has(ctx.toolName) && ctx.command !== undefined) {
+    if (SHELL_TOOL_NAMES.has(ctx.toolName) && ctx.command !== undefined) {
       const cwd = pathCtx?.cwd ?? process.cwd();
       const ops = extractShellOperations(ctx.command, cwd);
       if (
@@ -661,7 +655,7 @@ export class PermissionManager {
     ctx = this.normalizePermissionContext(ctx);
     const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
-    if (SHELL_LIKE_TOOLS.has(ctx.toolName) && command !== undefined) {
+    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
@@ -693,7 +687,7 @@ export class PermissionManager {
       return true;
     }
 
-    if (SHELL_LIKE_TOOLS.has(ctx.toolName) && ctx.command !== undefined) {
+    if (SHELL_TOOL_NAMES.has(ctx.toolName) && ctx.command !== undefined) {
       const cwd = pathCtx?.cwd ?? process.cwd();
       const ops = extractShellOperations(ctx.command, cwd);
       return ops.some((op) => {

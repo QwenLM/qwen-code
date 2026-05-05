@@ -267,7 +267,8 @@ describe('errors', () => {
             {
               error: {
                 type: 'AlreadyReportedError',
-                message: '[API Error: 402 Model X is not available for billing.]',
+                message:
+                  '[API Error: 402 Model X is not available for billing.]',
                 code: 42,
               },
             },

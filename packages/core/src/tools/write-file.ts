@@ -32,7 +32,7 @@ import {
   detectLineEnding,
 } from '../services/fileSystemService.js';
 import type { LineEnding } from '../services/fileSystemService.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
+import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -404,7 +404,10 @@ export class WriteFileTool
   protected override validateToolParamValues(
     params: WriteFileToolParams,
   ): string | null {
-    const filePath = params.file_path;
+    // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
+    // that may reach the LLM via at-completion or manual typing.
+    const filePath = unescapePath(params.file_path.trim());
+    params.file_path = filePath;
 
     if (!filePath) {
       return `Missing or empty "file_path"`;
