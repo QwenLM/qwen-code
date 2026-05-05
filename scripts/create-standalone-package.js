@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { isReleaseChecksumAsset } from './release-asset-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -556,7 +557,7 @@ async function writeSha256Sums(outDir) {
 
   if (entries.length === 0) {
     fail(
-      `No qwen-code archives found in ${outDir}; refusing to write empty SHA256SUMS.`,
+      `No release checksum assets found in ${outDir}; refusing to write empty SHA256SUMS.`,
     );
   }
 
@@ -568,17 +569,6 @@ async function writeSha256Sums(outDir) {
   }
 
   fs.writeFileSync(path.join(outDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
-}
-
-function isReleaseChecksumAsset(entry) {
-  if (
-    entry.startsWith('qwen-code-') &&
-    (entry.endsWith('.tar.gz') || entry.endsWith('.zip'))
-  ) {
-    return true;
-  }
-
-  return entry === 'install-qwen.sh' || entry === 'install-qwen.bat';
 }
 
 async function sha256File(filePath) {

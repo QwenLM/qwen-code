@@ -15,6 +15,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { writeSha256Sums } from './create-standalone-package.js';
+import { isStandaloneArchiveName } from './release-asset-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -231,13 +232,6 @@ function assertStandaloneOutput(outDir) {
   }
 
   console.log(`Verified ${archiveNames.length} standalone release checksums.`);
-}
-
-function isStandaloneArchiveName(archiveName) {
-  return (
-    archiveName.startsWith('qwen-code-') &&
-    (archiveName.endsWith('.tar.gz') || archiveName.endsWith('.zip'))
-  );
 }
 
 function parseArgs(argv) {
