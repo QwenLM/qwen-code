@@ -3415,6 +3415,7 @@ Other open files:
 
     it('should cache per-model content generators', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortController = new AbortController();
       const mockResolvedModel = {
         id: 'fast-model',
         authType: 'openai' as const,
@@ -3431,12 +3432,124 @@ Other open files:
       vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
 
       // First call
-      await client.generateContent(contents, {}, undefined, 'fast-model');
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
       expect(createContentGenerator).toHaveBeenCalledTimes(1);
 
       // Second call - should use cache
-      await client.generateContent(contents, {}, undefined, 'fast-model');
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
       expect(createContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('should resolve model across authTypes when main authType misses', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+        envKey: undefined,
+      };
+
+      // resolveModelAcrossAuthTypes calls getResolvedModel multiple times:
+      // 1. main authType (QWEN_OAUTH) → undefined (miss)
+      // 2. secondary authType (USE_OPENAI) → mockResolvedModel (hit)
+      // 3. buildAgentContentGeneratorConfig calls getResolvedModel again
+      //    with the resolved authType → mockResolvedModel (hit)
+      const getResolvedModel = vi
+        .fn()
+        .mockReturnValueOnce(undefined)
+        .mockReturnValue(mockResolvedModel);
+
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      // Main config uses QWEN_OAUTH — fast model registered under USE_OPENAI
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.QWEN_OAUTH,
+        apiKey: 'test-key',
+        apiModel: 'test-model',
+      } as unknown as ContentGeneratorConfig);
+
+      // Mock createContentGenerator to succeed so the cross-authType
+      // resolution path completes without falling back
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      await client.generateContent(
+        contents,
+        { temperature: 0.5 },
+        abortSignal,
+        'fast-model',
+      );
+
+      // First call uses main authType (QWEN_OAUTH) — misses
+      expect(getResolvedModel).toHaveBeenNthCalledWith(
+        1,
+        AuthType.QWEN_OAUTH,
+        'fast-model',
+      );
+      // Second call falls through to secondary authType — hits
+      expect(getResolvedModel).toHaveBeenNthCalledWith(
+        2,
+        AuthType.USE_OPENAI,
+        'fast-model',
+      );
+      // Generator was created using the resolved model's config
+      expect(createContentGenerator).toHaveBeenCalled();
+    });
+
+    it('should clear per-model generator cache on resetChat', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortController = new AbortController();
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+      };
+
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
+      } as unknown as ModelsConfig);
+
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      // First call — populates cache
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(1);
+
+      // Reset chat should clear the cache
+      await client.resetChat();
+
+      // Second call after reset — cache should be cleared, generator recreated
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(2);
     });
   });
 });

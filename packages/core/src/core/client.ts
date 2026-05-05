@@ -144,7 +144,7 @@ export class GeminiClient {
    * Cache of per-model ContentGenerators keyed by model ID.
    * Avoids rebuilding the generator (SDK instantiation, config resolution)
    * on every side query (recap, title, tool summary).
-   * Cleared on config changes that could affect model settings.
+   * Cleared on session reset (resetChat) to pick up config changes.
    */
   private perModelGeneratorCache = new Map<string, Promise<ContentGenerator>>();
 
@@ -284,6 +284,7 @@ export class GeminiClient {
     // pointing at content the model can no longer retrieve.
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
+    this.perModelGeneratorCache.clear();
     await this.startChat();
   }
 
