@@ -418,8 +418,9 @@ jobs:
               echo "See commit history for changes." >> "${NOTES_FILE}"
             fi
           else
-            # PREVIOUS_RELEASE_TAG is only computed for stable releases.
-            # For preview/nightly, skip --generate-notes to avoid including non-SDK commits.
+            # PREVIOUS_RELEASE_TAG is empty for preview/nightly (not computed)
+            # and for the very first stable release (no prior stable on PyPI).
+            # Skip --generate-notes to avoid including non-SDK commits.
             GENERATE_NOTES_FLAG=""
             echo "See commit history for changes." >> "${NOTES_FILE}"
           fi
