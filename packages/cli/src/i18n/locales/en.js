@@ -153,6 +153,11 @@ export default {
     'Configure authentication information for login',
   'Copy the last result or code snippet to clipboard':
     'Copy the last result or code snippet to clipboard',
+  'Create a git commit with the given message. Stages all changes automatically.':
+    'Create a git commit with the given message. Stages all changes automatically.',
+  'Commit message required. Usage: /commit <message>':
+    'Commit message required. Usage: /commit <message>',
+  'Stage all changes and commit': 'Stage all changes and commit',
 
   // ============================================================================
   // Commands - Agents
