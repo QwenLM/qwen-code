@@ -403,14 +403,17 @@ jobs:
             echo ""
           } > "${NOTES_FILE}"
 
-          NOTES_START_TAG_FLAG=""
+          NOTES_START_TAG_ARG=""
           GENERATE_NOTES_FLAG="--generate-notes"
           if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
-            NOTES_START_TAG_FLAG="--notes-start-tag sdk-python-${PREVIOUS_RELEASE_TAG}"
+            # --notes-start-tag replaces the old gh release view fetch;
+            # gh release create handles missing tags with a clear error.
+            NOTES_START_TAG_ARG="--notes-start-tag sdk-python-${PREVIOUS_RELEASE_TAG}"
           else
-            # No prior SDK tag — auto-generated notes would include non-SDK commits.
+            # PREVIOUS_RELEASE_TAG is only computed for stable releases.
+            # For preview/nightly, skip --generate-notes to avoid including non-SDK commits.
             GENERATE_NOTES_FLAG=""
-            echo "Initial release. See commit history for changes." >> "${NOTES_FILE}"
+            echo "See commit history for changes." >> "${NOTES_FILE}"
           fi
 
           gh release create "${TAG_NAME}" \
@@ -418,7 +421,7 @@ jobs:
             --title "SDK Python Release ${RELEASE_TAG}" \
             --notes-file "${NOTES_FILE}" \
             ${GENERATE_NOTES_FLAG} \
-            ${NOTES_START_TAG_FLAG} \
+            ${NOTES_START_TAG_ARG} \
             ${PRERELEASE_FLAG}
 
           rm -f "${NOTES_FILE}"
