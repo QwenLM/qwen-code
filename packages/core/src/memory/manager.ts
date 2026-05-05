@@ -933,7 +933,19 @@ export class MemoryManager {
           },
         });
       } finally {
-        await releaseDreamLock(params.projectRoot);
+        // Lock release errors are logged but swallowed: if releasing
+        // throws (e.g., filesystem error), letting it propagate to
+        // the outer catch would overwrite a successfully-completed
+        // dream with 'failed'. The on-disk lock will be cleaned up
+        // on the next session start anyway via the staleness sweep.
+        try {
+          await releaseDreamLock(params.projectRoot);
+        } catch (lockError) {
+          debugLogger.warn(
+            `Failed to release dream lock for task ${record.id}: ` +
+              `${lockError instanceof Error ? lockError.message : String(lockError)}`,
+          );
+        }
       }
     } catch (error) {
       // User-cancel path: cancelTask already aborted the signal AND
