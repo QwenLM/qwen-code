@@ -68,6 +68,27 @@ describe('V3ToV4Migration', () => {
         }),
       ).toBe(false);
     });
+
+    // Without the migration firing on invalid versionless values, the
+    // loader would stamp $version: 4 with `"off"` / `[]` / etc. left
+    // on disk, and runtime normalization would silently re-enable
+    // attribution. The migrate() body's drop-and-warn handles these
+    // — shouldMigrate has to fire so it gets a chance to run.
+    it.each([
+      ['"off"', 'off'],
+      ['empty array', []],
+      ['number', 42],
+      ['null', null],
+    ])(
+      'returns true for versionless settings with invalid gitCoAuthor (%s)',
+      (_label, value) => {
+        expect(
+          migration.shouldMigrate({
+            general: { gitCoAuthor: value },
+          }),
+        ).toBe(true);
+      },
+    );
   });
 
   describe('migrate', () => {

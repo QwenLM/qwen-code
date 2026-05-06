@@ -260,9 +260,17 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   if (typeof value === 'boolean') {
     return { commit: value, pr: value };
   }
+  // Defensive type-check on each sub-field. settings.json is
+  // user-editable (and the schema validator only runs in IDEs that
+  // load the bundled JSON schema) so a hand-edited
+  // `{ "commit": "false" }` would otherwise reach runtime as a
+  // truthy string and behave as if attribution were enabled. Coerce
+  // anything non-boolean to the schema default (true) so the user
+  // doesn't get surprise-on by a misspelled setting.
+  const pickBool = (v: unknown): boolean => (typeof v === 'boolean' ? v : true);
   return {
-    commit: value?.commit ?? true,
-    pr: value?.pr ?? true,
+    commit: pickBool(value?.commit),
+    pr: pickBool(value?.pr),
   };
 }
 

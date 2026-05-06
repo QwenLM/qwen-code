@@ -42,20 +42,31 @@ export class V3ToV4Migration implements SettingsMigration {
     if (s['$version'] === 3) {
       return true;
     }
-    // Versionless settings file (no $version key) with the legacy
-    // boolean `gitCoAuthor` shape: the V1/V2 migrations don't list
-    // `gitCoAuthor` as an indicator key (it post-dates them), so a
-    // settings file that has ONLY this shape wouldn't trigger any
-    // earlier migration and would land here at the v3→v4 boundary
-    // without being rewritten. Handle the boolean directly so the
-    // settings dialog (which reads the v4 `{commit, pr}` shape) can
-    // surface the user's prior choice instead of silently overwriting
-    // their opt-out with the schema defaults on first save.
+    // Versionless settings file (no $version key): the V1/V2 migrations
+    // don't list `gitCoAuthor` as an indicator key (it post-dates them),
+    // so a settings file with ONLY this shape wouldn't trigger any
+    // earlier migration. Catch it here so:
+    //   - legacy boolean (`gitCoAuthor: false`) gets expanded to
+    //     `{commit: false, pr: false}` instead of being silently
+    //     overwritten by the dialog's schema defaults on first save;
+    //   - invalid shapes (`gitCoAuthor: "off"`, `gitCoAuthor: []`,
+    //     etc.) get reset by the migrate() body's drop-and-warn path
+    //     so runtime normalization doesn't quietly re-enable
+    //     attribution against the user's intent.
     if (s['$version'] === undefined) {
       const value = getNestedProperty(s, GIT_CO_AUTHOR_PATH);
-      if (typeof value === 'boolean') {
-        return true;
+      if (value === undefined) return false;
+      // Already in the v4 shape — leave the loader to stamp $version: 4.
+      if (
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
+        return false;
       }
+      // Anything else (boolean, string, number, array, null) needs
+      // rewriting via migrate().
+      return true;
     }
     return false;
   }

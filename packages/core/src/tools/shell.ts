@@ -1934,18 +1934,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return null;
     }
 
-    const gitCoAuthorSettings = this.config.getGitCoAuthor();
-    if (!gitCoAuthorSettings.commit) {
-      // Commit succeeded but attribution is disabled. Snapshot the
-      // prompt counters as "at last commit" but leave per-file
-      // attributions alone — a wholesale clear here would lose the
-      // user's pending unstaged AI work just because they toggled
-      // attribution off, which is a much harsher contract than the
-      // toggle name suggests.
-      attributionService.noteCommitWithoutClearing();
-      return null;
-    }
-
     let committedAbsolutePaths: Set<string> | null = null;
     let warning: string | null = null;
     try {
@@ -2010,6 +1998,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // attributions stay tracked for a later commit.
       if (committedAbsolutePaths.size === 0) {
         return null;
+      }
+
+      // Toggle gate AFTER computing committedAbsolutePaths so the
+      // finally block still does a proper partial clear of files
+      // that just landed. Without this, a user who turned off
+      // attribution would have those just-committed files' tracked
+      // AI work sit in the singleton; flipping the toggle back on
+      // and committing the same file again would re-attribute the
+      // earlier (already-committed) AI edits to the new commit.
+      const gitCoAuthorSettings = this.config.getGitCoAuthor();
+      if (!gitCoAuthorSettings.commit) {
+        return null; // finally block does the partial clear
       }
 
       const note = attributionService.generateNotePayload(

@@ -1060,6 +1060,32 @@ describe('Server Config (config.ts)', () => {
         expect(settings.pr).toBe(value);
       },
     );
+
+    // settings.json is hand-editable; without per-field type checks
+    // a stored `{ commit: "false" }` would reach runtime as a truthy
+    // string and behave as if attribution were enabled. Coerce
+    // anything non-boolean to the schema default (true) so a
+    // misspelled setting can't quietly invert the user's intent.
+    it.each([
+      ['string "false"', 'false', true],
+      ['string "true"', 'true', true],
+      ['number 0', 0, true],
+      ['null', null, true],
+    ])(
+      'coerces non-boolean field (%s) to the schema default true',
+      (_label, badValue, expected) => {
+        const config = new Config({
+          ...baseParams,
+          gitCoAuthor: {
+            commit: badValue as unknown as boolean,
+            pr: badValue as unknown as boolean,
+          },
+        });
+        const settings = config.getGitCoAuthor();
+        expect(settings.commit).toBe(expected);
+        expect(settings.pr).toBe(expected);
+      },
+    );
   });
 
   describe('Telemetry Settings', () => {
