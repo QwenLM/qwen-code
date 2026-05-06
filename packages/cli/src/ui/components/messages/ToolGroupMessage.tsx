@@ -48,6 +48,14 @@ interface ToolGroupMessageProps {
   availableTerminalHeight?: number;
   contentWidth: number;
   isFocused?: boolean;
+  /**
+   * True when this tool group is being rendered live (in
+   * `pendingHistoryItems`). False once it commits to Ink's `<Static>`.
+   * The subagent renderer uses this to suppress the live frame for
+   * foreground subagents (the pill+dialog handle live drill-down) while
+   * keeping the committed scrollback render unchanged.
+   */
+  isPending?: boolean;
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   onShellInputSubmit?: (input: string) => void;
@@ -70,6 +78,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   isFocused = true,
+  isPending = false,
   activeShellPtyId,
   embeddedShellFocused,
   memoryWriteCount,
@@ -319,6 +328,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   isAgentWithPendingConfirmation(tool.resultDisplay)
                 }
                 isFocused={isSubagentFocused}
+                isPending={isPending}
                 isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             </Box>

@@ -67,10 +67,7 @@ function snippet(s: string | undefined, max = 240): string {
  * Walk a comment's `in_reply_to_id` chain up to the root. Defends against
  * cycles (which shouldn't happen on GitHub but cheap to handle).
  */
-function findRootId(
-  startId: number,
-  byId: Map<number, RawComment>,
-): number {
+function findRootId(startId: number, byId: Map<number, RawComment>): number {
   const seen = new Set<number>();
   let cur = startId;
   while (true) {
@@ -141,7 +138,9 @@ function buildMarkdown(
   parts.push(`- **Repo:** ${ownerRepo}`);
   parts.push(`- **Author:** @${meta.author?.login ?? 'unknown'}`);
   parts.push(`- **State:** ${meta.state}`);
-  parts.push(`- **Base → Head:** \`${meta.baseRefName}\` ← \`${meta.headRefName}\``);
+  parts.push(
+    `- **Base → Head:** \`${meta.baseRefName}\` ← \`${meta.headRefName}\``,
+  );
   parts.push(`- **HEAD SHA:** \`${meta.headRefOid}\``);
   parts.push(
     `- **Diff:** ${meta.changedFiles} files, +${meta.additions}/-${meta.deletions}`,
@@ -187,7 +186,9 @@ function buildMarkdown(
   // only root-comment snippets and forced the LLM driver to manually
   // summarise each reply chain in agent prompts.
   if (repliedRoots.length > 0 || issue.length > 0) {
-    parts.push('## Already discussed — do NOT re-report unless the latest reply itself raises a new concern');
+    parts.push(
+      '## Already discussed — do NOT re-report unless the latest reply itself raises a new concern',
+    );
     parts.push('');
     if (repliedRoots.length > 0) {
       parts.push('### Inline-comment threads with replies');
@@ -209,9 +210,7 @@ function buildMarkdown(
         if (replies.length > 0) {
           parts.push('Replies (chronological):');
           for (const r of replies) {
-            parts.push(
-              `- **@${r.user?.login ?? '?'}**: ${snippet(r.body)}`,
-            );
+            parts.push(`- **@${r.user?.login ?? '?'}**: ${snippet(r.body)}`);
           }
           parts.push('');
         }
@@ -221,16 +220,16 @@ function buildMarkdown(
       parts.push('### Issue-level comments (general PR thread)');
       parts.push('');
       for (const c of issue) {
-        parts.push(
-          `- by @${c.user?.login ?? '?'}: ${snippet(c.body)}`,
-        );
+        parts.push(`- by @${c.user?.login ?? '?'}: ${snippet(c.body)}`);
       }
       parts.push('');
     }
   }
 
   if (openRoots.length > 0) {
-    parts.push('## Open inline comments (no replies yet — may still need attention)');
+    parts.push(
+      '## Open inline comments (no replies yet — may still need attention)',
+    );
     parts.push('');
     for (const c of openRoots) {
       parts.push(

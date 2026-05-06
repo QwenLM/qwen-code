@@ -144,7 +144,11 @@ export class SkillManager {
           () => reject(new Error(`listener timeout after ${TIMEOUT_MS}ms`)),
           TIMEOUT_MS,
         );
-        if (typeof timerId === 'object' && timerId !== null && 'unref' in timerId) {
+        if (
+          typeof timerId === 'object' &&
+          timerId !== null &&
+          'unref' in timerId
+        ) {
           (timerId as { unref: () => void }).unref();
         }
       });

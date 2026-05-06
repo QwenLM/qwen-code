@@ -129,15 +129,15 @@ You can review PRs from other repositories by passing the full URL:
 
 This runs in **lightweight mode** — no worktree, no linter, no build/test, no autofix. The review is based on the diff text only (fetched via GitHub API). PR comments can still be posted if you have write access.
 
-| Capability                                       | Same-repo | Cross-repo                    |
-| ------------------------------------------------ | --------- | ----------------------------- |
+| Capability                                                 | Same-repo | Cross-repo                    |
+| ---------------------------------------------------------- | --------- | ----------------------------- |
 | LLM review (Agents 1-6 + verify + iterative reverse audit) | ✅        | ✅                            |
 | Agent 7: Build & test                                      | ✅        | ❌ (no local codebase)        |
-| Deterministic analysis (linter/typecheck)        | ✅        | ❌                            |
-| Cross-file impact analysis                       | ✅        | ❌                            |
-| Autofix                                          | ✅        | ❌                            |
-| PR inline comments                               | ✅        | ✅ (if you have write access) |
-| Incremental review cache                         | ✅        | ❌                            |
+| Deterministic analysis (linter/typecheck)                  | ✅        | ❌                            |
+| Cross-file impact analysis                                 | ✅        | ❌                            |
+| Autofix                                                    | ✅        | ❌                            |
+| PR inline comments                                         | ✅        | ✅ (if you have write access) |
+| Incremental review cache                                   | ✅        | ❌                            |
 
 ## PR Inline Comments
 
@@ -258,13 +258,13 @@ For large diffs (>10 modified symbols), analysis prioritizes functions with sign
 
 The review pipeline uses a bounded number of LLM calls regardless of how many findings are produced:
 
-| Stage                            | LLM calls         | Notes                                                |
-| -------------------------------- | ----------------- | ---------------------------------------------------- |
-| Deterministic analysis (Step 3)  | 0                 | Shell commands only                                  |
-| Review agents (Step 4)           | 9 (or 8)          | Run in parallel; Agent 7 skipped in cross-repo mode  |
-| Batch verification (Step 5)      | 1                 | Single agent verifies all findings at once           |
-| Iterative reverse audit (Step 6) | 1-3               | Loops until "No issues found" or 3-round cap         |
-| **Total**                        | **11-13 (10-12)** | Same-repo: 11-13; cross-repo: 10-12 (no Agent 7)     |
+| Stage                            | LLM calls         | Notes                                               |
+| -------------------------------- | ----------------- | --------------------------------------------------- |
+| Deterministic analysis (Step 3)  | 0                 | Shell commands only                                 |
+| Review agents (Step 4)           | 9 (or 8)          | Run in parallel; Agent 7 skipped in cross-repo mode |
+| Batch verification (Step 5)      | 1                 | Single agent verifies all findings at once          |
+| Iterative reverse audit (Step 6) | 1-3               | Loops until "No issues found" or 3-round cap        |
+| **Total**                        | **11-13 (10-12)** | Same-repo: 11-13; cross-repo: 10-12 (no Agent 7)    |
 
 Most PRs converge to the lower end of the range (1 reverse audit round); the cap prevents runaway cost on pathological cases.
 

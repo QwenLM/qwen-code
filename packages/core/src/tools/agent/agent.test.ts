@@ -93,7 +93,24 @@ describe('AgentTool', () => {
     // Setup fake timers
     vi.useFakeTimers();
 
-    // Create mock config
+    // Create mock config. The outer describe covers foreground execution
+    // paths, which now register/unregister in the BackgroundTaskRegistry
+    // to surface the run in the pill+dialog. A no-op stub registry is
+    // enough for these tests — they don't assert on registry behavior.
+    const stubRegistry = {
+      register: vi.fn(),
+      unregisterForeground: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      finalizeCancelled: vi.fn(),
+      finalizeCancellationIfPending: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+      getAll: vi.fn().mockReturnValue([]),
+      drainMessages: vi.fn().mockReturnValue([]),
+      queueMessage: vi.fn(),
+      appendActivity: vi.fn(),
+    };
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -104,6 +121,7 @@ describe('AgentTool', () => {
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
     } as unknown as Config;
 
     changeListeners = [];
@@ -412,9 +430,13 @@ describe('AgentTool', () => {
         expect.any(Object), // config (may be approval-mode override)
         expect.any(Object), // eventEmitter parameter
       );
+      // Foreground subagents now run with a composed AbortSignal so the
+      // dialog's per-agent cancel can abort just this child without aborting
+      // the parent turn. The signal received by the subagent is the
+      // controller's signal, not whatever the caller passed in.
       expect(mockAgent.execute).toHaveBeenCalledWith(
         mockContextState,
-        undefined, // signal parameter (undefined when not provided)
+        expect.any(AbortSignal),
       );
 
       const llmText = partToString(result.llmContent);
@@ -738,7 +760,10 @@ describe('AgentTool', () => {
         expect.stringContaining('file-search-'),
         'file-search',
         PermissionMode.AutoEdit,
-        undefined,
+        // Foreground subagents now run with a composed signal (so the
+        // dialog can cancel just this child) — the hook receives the
+        // composed signal, not the caller-supplied one.
+        expect.any(AbortSignal),
       );
     });
 
@@ -920,7 +945,8 @@ describe('AgentTool', () => {
         'Task completed successfully',
         false,
         PermissionMode.AutoEdit,
-        undefined,
+        // Foreground subagents now run with a composed signal.
+        expect.any(AbortSignal),
       );
     });
 
@@ -965,7 +991,8 @@ describe('AgentTool', () => {
         'Task completed successfully',
         true,
         PermissionMode.AutoEdit,
-        undefined,
+        // Foreground subagents now run with a composed signal.
+        expect.any(AbortSignal),
       );
     });
 
@@ -1419,10 +1446,12 @@ describe('AgentTool', () => {
     let mockContextState: ContextState;
     let mockRegistry: {
       register: ReturnType<typeof vi.fn>;
+      unregisterForeground: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
       fail: ReturnType<typeof vi.fn>;
       finalizeCancelled: ReturnType<typeof vi.fn>;
       drainMessages: ReturnType<typeof vi.fn>;
+      appendActivity: ReturnType<typeof vi.fn>;
     };
 
     const bgSubagent: SubagentConfig = {
@@ -1454,10 +1483,12 @@ describe('AgentTool', () => {
 
       mockRegistry = {
         register: vi.fn(),
+        unregisterForeground: vi.fn(),
         complete: vi.fn(),
         fail: vi.fn(),
         finalizeCancelled: vi.fn(),
         drainMessages: vi.fn().mockReturnValue([]),
+        appendActivity: vi.fn(),
       };
 
       vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
@@ -1597,7 +1628,57 @@ describe('AgentTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).not.toContain('Background agent launched');
-      expect(mockRegistry.register).not.toHaveBeenCalled();
+      // Foreground subagents register in the same registry with
+      // flavor: 'foreground' so the pill+dialog can surface them while
+      // the parent's tool-call awaits, then unregister in the finally
+      // path once the call returns. (The tool-result is the durable
+      // record — the entry does not persist.)
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({
+          flavor: 'foreground',
+          description: 'Search files',
+          subagentType: 'file-search',
+          status: 'running',
+        }),
+      );
+      expect(mockRegistry.unregisterForeground).toHaveBeenCalledWith(
+        expect.stringContaining('file-search-'),
+      );
+    });
+
+    it('foreground CANCELLED prefixes the partial result so the parent sees the cancel', async () => {
+      // Without this prefix, a user-cancelled foreground subagent returns
+      // the same `{ llmContent: [{ text: finalText }] }` shape as a
+      // successful run, leaving the parent model unable to tell that the
+      // partial result is incomplete. The background path surfaces this
+      // through the registry's `<status>cancelled</status>` XML envelope;
+      // the foreground path has no equivalent envelope, so the marker
+      // rides the llmContent payload itself.
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.CANCELLED,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Agent was cancelled by the user.');
+      expect(llmText).toContain('halfway through');
     });
 
     it('should allow background in non-interactive mode (headless support)', async () => {
