@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
@@ -24,11 +24,11 @@ import {
   THIRD_PARTY_PROVIDERS,
 } from '../../auth/allProviders.js';
 import type { ProviderConfig } from '../../auth/providerConfig.js';
-import { useProviderSetupFlow } from './flows/useProviderSetupFlow.js';
-import { ProviderSetupSteps } from './flows/ProviderSetupSteps.js';
+import { useProviderSetupFlow } from './useProviderSetupFlow.js';
+import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 
 // ---------------------------------------------------------------------------
-// View levels
+// Types
 // ---------------------------------------------------------------------------
 
 type ViewLevel =
@@ -36,17 +36,17 @@ type ViewLevel =
   | 'alibaba-select'
   | 'thirdparty-select'
   | 'oauth-select'
-  | 'provider-setup'; // unified setup flow (driven by ProviderConfig)
-
-// ---------------------------------------------------------------------------
-// Top-level options
-// ---------------------------------------------------------------------------
+  | 'provider-setup';
 
 type MainOption =
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
   | 'OAUTH'
   | 'CUSTOM_PROVIDER';
+
+// ---------------------------------------------------------------------------
+// Static data
+// ---------------------------------------------------------------------------
 
 const MAIN_ITEMS = [
   {
@@ -85,6 +85,25 @@ const MAIN_ITEMS = [
   },
 ];
 
+const OAUTH_ITEMS = [
+  {
+    key: 'openrouter',
+    title: t('OpenRouter'),
+    label: t('OpenRouter'),
+    description: t(
+      'Browser OAuth · Auto-configure API key and OpenRouter models',
+    ),
+    value: 'openrouter',
+  },
+  {
+    key: 'qwen-oauth-discontinued',
+    title: t('Qwen'),
+    label: t('Qwen'),
+    description: t('Discontinued — switch to Coding Plan or API Key'),
+    value: 'qwen-oauth-discontinued',
+  },
+];
+
 function providerToItem(config: ProviderConfig) {
   return {
     key: config.id,
@@ -94,6 +113,34 @@ function providerToItem(config: ProviderConfig) {
     value: config.id,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Step label for provider-setup title bar
+// ---------------------------------------------------------------------------
+
+function getStepLabel(step: string | null, p: ProviderConfig): string {
+  if (step === 'protocol') return 'Protocol';
+  if (step === 'baseUrl') {
+    if (p.uiLabels?.baseUrlStepTitle) return p.uiLabels.baseUrlStepTitle;
+    return Array.isArray(p.baseUrl) ? 'Endpoint' : 'Base URL';
+  }
+  if (step === 'apiKey') return 'API Key';
+  if (step === 'models') return 'Model IDs';
+  if (step === 'advancedConfig') return 'Advanced Config';
+  if (step === 'review') return 'Review';
+  return '';
+}
+
+// ---------------------------------------------------------------------------
+// View titles
+// ---------------------------------------------------------------------------
+
+const VIEW_TITLES: Record<string, string> = {
+  main: t('Select Authentication Method'),
+  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': t('Third-party Providers · Provider'),
+  'oauth-select': t('Select OAuth Provider'),
+};
 
 // ---------------------------------------------------------------------------
 // AuthDialog
@@ -115,19 +162,19 @@ export function AuthDialog(): React.JSX.Element {
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
-  // Navigation stack — viewStack stores parent views for goBack
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
-  // Selection indices for each group
-  const [mainIndex, setMainIndex] = useState<number>(0);
-  const [alibabaIndex, setAlibabaIndex] = useState<number>(0);
-  const [thirdPartyIndex, setThirdPartyIndex] = useState<number>(0);
-  const [oauthIndex, setOauthIndex] = useState<number>(0);
+  const [mainIndex, setMainIndex] = useState(0);
+  const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
-  // Unified provider setup flow
   const setupFlow = useProviderSetupFlow(handleProviderSubmit);
 
-  // -- Navigation helpers ---------------------------------------------------
+  // -- Navigation -----------------------------------------------------------
+
+  const clearErrors = () => {
+    setErrorMessage(null);
+    onAuthError(null);
+  };
 
   const pushView = (view: ViewLevel) => {
     setViewStack((prev) => [...prev, viewLevel]);
@@ -135,13 +182,10 @@ export function AuthDialog(): React.JSX.Element {
   };
 
   const goBack = () => {
-    setErrorMessage(null);
-    onAuthError(null);
+    clearErrors();
 
     if (viewLevel === 'provider-setup') {
-      const stayedInSetup = setupFlow.goBack();
-      if (stayedInSetup) return;
-      // Fall through to pop view stack
+      if (setupFlow.goBack()) return;
     }
 
     setViewStack((prev) => {
@@ -152,31 +196,53 @@ export function AuthDialog(): React.JSX.Element {
     });
   };
 
-  // -- Provider items -------------------------------------------------------
+  // -- Sub-menu definitions (data-driven) -----------------------------------
 
-  const alibabaItems = ALIBABA_PROVIDERS.map(providerToItem);
-  const thirdPartyItems = THIRD_PARTY_PROVIDERS.map(providerToItem);
+  const alibabaItems = useMemo(() => ALIBABA_PROVIDERS.map(providerToItem), []);
+  const thirdPartyItems = useMemo(
+    () => THIRD_PARTY_PROVIDERS.map(providerToItem),
+    [],
+  );
 
-  const oauthItems = [
-    {
-      key: 'openrouter',
-      title: t('OpenRouter'),
-      label: t('OpenRouter'),
-      description: t(
-        'Browser OAuth · Auto-configure API key and OpenRouter models',
+  const handleProviderSelect = (providerId: string) => {
+    clearErrors();
+    const providerConfig = findProviderById(providerId);
+    if (!providerConfig) return;
+    setupFlow.start(providerConfig);
+    pushView('provider-setup');
+  };
+
+  const handleOAuthSelect = (value: string) => {
+    clearErrors();
+    if (value === 'openrouter') {
+      void handleOpenRouterSubmit();
+      return;
+    }
+    setErrorMessage(
+      t(
+        'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
       ),
-      value: 'openrouter',
-    },
-    {
-      key: 'qwen-oauth-discontinued',
-      title: t('Qwen'),
-      label: t('Qwen'),
-      description: t('Discontinued — switch to Coding Plan or API Key'),
-      value: 'qwen-oauth-discontinued',
-    },
-  ];
+    );
+  };
 
-  // -- Compute default main index from current auth state -------------------
+  const subMenus: Record<
+    string,
+    { items: typeof OAUTH_ITEMS; onSelect: (v: string) => void }
+  > = {
+    'alibaba-select': {
+      items: alibabaItems,
+      onSelect: handleProviderSelect,
+    },
+    'thirdparty-select': {
+      items: thirdPartyItems,
+      onSelect: handleProviderSelect,
+    },
+    'oauth-select': { items: OAUTH_ITEMS, onSelect: handleOAuthSelect },
+  };
+
+  const activeSubMenu = subMenus[viewLevel];
+
+  // -- Default main index from current auth state ---------------------------
 
   const contentGenConfig = config.getContentGeneratorConfig();
   const isCurrentlyCodingPlan = !!findProviderByCredentials(
@@ -184,22 +250,19 @@ export function AuthDialog(): React.JSX.Element {
     contentGenConfig?.apiKeyEnvKey,
   )?.metadataKey;
 
-  const getDefaultMainIndex = () => {
+  const defaultMainIndex = useMemo(() => {
     const currentAuth = pendingAuthType ?? config.getAuthType();
     if (!currentAuth) return 0;
     if (currentAuth === AuthType.QWEN_OAUTH) return 2;
     if (currentAuth === AuthType.USE_OPENAI && isCurrentlyCodingPlan) return 0;
     return 1;
-  };
-
-  const defaultMainIndex = Math.max(0, getDefaultMainIndex());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAuthType, isCurrentlyCodingPlan]);
 
   // -- Handlers -------------------------------------------------------------
 
   const handleMainSelect = (value: MainOption) => {
-    setErrorMessage(null);
-    onAuthError(null);
-
+    clearErrors();
     switch (value) {
       case 'ALIBABA_MODELSTUDIO':
         pushView('alibaba-select');
@@ -217,33 +280,6 @@ export function AuthDialog(): React.JSX.Element {
       default:
         break;
     }
-  };
-
-  const handleProviderSelect = (providerId: string) => {
-    setErrorMessage(null);
-    onAuthError(null);
-
-    const providerConfig = findProviderById(providerId);
-    if (!providerConfig) return;
-    setupFlow.start(providerConfig);
-    pushView('provider-setup');
-  };
-
-  const handleOAuthSelect = (value: string) => {
-    setErrorMessage(null);
-    onAuthError(null);
-
-    if (value === 'openrouter') {
-      void handleOpenRouterSubmit();
-      return;
-    }
-
-    // Qwen OAuth discontinued
-    setErrorMessage(
-      t(
-        'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
-      ),
-    );
   };
 
   // -- Keyboard handling ----------------------------------------------------
@@ -270,87 +306,23 @@ export function AuthDialog(): React.JSX.Element {
     { isActive: true },
   );
 
-  // Handle Enter/Space for advanced config and review steps
-  useKeypress(
-    (key) => {
-      if (viewLevel !== 'provider-setup') return;
-      const step = setupFlow.state.step;
-
-      if (step === 'advancedConfig') {
-        if (key.name === 'up') {
-          setupFlow.moveAdvancedFocusUp();
-          return;
-        }
-        if (key.name === 'down') {
-          setupFlow.moveAdvancedFocusDown();
-          return;
-        }
-        if (key.name === 'space') {
-          setupFlow.toggleFocusedAdvancedOption();
-          return;
-        }
-        if (key.name === 'return') {
-          setupFlow.submitAdvancedConfig();
-          return;
-        }
-      }
-
-      if (step === 'review' && key.name === 'return') {
-        setupFlow.submit();
-      }
-    },
-    { isActive: true },
-  );
-
   // -- View title -----------------------------------------------------------
 
-  const getGroupStepLabel = (groupLabel: string): string =>
-    groupLabel === 'Alibaba ModelStudio' ? 'Access Method' : 'Provider';
-
-  const getStepLabel = (step: string | null, p: ProviderConfig): string => {
-    if (step === 'protocol') return 'Protocol';
-    if (step === 'baseUrl') {
-      if (p.uiLabels?.baseUrlStepTitle) return p.uiLabels.baseUrlStepTitle;
-      return Array.isArray(p.baseUrl) ? 'Endpoint' : 'Base URL';
+  const viewTitle = useMemo(() => {
+    if (viewLevel !== 'provider-setup') {
+      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
     }
-    if (step === 'apiKey') return 'API Key';
-    if (step === 'models') return 'Model IDs';
-    if (step === 'advancedConfig') return 'Advanced Config';
-    if (step === 'review') return 'Review';
-    return '';
-  };
-
-  const getViewTitle = (): string => {
-    switch (viewLevel) {
-      case 'main':
-        return t('Select Authentication Method');
-      case 'alibaba-select':
-        return t('Alibaba ModelStudio · {{stepLabel}}', {
-          stepLabel: getGroupStepLabel('Alibaba ModelStudio'),
-        });
-      case 'thirdparty-select':
-        return t('Third-party Providers · {{stepLabel}}', {
-          stepLabel: getGroupStepLabel('Third-party Providers'),
-        });
-      case 'oauth-select':
-        return t('Select OAuth Provider');
-      case 'provider-setup': {
-        const p = setupFlow.state.provider;
-        if (!p) return t('Provider Setup');
-        const flowTitle = p.uiLabels?.flowTitle ?? p.label;
-        const { stepIndex, totalSteps, step } = setupFlow.state;
-
-        return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
-          flowTitle,
-          step: String(stepIndex),
-          total: String(totalSteps),
-          stepLabel: getStepLabel(step, p),
-        });
-      }
-      default:
-        return t('Select Authentication Method');
-    }
-  };
+    const p = setupFlow.state.provider;
+    if (!p) return t('Provider Setup');
+    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
+    const { stepIndex, totalSteps, step } = setupFlow.state;
+    return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
+      flowTitle,
+      step: String(stepIndex),
+      total: String(totalSteps),
+      stepLabel: getStepLabel(step, p),
+    });
+  }, [viewLevel, setupFlow.state]);
 
   // -- Render ---------------------------------------------------------------
 
@@ -362,7 +334,7 @@ export function AuthDialog(): React.JSX.Element {
       padding={1}
       width="100%"
     >
-      <Text bold>{getViewTitle()}</Text>
+      <Text bold>{viewTitle}</Text>
 
       {viewLevel === 'main' && (
         <Box marginTop={1}>
@@ -380,61 +352,20 @@ export function AuthDialog(): React.JSX.Element {
         </Box>
       )}
 
-      {viewLevel === 'alibaba-select' && (
+      {activeSubMenu && (
         <>
           <Box marginTop={1}>
             <DescriptiveRadioButtonSelect
-              items={alibabaItems}
-              initialIndex={alibabaIndex}
-              onSelect={handleProviderSelect}
+              items={activeSubMenu.items}
+              initialIndex={subMenuIndex[viewLevel] ?? 0}
+              onSelect={activeSubMenu.onSelect}
               onHighlight={(value) => {
-                setAlibabaIndex(
-                  alibabaItems.findIndex((i) => i.value === value),
-                );
-              }}
-              itemGap={1}
-            />
-          </Box>
-          <Box marginTop={1}>
-            <Text color={theme?.text?.secondary}>
-              {t('Enter to select, ↑↓ to navigate, Esc to go back')}
-            </Text>
-          </Box>
-        </>
-      )}
-
-      {viewLevel === 'thirdparty-select' && (
-        <>
-          <Box marginTop={1}>
-            <DescriptiveRadioButtonSelect
-              items={thirdPartyItems}
-              initialIndex={thirdPartyIndex}
-              onSelect={handleProviderSelect}
-              onHighlight={(value) => {
-                setThirdPartyIndex(
-                  thirdPartyItems.findIndex((i) => i.value === value),
-                );
-              }}
-              itemGap={1}
-            />
-          </Box>
-          <Box marginTop={1}>
-            <Text color={theme?.text?.secondary}>
-              {t('Enter to select, ↑↓ to navigate, Esc to go back')}
-            </Text>
-          </Box>
-        </>
-      )}
-
-      {viewLevel === 'oauth-select' && (
-        <>
-          <Box marginTop={1}>
-            <DescriptiveRadioButtonSelect
-              items={oauthItems}
-              initialIndex={oauthIndex}
-              onSelect={handleOAuthSelect}
-              onHighlight={(value) => {
-                setOauthIndex(oauthItems.findIndex((i) => i.value === value));
+                setSubMenuIndex((prev) => ({
+                  ...prev,
+                  [viewLevel]: activeSubMenu.items.findIndex(
+                    (i) => i.value === value,
+                  ),
+                }));
               }}
               itemGap={1}
             />
@@ -448,26 +379,7 @@ export function AuthDialog(): React.JSX.Element {
       )}
 
       {viewLevel === 'provider-setup' && (
-        <ProviderSetupSteps
-          state={setupFlow.state}
-          onProtocolSelect={(protocol) => {
-            setupFlow.selectProtocol(protocol);
-          }}
-          onBaseUrlSelect={setupFlow.selectBaseUrl}
-          onBaseUrlHighlight={(url) => {
-            const p = setupFlow.state.provider;
-            if (p && Array.isArray(p.baseUrl)) {
-              const idx = p.baseUrl.findIndex((o) => o.url === url);
-              setupFlow.setBaseUrlOptionIndex(idx >= 0 ? idx : 0);
-            }
-          }}
-          onBaseUrlChange={setupFlow.changeBaseUrl}
-          onBaseUrlSubmit={setupFlow.submitBaseUrl}
-          onApiKeyChange={setupFlow.changeApiKey}
-          onApiKeySubmit={setupFlow.submitApiKey}
-          onModelIdsChange={setupFlow.changeModelIds}
-          onModelIdsSubmit={setupFlow.submitModelIds}
-        />
+        <ProviderSetupSteps flow={setupFlow} />
       )}
 
       {(authError || errorMessage) && (

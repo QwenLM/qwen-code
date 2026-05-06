@@ -7,16 +7,17 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
-import { DescriptiveRadioButtonSelect } from '../../components/shared/DescriptiveRadioButtonSelect.js';
-import { TextInput } from '../../components/shared/TextInput.js';
-import { theme } from '../../semantic-colors.js';
-import { t } from '../../../i18n/index.js';
-import type { ProviderSetupState } from './useProviderSetupFlow.js';
+import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
+import { TextInput } from '../components/shared/TextInput.js';
+import { theme } from '../semantic-colors.js';
+import { useKeypress } from '../hooks/useKeypress.js';
+import { t } from '../../i18n/index.js';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import type {
   ProviderConfig,
   BaseUrlOption,
-} from '../../../auth/providerConfig.js';
+} from '../../auth/providerConfig.js';
+import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -54,14 +55,10 @@ function resolveDocumentationUrl(
 
 function BaseUrlSelectStep({
   config,
-  state,
-  onSelect,
-  onHighlight,
+  flow,
 }: {
   config: ProviderConfig;
-  state: ProviderSetupState;
-  onSelect: (url: string) => void;
-  onHighlight: (url: string) => void;
+  flow: ProviderSetupFlow;
 }): React.JSX.Element {
   const options = config.baseUrl as BaseUrlOption[];
   const items = options.map((opt) => ({
@@ -77,9 +74,9 @@ function BaseUrlSelectStep({
       <Box marginTop={1}>
         <DescriptiveRadioButtonSelect
           items={items}
-          initialIndex={state.baseUrlOptionIndex}
-          onSelect={onSelect}
-          onHighlight={onHighlight}
+          initialIndex={flow.state.baseUrlOptionIndex}
+          onSelect={flow.selectBaseUrl}
+          onHighlight={flow.highlightBaseUrl}
           itemGap={1}
         />
       </Box>
@@ -93,14 +90,10 @@ function BaseUrlSelectStep({
 // ---------------------------------------------------------------------------
 
 function BaseUrlInputStep({
-  state,
-  onChange,
-  onSubmit,
+  flow,
   documentationUrl,
 }: {
-  state: ProviderSetupState;
-  onChange: (v: string) => void;
-  onSubmit: () => void;
+  flow: ProviderSetupFlow;
   documentationUrl?: string;
 }): React.JSX.Element {
   return (
@@ -113,15 +106,15 @@ function BaseUrlInputStep({
       <Box marginTop={1}>
         <TextInput
           key="base-url-input"
-          value={state.baseUrl}
-          onChange={onChange}
-          onSubmit={onSubmit}
+          value={flow.state.baseUrl}
+          onChange={flow.changeBaseUrl}
+          onSubmit={flow.submitBaseUrl}
           placeholder="https://api.openai.com/v1"
         />
       </Box>
-      {state.baseUrlError && (
+      {flow.state.baseUrlError && (
         <Box marginTop={1}>
-          <Text color={theme.status.error}>{state.baseUrlError}</Text>
+          <Text color={theme.status.error}>{flow.state.baseUrlError}</Text>
         </Box>
       )}
       {documentationUrl && (
@@ -142,16 +135,12 @@ function BaseUrlInputStep({
 
 function ApiKeyStep({
   config,
-  state,
-  onChange,
-  onSubmit,
+  flow,
 }: {
   config: ProviderConfig;
-  state: ProviderSetupState;
-  onChange: (v: string) => void;
-  onSubmit: (key?: string) => void;
+  flow: ProviderSetupFlow;
 }): React.JSX.Element {
-  const docUrl = resolveDocumentationUrl(config, state.baseUrl);
+  const docUrl = resolveDocumentationUrl(config, flow.state.baseUrl);
 
   return (
     <Box marginTop={1} flexDirection="column">
@@ -167,15 +156,15 @@ function ApiKeyStep({
       <Box marginTop={1}>
         <TextInput
           key="api-key-input"
-          value={state.apiKey}
-          onChange={onChange}
-          onSubmit={() => onSubmit(state.apiKey)}
+          value={flow.state.apiKey}
+          onChange={flow.changeApiKey}
+          onSubmit={() => flow.submitApiKey(flow.state.apiKey)}
           placeholder={config.apiKeyPlaceholder ?? 'sk-...'}
         />
       </Box>
-      {state.apiKeyError && (
+      {flow.state.apiKeyError && (
         <Box marginTop={1}>
-          <Text color={theme.status.error}>{state.apiKeyError}</Text>
+          <Text color={theme.status.error}>{flow.state.apiKeyError}</Text>
         </Box>
       )}
       <NAV_HINT_INPUT />
@@ -189,14 +178,10 @@ function ApiKeyStep({
 
 function ModelIdsStep({
   config,
-  state,
-  onChange,
-  onSubmit,
+  flow,
 }: {
   config: ProviderConfig;
-  state: ProviderSetupState;
-  onChange: (v: string) => void;
-  onSubmit: () => void;
+  flow: ProviderSetupFlow;
 }): React.JSX.Element {
   const defaultIds = config.models?.map((m) => m.id).join(', ') ?? '';
 
@@ -214,15 +199,15 @@ function ModelIdsStep({
       <Box marginTop={1}>
         <TextInput
           key="model-ids-input"
-          value={state.modelIds}
-          onChange={onChange}
-          onSubmit={onSubmit}
+          value={flow.state.modelIds}
+          onChange={flow.changeModelIds}
+          onSubmit={flow.submitModelIds}
           placeholder={defaultIds || 'model-id-1, model-id-2'}
         />
       </Box>
-      {state.modelIdsError && (
+      {flow.state.modelIdsError && (
         <Box marginTop={1}>
-          <Text color={theme.status.error}>{state.modelIdsError}</Text>
+          <Text color={theme.status.error}>{flow.state.modelIdsError}</Text>
         </Box>
       )}
       <NAV_HINT_INPUT />
@@ -235,13 +220,13 @@ function ModelIdsStep({
 // ---------------------------------------------------------------------------
 
 function AdvancedConfigStep({
-  state,
+  flow,
 }: {
-  state: ProviderSetupState;
+  flow: ProviderSetupFlow;
 }): React.JSX.Element {
+  const { focusedConfigIndex, thinkingEnabled, modalityEnabled } = flow.state;
   const checkmark = (v: boolean) => (v ? '◉' : '○');
-  const cursor = (index: number) =>
-    state.focusedConfigIndex === index ? '›' : ' ';
+  const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
 
   return (
     <Box marginTop={1} flexDirection="column">
@@ -252,11 +237,9 @@ function AdvancedConfigStep({
       </Box>
       <Box marginTop={1} marginLeft={2}>
         <Text
-          color={
-            state.focusedConfigIndex === 0 ? theme.status.success : undefined
-          }
+          color={focusedConfigIndex === 0 ? theme.status.success : undefined}
         >
-          {cursor(0)} {checkmark(state.thinkingEnabled)} {t('Enable thinking')}
+          {cursor(0)} {checkmark(thinkingEnabled)} {t('Enable thinking')}
         </Text>
       </Box>
       <Box marginTop={0} marginLeft={4}>
@@ -268,11 +251,9 @@ function AdvancedConfigStep({
       </Box>
       <Box marginTop={1} marginLeft={2}>
         <Text
-          color={
-            state.focusedConfigIndex === 1 ? theme.status.success : undefined
-          }
+          color={focusedConfigIndex === 1 ? theme.status.success : undefined}
         >
-          {cursor(1)} {checkmark(state.modalityEnabled)} {t('Enable modality')}
+          {cursor(1)} {checkmark(modalityEnabled)} {t('Enable modality')}
         </Text>
       </Box>
       <Box marginTop={0} marginLeft={4}>
@@ -295,11 +276,7 @@ function AdvancedConfigStep({
 // Step: Review JSON
 // ---------------------------------------------------------------------------
 
-function ReviewStep({
-  state,
-}: {
-  state: ProviderSetupState;
-}): React.JSX.Element {
+function ReviewStep({ flow }: { flow: ProviderSetupFlow }): React.JSX.Element {
   return (
     <Box marginTop={1} flexDirection="column">
       <Box marginTop={1}>
@@ -308,7 +285,7 @@ function ReviewStep({
         </Text>
       </Box>
       <Box marginTop={1}>
-        <Text>{state.previewJson}</Text>
+        <Text>{flow.state.previewJson}</Text>
       </Box>
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
@@ -320,11 +297,7 @@ function ReviewStep({
 }
 
 // ---------------------------------------------------------------------------
-// Main: render the current step
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Protocol label mapping
+// Protocol options
 // ---------------------------------------------------------------------------
 
 const PROTOCOL_ITEMS = [
@@ -352,37 +325,47 @@ const PROTOCOL_ITEMS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Props
+// Main component
 // ---------------------------------------------------------------------------
 
 export interface ProviderSetupStepsProps {
-  state: ProviderSetupState;
-  onProtocolSelect: (protocol: AuthType) => void;
-  onProtocolHighlight?: (protocol: AuthType) => void;
-  onBaseUrlSelect: (url: string) => void;
-  onBaseUrlHighlight: (url: string) => void;
-  onBaseUrlChange: (v: string) => void;
-  onBaseUrlSubmit: () => void;
-  onApiKeyChange: (v: string) => void;
-  onApiKeySubmit: (key?: string) => void;
-  onModelIdsChange: (v: string) => void;
-  onModelIdsSubmit: () => void;
+  flow: ProviderSetupFlow;
 }
 
 export function ProviderSetupSteps({
-  state,
-  onProtocolSelect,
-  onProtocolHighlight,
-  onBaseUrlSelect,
-  onBaseUrlHighlight,
-  onBaseUrlChange,
-  onBaseUrlSubmit,
-  onApiKeyChange,
-  onApiKeySubmit,
-  onModelIdsChange,
-  onModelIdsSubmit,
+  flow,
 }: ProviderSetupStepsProps): React.JSX.Element | null {
-  const { provider, step } = state;
+  const { provider, step } = flow.state;
+
+  // Keyboard handling for steps that need it (advancedConfig, review)
+  useKeypress(
+    (key) => {
+      if (step === 'advancedConfig') {
+        if (key.name === 'up') {
+          flow.moveAdvancedFocusUp();
+          return;
+        }
+        if (key.name === 'down') {
+          flow.moveAdvancedFocusDown();
+          return;
+        }
+        if (key.name === 'space') {
+          flow.toggleFocusedAdvancedOption();
+          return;
+        }
+        if (key.name === 'return') {
+          flow.submitAdvancedConfig();
+          return;
+        }
+      }
+
+      if (step === 'review' && key.name === 'return') {
+        flow.submit();
+      }
+    },
+    { isActive: step === 'advancedConfig' || step === 'review' },
+  );
+
   if (!provider || !step) return null;
 
   switch (step) {
@@ -397,8 +380,7 @@ export function ProviderSetupSteps({
             <DescriptiveRadioButtonSelect
               items={items}
               initialIndex={0}
-              onSelect={onProtocolSelect}
-              onHighlight={onProtocolHighlight}
+              onSelect={flow.selectProtocol}
               itemGap={1}
             />
           </Box>
@@ -409,49 +391,30 @@ export function ProviderSetupSteps({
 
     case 'baseUrl':
       if (Array.isArray(provider.baseUrl)) {
-        return (
-          <BaseUrlSelectStep
-            config={provider}
-            state={state}
-            onSelect={onBaseUrlSelect}
-            onHighlight={onBaseUrlHighlight}
-          />
-        );
+        return <BaseUrlSelectStep config={provider} flow={flow} />;
       }
       return (
         <BaseUrlInputStep
-          state={state}
-          onChange={onBaseUrlChange}
-          onSubmit={onBaseUrlSubmit}
-          documentationUrl={resolveDocumentationUrl(provider, state.baseUrl)}
+          flow={flow}
+          documentationUrl={resolveDocumentationUrl(
+            provider,
+            flow.state.baseUrl,
+          )}
         />
       );
 
     case 'apiKey':
-      return (
-        <ApiKeyStep
-          config={provider}
-          state={state}
-          onChange={onApiKeyChange}
-          onSubmit={onApiKeySubmit}
-        />
-      );
+      return <ApiKeyStep config={provider} flow={flow} />;
 
     case 'models':
-      return (
-        <ModelIdsStep
-          config={provider}
-          state={state}
-          onChange={onModelIdsChange}
-          onSubmit={onModelIdsSubmit}
-        />
-      );
+      return <ModelIdsStep config={provider} flow={flow} />;
 
     case 'advancedConfig':
-      return <AdvancedConfigStep state={state} />;
+      return <AdvancedConfigStep flow={flow} />;
 
     case 'review':
-      return <ReviewStep state={state} />;
+      return <ReviewStep flow={flow} />;
+
     default:
       return null;
   }

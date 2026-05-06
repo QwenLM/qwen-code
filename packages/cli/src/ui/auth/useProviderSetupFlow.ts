@@ -6,7 +6,7 @@
 
 import { useState, useCallback } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import { t } from '../../../i18n/index.js';
+import { t } from '../../i18n/index.js';
 
 const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
   [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
@@ -19,8 +19,8 @@ import {
   getDefaultModelIds,
   type ProviderConfig,
   type ProviderSetupInputs,
-} from '../../../auth/providerConfig.js';
-import { normalizeModelIds, maskApiKey } from '../useAuth.js';
+} from '../../auth/providerConfig.js';
+import { normalizeModelIds, maskApiKey } from './useAuth.js';
 
 // ---------------------------------------------------------------------------
 // Setup step names (generic, config-driven)
@@ -249,6 +249,16 @@ export function useProviderSetupFlow(
     [apiKey, provider, baseUrl, submitOrNext],
   );
 
+  const highlightBaseUrl = useCallback(
+    (url: string) => {
+      if (provider && Array.isArray(provider.baseUrl)) {
+        const idx = provider.baseUrl.findIndex((o) => o.url === url);
+        setBaseUrlOptionIndex(idx >= 0 ? idx : 0);
+      }
+    },
+    [provider],
+  );
+
   const changeModelIds = useCallback((value: string) => {
     setModelIds(value);
     setModelIdsError(null);
@@ -383,9 +393,9 @@ export function useProviderSetupFlow(
     goBack,
     selectProtocol,
     selectBaseUrl,
+    highlightBaseUrl,
     submitBaseUrl,
     changeBaseUrl,
-    setBaseUrlOptionIndex,
     changeApiKey,
     submitApiKey,
     changeModelIds,
@@ -397,3 +407,5 @@ export function useProviderSetupFlow(
     submit,
   };
 }
+
+export type ProviderSetupFlow = ReturnType<typeof useProviderSetupFlow>;
