@@ -630,8 +630,15 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Verify that fs.writeFileSync was called with migrated settings including version
+      // writeWithBackupSync writes to a .tmp file first, then renames
       expect(fs.writeFileSync).toHaveBeenCalled();
-      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error('Expected temp write call for migrated settings');
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
       expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
     });
@@ -688,7 +695,7 @@ describe('Settings Loading and Merging', () => {
 
       loadSettings(MOCK_WORKSPACE_DIR);
 
-      // Version normalization now uses writeWithBackupSync (temp write + rename)
+      // Version normalization uses writeWithBackupSync (temp write + rename)
       // Verify that writeFileSync was called with the temp file path
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
         (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
@@ -728,8 +735,17 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Verify that the migrated settings preserve the model object correctly
+      // writeWithBackupSync writes to a .tmp file first, then renames
       expect(fs.writeFileSync).toHaveBeenCalled();
-      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error(
+          'Expected temp write call for partially migrated settings',
+        );
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
 
       // Model should remain as an object, not double-nested
@@ -831,7 +847,7 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Version should be bumped to 3 even though no keys needed migration
-      // writeWithBackupSync writes to a temp file first, then renames
+      // writeWithBackupSync writes to a .tmp file first, then renames
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
         (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
       );
@@ -863,6 +879,7 @@ describe('Settings Loading and Merging', () => {
 
       loadSettings(MOCK_WORKSPACE_DIR);
 
+      // Version normalization uses writeWithBackupSync (temp write + rename)
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
         (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
       );
@@ -896,6 +913,7 @@ describe('Settings Loading and Merging', () => {
 
       loadSettings(MOCK_WORKSPACE_DIR);
 
+      // Version normalization uses writeWithBackupSync (temp write + rename)
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
         (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
       );

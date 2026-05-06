@@ -38,7 +38,6 @@ import {
   V1_TO_V2_MIGRATION_MAP,
   V2_CONTAINER_KEYS,
 } from './migration/versions/v1-to-v2-shared.js';
-import { writeWithBackupSync } from '../utils/writeWithBackup.js';
 
 const debugLogger = createDebugLogger('SETTINGS');
 
@@ -732,10 +731,20 @@ export function loadSettings(
 
         const persistSettingsObject = (warningPrefix: string) => {
           try {
-            writeWithBackupSync(
+            // Use sync mode to remove deprecated keys (zombie key prevention)
+            // while preserving comments and formatting from the original file.
+            // updateSettingsFilePreservingFormat handles atomicity internally
+            // via temp-file + rename writes.
+            const written = updateSettingsFilePreservingFormat(
               filePath,
-              JSON.stringify(settingsObject, null, 2),
+              settingsObject,
+              { sync: true },
             );
+            if (!written) {
+              debugLogger.error(
+                `${warningPrefix}: updateSettingsFilePreservingFormat returned false for ${filePath}`,
+              );
+            }
           } catch (e) {
             debugLogger.error(`${warningPrefix}: ${getErrorMessage(e)}`);
           }

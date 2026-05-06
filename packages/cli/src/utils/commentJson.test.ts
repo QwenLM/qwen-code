@@ -184,3 +184,103 @@ describe('applyUpdates', () => {
     expect(result).toEqual({ a: 1, b: {} });
   });
 });
+
+describe('migration write-back via updateSettingsFilePreservingFormat', () => {
+  let tempDir: string;
+  let testFilePath: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'migration-writeback-test-'),
+    );
+    testFilePath = path.join(tempDir, 'settings.json');
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should preserve comments on keys that exist in both original and updates', () => {
+    const original = `{
+  // My model choice
+  "model": "gemini-2.5-pro",
+  "ui": {
+    // Theme preference
+    "theme": "dark"
+  }
+}`;
+
+    fs.writeFileSync(testFilePath, original, 'utf-8');
+
+    // Runtime update: only changes model, keeps ui
+    const updates = {
+      model: 'gemini-2.5-flash',
+      ui: {
+        theme: 'dark',
+      },
+    };
+
+    updateSettingsFilePreservingFormat(testFilePath, updates);
+
+    const result = fs.readFileSync(testFilePath, 'utf-8');
+
+    // Comments on preserved keys survive
+    expect(result).toContain('// My model choice');
+    expect(result).toContain('// Theme preference');
+    // Updated value applied
+    expect(result).toContain('"model": "gemini-2.5-flash"');
+  });
+
+  it('should add new keys while preserving existing comments', () => {
+    const original = `{
+  // API configuration
+  "model": "gemini-2.5-flash"
+}`;
+
+    fs.writeFileSync(testFilePath, original, 'utf-8');
+
+    const updates = {
+      model: 'gemini-2.5-flash',
+      $version: 3,
+    };
+
+    updateSettingsFilePreservingFormat(testFilePath, updates);
+
+    const result = fs.readFileSync(testFilePath, 'utf-8');
+
+    // Original comment preserved
+    expect(result).toContain('// API configuration');
+    // New key added
+    expect(result).toContain('$version');
+  });
+
+  it('should preserve inline comments and trailing commas', () => {
+    const original = `{
+  "model": "gemini-2.5-pro", // inline comment
+  "ui": {
+    "theme": "dark",
+  },
+}`;
+
+    fs.writeFileSync(testFilePath, original, 'utf-8');
+
+    const updates = {
+      model: 'gemini-2.5-flash',
+      ui: {
+        theme: 'light',
+      },
+    };
+
+    updateSettingsFilePreservingFormat(testFilePath, updates);
+
+    const result = fs.readFileSync(testFilePath, 'utf-8');
+
+    // Inline comment preserved
+    expect(result).toContain('// inline comment');
+    // Values updated
+    expect(result).toContain('"model": "gemini-2.5-flash"');
+    expect(result).toContain('"theme": "light"');
+  });
+});
