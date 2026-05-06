@@ -65,17 +65,31 @@ describe('directoryCommand', () => {
       setGeminiMdFileCount: vi.fn(),
     } as unknown as Config;
 
+    const createMockSettings = () => ({
+      merged: {},
+      workspace: {
+        settings: {},
+        originalSettings: {},
+      } as SettingsFile,
+      user: {
+        settings: {},
+        originalSettings: {},
+      } as SettingsFile,
+      setValue: vi.fn(),
+      forScope: vi.fn(function (scope: string) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const self = this as any;
+        if (scope === 'user') return self.user;
+        return self.workspace;
+      }),
+    });
+
+    const mockSettings = createMockSettings();
+
     mockContext = {
       services: {
         config: mockConfig,
-        settings: {
-          merged: {},
-          workspace: {
-            settings: {},
-            originalSettings: {},
-          },
-          setValue: vi.fn(),
-        },
+        settings: mockSettings,
       },
       ui: {
         addItem: vi.fn(),
