@@ -55,7 +55,7 @@ describe('settings/trustedFolders path getters are lazy', () => {
     expect(getUserSettingsDir()).toBe(path.join(homedir(), '.qwen'));
 
     process.env['QWEN_HOME'] = '/tmp/qwen-lazy-test';
-    expect(getUserSettingsDir()).toBe('/tmp/qwen-lazy-test');
+    expect(getUserSettingsDir()).toBe(path.normalize('/tmp/qwen-lazy-test'));
   });
 
   it('getTrustedFoldersPath() reflects QWEN_HOME set after module load', () => {
