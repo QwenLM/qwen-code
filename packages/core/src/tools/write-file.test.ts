@@ -26,6 +26,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { GeminiClient } from '../core/client.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 
 const rootDir = path.resolve(os.tmpdir(), 'qwen-code-test-root');
@@ -37,6 +38,7 @@ let mockGeminiClientInstance: Mocked<GeminiClient>;
 
 // Mock Config
 const fsService = new StandardFileSystemService();
+const fileReadCache = new FileReadCache();
 const mockConfigInternal = {
   getTargetDir: () => rootDir,
   getProjectRoot: () => rootDir,
@@ -67,6 +69,7 @@ const mockConfigInternal = {
       discoverTools: vi.fn(),
     }) as unknown as ToolRegistry,
   getDefaultFileEncoding: () => 'utf-8',
+  getFileReadCache: () => fileReadCache,
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -175,6 +178,24 @@ describe('WriteFileTool', () => {
       };
       expect(() => tool.build(params)).toThrow(`Missing or empty "file_path"`);
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped spaces in file_path',
+      () => {
+        // On Windows, unescapePath is a no-op and backslashes are path
+        // separators, so the expected unescape behavior doesn't apply.
+        const escapedPath = path.join(rootDir, 'my\\ file.txt');
+        const params = {
+          file_path: escapedPath,
+          content: 'hello',
+        };
+        const invocation = tool.build(params);
+        expect(invocation).toBeDefined();
+        expect(invocation.params.file_path).toBe(
+          path.join(rootDir, 'my file.txt'),
+        );
+      },
+    );
   });
 
   describe('shouldConfirmExecute', () => {
@@ -455,6 +476,37 @@ describe('WriteFileTool', () => {
 
       expect(result.llmContent).not.toMatch(/User modified the `content`/);
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should write to a file with spaces in its name when given an escaped path',
+      async () => {
+        // On Windows, unescapePath is a no-op and backslashes are path
+        // separators, so shell-escaping behavior doesn't apply.
+        const realPath = path.join(rootDir, 'my spaced write.txt');
+        const escapedPath = path.join(rootDir, 'my\\ spaced\\ write.txt');
+        const content = 'Written via escaped path.';
+
+        const params = { file_path: escapedPath, content };
+        const invocation = tool.build(params);
+
+        const confirmDetails =
+          await invocation.getConfirmationDetails(abortSignal);
+        if (
+          typeof confirmDetails === 'object' &&
+          'onConfirm' in confirmDetails &&
+          confirmDetails.onConfirm
+        ) {
+          await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+        }
+
+        const result = await invocation.execute(abortSignal);
+
+        // Should succeed — file created at the unescaped (real) path
+        expect(result.llmContent).toMatch(/Successfully created and wrote/);
+        expect(fs.existsSync(realPath)).toBe(true);
+        expect(fs.readFileSync(realPath, 'utf8')).toBe(content);
+      },
+    );
   });
 
   describe('workspace boundary validation', () => {
@@ -717,6 +769,31 @@ describe('WriteFileTool', () => {
         originalGetDefaultFileEncoding;
 
       // Cleanup
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+
+    it('records a write into the FileReadCache', async () => {
+      // Symmetric with EditTool's "records a write" test: ensures
+      // ReadFile's post-write guard observes lastWriteAt and skips
+      // the file_unchanged placeholder for files this PR's tools just
+      // mutated.
+      fileReadCache.clear();
+      const filePath = path.join(rootDir, 'cache-marker.txt');
+      const params = { file_path: filePath, content: 'fresh bytes' };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+      expect(result.error).toBeUndefined();
+
+      const stats = fs.statSync(filePath);
+      const status = fileReadCache.check(stats);
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastWriteAt).toBeDefined();
+      }
+
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }

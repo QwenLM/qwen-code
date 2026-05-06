@@ -218,7 +218,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const sendCopyToActive = (action: string) => {
     for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
       []) {
-      if (provider.sendCopyCommand(action)) break;
+      if (provider.sendCopyCommand(action)) {
+        break;
+      }
     }
   };
   context.subscriptions.push(

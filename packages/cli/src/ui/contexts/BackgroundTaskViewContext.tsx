@@ -19,19 +19,25 @@ import {
   useMemo,
   useState,
 } from 'react';
+import { type Config, createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
-  type BackgroundTaskEntry,
-  type Config,
-} from '@qwen-code/qwen-code-core';
-import { useBackgroundTaskView } from '../hooks/useBackgroundTaskView.js';
+  type DialogEntry,
+  useBackgroundTaskView,
+} from '../hooks/useBackgroundTaskView.js';
+
+const debugLogger = createDebugLogger('BG_TASK_VIEW');
 
 // ─── Types ──────────────────────────────────────────────────
 
 export type BackgroundDialogMode = 'closed' | 'list' | 'detail';
 
 export interface BackgroundTaskViewState {
-  /** Live snapshot of every background agent entry, ordered by startTime. */
-  entries: readonly BackgroundTaskEntry[];
+  /**
+   * Live snapshot of every background entry across both registries
+   * (subagents + managed shells), ordered by `startTime`. Each entry carries
+   * a `kind` discriminator so renderers can dispatch on agent vs shell.
+   */
+  entries: readonly DialogEntry[];
   /** Index into `entries` for the currently focused row (0-based). */
   selectedIndex: number;
   /** `'closed'` when the overlay isn't mounted; otherwise the active mode. */
@@ -52,8 +58,10 @@ export interface BackgroundTaskViewActions {
   closeDialog(): void;
   enterDetail(): void;
   exitDetail(): void;
-  /** Cancel the currently selected entry (no-op if not running). */
+  /** Stop or abandon the currently selected entry. */
   cancelSelected(): void;
+  /** Resume the currently selected paused entry. */
+  resumeSelected(): Promise<void>;
   setPillFocused(focused: boolean): void;
 }
 
@@ -85,6 +93,7 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   enterDetail: noop,
   exitDetail: noop,
   cancelSelected: noop,
+  resumeSelected: async () => {},
   setPillFocused: noop,
 };
 
@@ -166,8 +175,70 @@ export function BackgroundTaskViewProvider({
     if (!config) return;
     const target = entries[selectedIndex];
     if (!target) return;
-    // cancel() is a no-op for non-running entries, so no pre-check here.
-    config.getBackgroundTaskRegistry().cancel(target.agentId);
+    if (target.kind === 'agent' && target.status === 'paused') {
+      config.abandonBackgroundAgent(target.agentId);
+      return;
+    }
+    // All three registries' cancel paths are no-ops on non-running
+    // entries, so no pre-check here. Shell cancel goes through
+    // requestCancel — it triggers the AbortController only and lets the
+    // spawn's settle path record the real terminal moment + outcome
+    // (mirrors the task_stop tool path in #3687). Monitor cancel is
+    // synchronous: settle + abort happen inside the registry's cancel(),
+    // matching its own task_stop path.
+    switch (target.kind) {
+      case 'agent':
+        config.getBackgroundTaskRegistry().cancel(target.agentId);
+        break;
+      case 'shell':
+        config.getBackgroundShellRegistry().requestCancel(target.shellId);
+        break;
+      case 'monitor':
+        config.getMonitorRegistry().cancel(target.monitorId);
+        break;
+      case 'dream': {
+        // Aborts the dream fork-agent via MemoryManager.cancelTask;
+        // the manager flips status to 'cancelled' before aborting, and
+        // the runDream finally block releases the consolidation lock as
+        // the agent unwinds. Same one-shot fire-and-forget shape as
+        // shell.requestCancel above.
+        //
+        // cancelTask returns false in the contract-violation path
+        // (running record without an AbortController). Today this is
+        // unreachable because the controller is registered before
+        // storeWith fires the notify, but if a future refactor
+        // breaks the invariant a silent ignore here would let the
+        // user think the cancel took. Log + leave the dialog open.
+        const ok = config.getMemoryManager().cancelTask(target.dreamId);
+        if (!ok) {
+          debugLogger.warn(
+            `cancelSelected: dream task ${target.dreamId} could not be cancelled ` +
+              `(internal state inconsistency — see MemoryManager.cancelTask warn).`,
+          );
+        }
+        break;
+      }
+      default: {
+        const _exhaustive: never = target;
+        throw new Error(
+          `cancelSelected: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+        );
+      }
+    }
+  }, [config, entries, selectedIndex]);
+
+  const resumeSelected = useCallback(async () => {
+    if (!config) return;
+    const target = entries[selectedIndex];
+    if (
+      !target ||
+      target.kind !== 'agent' ||
+      target.status !== 'paused' ||
+      target.resumeBlockedReason
+    ) {
+      return;
+    }
+    await config.resumeBackgroundAgent(target.agentId);
   }, [config, entries, selectedIndex]);
 
   const state: BackgroundTaskViewState = useMemo(
@@ -190,6 +261,7 @@ export function BackgroundTaskViewProvider({
       enterDetail,
       exitDetail,
       cancelSelected,
+      resumeSelected,
       setPillFocused,
     }),
     [
@@ -200,6 +272,7 @@ export function BackgroundTaskViewProvider({
       enterDetail,
       exitDetail,
       cancelSelected,
+      resumeSelected,
       setPillFocused,
     ],
   );

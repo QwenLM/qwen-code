@@ -23,6 +23,7 @@ export interface AcpBridgeOptions {
 export interface AvailableCommand {
   name: string;
   description: string;
+  input?: { hint: string } | null;
 }
 
 export interface ToolCallEvent {

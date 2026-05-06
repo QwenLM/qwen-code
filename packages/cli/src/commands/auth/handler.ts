@@ -90,6 +90,7 @@ function createMinimalArgv(): CliArgs {
     telemetryLogPrompts: undefined,
     telemetryOutfile: undefined,
     allowedMcpServerNames: undefined,
+    mcpConfig: undefined,
     allowedTools: undefined,
     acp: undefined,
     experimentalAcp: undefined,

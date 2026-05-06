@@ -252,6 +252,84 @@ describe('InProcessBackend', () => {
     // Agent should eventually reach cancelled state
   });
 
+  it('stopAgent disposes the per-agent tool registry and clears the Map entry', async () => {
+    // Regression: per-agent tool registries used to live in a flat array
+    // and only got disposed at backend cleanup(). With the Map, stopAgent
+    // must (1) call registry.stop() so listeners on shared managers
+    // (SkillManager / SubagentManager) get released immediately, and (2)
+    // delete the Map entry so a subsequent cleanup() doesn't double-stop
+    // and a re-spawn with the same id can take a fresh registry.
+    await backend.init();
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+
+    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
+    const registries = (
+      backend as unknown as { agentRegistries: AgentRegistries }
+    ).agentRegistries;
+
+    const registry = registries.get('agent-1');
+    expect(registry).toBeDefined();
+    expect(registries.has('agent-1')).toBe(true);
+
+    backend.stopAgent('agent-1');
+
+    expect(registry!.stop).toHaveBeenCalledTimes(1);
+    expect(registries.has('agent-1')).toBe(false);
+  });
+
+  it('stopAgent on a non-existent id is a no-op (no throw, Map untouched)', async () => {
+    // Defensive: if an upstream caller (e.g. SubagentManager) loses track
+    // and asks to stop an unknown agent, we silently ignore rather than
+    // throwing — matches the behavior of `agents.get` returning undefined
+    // for the agent itself in the same method.
+    await backend.init();
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+
+    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
+    const registries = (
+      backend as unknown as { agentRegistries: AgentRegistries }
+    ).agentRegistries;
+    const sizeBefore = registries.size;
+
+    expect(() => backend.stopAgent('agent-does-not-exist')).not.toThrow();
+    expect(registries.size).toBe(sizeBefore);
+  });
+
+  it('cleanup disposes all remaining registries (covers the in-flight shutdown path)', async () => {
+    // Even when stopAgent has not been called for every agent (fast-path
+    // shutdown / tab close), cleanup must drain the Map so listeners
+    // don't leak past process exit.
+    //
+    // Build a config whose createToolRegistry returns a fresh mock per
+    // call — the shared `createMockConfig` returns the same singleton
+    // every spawn, which would conflate r1/r2 into a single instance and
+    // make per-registry call counts ambiguous.
+    const config = createMockConfig() as unknown as {
+      createToolRegistry: ReturnType<typeof vi.fn>;
+    };
+    config.createToolRegistry = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(createMockToolRegistry()));
+    const localBackend = new InProcessBackend(config as never);
+    await localBackend.init();
+    await localBackend.spawnAgent(createSpawnConfig('agent-1'));
+    await localBackend.spawnAgent(createSpawnConfig('agent-2'));
+
+    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
+    const registries = (
+      localBackend as unknown as { agentRegistries: AgentRegistries }
+    ).agentRegistries;
+    const r1 = registries.get('agent-1')!;
+    const r2 = registries.get('agent-2')!;
+    expect(r1).not.toBe(r2);
+
+    await localBackend.cleanup();
+
+    expect(r1.stop).toHaveBeenCalledTimes(1);
+    expect(r2.stop).toHaveBeenCalledTimes(1);
+    expect(registries.size).toBe(0);
+  });
+
   it('should stop all agents', async () => {
     await backend.init();
     await backend.spawnAgent(createSpawnConfig('agent-1'));

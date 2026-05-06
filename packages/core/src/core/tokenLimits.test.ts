@@ -172,6 +172,11 @@ describe('tokenLimit', () => {
   });
 
   describe('DeepSeek', () => {
+    it('should return 1M for DeepSeek V4 models', () => {
+      expect(tokenLimit('deepseek-v4-flash')).toBe(1000000);
+      expect(tokenLimit('deepseek-v4-pro')).toBe(1000000);
+    });
+
     it('should return 128K for DeepSeek models', () => {
       expect(tokenLimit('deepseek-r1')).toBe(131072);
       expect(tokenLimit('deepseek-v3')).toBe(131072);
@@ -296,6 +301,8 @@ describe('tokenLimit with output type', () => {
 
   describe('other output limits', () => {
     it('should return correct output limits for DeepSeek', () => {
+      expect(tokenLimit('deepseek-v4-flash', 'output')).toBe(384000);
+      expect(tokenLimit('deepseek-v4-pro', 'output')).toBe(384000);
       expect(tokenLimit('deepseek-reasoner', 'output')).toBe(65536);
       expect(tokenLimit('deepseek-r1', 'output')).toBe(65536);
       expect(tokenLimit('deepseek-r1-0528', 'output')).toBe(65536);

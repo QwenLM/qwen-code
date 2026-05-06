@@ -1200,8 +1200,8 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
-    'Switch the model for this session (--fast for suggestion model)',
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
+    'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':
@@ -1209,6 +1209,8 @@ export default {
   'Authentication type not available.': 'Authentication type not available.',
   'No models available for the current authentication type ({{authType}}).':
     'No models available for the current authentication type ({{authType}}).',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
@@ -1691,6 +1693,7 @@ export default {
   'Command Format Migration': 'Command Format Migration',
   'Found {{count}} TOML command file:': 'Found {{count}} TOML command file:',
   'Found {{count}} TOML command files:': 'Found {{count}} TOML command files:',
+  'Current tasks': 'Current tasks',
   '... and {{count}} more': '... and {{count}} more',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'The TOML format is deprecated. Would you like to migrate them to Markdown format?',

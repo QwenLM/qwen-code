@@ -2,7 +2,10 @@ import {
   type SkillConfig,
   type SkillValidationResult,
   parseModelField,
+  parsePathsField,
+  validateSkillName,
 } from './types.js';
+import { validateSymlinkScope } from './symlinkScope.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
@@ -22,14 +25,60 @@ export async function loadSkillsFromDir(
     const skills: SkillConfig[] = [];
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
+    // Resolve baseDir once outside the loop. Symlink scope validation
+    // (in `validateSymlinkScope`) needs the canonical form to compare
+    // against; doing it per-entry would burn a syscall per directory
+    // entry for the same answer. `fs.readdir` succeeded just above so
+    // the directory exists — realpath should not throw here, but if it
+    // does we treat the whole directory as unreadable.
+    let baseRealPath: string;
+    try {
+      baseRealPath = await fs.realpath(baseDir);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      debugLogger.debug(
+        `Cannot realpath skills baseDir ${baseDir}: ${errorMessage}`,
+      );
+      return [];
+    }
+
     for (const entry of entries) {
-      // Only process directories (each skill is a directory)
-      if (!entry.isDirectory()) {
+      // Process directories and symlinks that resolve to directories.
+      // Plain files are silently skipped (each skill must be a directory).
+      const isDirectory = entry.isDirectory();
+      const isSymlink = entry.isSymbolicLink();
+
+      if (!isDirectory && !isSymlink) {
         debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
         continue;
       }
 
       const skillDir = path.join(baseDir, entry.name);
+
+      // For symlinks, verify the target (a) resolves, (b) is a directory,
+      // and (c) stays within `baseDir`. Shared with `skill-manager.ts`
+      // so the two parsers can't drift on this code-execution-vector
+      // gate (skills can ship hooks that run shell commands).
+      if (isSymlink) {
+        const check = await validateSymlinkScope(skillDir, baseRealPath);
+        if (!check.ok) {
+          if (check.reason === 'escapes') {
+            debugLogger.warn(
+              `Skipping symlink ${entry.name} that escapes ${baseDir}`,
+            );
+          } else if (check.reason === 'not-directory') {
+            debugLogger.warn(
+              `Skipping symlink ${entry.name} that does not point to a directory`,
+            );
+          } else {
+            debugLogger.warn(
+              `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
+            );
+          }
+          continue;
+        }
+      }
       const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
 
       try {
@@ -98,6 +147,10 @@ export function parseSkillContent(
 
   // Convert to strings
   const name = String(nameRaw);
+  // Reject unsafe names early — the value flows into the SkillTool
+  // description, schema enums, and the path-activation
+  // <system-reminder>, all of which the model treats as trusted text.
+  validateSkillName(name);
   const description = String(descriptionRaw);
 
   // Extract optional fields
@@ -119,6 +172,26 @@ export function parseSkillContent(
       ? frontmatter['argument-hint']
       : undefined;
 
+  // `whenToUse` and `disable-model-invocation` were historically only
+  // parsed by the project/user/bundled parser in skill-manager.ts, which
+  // meant an extension SKILL.md with `disable-model-invocation: true`
+  // had the flag silently stripped — and (post-paths PR) would still
+  // fire path-activation reminders for a skill the model can't invoke.
+  // Extract them here too so the extension and managed parsers agree.
+  const whenToUse =
+    typeof frontmatter['when_to_use'] === 'string'
+      ? frontmatter['when_to_use']
+      : undefined;
+  const disableModelInvocationRaw = frontmatter['disable-model-invocation'];
+  const disableModelInvocation =
+    disableModelInvocationRaw === true || disableModelInvocationRaw === 'true'
+      ? true
+      : undefined;
+
+  // Optional `paths` frontmatter: glob patterns that gate when this skill
+  // is offered to the model (conditional skill).
+  const paths = parsePathsField(frontmatter);
+
   const config: SkillConfig = {
     name,
     description,
@@ -126,8 +199,26 @@ export function parseSkillContent(
     argumentHint,
     model,
     filePath,
+    // Set skillRoot to the directory containing SKILL.md so command
+    // hooks for extension skills get `QWEN_SKILL_ROOT` set in their
+    // environment (registerSkillHooks.ts:116 skips the env var when
+    // skillRoot is undefined). Matches the project/user/bundled
+    // parser in skill-manager.ts. The previous omission silently
+    // broke `$QWEN_SKILL_ROOT/scripts/...` references in extension
+    // skill hook commands.
+    //
+    // Note: extension parser still does not extract `hooks:`
+    // frontmatter; that's a separate alignment task and may be
+    // intentionally restricted to managed (project/user/bundled)
+    // skills as a security boundary. If hooks become supported here
+    // they need their own extraction pass and the same managed-vs-
+    // extension trust review.
+    skillRoot: path.dirname(filePath),
     body: body.trim(),
     level: 'extension',
+    whenToUse,
+    disableModelInvocation,
+    paths,
   };
 
   // Validate the parsed configuration

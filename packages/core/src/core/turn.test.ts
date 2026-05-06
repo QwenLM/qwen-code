@@ -9,7 +9,7 @@ import type {
   ServerGeminiToolCallRequestEvent,
   ServerGeminiErrorEvent,
 } from './turn.js';
-import { Turn, GeminiEventType } from './turn.js';
+import { CompressionStatus, Turn, GeminiEventType } from './turn.js';
 import type { GenerateContentResponse, Part, Content } from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
@@ -408,7 +408,6 @@ describe('Turn', () => {
               candidatesTokenCount: 50,
               cachedContentTokenCount: 10,
               thoughtsTokenCount: 5,
-              toolUsePromptTokenCount: 2,
             },
           } as GenerateContentResponse,
         };
@@ -435,7 +434,6 @@ describe('Turn', () => {
               candidatesTokenCount: 50,
               cachedContentTokenCount: 10,
               thoughtsTokenCount: 5,
-              toolUsePromptTokenCount: 2,
             },
           },
         },
@@ -845,6 +843,38 @@ describe('Turn', () => {
       expect(events).toEqual([
         { type: GeminiEventType.Retry },
         { type: GeminiEventType.Content, value: 'Success' },
+      ]);
+    });
+
+    it('bridges a compressed stream event to a ChatCompressed event', async () => {
+      const compressionInfo = {
+        originalTokenCount: 1000,
+        newTokenCount: 200,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      };
+      const mockResponseStream = (async function* () {
+        yield { type: StreamEventType.COMPRESSED, info: compressionInfo };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [{ content: { parts: [{ text: 'after' }] } }],
+          },
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        { type: GeminiEventType.ChatCompressed, value: compressionInfo },
+        { type: GeminiEventType.Content, value: 'after' },
       ]);
     });
   });
