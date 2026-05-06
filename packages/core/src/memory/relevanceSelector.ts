@@ -4,60 +4,81 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { z } from 'zod';
+import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { runSideQuery } from '../core/sideQuery.js';
-import { type ScannedAutoMemoryDocument } from './types.js';
-
-const SELECT_MEMORIES_SYSTEM_PROMPT = `
-You are an expert at information retrieval. Your goal is to select which of the provided background documents (memories) are relevant to the user's latest query.
-
-Rules:
-1. Return a list of relative paths for documents that provide useful context or instructions for answering the user's request.
-2. If multiple documents are relevant, return all of them.
-3. If no documents are relevant, return an empty list.
-4. Only return relative paths from the provided document list.
-`.trim();
-
-const RESPONSE_SCHEMA = z.object({
-  selected_memories: z.array(z.string()),
-});
-
-type RecallSelectorResponse = z.infer<typeof RESPONSE_SCHEMA>;
+import { runSideQuery } from '../utils/sideQuery.js';
+import type { ScannedAutoMemoryDocument } from './scan.js';
 
 /**
- * Uses a lighter "fast" model to select which background documents are relevant
- * to the current user query.
- *
- * @param config The application config.
- * @param query The user's query.
- * @param docs The candidate documents.
- * @param limit Maximum number of documents to return.
- * @param callerAbortSignal Optional abort signal from the caller.
- * @returns A filtered list of documents.
+ * System prompt for the selector side-query.
  */
+const SELECT_MEMORIES_SYSTEM_PROMPT = `You are selecting memories that will be useful to an AI coding assistant as it processes a user's query. You will be given the user's query and a list of available memory files with their filenames and descriptions.
+
+Return a list of filenames for the memories that will clearly be useful to the assistant as it processes the user's query (up to 5). Only include memories that you are certain will be helpful based on their name and description.
+- If you are unsure if a memory will be useful in processing the user's query, then do not include it in your list. Be selective and discerning.
+- If there are no memories in the list that would clearly be useful, feel free to return an empty list.
+- If a list of recently-used tools is provided, do not select memories that are usage reference or API documentation for those tools (the assistant is already exercising them). DO still select memories containing warnings, gotchas, or known issues about those tools — active use is exactly when those matter.`;
+
+const RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    selected_memories: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+  },
+  required: ['selected_memories'],
+  additionalProperties: false,
+};
+
+interface RecallSelectorResponse {
+  selected_memories: string[];
+}
+
+/**
+ * Format memory headers as a text manifest: one line per file with
+ * [type] relativePath (ISO-timestamp): description.
+ * Selector sees only the header (type, path, age, description), not the body content.
+ */
+function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): string {
+  return docs
+    .map((doc) => {
+      const tag = `[${doc.type}] `;
+      const ts = new Date(doc.mtimeMs).toISOString();
+      return doc.description
+        ? `- ${tag}${doc.relativePath} (${ts}): ${doc.description}`
+        : `- ${tag}${doc.relativePath} (${ts})`;
+    })
+    .join('\n');
+}
+
 export async function selectRelevantAutoMemoryDocumentsByModel(
   config: Config,
   query: string,
   docs: ScannedAutoMemoryDocument[],
   limit: number,
+  recentTools: readonly string[] = [],
   callerAbortSignal?: AbortSignal,
 ): Promise<ScannedAutoMemoryDocument[]> {
-  if (!query || docs.length === 0) {
+  if (docs.length === 0 || limit <= 0 || query.trim().length === 0) {
     return [];
   }
 
-  const contents = [
+  const manifest = formatMemoryManifest(docs);
+
+  // When the assistant is actively using a tool, surfacing that tool's
+  // reference docs is noise.  Pass the tool list so the selector can skip them.
+  const toolsSection =
+    recentTools.length > 0
+      ? `\n\nRecently used tools: ${recentTools.join(', ')}`
+      : '';
+
+  const contents: Content[] = [
     {
       role: 'user',
       parts: [
         {
-          text: `User query: ${query}\n\nDocuments:\n${docs
-            .map(
-              (doc) =>
-                `- Path: ${doc.relativePath}\n  Content Summary: ${doc.content.slice(0, 500)}`,
-            )
-            .join('\n\n')}`,
+          text: `Query: ${query.trim()}\n\nAvailable memories:\n${manifest}${toolsSection}`,
         },
       ],
     },
@@ -73,6 +94,7 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     abortSignal: callerAbortSignal
       ? AbortSignal.any([AbortSignal.timeout(1_000), callerAbortSignal])
       : AbortSignal.timeout(1_000),
+
     // Use the fast model for this background side-query to reduce latency and
     // cost. Falls back to the main session model if no fast model is configured.
     model: config.getFastModel(),
@@ -84,10 +106,15 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
       if (!Array.isArray(value.selected_memories)) {
         return 'Recall selector must return selected_memories array';
       }
-      for (const path of value.selected_memories) {
-        if (!validRelativePaths.has(path)) {
-          return `Recall selector returned unknown relative path: ${path}`;
-        }
+      if (value.selected_memories.length > limit) {
+        return `Recall selector returned too many documents: ${value.selected_memories.length}`;
+      }
+      if (
+        value.selected_memories.some(
+          (relativePath) => !validRelativePaths.has(relativePath),
+        )
+      ) {
+        return 'Recall selector returned unknown relative path';
       }
       return null;
     },
