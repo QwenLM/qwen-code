@@ -317,11 +317,17 @@ export class AgentCore {
     }
 
     try {
-      return new GeminiChat(
+      const chat = new GeminiChat(
         this.runtimeContext,
         generationConfig,
         startHistory,
       );
+      // Seed the per-chat token count so the auto-compaction threshold
+      // gate sees the inherited history's true size on the first send.
+      // Without this, fork subagents start at 0 and the gate NOOPs even
+      // when `startHistory` is already huge — first API call can 400.
+      chat.setLastPromptTokenCount(this.lastPromptTokenCount);
+      return chat;
     } catch (error) {
       await reportError(
         error,
@@ -537,6 +543,18 @@ export class AgentCore {
           lastUsage = undefined;
           currentResponseId = undefined;
           wasOutputTruncated = false;
+          continue;
+        }
+
+        // GeminiChat already mutated its own history; surface to the debug
+        // log so subagent compactions show up alongside the main session's.
+        if (streamEvent.type === 'compressed') {
+          this.runtimeContext
+            .getDebugLogger()
+            .debug(
+              `[AGENT-COMPACT] subagent=${this.subagentId} round=${turnCounter} ` +
+                `tokens ${streamEvent.info.originalTokenCount} -> ${streamEvent.info.newTokenCount}`,
+            );
           continue;
         }
 
