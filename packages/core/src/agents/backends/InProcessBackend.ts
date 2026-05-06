@@ -170,7 +170,14 @@ export class InProcessBackend implements Backend {
     } catch (error) {
       // Clean up registered state so the caller's rollback logic
       // can detect the failure (spawnAgent must reject, not swallow).
+      // Includes the registry and content-generator that were
+      // populated before the try block — without this, every spawn
+      // failure leaks one tool registry (with its listeners on
+      // shared managers) and one ContentGenerator until backend
+      // cleanup() at process exit.
       this.agents.delete(config.agentId);
+      this.agentRegistries.delete(config.agentId);
+      this.agentContentGenerators.delete(config.agentId);
       const idx = this.agentOrder.indexOf(config.agentId);
       if (idx !== -1) this.agentOrder.splice(idx, 1);
       if (this.activeAgentId === config.agentId) {
