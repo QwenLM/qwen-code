@@ -314,16 +314,30 @@ export class CommitAttributionService {
     let aiContribution = existing?.aiContribution ?? 0;
     let aiCreated = existing?.aiCreated ?? false;
 
-    // If we have a prior tracked state for this file AND the input
-    // `oldContent` we're being told about doesn't match the hash we
-    // recorded after AI's last write, the file diverged out-of-band.
-    // Drop the accumulated counters before applying the new edit.
+    // Fresh-file lifetime: if we have a prior tracked state for this
+    // path BUT the caller is reporting `oldContent === null` (the file
+    // didn't exist on disk at edit time), the previous tracking was
+    // for a since-deleted file at the same path — accumulating across
+    // distinct file lifetimes would credit AI for chars from the old
+    // file that no longer exist. Reset before counting the new
+    // contribution. Common path: AI creates `foo.ts` → user / shell
+    // `rm foo.ts` → AI re-creates `foo.ts` from scratch.
+    if (existing && isNewFile) {
+      aiContribution = 0;
+      aiCreated = false;
+    }
+
+    // Out-of-band mutation: if we have a prior tracked state AND the
+    // input `oldContent` doesn't match the hash we recorded after
+    // AI's last write, the file diverged out-of-band (paste-replace
+    // via external editor, `git checkout`, manual save). Reset the
+    // accumulator before applying the new edit.
     //
-    // Skip the check when `existing.contentHash` is empty: that's a
-    // legacy snapshot (pre-divergence-detection schema) where we
-    // never recorded the post-write hash. Comparing an empty hash to
-    // the actual file hash would always trip the reset and silently
-    // wipe AI work that's still on disk.
+    // Skip when `existing.contentHash` is empty: that's a legacy
+    // snapshot (pre-divergence-detection schema) where we never
+    // recorded the post-write hash. Comparing an empty hash to the
+    // actual file hash would always trip the reset and silently wipe
+    // AI work that's still on disk.
     if (existing && existing.contentHash && oldContent !== null) {
       const oldHash = computeContentHash(oldContent);
       if (existing.contentHash !== oldHash) {

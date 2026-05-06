@@ -137,6 +137,33 @@ describe('CommitAttributionService', () => {
     expect(after2.aiContribution).toBeLessThan(after1.aiContribution);
   });
 
+  // Fresh-file lifetime: when AI re-creates a file at a path that was
+  // previously tracked but has since been deleted (oldContent === null
+  // signals "no file existed on disk"), the previous tracked state is
+  // from a different file lifetime. Without this reset, AI's
+  // accumulated chars from the deleted file would carry over and
+  // double-count toward the new file's attribution.
+  it('should reset accumulator when re-creating a previously-tracked deleted file', () => {
+    const service = CommitAttributionService.getInstance();
+    // First lifetime: AI creates 'foo.ts' with 100 chars of content.
+    const firstContent = 'A'.repeat(100);
+    service.recordEdit('/project/foo.ts', null, firstContent);
+    const after1 = service.getFileAttribution('/project/foo.ts')!;
+    expect(after1.aiContribution).toBe(100);
+    expect(after1.aiCreated).toBe(true);
+
+    // Second lifetime: file was deleted (e.g. user `rm foo.ts`), then
+    // AI re-creates it with new (shorter) content. oldContent=null
+    // signals "didn't exist on disk before this write".
+    const secondContent = 'short';
+    service.recordEdit('/project/foo.ts', null, secondContent);
+    const after2 = service.getFileAttribution('/project/foo.ts')!;
+    // aiContribution should reflect ONLY the second write's chars, not
+    // 100 + 5. aiCreated stays true (this lifetime is also a creation).
+    expect(after2.aiContribution).toBe(5);
+    expect(after2.aiCreated).toBe(true);
+  });
+
   it('should NOT reset accumulator when oldContent matches AI last write', () => {
     const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/f.ts', 'abc', 'AI step one');
