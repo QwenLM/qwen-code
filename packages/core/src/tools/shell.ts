@@ -2090,20 +2090,41 @@ export class ShellToolInvocation extends BaseToolInvocation<
         canonicalBase = baseDir;
       }
 
+      // First-pass match: which tracked entries are part of THIS
+      // commit? Validation must run against this subset only — a
+      // tracked file the user didn't stage isn't in HEAD's new tree
+      // post-commit (HEAD still has the pre-AI-edit version), so
+      // `git show HEAD:<rel>` would return the OLD content and the
+      // hash divergence check would drop the AI's pending unstaged
+      // work. Scope the reader to the committed set only.
+      const committedScope = attributionService.matchCommittedFiles(
+        stagedInfo.files,
+        canonicalBase,
+      );
+
       // Drop tracked entries whose COMMITTED content has diverged
       // from what AI's last write recorded — catches the case where
       // the user paste-replaced via an external editor, ran
       // `git checkout`, or otherwise modified the file outside the
-      // Edit/Write tools. Validate against the COMMITTED blob (via
-      // `git show HEAD:<rel>`) rather than the live working tree:
-      // the user can `git add` AI's content, then make additional
-      // unstaged edits, then `git commit` — the commit's blob still
-      // matches AI's recorded hash, but the working-tree file does
-      // not. A working-tree comparison would drop the entry on a
-      // commit that legitimately came from AI. Run BEFORE
-      // matchCommittedFiles so dropped entries are also out of the
-      // per-file payload.
+      // Edit/Write tools. Validate against the COMMITTED blob rather
+      // than the live working tree: the user can `git add` AI's
+      // content, then make additional unstaged edits, then
+      // `git commit` — the commit's blob still matches AI's recorded
+      // hash, but the working-tree file does not. A working-tree
+      // comparison would drop the entry on a commit that legitimately
+      // came from AI.
+      //
+      // Pin the read to the captured `postHead` SHA, NOT the symbolic
+      // `HEAD`, for the same TOCTOU reason `buildGitNotesCommand`
+      // does: a post-commit hook or chained command can advance HEAD
+      // between our postHead capture and these reads, and a symbolic
+      // `git show HEAD:<rel>` would then compare against the WRONG
+      // commit's content and spuriously drop entries.
       attributionService.validateAgainst((absPath) => {
+        // ONLY check files that landed in this commit. Anything else
+        // (unstaged AI work, files in other directories) returns null
+        // so validateAgainst leaves them alone.
+        if (!committedScope.has(absPath)) return null;
         const rel = path
           .relative(canonicalBase, absPath)
           .split(path.sep)
@@ -2111,7 +2132,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         if (!rel || rel.startsWith('..')) return null;
         try {
           return childProcess
-            .execFileSync('git', ['show', `HEAD:${rel}`], {
+            .execFileSync('git', ['show', `${postHead}:${rel}`], {
               cwd,
               timeout: 2000,
               stdio: ['ignore', 'pipe', 'ignore'],
@@ -2119,14 +2140,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
             })
             .toString('utf-8');
         } catch {
-          // No committed content (deleted file, file not in commit,
-          // or git error) — leave the entry alone. Deletion handling
-          // is its own thread; what matters here is that we don't
-          // FALSE-positive on a missing-from-commit signal.
+          // No committed content (deleted file, file not in the
+          // commit, or git error) — leave the entry alone.
           return null;
         }
       });
 
+      // Recompute the committed set after validation: dropped entries
+      // shouldn't appear in the per-file payload OR in the partial
+      // clear set (they were already deleted from fileAttributions).
       committedAbsolutePaths = attributionService.matchCommittedFiles(
         stagedInfo.files,
         canonicalBase,

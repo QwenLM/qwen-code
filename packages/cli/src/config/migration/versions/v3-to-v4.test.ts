@@ -148,37 +148,63 @@ describe('V3ToV4Migration', () => {
       expect(warnings).toEqual([]);
     });
 
-    it('drops invalid values and emits a warning', () => {
-      const input = { $version: 3, general: { gitCoAuthor: 'yes' } };
-      const { settings, warnings } = migration.migrate(input, 'user') as {
-        settings: Record<string, unknown>;
-        warnings: string[];
-      };
+    // String enable-intent forms map to {commit: true, pr: true};
+    // disable-intent forms map to {commit: false, pr: false}; an
+    // unrecognised string also defaults to disabled (safer-by-default
+    // — same contract as the runtime `pickBool`) but emits a warning.
+    it.each([
+      ['"true"', 'true', { commit: true, pr: true }, false],
+      ['"yes"', 'yes', { commit: true, pr: true }, false],
+      ['"on"', 'on', { commit: true, pr: true }, false],
+      ['"1"', '1', { commit: true, pr: true }, false],
+      ['"false"', 'false', { commit: false, pr: false }, false],
+      ['"no"', 'no', { commit: false, pr: false }, false],
+      ['"off"', 'off', { commit: false, pr: false }, false],
+      ['"0"', '0', { commit: false, pr: false }, false],
+      ['empty string', '', { commit: false, pr: false }, false],
+      ['"OFF" (case)', 'OFF', { commit: false, pr: false }, false],
+      ['unknown string', 'maybe', { commit: false, pr: false }, true],
+    ])(
+      'maps string %s to %j (warn=%s)',
+      (_label, str, expected, expectWarn) => {
+        const input = { $version: 3, general: { gitCoAuthor: str } };
+        const { settings, warnings } = migration.migrate(input, 'user') as {
+          settings: Record<string, unknown>;
+          warnings: string[];
+        };
+        expect(
+          (settings['general'] as Record<string, unknown>)['gitCoAuthor'],
+        ).toEqual(expected);
+        if (expectWarn) {
+          expect(warnings).toHaveLength(1);
+          expect(warnings[0]).toContain('gitCoAuthor');
+        } else {
+          expect(warnings).toHaveLength(0);
+        }
+      },
+    );
 
-      expect(
-        (settings['general'] as Record<string, unknown>)['gitCoAuthor'],
-      ).toEqual({});
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain('gitCoAuthor');
-      expect(warnings[0]).toContain('user');
-    });
-
+    // Non-string invalid values (null/array/number) get the
+    // safer-by-default disabled state with a warning.
     it.each([
       ['null', null],
       ['array', []],
       ['number', 42],
-    ])('treats %s as invalid and resets with a warning', (_label, bad) => {
-      const input = { $version: 3, general: { gitCoAuthor: bad } };
-      const { settings, warnings } = migration.migrate(input, 'user') as {
-        settings: Record<string, unknown>;
-        warnings: string[];
-      };
+    ])(
+      'treats %s as invalid and resets to disabled with a warning',
+      (_label, bad) => {
+        const input = { $version: 3, general: { gitCoAuthor: bad } };
+        const { settings, warnings } = migration.migrate(input, 'user') as {
+          settings: Record<string, unknown>;
+          warnings: string[];
+        };
 
-      expect(
-        (settings['general'] as Record<string, unknown>)['gitCoAuthor'],
-      ).toEqual({});
-      expect(warnings).toHaveLength(1);
-    });
+        expect(
+          (settings['general'] as Record<string, unknown>)['gitCoAuthor'],
+        ).toEqual({ commit: false, pr: false });
+        expect(warnings).toHaveLength(1);
+      },
+    );
 
     it('leaves a partially-specified object unchanged', () => {
       // Downstream normalizeGitCoAuthor fills missing sub-keys with defaults;

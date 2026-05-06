@@ -218,17 +218,6 @@ describe('CommitAttributionService', () => {
       expect(service.getFileAttribution('/legacy.ts')).toBeDefined();
     });
 
-    // Working-tree variant for code paths without committed blobs.
-    it('validateAgainstWorkingTree drops entries whose on-disk content diverged', () => {
-      const service = CommitAttributionService.getInstance();
-      const filePath = path.join(tmpDir, 'wt-diverged.ts');
-      fs.writeFileSync(filePath, 'AI wrote this', 'utf-8');
-      service.recordEdit(filePath, null, 'AI wrote this');
-      fs.writeFileSync(filePath, 'human replaced', 'utf-8');
-      service.validateAgainstWorkingTree();
-      expect(service.getFileAttribution(filePath)).toBeUndefined();
-    });
-
     // Deleted-file lookup must remain stable: recordEdit canonicalises
     // the path via realpathSync; getFileAttribution must still resolve
     // the same canonical key after the leaf is unlinked. realpathOrSelf

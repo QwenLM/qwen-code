@@ -76,9 +76,9 @@ export interface FileAttribution {
    * `rm` + recreate, manual save) so AI's accumulated counter doesn't
    * silently get credited to subsequent human edits. recordEdit checks
    * this on every call (resets when the input `oldContent` doesn't
-   * match), and `validateOnDiskHashes` re-verifies before a commit
-   * note is generated to catch user edits that happened entirely
-   * outside the Edit/Write tools.
+   * match), and `validateAgainst` re-verifies before a commit note is
+   * generated to catch user edits that happened entirely outside the
+   * Edit/Write tools.
    */
   contentHash: string;
 }
@@ -322,19 +322,17 @@ export class CommitAttributionService {
    *
    * `getContent(absPath)` returns the bytes the caller wants to
    * compare against, or `null` if the entry shouldn't be checked
-   * (deletion, unreadable, no committed copy). Returning `null`
-   * leaves the entry alone rather than dropping it.
+   * (deletion, unreadable, file not in the relevant scope). Returning
+   * `null` leaves the entry alone rather than dropping it.
    *
-   * Two production callers:
-   *   1. `attachCommitAttribution` after a commit — should pass a
-   *      reader that fetches the COMMITTED blob (`git show HEAD:<rel>`)
-   *      so unstaged working-tree changes the user made AFTER `git add`
-   *      don't trip the divergence check on a commit whose blob still
-   *      matches AI's recorded hash.
-   *   2. The legacy live-disk reader (`fs.readFileSync`) is exposed
-   *      via `validateAgainstWorkingTree` for the no-committed-blob
-   *      cases (e.g. amend-without-reflog where we can't pin a
-   *      ref). Less precise but better than nothing.
+   * Production caller (`attachCommitAttribution`) passes a reader
+   * that fetches the COMMITTED blob (`git show HEAD:<rel>`) for files
+   * actually in the just-made commit, returning null for everything
+   * else. The "committed blob" choice (rather than the live working
+   * tree) is what makes a `git add AI's edit && extra unstaged edits
+   * && git commit` flow correctly attribute the commit to AI even
+   * though the working-tree file no longer matches AI's recorded
+   * hash.
    */
   validateAgainst(getContent: (absPath: string) => string | null): void {
     for (const [key, attr] of this.fileAttributions) {
@@ -350,21 +348,6 @@ export class CommitAttributionService {
         this.fileAttributions.delete(key);
       }
     }
-  }
-
-  /**
-   * Convenience wrapper around {@link validateAgainst} that reads
-   * the live working-tree file. Used for code paths where we can't
-   * read the committed blob (no commit happened, no ref available).
-   */
-  validateAgainstWorkingTree(): void {
-    this.validateAgainst((p) => {
-      try {
-        return fs.readFileSync(p, 'utf-8');
-      } catch {
-        return null;
-      }
-    });
   }
 
   // -----------------------------------------------------------------------

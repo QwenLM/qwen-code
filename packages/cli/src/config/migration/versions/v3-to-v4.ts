@@ -90,15 +90,49 @@ export class V3ToV4Migration implements SettingsMigration {
         commit: value,
         pr: value,
       });
+    } else if (typeof value === 'string') {
+      // String forms: a user who hand-edited `"gitCoAuthor": "off"` (or
+      // similar) to disable the feature must NOT see attribution
+      // silently re-enable just because we couldn't parse the literal
+      // shape. Map disable-intent strings to `{commit: false, pr: false}`,
+      // enable-intent strings to `{commit: true, pr: true}`, and
+      // anything else to disabled with a warning (safer-by-default
+      // than enabling against an ambiguous opt-out).
+      const lowered = value.trim().toLowerCase();
+      const disableIntent = ['false', 'no', 'off', '0', 'disabled', ''];
+      const enableIntent = ['true', 'yes', 'on', '1', 'enabled'];
+      if (enableIntent.includes(lowered)) {
+        setNestedPropertySafe(result, GIT_CO_AUTHOR_PATH, {
+          commit: true,
+          pr: true,
+        });
+      } else if (disableIntent.includes(lowered)) {
+        setNestedPropertySafe(result, GIT_CO_AUTHOR_PATH, {
+          commit: false,
+          pr: false,
+        });
+      } else {
+        setNestedPropertySafe(result, GIT_CO_AUTHOR_PATH, {
+          commit: false,
+          pr: false,
+        });
+        warnings.push(
+          `Reset '${GIT_CO_AUTHOR_PATH}' in ${scope} settings to {commit: false, pr: false} because the stored string '${value}' was not a recognized boolean form.`,
+        );
+      }
     } else if (
       value !== undefined &&
       (typeof value !== 'object' || value === null || Array.isArray(value))
     ) {
-      // Invalid: can't safely interpret. Drop so the schema default (both
-      // toggles on) applies on next load.
-      setNestedPropertySafe(result, GIT_CO_AUTHOR_PATH, {});
+      // Invalid non-string shape (number, array, null). Drop and
+      // disable rather than re-enable on ambiguity — same
+      // safer-by-default contract as `pickBool` at runtime.
+      setNestedPropertySafe(result, GIT_CO_AUTHOR_PATH, {
+        commit: false,
+        pr: false,
+      });
       warnings.push(
-        `Reset '${GIT_CO_AUTHOR_PATH}' in ${scope} settings because the stored value was not a boolean or object.`,
+        `Reset '${GIT_CO_AUTHOR_PATH}' in ${scope} settings to {commit: false, pr: false} because the stored value was not a boolean or object.`,
       );
     }
     // Object values (including the new shape) pass through unchanged.
