@@ -43,22 +43,19 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
 }) => {
   const writeRaw = useTerminalOutput();
   const preparedTerminalImageSequence = React.useRef<string | null>(null);
-  const availableTerminalHeightRef = React.useRef(availableTerminalHeight);
   const [imageState, setImageState] = React.useState<MermaidImageState | null>(
     null,
   );
   const innerWidth = Math.max(8, contentWidth - MERMAID_PADDING);
-  const imageKey = `${source}\0${innerWidth}`;
+  const imageKey = `${source}\0${innerWidth}\0${
+    availableTerminalHeight ?? 'auto'
+  }`;
   const image =
     imageState?.key === imageKey && !isPending ? imageState.result : null;
   const visual = React.useMemo(
     () => renderMermaidVisual(source, innerWidth),
     [source, innerWidth],
   );
-
-  React.useEffect(() => {
-    availableTerminalHeightRef.current = availableTerminalHeight;
-  }, [availableTerminalHeight]);
 
   React.useEffect(() => {
     if (isPending) {
@@ -70,7 +67,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
     void renderMermaidImageAsync({
       source,
       contentWidth: innerWidth,
-      availableTerminalHeight: availableTerminalHeightRef.current,
+      availableTerminalHeight,
     }).then(
       (result) => {
         if (!cancelled) {
@@ -93,7 +90,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [imageKey, innerWidth, isPending, source]);
+  }, [availableTerminalHeight, imageKey, innerWidth, isPending, source]);
 
   const kittySequence =
     image?.kind === 'terminal-image' &&

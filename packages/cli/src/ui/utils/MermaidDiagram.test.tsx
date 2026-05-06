@@ -101,7 +101,7 @@ describe('MermaidDiagram', () => {
     expect(mockedRenderMermaidImageAsync).not.toHaveBeenCalled();
   });
 
-  it('does not restart image rendering for height-only resizes', async () => {
+  it('restarts image rendering for height-only resizes', async () => {
     mockedRenderMermaidImageAsync.mockResolvedValue({
       kind: 'unavailable',
       reason: 'disabled',
@@ -132,7 +132,14 @@ describe('MermaidDiagram', () => {
       />,
     );
 
-    expect(mockedRenderMermaidImageAsync).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(mockedRenderMermaidImageAsync).toHaveBeenCalledTimes(2);
+    });
+    expect(mockedRenderMermaidImageAsync).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        availableTerminalHeight: 8,
+      }),
+    );
   });
 
   it('shows the wireframe fallback when async image rendering rejects', async () => {
