@@ -66,19 +66,10 @@ export function updateSettingsFilePreservingFormat(
     return false;
   }
 
-  let updatedStructure: Record<string, unknown>;
-  if (sync) {
-    // Sync mode: remove keys not present in updates, then apply updates.
-    // This ensures deprecated keys from migrations don't persist as zombies.
-    const keysToRemove = Object.keys(parsed).filter((key) => !(key in updates));
-    for (const key of keysToRemove) {
-      delete parsed[key];
-    }
-    updatedStructure = applyUpdates(parsed, updates);
-  } else {
-    // Merge mode: only apply updates, preserve everything else.
-    updatedStructure = applyUpdates(parsed, updates);
-  }
+  // In sync mode, applyUpdates recursively removes keys not present in the
+  // migrated object, preventing zombie keys at every nesting level.
+  // In merge mode, only the specified updates are applied.
+  const updatedStructure = applyUpdates(parsed, updates, sync);
 
   const updatedContent = stringify(updatedStructure, null, 2);
 
@@ -172,8 +163,19 @@ function writeFileSyncAtomic(targetPath: string, content: string): void {
 export function applyUpdates(
   current: Record<string, unknown>,
   updates: Record<string, unknown>,
+  sync = false,
 ): Record<string, unknown> {
   const result = current;
+
+  if (sync) {
+    // Sync mode: remove keys from current that are not present in updates,
+    // then recursively apply updates. This prevents nested zombie keys
+    // from persisting after migrations that restructure nested objects.
+    const keysToRemove = Object.keys(result).filter((key) => !(key in updates));
+    for (const key of keysToRemove) {
+      delete result[key];
+    }
+  }
 
   for (const key of Object.getOwnPropertyNames(updates)) {
     const value = updates[key];
@@ -189,6 +191,7 @@ export function applyUpdates(
       result[key] = applyUpdates(
         result[key] as Record<string, unknown>,
         value as Record<string, unknown>,
+        sync,
       );
     } else {
       result[key] = value;

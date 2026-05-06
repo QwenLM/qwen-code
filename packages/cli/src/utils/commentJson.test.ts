@@ -283,4 +283,120 @@ describe('migration write-back via updateSettingsFilePreservingFormat', () => {
     expect(result).toContain('"model": "gemini-2.5-flash"');
     expect(result).toContain('"theme": "light"');
   });
+
+  it('should remove nested zombie keys in sync mode', () => {
+    // Simulate a V2 settings file with deprecated disable* keys inside nested objects
+    const v2Settings = `{
+  "general": {
+    // Auto-update setting
+    "disableAutoUpdate": true,
+    "disableUpdateNag": true
+  },
+  "ui": {
+    "theme": "dark"
+  },
+  "$version": 2
+}`;
+
+    fs.writeFileSync(testFilePath, v2Settings, 'utf-8');
+
+    // Migrated V3 settings: disable* keys removed, enable* keys added
+    const migratedSettings = {
+      general: {
+        enableAutoUpdate: false,
+      },
+      ui: {
+        theme: 'dark',
+      },
+      $version: 3,
+    };
+
+    const result = updateSettingsFilePreservingFormat(
+      testFilePath,
+      migratedSettings,
+      { sync: true },
+    );
+
+    expect(result).toBe(true);
+    const content = fs.readFileSync(testFilePath, 'utf-8');
+
+    // Deprecated nested keys must be removed
+    expect(content).not.toContain('disableAutoUpdate');
+    expect(content).not.toContain('disableUpdateNag');
+    // New keys must be present
+    expect(content).toContain('enableAutoUpdate');
+    expect(content).toContain('$version');
+    // Unrelated keys preserved
+    expect(content).toContain('"theme": "dark"');
+  });
+
+  it('should remove top-level zombie keys in sync mode', () => {
+    const original = `{
+  "theme": "dark",
+  "model": "gemini-2.5-pro",
+  "deprecatedKey": "zombie"
+}`;
+
+    fs.writeFileSync(testFilePath, original, 'utf-8');
+
+    const migratedSettings = {
+      model: 'gemini-2.5-flash',
+      $version: 3,
+    };
+
+    const result = updateSettingsFilePreservingFormat(
+      testFilePath,
+      migratedSettings,
+      { sync: true },
+    );
+
+    expect(result).toBe(true);
+    const content = fs.readFileSync(testFilePath, 'utf-8');
+
+    // Top-level zombie removed
+    expect(content).not.toContain('theme');
+    expect(content).not.toContain('deprecatedKey');
+    // Migrated keys present
+    expect(content).toContain('"model": "gemini-2.5-flash"');
+    expect(content).toContain('$version');
+  });
+
+  it('should preserve unrelated keys in nested objects during sync', () => {
+    // The migrated object represents the full desired state — migrations
+    // preserve unrelated keys, so they appear in the migrated output.
+    const original = `{
+  "general": {
+    "disableAutoUpdate": true,
+    "someOtherSetting": "keep-me"
+  }
+}`;
+
+    fs.writeFileSync(testFilePath, original, 'utf-8');
+
+    // After migration: disableAutoUpdate removed, enableAutoUpdate added,
+    // someOtherSetting preserved (migrations carry forward unrelated keys)
+    const migratedSettings = {
+      general: {
+        enableAutoUpdate: false,
+        someOtherSetting: 'keep-me',
+      },
+    };
+
+    const result = updateSettingsFilePreservingFormat(
+      testFilePath,
+      migratedSettings,
+      { sync: true },
+    );
+
+    expect(result).toBe(true);
+    const content = fs.readFileSync(testFilePath, 'utf-8');
+
+    // Deprecated key removed
+    expect(content).not.toContain('disableAutoUpdate');
+    // New key added
+    expect(content).toContain('enableAutoUpdate');
+    // Unrelated key in same nested object preserved
+    expect(content).toContain('someOtherSetting');
+    expect(content).toContain('keep-me');
+  });
 });
