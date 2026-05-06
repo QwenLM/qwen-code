@@ -455,16 +455,35 @@ export class AgentCore {
         abortController,
         options,
       );
-    return subagentNameContext.run(this.name, () =>
-      this.withRuntimeView(inner),
-    );
+    return this.runInAgentFrames(inner);
   }
 
   /**
-   * Wraps `fn` in this agent's runtime ContentGenerator view (when set), so
-   * `Config.getContentGenerator{,Config}()` calls inside resolve to the
-   * agent rather than to the parent Config that tools captured at
-   * construction time.
+   * Run `fn` inside both ALS frames this agent owns:
+   * 1. {@link subagentNameContext} so token-attribution code resolves to
+   *    this agent's name.
+   * 2. The per-agent runtime ContentGenerator view (when set) so
+   *    `Config.getContentGenerator{,Config}()` calls inside resolve to
+   *    the agent rather than to the parent Config tools captured at
+   *    construction time.
+   *
+   * Used both around the reasoning loop and around the deferred-approval
+   * `onConfirm` continuation — the latter runs from the parent UI's input
+   * handler, on a different async chain than the loop, so without this
+   * re-entry the resumed tool body would fall back to the parent's view
+   * and mis-attribute its tokens.
+   *
+   * Exposed (rather than inlined twice) so the contract stays testable in
+   * isolation; see `agent-core.test.ts`.
+   */
+  runInAgentFrames<T>(fn: () => Promise<T>): Promise<T> {
+    return subagentNameContext.run(this.name, () => this.withRuntimeView(fn));
+  }
+
+  /**
+   * Wraps `fn` in this agent's runtime ContentGenerator view (when set).
+   * Internal — public callers should use {@link runInAgentFrames}, which
+   * also restores the subagent-name frame.
    */
   private withRuntimeView<T>(fn: () => Promise<T>): Promise<T> {
     return this.runtimeView
@@ -944,9 +963,10 @@ export class AgentCore {
                 if (responded.has(waiting.request.callId)) return;
                 responded.add(waiting.request.callId);
                 // UI invokes this from its own async chain (outside the
-                // reasoning-loop ALS frame), so re-enter the agent's view
-                // before the resumed tool body runs.
-                await this.withRuntimeView(() =>
+                // reasoning-loop ALS frames), so re-enter both the agent's
+                // runtime view AND its name context before the resumed
+                // tool body runs. See `runInAgentFrames` for rationale.
+                await this.runInAgentFrames(() =>
                   waiting.confirmationDetails.onConfirm(outcome, payload),
                 );
               },

@@ -48,6 +48,28 @@ vi.mock('../agents/runtime/agent-headless.js', () => ({
   ContextState: class {},
 }));
 
+// Mirrors the positional AgentHeadless.create parameters so tests can
+// destructure by name instead of indexing — adding new parameters can't
+// silently shift assertions onto the wrong slot.
+function destructureAgentHeadlessCall(call: unknown[]) {
+  return {
+    name: call[0] as string,
+    runtimeContext: call[1],
+    promptConfig: call[2],
+    modelConfig: call[3],
+    runConfig: call[4],
+    toolConfig: call[5],
+    eventEmitter: call[6],
+    hooks: call[7],
+    runtimeView: call[8] as
+      | {
+          contentGenerator: unknown;
+          contentGeneratorConfig: { authType?: string; model?: string };
+        }
+      | undefined,
+  };
+}
+
 // Mock createContentGenerator for model override tests
 const mockCreateContentGenerator = vi.hoisted(() => vi.fn());
 vi.mock('../core/contentGenerator.js', async (importOriginal) => {
@@ -1482,17 +1504,13 @@ System prompt 3`);
 
         await manager.createAgentHeadless(config, mockConfig);
 
-        // AgentHeadless.create signature: (name, runtimeContext,
-        // promptConfig, modelConfig, runConfig, toolConfig?, eventEmitter?,
-        // hooks?, runtimeView?). The view replaces the per-method override.
-        const call = mockAgentHeadlessCreate.mock.calls[0];
-        expect(call[1]).toBe(mockConfig);
-        const runtimeView = call[8] as {
-          contentGenerator: unknown;
-          contentGeneratorConfig: { model: string };
-        };
-        expect(runtimeView.contentGenerator).toBe(fakeGenerator);
-        expect(runtimeView.contentGeneratorConfig.model).toBe('custom-model');
+        const { runtimeContext, runtimeView } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(runtimeContext).toBe(mockConfig);
+        expect(runtimeView).toBeDefined();
+        expect(runtimeView!.contentGenerator).toBe(fakeGenerator);
+        expect(runtimeView!.contentGeneratorConfig.model).toBe('custom-model');
       });
     });
   });

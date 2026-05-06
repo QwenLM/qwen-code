@@ -35,9 +35,8 @@ import type {
 } from '../agents/runtime/agent-events.js';
 import type { Config } from '../config/config.js';
 import { APPROVAL_MODES } from '../config/config.js';
-import { createContentGenerator } from '../core/contentGenerator.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
-import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
+import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { parseSubagentModelSelection } from './model-selection.js';
@@ -655,7 +654,7 @@ export class SubagentManager {
       // dedicated ContentGenerator + view so the subagent talks to the
       // right API without affecting the parent process. The view is
       // applied via AsyncLocalStorage when the agent runs.
-      const runtimeView = await this.buildAgentRuntimeView(
+      const runtimeView = await this.buildRuntimeContentGeneratorView(
         config,
         runtimeContext,
       );
@@ -689,7 +688,7 @@ export class SubagentManager {
    * the agent runtime should publish via AsyncLocalStorage during the
    * run. Returns `undefined` for inherit selectors (no override needed).
    */
-  private async buildAgentRuntimeView(
+  private async buildRuntimeContentGeneratorView(
     config: SubagentConfig,
     base: Config,
   ): Promise<RuntimeContentGeneratorView | undefined> {
@@ -704,25 +703,18 @@ export class SubagentManager {
       authType: authType as string,
     };
 
-    const agentGeneratorConfig = buildAgentContentGeneratorConfig(
+    const view = await createRuntimeContentGeneratorView(
+      base,
       base,
       selection.modelId,
       authOverrides,
     );
 
-    const agentGenerator = await createContentGenerator(
-      agentGeneratorConfig,
-      base,
-    );
-
     debugLogger.info(
-      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${agentGeneratorConfig.model}`,
+      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${view.contentGeneratorConfig.model}`,
     );
 
-    return {
-      contentGenerator: agentGenerator,
-      contentGeneratorConfig: agentGeneratorConfig,
-    };
+    return view;
   }
 
   /**

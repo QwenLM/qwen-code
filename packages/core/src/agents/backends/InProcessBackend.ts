@@ -13,15 +13,12 @@
 
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { Config } from '../../config/config.js';
-import {
-  type ContentGenerator,
-  createContentGenerator,
-} from '../../core/contentGenerator.js';
+import { type ContentGenerator } from '../../core/contentGenerator.js';
 import type { RuntimeContentGeneratorView } from '../runtime/agent-context.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
-import { buildAgentContentGeneratorConfig } from '../../models/content-generator-config.js';
+import { createRuntimeContentGeneratorView } from '../../models/content-generator-config.js';
 import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
 import { AgentCore } from '../runtime/agent-core.js';
 import { AgentEventEmitter } from '../runtime/agent-events.js';
@@ -423,23 +420,16 @@ async function createPerAgentConfig(
 
   if (authOverrides?.authType) {
     try {
-      const agentGeneratorConfig = buildAgentContentGeneratorConfig(
+      runtimeView = await createRuntimeContentGeneratorView(
         base,
+        override as Config,
         modelId,
         authOverrides,
       );
-      const agentGenerator = await createContentGenerator(
-        agentGeneratorConfig,
-        override as Config,
-      );
-      dedicatedContentGenerator = agentGenerator;
-      runtimeView = {
-        contentGenerator: agentGenerator,
-        contentGeneratorConfig: agentGeneratorConfig,
-      };
+      dedicatedContentGenerator = runtimeView.contentGenerator;
 
       debugLogger.info(
-        `Created per-agent ContentGenerator: authType=${authOverrides.authType}, model=${agentGeneratorConfig.model}`,
+        `Created per-agent ContentGenerator: authType=${authOverrides.authType}, model=${runtimeView.contentGeneratorConfig.model}`,
       );
     } catch (error) {
       debugLogger.error(
