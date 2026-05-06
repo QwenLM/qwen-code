@@ -214,7 +214,12 @@ export class BackgroundTaskRegistry {
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
 
-    if (this.registerCallback) {
+    // Foreground entries are paired with a synchronous tool-call result on
+    // the parent's response and never emit a terminal `task_notification`
+    // (see emitNotification's flavor gate). Letting them fire the register
+    // callback would emit a `task_started` SDK event without a matching
+    // completion event, breaking the lifecycle contract for SDK consumers.
+    if (entry.flavor !== 'foreground' && this.registerCallback) {
       try {
         this.registerCallback(entry);
       } catch (error) {
@@ -270,9 +275,12 @@ export class BackgroundTaskRegistry {
           `Background entries must terminate via complete/fail/finalizeCancelled.`,
       );
     }
+    // Emit before delete so any future BackgroundStatusChangeCallback that
+    // re-reads `registry.get(agentId)` from inside the callback sees the
+    // entry, matching the ordering used by complete/fail/cancel/finalize.
+    this.emitStatusChange(entry);
     this.agents.delete(agentId);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
-    this.emitStatusChange(entry);
   }
 
   // See complete() for the cancelled → terminal path rationale.

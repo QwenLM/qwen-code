@@ -1646,6 +1646,41 @@ describe('AgentTool', () => {
       );
     });
 
+    it('foreground CANCELLED prefixes the partial result so the parent sees the cancel', async () => {
+      // Without this prefix, a user-cancelled foreground subagent returns
+      // the same `{ llmContent: [{ text: finalText }] }` shape as a
+      // successful run, leaving the parent model unable to tell that the
+      // partial result is incomplete. The background path surfaces this
+      // through the registry's `<status>cancelled</status>` XML envelope;
+      // the foreground path has no equivalent envelope, so the marker
+      // rides the llmContent payload itself.
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.CANCELLED,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Agent was cancelled by the user.');
+      expect(llmText).toContain('halfway through');
+    });
+
     it('should allow background in non-interactive mode (headless support)', async () => {
       vi.mocked(
         config.isInteractive as ReturnType<typeof vi.fn>,

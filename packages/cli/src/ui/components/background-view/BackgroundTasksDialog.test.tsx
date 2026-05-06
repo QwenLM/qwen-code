@@ -317,6 +317,55 @@ describe('BackgroundTasksDialog', () => {
     expect(h.cancel).toHaveBeenCalledWith('bg-1');
   });
 
+  it('ignores `x` on a terminal foreground entry (no arm, no cancel call)', () => {
+    // A foreground entry briefly stays visible after settling but before
+    // the tool-call's finally path unregisters it. The dialog's hint
+    // footer drops "x stop" once status leaves 'running', but without
+    // gating handleCancelKey itself, the first `x` would still arm a
+    // confirm step on the (now-terminal) entry — surfacing a misleading
+    // "x again to confirm stop" line that does nothing.
+    const completed = entry({
+      agentId: 'fg-done',
+      status: 'completed',
+      flavor: 'foreground',
+    });
+    const h = setup([completed]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.lastFrame()).not.toContain('x again to confirm stop');
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.cancel).not.toHaveBeenCalled();
+  });
+
+  it('detail-mode left clears any armed foreground cancel before exiting', () => {
+    // Detail-mode `x` arms the foreground confirm step on the focused
+    // entry. If the user presses `left` to back out without confirming,
+    // the armed state must NOT carry into list mode — otherwise the
+    // hint bar still shows "x again to confirm stop" and the next `x`
+    // unintentionally cancels the run.
+    const fg = entry({
+      agentId: 'fg-1',
+      status: 'running',
+      flavor: 'foreground',
+    });
+    const h = setup([fg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    h.pressKey({ sequence: 'x' });
+    h.pressKey({ name: 'left' });
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+
+    // Back in list mode, the next `x` arms again rather than confirming
+    // a stale armed state inherited from detail mode.
+    h.pressKey({ sequence: 'x' });
+    expect(h.cancel).not.toHaveBeenCalled();
+  });
+
   it('Esc backs out of an armed foreground cancel without closing the dialog', () => {
     const fg = entry({
       agentId: 'fg-1',

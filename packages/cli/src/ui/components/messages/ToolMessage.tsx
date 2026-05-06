@@ -271,10 +271,9 @@ const SubagentExecutionRenderer: React.FC<{
   isWaitingForOtherApproval,
 }) => {
   if (isPending) {
-    // Surface only the approval prompt, and only for the subagent
-    // currently holding the focus lock. Queued approvals stay invisible
-    // here — the user can see them in the dialog.
     if (data.pendingConfirmation && isFocused) {
+      // Active approval prompt for the focus-holding subagent — render
+      // inline so the user can act on it without opening the dialog.
       const agentLabel = data.subagentName || 'agent';
       return (
         <Box flexDirection="column" paddingLeft={1}>
@@ -285,11 +284,6 @@ const SubagentExecutionRenderer: React.FC<{
             </Text>
             <Text color={theme.text.secondary}>:</Text>
           </Box>
-          {isWaitingForOtherApproval && (
-            <Text color={theme.text.secondary} dimColor>
-              ⏳ Waiting for other approval...
-            </Text>
-          )}
           <ToolConfirmationMessage
             confirmationDetails={data.pendingConfirmation}
             isFocused={isFocused}
@@ -298,6 +292,21 @@ const SubagentExecutionRenderer: React.FC<{
             compactMode={true}
             config={config}
           />
+        </Box>
+      );
+    }
+    if (data.pendingConfirmation) {
+      // Queued approval — another subagent currently holds the focus lock.
+      // A one-line marker keeps the user aware that something is waiting
+      // without opening the dialog; the full prompt renders on the
+      // focus-holder above and inside `BackgroundTasksDialog`.
+      const agentLabel = data.subagentName || 'agent';
+      return (
+        <Box paddingLeft={1}>
+          <Text color={theme.text.secondary} dimColor>
+            ⏳ Queued approval:{' '}
+          </Text>
+          <Text dimColor>{agentLabel}</Text>
         </Box>
       );
     }

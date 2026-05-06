@@ -337,23 +337,30 @@ describe('<ToolMessage />', () => {
       };
       isPending?: boolean;
       isFocused?: boolean;
-    }): ToolMessageProps =>
-      ({
+      isWaitingForOtherApproval?: boolean;
+    }): ToolMessageProps => {
+      // Spread the existing typed defaults so any future required field
+      // on `ToolMessageProps` becomes a compile-time miss instead of
+      // silently defaulting to undefined. Only the agent-specific
+      // `resultDisplay` shape uses a cast — its `pendingConfirmation`
+      // intentionally accepts a loose `object` fixture for these tests.
+      const resultDisplay = {
+        type: 'task_execution' as const,
+        ...overrides.data,
+      } as ToolMessageProps['resultDisplay'];
+      return {
+        ...baseProps,
         name: 'task',
         description: 'Delegate task to subagent',
-        resultDisplay: {
-          type: 'task_execution' as const,
-          ...overrides.data,
-        },
+        resultDisplay,
         status: ToolCallStatus.Executing,
-        contentWidth: 80,
         callId: 'gated-task-call',
-        confirmationDetails: undefined,
-        config: mockConfig,
         forceShowResult: true, // mirror ToolGroupMessage's forceShowResult
         isPending: overrides.isPending,
         isFocused: overrides.isFocused,
-      }) as ToolMessageProps;
+        isWaitingForOtherApproval: overrides.isWaitingForOtherApproval,
+      };
+    };
 
     it('isPending && no pendingConfirmation → no inline frame', () => {
       const { lastFrame } = renderWithContext(
@@ -404,7 +411,11 @@ describe('<ToolMessage />', () => {
       expect(output).not.toContain('🤖');
     });
 
-    it('isPending && pendingConfirmation && !isFocused → renders nothing (queued in dialog)', () => {
+    it('isPending && pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {
+      // Without this marker, a subagent waiting on another subagent's
+      // approval would be invisible in the main view — the user would
+      // have no inline signal that an approval is queued and would have
+      // to open the dialog to discover it.
       const { lastFrame } = renderWithContext(
         <ToolMessage
           {...buildProps({
@@ -422,6 +433,10 @@ describe('<ToolMessage />', () => {
         StreamingState.Responding,
       );
       const output = lastFrame() ?? '';
+      expect(output).toContain('Queued approval:');
+      expect(output).toContain('queued-agent');
+      // The full prompt + frame stay suppressed — only the focus-holder
+      // renders the active prompt above this row.
       expect(output).not.toContain('Approval requested by');
       expect(output).not.toContain('MockApprovalPrompt');
       expect(output).not.toContain('🤖');

@@ -772,6 +772,16 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // and shell entries: one-shot cancel (no behavior change).
   const handleCancelKey = () => {
     if (!selectedEntry) return;
+    // `x` only has a meaning for entries the user can still act on:
+    // `running` → cancel, `paused` (agent kind) → abandon. Terminal
+    // statuses (completed/failed/cancelled) ignore the keypress so a
+    // foreground entry that just settled can't display the misleading
+    // "x again to confirm stop" line during the brief window before it
+    // unregisters.
+    const isCancelable = selectedEntry.status === 'running';
+    const isAbandonable =
+      selectedEntry.kind === 'agent' && selectedEntry.status === 'paused';
+    if (!isCancelable && !isAbandonable) return;
     const entryKey = entryId(selectedEntry);
     const isForegroundAgent =
       selectedEntry.kind === 'agent' && selectedEntry.flavor === 'foreground';
@@ -829,6 +839,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 
       // detail mode
       if (key.name === 'left') {
+        // Reset the foreground confirm-step before leaving detail so the
+        // armed state can't carry into list mode and turn a stray `x` into
+        // an unintended cancel on the same entry.
+        setPendingCancelEntryId(null);
         exitDetail();
         return;
       }
