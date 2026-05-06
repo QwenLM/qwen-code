@@ -389,6 +389,12 @@ export interface ToolResult {
   returnDisplay: ToolResultDisplay;
 
   /**
+   * Concrete filesystem paths discovered or touched during successful execution.
+   * Scheduler-side path activation consumes these in addition to input fields.
+   */
+  resultFilePaths?: string[];
+
+  /**
    * If this property is present, the tool call is considered a failure.
    */
   error?: {
@@ -495,10 +501,12 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  /** Real-time output-token count during execution, accumulated across subagent rounds. */
+  tokenCount?: number;
 
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.
@@ -519,6 +527,9 @@ export interface AgentResultDisplay {
 
 export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
+  totalLines?: number;
+  totalBytes?: number;
+  timeoutMs?: number;
 }
 
 /**
@@ -692,7 +703,7 @@ export interface ToolAskUserQuestionConfirmationDetails {
       label: string;
       description: string;
     }>;
-    multiSelect: boolean;
+    multiSelect?: boolean;
   }>;
   metadata?: {
     source?: string;

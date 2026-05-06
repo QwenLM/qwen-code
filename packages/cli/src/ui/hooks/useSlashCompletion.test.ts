@@ -246,6 +246,35 @@ describe('useSlashCompletion', () => {
       });
     });
 
+    it('should keep argumentHint out of command suggestion labels', async () => {
+      const slashCommands = [
+        createTestCommand({
+          name: 'fix-issue',
+          description: 'Fix GitHub issue',
+          argumentHint: '[issue-number]',
+        }),
+      ];
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/fix',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions).toEqual([
+          {
+            label: 'fix-issue',
+            value: 'fix-issue',
+            description: 'Fix GitHub issue',
+            commandKind: CommandKind.BUILT_IN,
+          },
+        ]);
+      });
+    });
+
     it('should prefer higher completionPriority when match quality ties', async () => {
       const slashCommands = [
         createTestCommand({
@@ -562,12 +591,12 @@ describe('useSlashCompletion', () => {
 
       const slashCommands = [
         createTestCommand({
-          name: 'memory',
-          description: 'Manage memory',
+          name: 'config',
+          description: 'Manage configuration',
           subCommands: [
             createTestCommand({
-              name: 'show',
-              description: 'Show memory',
+              name: 'set',
+              description: 'Set configuration',
               completion: mockCompletionFn,
             }),
           ],
@@ -577,7 +606,7 @@ describe('useSlashCompletion', () => {
       const { result } = renderHook(() =>
         useTestHarnessForSlashCompletion(
           true,
-          '/memory show --project',
+          '/config set --project',
           slashCommands,
           mockCommandContext,
         ),
@@ -587,8 +616,8 @@ describe('useSlashCompletion', () => {
         expect(mockCompletionFn).toHaveBeenCalledWith(
           expect.objectContaining({
             invocation: {
-              raw: '/memory show --project',
-              name: 'show',
+              raw: '/config set --project',
+              name: 'set',
               args: '--project',
             },
           }),

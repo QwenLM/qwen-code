@@ -41,7 +41,6 @@ function makeModelMessage(text: string): Content {
 }
 
 const DEFAULT_SETTINGS: ClearContextOnIdleSettings = {
-  thinkingThresholdMinutes: 5,
   toolResultsThresholdMinutes: 5,
   toolResultsNumToKeep: 1,
 };

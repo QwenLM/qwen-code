@@ -11,6 +11,7 @@ import type { SimpleGit } from 'simple-git';
 import { simpleGit, CheckRepoActions } from 'simple-git';
 import type { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
+import { initRepositoryWithMainBranch } from './gitInit.js';
 
 export class GitService {
   private projectRoot: string;
@@ -57,7 +58,11 @@ export class GitService {
       '[user]\n  name = Qwen Code\n  email = qwen-code@qwen.ai\n[commit]\n  gpgsign = false\n';
     await fs.writeFile(gitConfigPath, gitConfigContent);
 
-    const repo = simpleGit(repoDir);
+    const repo = simpleGit(repoDir).env({
+      // Prevent git from using the user's global git config.
+      HOME: repoDir,
+      XDG_CONFIG_HOME: repoDir,
+    });
     let isRepoDefined = false;
     try {
       isRepoDefined = await repo.checkIsRepo(CheckRepoActions.IS_REPO_ROOT);
@@ -68,10 +73,7 @@ export class GitService {
     }
 
     if (!isRepoDefined) {
-      await repo.init(false, {
-        '--initial-branch': 'main',
-      });
-
+      await initRepositoryWithMainBranch(repo);
       await repo.commit('Initial commit', { '--allow-empty': null });
     }
 

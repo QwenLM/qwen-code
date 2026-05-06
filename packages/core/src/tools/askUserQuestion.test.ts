@@ -98,6 +98,43 @@ describe('AskUserQuestionTool', () => {
       const result = tool.validateToolParams(params);
       expect(result).toContain('between 2 and 4 options');
     });
+
+    it('should accept params with multiSelect omitted', () => {
+      const params = {
+        questions: [
+          {
+            question: 'Pick a framework?',
+            header: 'Framework',
+            options: [
+              { label: 'React', description: 'A JavaScript library' },
+              { label: 'Vue', description: 'Progressive framework' },
+            ],
+          },
+        ],
+      };
+
+      expect(tool.validateToolParams(params)).toBeNull();
+      expect(() => tool.build(params)).not.toThrow();
+    });
+
+    it('should reject params where multiSelect is not a boolean', () => {
+      const params = {
+        questions: [
+          {
+            question: 'Pick a framework?',
+            header: 'Framework',
+            options: [
+              { label: 'React', description: 'A JavaScript library' },
+              { label: 'Vue', description: 'Progressive framework' },
+            ],
+            multiSelect: 'yes' as unknown as boolean,
+          },
+        ],
+      };
+
+      const result = tool.validateToolParams(params);
+      expect(result).toBe('Question 1: "multiSelect" must be a boolean.');
+    });
   });
 
   describe('getDefaultPermission and getConfirmationDetails', () => {

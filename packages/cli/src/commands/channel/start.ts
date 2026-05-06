@@ -29,15 +29,19 @@ const RESTART_DELAY_MS = 3000;
  *
  * The normal CLI path applies proxy via loadCliConfig → Config constructor →
  * setGlobalDispatcher, but `channel start` never calls loadCliConfig. This
- * replicates the same resolution logic (--proxy flag → HTTPS_PROXY →
- * HTTP_PROXY) and applies the global dispatcher for native fetch() calls.
- * The resolved URL is also passed to channels via ChannelBaseOptions so
- * adapters can configure their own HTTP clients (e.g. grammy uses node-fetch
- * which needs a separate agent).
+ * replicates the same resolution logic (--proxy flag → settings.proxy →
+ * HTTPS_PROXY → HTTP_PROXY) and applies the global dispatcher for native
+ * fetch() calls. The resolved URL is also passed to channels via
+ * ChannelBaseOptions so adapters can configure their own HTTP clients (e.g.
+ * grammy uses node-fetch which needs a separate agent).
  */
-function resolveProxy(cliProxy?: string): string | undefined {
+export function resolveProxy(
+  cliProxy?: string,
+  settingsProxy?: string,
+): string | undefined {
   const proxyUrl = normalizeProxyUrl(
     cliProxy ||
+      settingsProxy ||
       process.env['HTTPS_PROXY'] ||
       process.env['https_proxy'] ||
       process.env['HTTP_PROXY'] ||
@@ -224,48 +228,52 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   writeServiceInfo([name]);
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
 
-  bridge.on('disconnected', async () => {
-    if (shuttingDown) return;
+  const attachDisconnectHandler = (b: AcpBridge): void => {
+    b.on('disconnected', async () => {
+      if (shuttingDown) return;
 
-    const now = Date.now();
-    crashTimestamps.push(now);
-    // Only count crashes within the recent window
-    const recentCrashes = crashTimestamps.filter(
-      (ts) => now - ts < CRASH_WINDOW_MS,
-    );
+      const now = Date.now();
+      crashTimestamps.push(now);
+      // Only count crashes within the recent window
+      const recentCrashes = crashTimestamps.filter(
+        (ts) => now - ts < CRASH_WINDOW_MS,
+      );
 
-    if (recentCrashes.length > MAX_CRASH_RESTARTS) {
+      if (recentCrashes.length > MAX_CRASH_RESTARTS) {
+        writeStderrLine(
+          `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
+        );
+        channel.disconnect();
+        router.clearAll();
+        removeServiceInfo();
+        process.exit(1);
+      }
+
       writeStderrLine(
-        `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
+        `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
       );
-      channel.disconnect();
-      router.clearAll();
-      removeServiceInfo();
-      process.exit(1);
-    }
+      await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
 
-    writeStderrLine(
-      `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
-    );
-    await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
+      try {
+        bridge = new AcpBridge(bridgeOpts);
+        await bridge.start();
+        router.setBridge(bridge);
+        channel.setBridge(bridge);
+        registerToolCallDispatch(bridge, router, channels);
+        attachDisconnectHandler(bridge);
 
-    try {
-      bridge = new AcpBridge(bridgeOpts);
-      await bridge.start();
-      router.setBridge(bridge);
-      channel.setBridge(bridge);
-      registerToolCallDispatch(bridge, router, channels);
-
-      const result = await router.restoreSessions();
-      writeStdoutLine(
-        `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
-      );
-    } catch (err) {
-      writeStderrLine(
-        `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  });
+        const result = await router.restoreSessions();
+        writeStdoutLine(
+          `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
+        );
+      } catch (err) {
+        writeStderrLine(
+          `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    });
+  };
+  attachDisconnectHandler(bridge);
 
   const shutdown = () => {
     shuttingDown = true;
@@ -382,55 +390,59 @@ async function startAll(proxy?: string): Promise<void> {
     `[Channel] Running ${connectedCount} channel(s). Press Ctrl+C to stop.`,
   );
 
-  bridge.on('disconnected', async () => {
-    if (shuttingDown) return;
+  const attachDisconnectHandler = (b: AcpBridge): void => {
+    b.on('disconnected', async () => {
+      if (shuttingDown) return;
 
-    const now = Date.now();
-    crashTimestamps.push(now);
-    const recentCrashes = crashTimestamps.filter(
-      (ts) => now - ts < CRASH_WINDOW_MS,
-    );
-
-    if (recentCrashes.length > MAX_CRASH_RESTARTS) {
-      writeStderrLine(
-        `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
+      const now = Date.now();
+      crashTimestamps.push(now);
+      const recentCrashes = crashTimestamps.filter(
+        (ts) => now - ts < CRASH_WINDOW_MS,
       );
-      for (const channel of channels.values()) {
-        try {
-          channel.disconnect();
-        } catch {
-          // best-effort
+
+      if (recentCrashes.length > MAX_CRASH_RESTARTS) {
+        writeStderrLine(
+          `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
+        );
+        for (const channel of channels.values()) {
+          try {
+            channel.disconnect();
+          } catch {
+            // best-effort
+          }
         }
+        router.clearAll();
+        removeServiceInfo();
+        process.exit(1);
       }
-      router.clearAll();
-      removeServiceInfo();
-      process.exit(1);
-    }
 
-    writeStderrLine(
-      `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
-    );
-    await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
-
-    try {
-      bridge = new AcpBridge(bridgeOpts);
-      await bridge.start();
-      router.setBridge(bridge);
-      for (const channel of channels.values()) {
-        channel.setBridge(bridge);
-      }
-      registerToolCallDispatch(bridge, router, channels);
-
-      const result = await router.restoreSessions();
-      writeStdoutLine(
-        `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
-      );
-    } catch (err) {
       writeStderrLine(
-        `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
+        `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
       );
-    }
-  });
+      await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
+
+      try {
+        bridge = new AcpBridge(bridgeOpts);
+        await bridge.start();
+        router.setBridge(bridge);
+        for (const channel of channels.values()) {
+          channel.setBridge(bridge);
+        }
+        registerToolCallDispatch(bridge, router, channels);
+        attachDisconnectHandler(bridge);
+
+        const result = await router.restoreSessions();
+        writeStdoutLine(
+          `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
+        );
+      } catch (err) {
+        writeStderrLine(
+          `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    });
+  };
+  attachDisconnectHandler(bridge);
 
   const shutdown = () => {
     shuttingDown = true;
@@ -463,8 +475,10 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       describe: 'Channel name (omit to start all configured channels)',
     }),
   handler: async (argv) => {
+    const settings = loadSettings(process.cwd());
     const proxy = resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
+      settings.merged.proxy as string | undefined,
     );
     if (argv.name) {
       await startSingle(argv.name, proxy);

@@ -65,7 +65,19 @@ export const formatTokenCount = (count: number): string => {
   return `${Math.floor(count / 1000)}k`;
 };
 
-export const formatDuration = (milliseconds: number): string => {
+export interface FormatDurationOptions {
+  /**
+   * When true, drops a trailing `.0` in the sub-minute range so that whole
+   * seconds render as `5s` rather than `5.0s`. Non-integer values keep their
+   * decimal (e.g. `5.5s`). Matches Claude Code's `ShellTimeDisplay` style.
+   */
+  hideTrailingZeros?: boolean;
+}
+
+export const formatDuration = (
+  milliseconds: number,
+  options?: FormatDurationOptions,
+): string => {
   if (milliseconds <= 0) {
     return '0s';
   }
@@ -77,7 +89,11 @@ export const formatDuration = (milliseconds: number): string => {
   const totalSeconds = milliseconds / 1000;
 
   if (totalSeconds < 60) {
-    return `${totalSeconds.toFixed(1)}s`;
+    const formatted = totalSeconds.toFixed(1);
+    if (options?.hideTrailingZeros && formatted.endsWith('.0')) {
+      return `${formatted.slice(0, -2)}s`;
+    }
+    return `${formatted}s`;
   }
 
   const hours = Math.floor(totalSeconds / 3600);

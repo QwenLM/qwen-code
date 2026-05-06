@@ -13,9 +13,13 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  resolveAndValidatePath,
+  isSubpath,
+  unescapePath,
+} from '../utils/paths.js';
 
-const debugLogger = createDebugLogger('GREP');
-import { resolveAndValidatePath } from '../utils/paths.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
@@ -23,6 +27,8 @@ import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
+
+const debugLogger = createDebugLogger('GREP');
 
 // --- Interfaces ---
 
@@ -56,6 +62,7 @@ export interface GrepToolParams {
  */
 interface GrepMatch {
   filePath: string;
+  absoluteFilePath: string;
   lineNumber: number;
   line: string;
 }
@@ -87,7 +94,10 @@ class GrepToolInvocation extends BaseToolInvocation<
       this.config.getTargetDir(),
       this.params.path,
     );
-    if (workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+    if (
+      workspaceContext.isPathWithinWorkspace(resolvedPath) ||
+      isSubpath(getMemoryBaseDir(), resolvedPath)
+    ) {
       return 'allow';
     }
     return 'ask';
@@ -200,20 +210,38 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build grep output
       let grepOutput = '';
-      for (const filePath in matchesByFile) {
-        grepOutput += `File: ${filePath}\n`;
-        matchesByFile[filePath].forEach((match) => {
-          const trimmedLine = match.line.trim();
-          grepOutput += `L${match.lineNumber}: ${trimmedLine}\n`;
-        });
-        grepOutput += '---\n';
-      }
-
-      // Apply character limit as safety net
+      const visibleMatches: GrepMatch[] = [];
       let truncatedByCharLimit = false;
-      if (Number.isFinite(charLimit) && grepOutput.length > charLimit) {
-        grepOutput = grepOutput.slice(0, charLimit) + '...';
-        truncatedByCharLimit = true;
+      const appendChunk = (chunk: string, match?: GrepMatch): boolean => {
+        if (
+          Number.isFinite(charLimit) &&
+          grepOutput.length + chunk.length > charLimit
+        ) {
+          grepOutput += chunk.slice(
+            0,
+            Math.max(charLimit - grepOutput.length, 0),
+          );
+          grepOutput += '...';
+          if (match) visibleMatches.push(match);
+          truncatedByCharLimit = true;
+          return false;
+        }
+        grepOutput += chunk;
+        if (match) visibleMatches.push(match);
+        return true;
+      };
+
+      for (const filePath in matchesByFile) {
+        if (!appendChunk(`File: ${filePath}\n`)) break;
+        let stopRendering = false;
+        for (const match of matchesByFile[filePath]) {
+          const trimmedLine = match.line.trim();
+          if (!appendChunk(`L${match.lineNumber}: ${trimmedLine}\n`, match)) {
+            stopRendering = true;
+            break;
+          }
+        }
+        if (stopRendering || !appendChunk('---\n')) break;
       }
 
       // Count how many lines we actually included after character truncation
@@ -243,6 +271,13 @@ class GrepToolInvocation extends BaseToolInvocation<
       return {
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
+        resultFilePaths: Array.from(
+          new Set(
+            visibleMatches
+              .map((match) => match.absoluteFilePath)
+              .filter((filePath) => filePath !== ''),
+          ),
+        ),
       };
     } catch (error) {
       debugLogger.error(`Error during GrepLogic execution: ${error}`);
@@ -299,8 +334,9 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         results.push({
           filePath: relativeFilePath || path.basename(absoluteFilePath),
+          absoluteFilePath,
           lineNumber,
-          line: lineContent,
+          line: lineContent.replace(/\r$/, ''),
         });
       }
     }
@@ -522,6 +558,7 @@ class GrepToolInvocation extends BaseToolInvocation<
                 filePath:
                   path.relative(absolutePath, fileAbsolutePath) ||
                   path.basename(fileAbsolutePath),
+                absoluteFilePath: fileAbsolutePath,
                 lineNumber: index + 1,
                 line,
               });
@@ -611,6 +648,7 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
 
     // Only validate path if one is provided
     if (params.path) {
+      params.path = unescapePath(params.path.trim());
       try {
         resolveAndValidatePath(this.config, params.path, {
           allowExternalPaths: true,

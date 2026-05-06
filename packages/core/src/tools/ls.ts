@@ -8,8 +8,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
-import { isSubpaths, isSubpath } from '../utils/paths.js';
+import {
+  makeRelative,
+  shortenPath,
+  unescapePath,
+  isSubpaths,
+  isSubpath,
+} from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
@@ -17,6 +22,7 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -132,7 +138,8 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     if (
       workspaceContext.isPathWithinWorkspace(dirPath) ||
       isSubpaths(userSkillsDirs, dirPath) ||
-      isSubpath(userExtensionsDir, dirPath)
+      isSubpath(userExtensionsDir, dirPath) ||
+      isSubpath(getMemoryBaseDir(), dirPath)
     ) {
       return 'allow';
     }
@@ -353,6 +360,8 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: LSToolParams,
   ): string | null {
+    params.path = unescapePath(params.path.trim());
+
     if (!path.isAbsolute(params.path)) {
       return `Path must be absolute: ${params.path}`;
     }

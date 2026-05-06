@@ -877,7 +877,49 @@ export class ModelsConfig {
     if (modelId && this.modelRegistry.hasModel(authType, modelId)) {
       const resolved = this.modelRegistry.getModel(authType, modelId);
       if (resolved) {
+        // When authType and modelId haven't changed (startup/restart scenario),
+        // the current apiKey was already correctly resolved by
+        // resolveCliGenerationConfig. Save it so we can restore it if
+        // applyResolvedModelDefaults clears it (i.e. process.env[envKey] is
+        // absent). For cross-provider switches (different modelId), we must
+        // NOT preserve the previous key — it may belong to a different
+        // service. Also detect hot-reload scenarios where the provider
+        // config changed in place (same modelId, different envKey/baseUrl)
+        // by comparing fields that applyResolvedModelDefaults sets. Use
+        // baseUrl source === 'modelProviders' as the "has been applied"
+        // signal — it covers both envKey and no-envKey models, and avoids
+        // false positives when startup baseUrl differs from registry
+        // default. (See #3417)
+        const hasBeenApplied =
+          this.generationConfigSources['baseUrl']?.kind === 'modelProviders';
+        const isProviderChanged =
+          hasBeenApplied &&
+          (this._generationConfig.apiKeyEnvKey !== resolved.envKey ||
+            this._generationConfig.baseUrl !== resolved.baseUrl);
+        const isUnchanged =
+          previousAuthType === authType &&
+          this._generationConfig.model === modelId &&
+          !isProviderChanged;
+        const savedApiKey = isUnchanged
+          ? this._generationConfig.apiKey
+          : undefined;
+        const savedApiKeySource = isUnchanged
+          ? this.generationConfigSources['apiKey']
+            ? { ...this.generationConfigSources['apiKey'] }
+            : undefined
+          : undefined;
+
         this.applyResolvedModelDefaults(resolved);
+
+        // Restore the previously-resolved apiKey if applyResolvedModelDefaults
+        // cleared it (env var not found) and this is the same model.
+        if (isUnchanged && !this._generationConfig.apiKey && savedApiKey) {
+          this._generationConfig.apiKey = savedApiKey;
+          if (savedApiKeySource) {
+            this.generationConfigSources['apiKey'] = savedApiKeySource;
+          }
+        }
+
         this.strictModelProviderSelection = true;
         // Clear active runtime model snapshot since we're now using a registry model
         this.activeRuntimeModelSnapshotId = undefined;

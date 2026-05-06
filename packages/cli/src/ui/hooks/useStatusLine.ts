@@ -69,9 +69,16 @@ export interface StatusLineCommandInput {
 interface StatusLineConfig {
   type: 'command';
   command: string;
+  // Re-run the command every N seconds so external data (git branch, quota,
+  // clock) stays fresh even when no Agent state changes. Values < 1 are
+  // rejected in getStatusLineConfig to avoid flooding the CLI with execs.
+  refreshInterval?: number;
 }
 
 const debugLog = createDebugLogger('STATUS_LINE');
+// Footer's bottom row (hint/mode indicator) occupies 1 line, so the status
+// line gets at most 2 to keep the total footer height at 3 rows max.
+export const MAX_STATUS_LINES = 2;
 
 function getStatusLineConfig(
   settings: ReturnType<typeof useSettings>,
@@ -90,6 +97,13 @@ function getStatusLineConfig(
       type: 'command',
       command: raw.command,
     };
+    if (
+      typeof raw.refreshInterval === 'number' &&
+      Number.isFinite(raw.refreshInterval) &&
+      raw.refreshInterval >= 1
+    ) {
+      config.refreshInterval = raw.refreshInterval;
+    }
     return config;
   }
   return undefined;
@@ -130,10 +144,13 @@ function buildMetricsPayload(
  * via stdin.
  *
  * Updates are debounced (300ms) and triggered by state changes (model switch,
- * new messages, vim mode toggle) rather than blind polling.
+ * new messages, vim mode toggle) rather than blind polling. When the config
+ * sets `refreshInterval` (seconds, >= 1), the command is additionally re-run
+ * on a timer so external data (git branch, quota, clock) stays fresh even
+ * when no Agent state has changed.
  */
 export function useStatusLine(): {
-  text: string | null;
+  lines: string[];
 } {
   const settings = useSettings();
   const uiState = useUIState();
@@ -142,8 +159,9 @@ export function useStatusLine(): {
 
   const statusLineConfig = getStatusLineConfig(settings);
   const statusLineCommand = statusLineConfig?.command;
+  const refreshInterval = statusLineConfig?.refreshInterval;
 
-  const [output, setOutput] = useState<string | null>(null);
+  const [output, setOutput] = useState<string[]>([]);
 
   // Keep latest values in refs so the stable doUpdate callback can read them
   // without being recreated on every render.
@@ -201,7 +219,7 @@ export function useStatusLine(): {
   const doUpdate = useCallback(() => {
     const cmd = statusLineCommandRef.current;
     if (!cmd) {
-      setOutput(null);
+      setOutput([]);
       return;
     }
 
@@ -282,18 +300,32 @@ export function useStatusLine(): {
         (error, stdout) => {
           if (gen !== generationRef.current) return; // stale
           activeChildRef.current = undefined;
-          if (!error && stdout) {
-            // Strip only the trailing newline to preserve intentional whitespace.
-            const line = stdout.replace(/\r?\n$/, '').split(/\r?\n/, 1)[0];
-            setOutput(line || null);
-          } else {
-            setOutput(null);
-          }
+          const nextLines =
+            !error && stdout
+              ? stdout
+                  .replace(/\r?\n$/, '')
+                  .split(/\r?\n/)
+                  .filter(Boolean)
+                  .slice(0, MAX_STATUS_LINES)
+              : [];
+          // Skip the state update if the output is unchanged — avoids a
+          // Footer re-render each periodic tick, which cuts wasted work
+          // and reduces the window for Ink to miscount rows in narrow
+          // terminals when `refreshInterval` runs at 1s (see #3383).
+          setOutput((prev) => {
+            if (
+              prev.length === nextLines.length &&
+              prev.every((v, i) => v === nextLines[i])
+            ) {
+              return prev;
+            }
+            return nextLines;
+          });
         },
       );
     } catch (err) {
       debugLog.error('statusline exec error:', (err as Error).message);
-      setOutput(null);
+      setOutput([]);
       return;
     }
 
@@ -333,7 +365,7 @@ export function useStatusLine(): {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = undefined;
       }
-      setOutput(null);
+      setOutput([]);
       return;
     }
 
@@ -384,6 +416,24 @@ export function useStatusLine(): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusLineCommand]);
 
+  // Periodic refresh — re-run the command every `refreshInterval` seconds.
+  // The tick yields if a previous exec is still running: unlike state-change
+  // triggers (which legitimately need to preempt stale data), the periodic
+  // tick exists only to keep external data fresh, so killing an in-flight
+  // child would starve commands that run longer than `refreshInterval` and
+  // the statusline would never update. The 5s exec timeout still caps the
+  // wait, and state-change triggers still go through `doUpdate` directly.
+  useEffect(() => {
+    if (!statusLineCommand || !refreshInterval) return;
+    const timer = setInterval(() => {
+      if (activeChildRef.current) return;
+      doUpdate();
+    }, refreshInterval * 1000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [statusLineCommand, refreshInterval, doUpdate]);
+
   // Initial execution + cleanup
   useEffect(() => {
     hasMountedRef.current = true;
@@ -404,5 +454,5 @@ export function useStatusLine(): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { text: output };
+  return { lines: output };
 }

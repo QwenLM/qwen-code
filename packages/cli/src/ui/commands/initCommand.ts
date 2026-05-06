@@ -23,6 +23,7 @@ export const initCommand: SlashCommand = {
     return t('Analyzes the project and creates a tailored QWEN.md file.');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     _args: string,

@@ -2,10 +2,13 @@ export default {
   commands: 'Commands',
   'code-review': 'Code Review',
   'followup-suggestions': 'Followup Suggestions',
+  'tool-use-summaries': 'Tool-Use Summaries',
   'sub-agents': 'SubAgents',
   arena: 'Agent Arena',
   skills: 'Skills',
+  memory: 'Memory',
   headless: 'Headless Mode',
+  'dual-output': 'Dual Output',
   checkpointing: {
     display: 'hidden',
   },

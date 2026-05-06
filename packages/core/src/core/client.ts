@@ -22,6 +22,8 @@ const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
 import type { ContentGenerator } from './contentGenerator.js';
+import type { ResolvedModelConfig } from '../models/types.js';
+import { AuthType, createContentGenerator } from './contentGenerator.js';
 import { GeminiChat } from './geminiChat.js';
 import {
   getArenaSystemReminder,
@@ -46,8 +48,12 @@ import {
 } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 
+// Models
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
+
 // Tools
-import { AgentTool } from '../tools/agent.js';
+import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
 import {
@@ -56,11 +62,11 @@ import {
 } from '../telemetry/index.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
-// Forked query cache
+// Forked agent cache
 import {
   saveCacheSafeParams,
   clearCacheSafeParams,
-} from '../followup/forkedQuery.js';
+} from '../utils/forkedAgent.js';
 
 // Utilities
 import {
@@ -76,7 +82,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { flatMapTextParts } from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
-import { retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 
 // Hook types and utilities
 import {
@@ -101,6 +107,8 @@ export enum SendMessageType {
   Hook = 'hook',
   /** Cron-fired prompt. Behaves like UserQuery but skips UserPromptSubmit hook. */
   Cron = 'cron',
+  /** Background agent notification. Display item is added by the drain loop. */
+  Notification = 'notification',
 }
 
 export interface SendMessageOptions {
@@ -110,18 +118,73 @@ export interface SendMessageOptions {
     iterationCount: number;
     reasons: string[];
   };
+  /** Display text for notification messages (persisted for session resume). */
+  notificationDisplayText?: string;
   /** Model override from skill execution. When present, overrides the session model for this turn. */
   modelOverride?: string;
+}
+
+const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
+  prompt: '',
+  selectedDocs: [],
+  strategy: 'none',
+};
+
+/**
+ * Resolve the auto-memory recall promise with a hard deadline.
+ * If the recall (model-driven selection + heuristic fallback) does not complete
+ * within the deadline, return an empty result so the main request is not delayed.
+ *
+ * The deadline is set slightly above the model-driven selector's own
+ * AbortSignal.timeout (2s) to give the heuristic fallback time to complete,
+ * but low enough that the user does not perceive a delay on every turn.
+ */
+async function resolveAutoMemoryWithDeadline(
+  promise: Promise<RelevantAutoMemoryPromptResult> | undefined,
+  onDeadline: () => void,
+): Promise<RelevantAutoMemoryPromptResult> {
+  if (!promise) {
+    return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<RelevantAutoMemoryPromptResult>((resolve) => {
+    timer = setTimeout(() => {
+      try {
+        onDeadline();
+      } finally {
+        resolve(EMPTY_RELEVANT_AUTO_MEMORY_RESULT);
+      }
+    }, 2_500);
+  });
+
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
+  private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
+  private pendingRecallAbortController: AbortController | undefined;
+
+  /**
+   * Cache of per-model ContentGenerators keyed by model ID.
+   * Avoids rebuilding the generator (SDK instantiation, config resolution)
+   * on every side query (recap, title, tool summary).
+   * Cleared on session reset (resetChat) to pick up config changes.
+   */
+  private perModelGeneratorCache = new Map<string, Promise<ContentGenerator>>();
 
   /**
    * At any point in this conversation, was compression triggered without
@@ -130,23 +193,19 @@ export class GeminiClient {
   private hasFailedCompressionAttempt = false;
 
   /**
+   * Promises for pending background memory tasks (dream / extract).
+   * Each promise resolves with a count of memory files touched (0 = nothing written).
+   * Consumed by the CLI via `consumePendingMemoryTaskPromises()`.
+   */
+  private pendingMemoryTaskPromises: Array<Promise<number>> = [];
+
+  /**
    * Timestamp (epoch ms) of the last completed API call.
    * Used to detect idle periods for thinking block cleanup.
    * Starts as null — on the first query there is no prior thinking to clean,
    * so the idle check is skipped until the first API call completes.
    */
   private lastApiCompletionTimestamp: number | null = null;
-
-  /**
-   * Sticky-on latch for clearing thinking blocks from prior turns.
-   * Triggered when idle exceeds the configured threshold (default 5 min,
-   * aligned with provider prompt-cache TTL). Once latched, stays true to
-   * prevent oscillation: without it, thinking would accumulate → get
-   * stripped → accumulate again, causing the message prefix to change
-   * repeatedly (bad for provider-side prompt caching and wastes context).
-   * Reset on /clear (resetChat).
-   */
-  private thinkingClearLatched = false;
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
@@ -196,34 +255,80 @@ export class GeminiClient {
     return this.getChat().getHistory(curated);
   }
 
-  stripThoughtsFromHistory() {
-    this.getChat().stripThoughtsFromHistory();
-  }
-
   private stripOrphanedUserEntriesFromHistory() {
     this.getChat().stripOrphanedUserEntriesFromHistory();
+    // Stripped trailing user entries can include read_file
+    // functionResponses from a failed-then-retried request. The
+    // FileReadCache would still record those reads, so the retry's
+    // re-issued Read could hit the file_unchanged placeholder while
+    // the model has nothing to fall back on. Clear to be safe.
+    debugLogger.debug(
+      '[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory',
+    );
+    this.config.getFileReadCache().clear();
   }
 
   setHistory(history: Content[]) {
     this.getChat().setHistory(history);
+    // Replacing history wholesale drops any prior read_file tool
+    // results the FileReadCache still believes the model has seen.
+    // Without clearing, a follow-up Read of an unchanged file would
+    // return the file_unchanged placeholder for bytes that no longer
+    // exist in the new history.
+    debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
+    this.config.getFileReadCache().clear();
     this.forceFullIdeContext = true;
   }
 
-  setTools(): void {
+  truncateHistory(keepCount: number) {
+    // Use the O(1) length getter rather than getHistory() — the latter
+    // structuredClone's the entire history just to read .length, which
+    // gets expensive in long-running sessions.
+    const prevLen = this.getChat().getHistoryLength();
+    this.getChat().truncateHistory(keepCount);
+    // Decide whether to invalidate based on the *actual* post-truncate
+    // length, not on the keepCount argument. Comparing keepCount alone
+    // misses pathological inputs (e.g. NaN: slice(0, NaN) returns [],
+    // emptying history, but `NaN < prevLen` is false and would skip
+    // the clear, reintroducing the file_unchanged placeholder bug).
+    const newLen = this.getChat().getHistoryLength();
+    if (newLen < prevLen) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
+      );
+      this.config.getFileReadCache().clear();
+    }
+    this.forceFullIdeContext = true;
+  }
+
+  async setTools(): Promise<void> {
     if (!this.isInitialized()) {
       return;
     }
 
     const toolRegistry = this.config.getToolRegistry();
+    await toolRegistry.warmAll();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
   }
 
   async resetChat(): Promise<void> {
-    // Reset thinking clear latch — fresh chat, no prior thinking to clean up
-    this.thinkingClearLatched = false;
+    this.surfacedRelevantAutoMemoryPaths.clear();
     this.lastApiCompletionTimestamp = null;
+    // startChat() rewrites the chat to its initial state. Any prior
+    // read_file tool results the FileReadCache still tracks are no
+    // longer in history, so a follow-up Read would serve a placeholder
+    // pointing at content the model can no longer retrieve.
+    debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
+    this.config.getFileReadCache().clear();
+    this.perModelGeneratorCache.clear();
+    // Abort any in-flight auto-memory recall so the stale controller
+    // does not leak into the next session.
+    if (this.pendingRecallAbortController) {
+      this.pendingRecallAbortController.abort();
+      this.pendingRecallAbortController = undefined;
+    }
     await this.startChat();
   }
 
@@ -283,7 +388,7 @@ export class GeminiClient {
         uiTelemetryService,
       );
 
-      this.setTools();
+      await this.setTools();
 
       return this.chat;
     } catch (error) {
@@ -489,6 +594,77 @@ export class GeminiClient {
     }
   }
 
+  private runManagedAutoMemoryBackgroundTasks(
+    messageType: SendMessageType,
+  ): void {
+    if (messageType !== SendMessageType.UserQuery) {
+      return;
+    }
+
+    if (!this.config.getManagedAutoMemoryEnabled()) {
+      return;
+    }
+
+    const projectRoot = this.config.getProjectRoot();
+    const sessionId = this.config.getSessionId();
+    const history = this.getHistory();
+    const mgr = this.config.getMemoryManager();
+
+    const extractPromise = mgr
+      .scheduleExtract({
+        projectRoot,
+        sessionId,
+        history,
+        config: this.config,
+      })
+      .then((result) => result.touchedTopics.length)
+      .catch((error: unknown) => {
+        debugLogger.warn(
+          'Failed to schedule managed auto-memory extraction.',
+          error,
+        );
+        return 0;
+      });
+    this.pendingMemoryTaskPromises.push(extractPromise);
+
+    const dreamPromise = mgr
+      .scheduleDream({
+        projectRoot,
+        sessionId,
+        config: this.config,
+      })
+      .then((schedResult) => {
+        if (schedResult.status === 'scheduled' && schedResult.promise) {
+          return schedResult.promise.then((state) => {
+            const topics = state.metadata?.['touchedTopics'] as
+              | string[]
+              | undefined;
+            return topics ? topics.length : 0;
+          });
+        }
+        return 0;
+      })
+      .catch((error: unknown) => {
+        debugLogger.warn(
+          'Failed to schedule managed auto-memory dream.',
+          error,
+        );
+        return 0;
+      });
+    this.pendingMemoryTaskPromises.push(dreamPromise);
+  }
+
+  /**
+   * Returns and clears the list of pending background memory task promises.
+   * Each promise resolves with the number of memory files touched (0 = nothing
+   * was written, caller should ignore).
+   */
+  consumePendingMemoryTaskPromises(): Array<Promise<number>> {
+    const promises = this.pendingMemoryTaskPromises;
+    this.pendingMemoryTaskPromises = [];
+    return promises;
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     signal: AbortSignal,
@@ -497,6 +673,9 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    let relevantAutoMemoryPromise:
+      | Promise<RelevantAutoMemoryPromptResult>
+      | undefined;
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
@@ -508,6 +687,7 @@ export class GeminiClient {
     if (
       messageType !== SendMessageType.Retry &&
       messageType !== SendMessageType.Cron &&
+      messageType !== SendMessageType.Notification &&
       hooksEnabled &&
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
@@ -552,37 +732,68 @@ export class GeminiClient {
       }
     }
 
+    if (messageType === SendMessageType.Notification) {
+      this.config
+        .getChatRecordingService()
+        ?.recordNotification(request, options?.notificationDisplayText);
+    }
+
+    // Notifications start a fresh Turn with a new prompt_id, so the loop
+    // detector must reset — otherwise a prior turn's count can trip
+    // LoopDetected early on the notification turn.
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification
+    ) {
+      this.loopDetector.reset(prompt_id);
+      this.lastPromptId = prompt_id;
+    }
+
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron
     ) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
-
-      // record user message for session management
-      this.config.getChatRecordingService()?.recordUserMessage(request);
-
-      // Idle cleanup: clear stale thinking blocks after idle period.
-      // Latch: once triggered, never revert — prevents oscillation.
-      const idleConfig = this.config.getClearContextOnIdle();
-      const thinkingThresholdMin = idleConfig.thinkingThresholdMinutes ?? 5;
-      if (
-        thinkingThresholdMin >= 0 &&
-        !this.thinkingClearLatched &&
-        this.lastApiCompletionTimestamp !== null
-      ) {
-        const thresholdMs = thinkingThresholdMin * 60 * 1000;
-        const idleMs = Date.now() - this.lastApiCompletionTimestamp;
-        if (idleMs > thresholdMs) {
-          this.thinkingClearLatched = true;
-          debugLogger.debug(
-            `Thinking clear latched: idle ${Math.round(idleMs / 1000)}s > threshold ${thresholdMs / 1000}s`,
-          );
-        }
+      if (this.config.getManagedAutoMemoryEnabled()) {
+        const recallAbortController = new AbortController();
+        const rawRecallPromise = this.config
+          .getMemoryManager()
+          .recall(this.config.getProjectRoot(), partToString(request), {
+            config: this.config,
+            excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+            abortSignal: recallAbortController.signal,
+          })
+          .catch((error: unknown) => {
+            if (error instanceof DOMException && error.name === 'AbortError') {
+              debugLogger.debug(
+                'Auto-memory recall aborted by deadline.',
+                error,
+              );
+            } else {
+              debugLogger.warn(
+                'Managed auto-memory recall prefetch failed.',
+                error,
+              );
+            }
+            return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+          });
+        this.pendingRecallAbortController = recallAbortController;
+        // Race the recall against the deadline at initiation time so the 2.5s
+        // budget is not consumed by intermediate work (microcompact, compression,
+        // token checks, IDE context) between initiation and consumption.
+        relevantAutoMemoryPromise = resolveAutoMemoryWithDeadline(
+          rawRecallPromise,
+          () => recallAbortController.abort(),
+        );
       }
-      if (this.thinkingClearLatched) {
-        this.getChat().stripThoughtsFromHistoryKeepRecent(1);
-        debugLogger.debug('Stripped old thinking blocks (keeping last 1 turn)');
+
+      // record user/cron message for session management
+      if (messageType === SendMessageType.Cron) {
+        this.config
+          .getChatRecordingService()
+          ?.recordCronPrompt(request, options?.notificationDisplayText);
+      } else {
+        this.config.getChatRecordingService()?.recordUserMessage(request);
       }
 
       // Idle cleanup: clear old tool results when idle > threshold.
@@ -596,6 +807,16 @@ export class GeminiClient {
       );
       if (mcResult.meta) {
         this.getChat().setHistory(mcResult.history);
+        // Microcompaction replaces old compactable tool outputs
+        // (including read_file) with a placeholder, but the
+        // FileReadCache still records the prior full Reads as "seen in
+        // this conversation". A follow-up Read of an unchanged file
+        // would then return the file_unchanged placeholder pointing at
+        // bytes the model can no longer retrieve from history. Drop the
+        // cache so post-microcompaction Reads re-emit the bytes,
+        // mirroring the post-compaction clear in tryCompressChat.
+        debugLogger.debug('[FILE_READ_CACHE] clear after microcompaction');
+        this.config.getFileReadCache().clear();
         const m = mcResult.meta;
         debugLogger.debug(
           `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
@@ -611,6 +832,8 @@ export class GeminiClient {
         this.config.getMaxSessionTurns() > 0 &&
         this.sessionTurnCount > this.config.getMaxSessionTurns()
       ) {
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         yield { type: GeminiEventType.MaxSessionTurns };
         return new Turn(this.getChat(), prompt_id);
       }
@@ -619,6 +842,8 @@ export class GeminiClient {
     // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
     const boundedTurns = Math.min(turns, MAX_TURNS);
     if (!boundedTurns) {
+      this.pendingRecallAbortController?.abort();
+      this.pendingRecallAbortController = undefined;
       return new Turn(this.getChat(), prompt_id);
     }
 
@@ -634,6 +859,8 @@ export class GeminiClient {
     if (sessionTokenLimit > 0) {
       const lastPromptTokenCount = uiTelemetryService.getLastPromptTokenCount();
       if (lastPromptTokenCount > sessionTokenLimit) {
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         yield {
           type: GeminiEventType.SessionTokenLimitExceeded,
           value: {
@@ -684,6 +911,8 @@ export class GeminiClient {
           `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
         );
         await arenaAgentClient.reportCancelled();
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         return new Turn(this.getChat(), prompt_id);
       }
     }
@@ -700,11 +929,25 @@ export class GeminiClient {
       messageType === SendMessageType.Cron
     ) {
       const systemReminders = [];
+      // The recall promise was already raced against the 2.5s deadline at
+      // initiation time; this await just collects the result.
+      this.pendingRecallAbortController = undefined;
+      const relevantAutoMemory = relevantAutoMemoryPromise
+        ? await relevantAutoMemoryPromise
+        : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+      const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
+
+      if (relevantAutoMemoryPrompt) {
+        systemReminders.push(relevantAutoMemoryPrompt);
+        for (const doc of relevantAutoMemory.selectedDocs) {
+          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        }
+      }
 
       // add subagent system reminder if there are subagents
-      const hasAgentTool = this.config
+      const hasAgentTool = await this.config
         .getToolRegistry()
-        .getTool(AgentTool.Name);
+        .ensureTool(ToolNames.AGENT);
       const subagents = (await this.config.getSubagentManager().listSubagents())
         .filter((subagent) => subagent.level !== 'builtin')
         .map((subagent) => subagent.name);
@@ -739,7 +982,11 @@ export class GeminiClient {
     for await (const event of resultStream) {
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {
-          yield { type: GeminiEventType.LoopDetected };
+          const loopType = this.loopDetector.getLastLoopType();
+          yield {
+            type: GeminiEventType.LoopDetected,
+            ...(loopType && { value: { loopType } }),
+          };
           if (arenaAgentClient) {
             await arenaAgentClient.reportError('Loop detected');
           }
@@ -880,7 +1127,28 @@ export class GeminiClient {
     }
 
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
+      // Save cache-safe params here — before any early return — so that
+      // background extract/dream agents calling getCacheSafeParams() always
+      // see the current turn's history regardless of which path exits below.
+      try {
+        const chat = this.getChat();
+        const fullHistory = chat.getHistory(true);
+        const maxHistoryForCache = 40;
+        const cachedHistory =
+          fullHistory.length > maxHistoryForCache
+            ? fullHistory.slice(-maxHistoryForCache)
+            : fullHistory;
+        saveCacheSafeParams(
+          chat.getGenerationConfig(),
+          cachedHistory,
+          this.config.getModel(),
+        );
+      } catch {
+        // Best-effort — don't block the main flow
+      }
+
       if (this.config.getSkipNextSpeakerCheck()) {
+        this.runManagedAutoMemoryBackgroundTasks(messageType);
         // Report completed before returning — agent has no more work to do
         if (arenaAgentClient) {
           await arenaAgentClient.reportCompleted();
@@ -913,7 +1181,11 @@ export class GeminiClient {
           options,
           boundedTurns - 1,
         );
-      } else if (arenaAgentClient) {
+      }
+
+      this.runManagedAutoMemoryBackgroundTasks(messageType);
+
+      if (arenaAgentClient) {
         // No continuation needed — agent completed its task
         await arenaAgentClient.reportCompleted();
       }
@@ -922,27 +1194,6 @@ export class GeminiClient {
     // Report cancelled to arena when user cancelled mid-stream
     if (signal?.aborted && arenaAgentClient) {
       await arenaAgentClient.reportCancelled();
-    }
-
-    // Save cache-safe params on successful completion (non-abort) for forked queries
-    if (!signal?.aborted && this.isInitialized()) {
-      try {
-        const chat = this.getChat();
-        // Clone history then truncate to last 40 entries to avoid full-session deep copy overhead
-        const fullHistory = chat.getHistory(true);
-        const maxHistoryForCache = 40;
-        const cachedHistory =
-          fullHistory.length > maxHistoryForCache
-            ? fullHistory.slice(-maxHistoryForCache)
-            : fullHistory;
-        saveCacheSafeParams(
-          chat.getGenerationConfig(),
-          cachedHistory,
-          this.config.getModel(),
-        );
-      } catch {
-        // Best-effort — don't block the main flow
-      }
     }
 
     return turn;
@@ -971,10 +1222,31 @@ export class GeminiClient {
         systemInstruction: finalSystemInstruction,
       };
 
+      // When the requested model differs from the main model (e.g. fast model
+      // side queries for session recap / title / summary), resolve the target
+      // model's own ContentGeneratorConfig so that per-model settings like
+      // extra_body, samplingParams, and reasoning are not inherited from the
+      // main model's config.
+      const mainModel = this.config.getModel() ?? model;
+      const isPerModel = model !== mainModel;
+
+      // Resolve the authType for retry logic. When using a per-model content
+      // generator (e.g. fast model side queries), the retry authType must match
+      // the target model's provider, not the main session's provider. This
+      // ensures QWEN_OAUTH quota detection checks against the right provider.
+      const retryAuthType = isPerModel
+        ? (this.createRetryAuthTypeForModel(model) ??
+          this.config.getContentGeneratorConfig()?.authType ??
+          AuthType.USE_OPENAI)
+        : this.config.getContentGeneratorConfig()?.authType;
+
+      const contentGenerator = isPerModel
+        ? await this.createContentGeneratorForModel(model)
+        : this.getContentGeneratorOrFail();
       const apiCall = () => {
         currentAttemptModel = model;
 
-        return this.getContentGeneratorOrFail().generateContent(
+        return contentGenerator.generateContent(
           {
             model,
             config: requestConfig,
@@ -984,7 +1256,14 @@ export class GeminiClient {
         );
       };
       const result = await retryWithBackoff(apiCall, {
-        authType: this.config.getContentGeneratorConfig()?.authType,
+        authType: retryAuthType,
+        persistentMode: isUnattendedMode(),
+        signal: abortSignal,
+        heartbeatFn: (info) => {
+          process.stderr.write(
+            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
       });
       return result;
     } catch (error: unknown) {
@@ -1005,6 +1284,111 @@ export class GeminiClient {
         `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
       );
     }
+  }
+
+  /**
+   * Resolve a model across all authTypes. Handles the case where the target
+   * model is registered under a different authType than the main model
+   * (e.g. main=QWEN_OAUTH, fast=USE_ANTHROPIC).
+   *
+   * TODO: Move cross-authType resolution to ModelRegistry for a cleaner
+   * data-layer solution. Follow-up PR.
+   */
+
+  private resolveModelAcrossAuthTypes(
+    model: string,
+  ): ResolvedModelConfig | undefined {
+    const modelsConfig = this.config.getModelsConfig();
+    const allAuthTypes: AuthType[] = [
+      AuthType.QWEN_OAUTH,
+      AuthType.USE_OPENAI,
+      AuthType.USE_VERTEX_AI,
+      AuthType.USE_ANTHROPIC,
+      AuthType.USE_GEMINI,
+    ];
+
+    // Try the main authType first for early exit
+    const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
+    if (mainAuthType) {
+      const resolved = modelsConfig.getResolvedModel(mainAuthType, model);
+      if (resolved) return resolved;
+    }
+
+    for (const authType of allAuthTypes) {
+      if (authType === mainAuthType) continue;
+      const resolved = modelsConfig.getResolvedModel(authType, model);
+      if (resolved) return resolved;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Resolve the authType for a given model without creating a full generator.
+   * Used by retry logic to ensure provider-specific checks (e.g. QWEN_OAUTH
+   * quota detection) reference the correct provider.
+   */
+  private createRetryAuthTypeForModel(model: string): string | undefined {
+    return this.resolveModelAcrossAuthTypes(model)?.authType;
+  }
+
+  /**
+   * Return a ContentGenerator for a specific model (e.g. the fast model) with
+   * its own per-model settings from modelProviders.  This prevents the main
+   * model's extra_body / samplingParams / reasoning from leaking into side
+   * queries that target a different model.
+   *
+   * Falls back to the main content generator when the target model is not in
+   * the registry or when creating a dedicated generator fails (e.g. in test
+   * environments without full auth setup).
+   *
+   * Results are cached by model ID to avoid rebuilding the generator
+   * (SDK instantiation, config resolution) on every side query.
+   */
+  private async createContentGeneratorForModel(
+    model: string,
+  ): Promise<ContentGenerator> {
+    // Check cache first (Promise coalescing to prevent redundant SDK instantiations)
+    const cached = this.perModelGeneratorCache.get(model);
+    if (cached) return cached;
+
+    const generatorPromise = (async () => {
+      try {
+        const resolvedModel = this.resolveModelAcrossAuthTypes(model);
+
+        if (!resolvedModel) {
+          debugLogger.warn(
+            `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
+          );
+          return this.getContentGeneratorOrFail();
+        }
+
+        const targetConfig = buildAgentContentGeneratorConfig(
+          this.config,
+          model,
+          {
+            authType: resolvedModel.authType,
+            apiKey: resolvedModel.envKey
+              ? (process.env[resolvedModel.envKey] ?? undefined)
+              : undefined,
+            baseUrl: resolvedModel.baseUrl,
+          },
+        );
+
+        return await createContentGenerator(targetConfig, this.config);
+      } catch (err: unknown) {
+        debugLogger.warn(
+          `Failed to create content generator for model "${model}", falling back to main generator.`,
+          err instanceof Error ? err.message : String(err),
+        );
+        // On failure, delete from cache so subsequent attempts can retry.
+        this.perModelGeneratorCache.delete(model);
+        return this.getContentGeneratorOrFail();
+      }
+    })();
+
+    this.perModelGeneratorCache.set(model, generatorPromise);
+    return generatorPromise;
   }
 
   async tryCompressChat(
@@ -1035,6 +1419,15 @@ export class GeminiClient {
         });
 
         await this.startChat(newHistory);
+        // Compaction rewrites the prompt history: prior full-Read tool
+        // results may have been summarised away, but the FileReadCache
+        // still believes those reads are "in this conversation". A
+        // follow-up Read could then return the file_unchanged
+        // placeholder pointing at content the model can no longer
+        // retrieve from its own context. Clear the cache so post-
+        // compaction Reads re-emit the bytes.
+        debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
+        this.config.getFileReadCache().clear();
         uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
         this.forceFullIdeContext = true;
       }

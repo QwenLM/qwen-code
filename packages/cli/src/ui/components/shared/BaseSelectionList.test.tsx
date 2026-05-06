@@ -300,7 +300,7 @@ describe('BaseSelectionList', () => {
         rerender(<BaseSelectionList {...componentProps} />);
 
         await waitFor(() => {
-          expect(lastFrame()).toBeTruthy();
+          expect(lastFrame()).toContain(longList[newIndex]!.label);
         });
       };
 
@@ -367,6 +367,10 @@ describe('BaseSelectionList', () => {
       expect(output).not.toContain('Item 1');
 
       await updateActiveIndex(5); // Scroll further
+      // Wait for scrollOffset state to settle after the second jump
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Item 6');
+      });
       output = lastFrame();
       expect(output).toContain('Item 4');
       expect(output).toContain('Item 6');

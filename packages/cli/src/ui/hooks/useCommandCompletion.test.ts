@@ -9,7 +9,8 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useCommandCompletion } from './useCommandCompletion.js';
-import type { CommandContext } from '../commands/types.js';
+import type { CommandContext, SlashCommand } from '../commands/types.js';
+import { CommandKind } from '../commands/types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { useTextBuffer } from '../components/shared/text-buffer.js';
 import { useEffect } from 'react';
@@ -583,6 +584,64 @@ describe('useCommandCompletion', () => {
       expect(result.current.textBuffer.text).toBe(
         '@src/file1.txt is a good file',
       );
+    });
+  });
+
+  describe('argument hint ghost text', () => {
+    it('shows argumentHint as inline ghost text for a complete slash command', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'fix-issue',
+          description: 'Fix GitHub issue',
+          argumentHint: '[issue-number]',
+          kind: CommandKind.FILE,
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('/fix-issue');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      expect(result.current.midInputGhostText).toEqual({
+        text: '[issue-number]',
+        insertPosition: '/fix-issue'.length,
+        showCursorBeforeText: true,
+      });
+    });
+
+    it('does not show argumentHint after arguments have started', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'fix-issue',
+          description: 'Fix GitHub issue',
+          argumentHint: '[issue-number]',
+          kind: CommandKind.FILE,
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('/fix-issue 123');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      expect(result.current.midInputGhostText).toBeNull();
     });
   });
 });

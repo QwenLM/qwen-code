@@ -52,9 +52,19 @@ import {
   type SpeculationState,
   IDLE_SPECULATION,
   ApprovalMode,
+  ConditionalRulesRegistry,
   type PermissionMode,
+  ToolConfirmationOutcome,
+  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import {
+  getStickyTodos,
+  getStickyTodoMaxVisibleItems,
+  getStickyTodosLayoutKey,
+  getStickyTodosRenderKey,
+} from './utils/todoSnapshot.js';
+import type { TodoItem } from './components/TodoDisplay.js';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import process from 'node:process';
@@ -66,10 +76,17 @@ import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
+import { useManageModelsCommand } from './hooks/useManageModelsCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
+import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import { useDoublePress } from './hooks/useDoublePress.js';
+import {
+  computeApiTruncationIndex,
+  isRealUserTurn,
+} from './utils/historyMapping.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
@@ -84,14 +101,16 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
-import { isBtwCommand } from './utils/commandUtils.js';
+import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
+import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
+import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
@@ -114,6 +133,10 @@ import {
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
+import {
+  useBackgroundTaskViewState,
+  useBackgroundTaskViewActions,
+} from './contexts/BackgroundTaskViewContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -123,9 +146,13 @@ import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
+import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
+import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
+import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
@@ -143,6 +170,34 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+function useStableStickyTodos(todos: TodoItem[] | null): TodoItem[] | null {
+  const renderKey = getStickyTodosRenderKey(todos);
+  const stableTodosRef = useRef<{
+    renderKey: string;
+    todos: TodoItem[] | null;
+  } | null>(null);
+
+  if (stableTodosRef.current?.renderKey !== renderKey) {
+    stableTodosRef.current = { renderKey, todos };
+  }
+
+  return stableTodosRef.current.todos;
+}
+
+// Exported for tests. Given a newest-first list of messages, return a list
+// with duplicates removed, keeping the first (newest) occurrence of each.
+export function dedupeNewestFirst(messages: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const msg of messages) {
+    if (!seen.has(msg)) {
+      seen.add(msg);
+      result.push(msg);
+    }
+  }
+  return result;
 }
 
 interface AppContainerProps {
@@ -271,10 +326,7 @@ export const AppContainer = (props: AppContainerProps) => {
     [],
   );
 
-  // Helper to determine the current model (polled, since Config has no model-change event).
-  const getCurrentModel = useCallback(() => config.getModel(), [config]);
-
-  const [currentModel, setCurrentModel] = useState(getCurrentModel());
+  const [currentModel, setCurrentModel] = useState(() => config.getModel());
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
@@ -284,6 +336,20 @@ export const AppContainer = (props: AppContainerProps) => {
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
+
+  // Raw write function for terminal escape sequences.
+  // Uses process.stdout directly instead of Ink's useStdout() because
+  // standard Ink v6.2.3 proxies stdout writes through its rendering
+  // pipeline, which can corrupt binary escape sequences (OSC, DCS).
+  const writeRaw = useCallback((data: string) => {
+    process.stdout.write(data);
+  }, []);
+
+  // Terminal notification helpers (constructed directly, not via context)
+  const terminal = useMemo(
+    () => buildTerminalNotification(writeRaw),
+    [writeRaw],
+  );
 
   // Additional hooks moved from App.tsx
   const { stats: sessionStats, startNewSession } = useSessionStats();
@@ -312,6 +378,29 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        const recovered = await config.loadPausedBackgroundAgents(
+          config.getSessionId(),
+        );
+        if (recovered.length > 0) {
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: config
+                .getBackgroundAgentResumeService()
+                .buildRecoveredBackgroundAgentsNotice(recovered.length),
+            },
+            Date.now(),
+          );
+        }
+
+        // Restore session name tag from custom title
+        const title = config
+          .getSessionService()
+          .getSessionTitle(config.getSessionId());
+        if (title) {
+          setSessionName(title);
+        }
       }
 
       // Fire SessionStart event after config is initialized
@@ -360,25 +449,25 @@ export const AppContainer = (props: AppContainerProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
 
-  useEffect(
-    () => setUpdateHandler(historyManager.addItem, setUpdateInfo),
-    [historyManager.addItem],
-  );
+  // Track idle state via ref so the update handler can defer notifications
+  // while the model is streaming, without triggering re-renders.
+  // Note: isIdleRef.current is assigned after streamingState becomes available
+  // (see the assignment below useGeminiStream).
+  const isIdleRef = useRef(true);
+  const updateHandlerRef = useRef<{
+    cleanup: () => void;
+    flush: () => void;
+  } | null>(null);
 
-  // Watch for model changes (e.g., user switches model via /model)
   useEffect(() => {
-    const checkModelChange = () => {
-      const model = getCurrentModel();
-      if (model !== currentModel) {
-        setCurrentModel(model);
-      }
-    };
-
-    checkModelChange();
-    const interval = setInterval(checkModelChange, 1000); // Check every second
-
-    return () => clearInterval(interval);
-  }, [config, currentModel, getCurrentModel]);
+    const handler = setUpdateHandler(
+      historyManager.addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+    updateHandlerRef.current = handler;
+    return () => handler?.cleanup();
+  }, [historyManager.addItem]);
 
   // Derive widths for InputPrompt using shared helper
   const { inputWidth, suggestionsWidth } = useMemo(() => {
@@ -419,28 +508,44 @@ export const AppContainer = (props: AppContainerProps) => {
         )
         .map((item) => item.text)
         .reverse();
+      // Current-session messages are already newest-first; combining with past
+      // messages gives a newest-first list. dedupeNewestFirst keeps the first
+      // (newest) occurrence so resubmitting an old prompt promotes it to
+      // "most recent" rather than leaving a stale copy at an older position.
       const combinedMessages = [
         ...currentSessionUserMessages,
         ...pastMessagesRaw,
       ];
-      const deduplicatedMessages: string[] = [];
-      if (combinedMessages.length > 0) {
-        deduplicatedMessages.push(combinedMessages[0]);
-        for (let i = 1; i < combinedMessages.length; i++) {
-          if (combinedMessages[i] !== combinedMessages[i - 1]) {
-            deduplicatedMessages.push(combinedMessages[i]);
-          }
-        }
-      }
-      setUserMessages(deduplicatedMessages.reverse());
+      setUserMessages(dedupeNewestFirst(combinedMessages).reverse());
     };
     fetchUserMessages();
   }, [historyManager.history, logger]);
 
+  const remountStaticHistory = useCallback(() => {
+    setHistoryRemountKey((prev) => prev + 1);
+  }, []);
+
   const refreshStatic = useCallback(() => {
     stdout.write(ansiEscapes.clearTerminal);
-    setHistoryRemountKey((prev) => prev + 1);
-  }, [setHistoryRemountKey, stdout]);
+    remountStaticHistory();
+  }, [remountStaticHistory, stdout]);
+
+  // Keep the static header in sync with model changes without polling.
+  // Ink's <Static> output is append-only, so model changes must explicitly
+  // clear and remount the static region to redraw the banner at the top.
+  useEffect(() => {
+    const unsubscribe = config.onModelChange((model) => {
+      setCurrentModel((prev) => {
+        if (prev === model) {
+          return prev;
+        }
+        refreshStatic();
+        return model;
+      });
+    });
+
+    return unsubscribe;
+  }, [config, refreshStatic]);
 
   const {
     isThemeDialogOpen,
@@ -467,10 +572,13 @@ export const AppContainer = (props: AppContainerProps) => {
     isAuthDialogOpen,
     isAuthenticating,
     pendingAuthType,
+    externalAuthState,
     qwenAuthState,
     handleAuthSelect,
     handleCodingPlanSubmit,
     handleAlibabaStandardSubmit,
+    handleOpenRouterSubmit,
+    handleCustomApiKeySubmit,
     openAuthDialog,
     cancelAuthentication,
   } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
@@ -531,6 +639,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
+  const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
+    useMemoryDialog();
 
   const {
     isModelDialogOpen,
@@ -538,11 +648,20 @@ export const AppContainer = (props: AppContainerProps) => {
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
+  const {
+    isManageModelsDialogOpen,
+    openManageModelsDialog,
+    closeManageModelsDialog,
+  } = useManageModelsCommand();
   const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
     useArenaCommand();
 
+  // Session name state (set via /rename, restored on /resume)
+  const [sessionName, setSessionName] = useState<string | null>(null);
+
   const {
     isResumeDialogOpen,
+    resumeMatchedSessions,
     openResumeDialog,
     closeResumeDialog,
     handleResume,
@@ -550,7 +669,18 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     historyManager,
     startNewSession,
+    setSessionName,
     remount: refreshStatic,
+  });
+
+  const {
+    isDeleteDialogOpen,
+    openDeleteDialog,
+    closeDeleteDialog,
+    handleDelete,
+  } = useDeleteCommand({
+    config,
+    addItem: historyManager.addItem,
   });
 
   const { toggleVimEnabled } = useVimMode();
@@ -574,13 +704,21 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
 
+  // Ref bridge: the guarded openRewindSelector callback is defined later
+  // (after useDoublePress), but slashCommandActions needs it now. The ref
+  // lets the useMemo capture a stable function pointer whose implementation
+  // is swapped in once the real callback exists.
+  const openRewindSelectorRef = useRef<() => void>(() => {});
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
+      openManageModelsDialog,
       openTrustDialog,
       openArenaDialog,
       openPermissionsDialog,
@@ -601,13 +739,18 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      openRewindSelector: () => openRewindSelectorRef.current(),
+      handleResume,
+      openDeleteDialog,
     }),
     [
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
+      openManageModelsDialog,
       openArenaDialog,
       setDebugMessage,
       dispatchExtensionStateUpdate,
@@ -621,6 +764,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      handleResume,
+      openDeleteDialog,
     ],
   );
 
@@ -640,15 +785,17 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.addItem,
     historyManager.clearItems,
     historyManager.loadHistory,
-    refreshStatic,
+    remountStaticHistory,
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
+    isIdleRef,
     setGeminiMdFileCount,
     slashCommandActions,
     extensionsUpdateStateInternal,
     isConfigInitialized,
     logger,
+    setSessionName,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -668,19 +815,24 @@ export const AppContainer = (props: AppContainerProps) => {
       Date.now(),
     );
     try {
-      const { memoryContent, fileCount } = await loadHierarchicalGeminiMemory(
-        process.cwd(),
-        settings.merged.context?.loadFromIncludeDirectories
-          ? config.getWorkspaceContext().getDirectories()
-          : [],
-        config.getFileService(),
-        config.getExtensionContextFilePaths(),
-        config.isTrustedFolder(),
-        settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
-      );
+      const { memoryContent, fileCount, conditionalRules, projectRoot } =
+        await loadHierarchicalGeminiMemory(
+          process.cwd(),
+          settings.merged.context?.loadFromIncludeDirectories
+            ? config.getWorkspaceContext().getDirectories()
+            : [],
+          config.getFileService(),
+          config.getExtensionContextFilePaths(),
+          config.isTrustedFolder(),
+          settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
+          config.getContextRuleExcludes(),
+        );
 
       config.setUserMemory(memoryContent);
       config.setGeminiMdFileCount(fileCount);
+      config.setConditionalRulesRegistry(
+        new ConditionalRulesRegistry(conditionalRules, projectRoot),
+      );
       setGeminiMdFileCount(fileCount);
 
       historyManager.addItem(
@@ -727,6 +879,9 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    pendingToolCalls,
+    streamingResponseLengthRef,
+    isReceivingContent,
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -748,6 +903,16 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     midTurnDrainRef,
   );
+
+  // Now that streamingState is available, keep isIdleRef in sync and
+  // flush any deferred update notifications when the model finishes responding.
+  isIdleRef.current = streamingState === StreamingState.Idle;
+
+  useEffect(() => {
+    if (streamingState === StreamingState.Idle) {
+      updateHandlerRef.current?.flush();
+    }
+  }, [streamingState]);
 
   // Contextual tips — show tips based on context usage after model responses
   // Defer TipHistory loading when tips are disabled to avoid side effects
@@ -773,6 +938,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
 
   const agentViewState = useAgentViewState();
+  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
+  const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
@@ -798,17 +965,145 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, popAllMessages, drainQueue } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
-    });
+  const {
+    messageQueue,
+    addMessage,
+    clearQueue,
+    popAllMessages,
+    drainQueue,
+    popNextSegment,
+  } = useMessageQueue();
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it
-  // stays consistent with popAllMessages even before React re-renders.
+  // stays consistent with popNextSegment even before React re-renders.
   midTurnDrainRef.current = drainQueue;
+
+  // Connect remote input watcher to submitQuery for bidirectional sync.
+  // When an external process writes a command to the input-file,
+  // the watcher calls submitQuery as if the user typed it in the TUI.
+  const remoteInput = useRemoteInput();
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setSubmitFn((text: string) => submitQuery(text));
+  }, [remoteInput, submitQuery]);
+
+  // Notify remote input watcher when TUI becomes idle so it can
+  // retry queued commands that were deferred while TUI was busy.
+  useEffect(() => {
+    if (!remoteInput) return;
+    if (streamingState === StreamingState.Idle) {
+      remoteInput.notifyIdle();
+    }
+  }, [remoteInput, streamingState]);
+
+  // Dual-output tool-confirmation bridge.
+  //
+  // When a tool call enters awaiting_approval we emit a `control_request`
+  // (subtype: can_use_tool) on the dual-output channel so an external
+  // consumer can decide. Whichever side resolves first (TUI native UI or
+  // `confirmation_response` written to --input-file) wins; we always emit
+  // a `control_response` mirroring the final decision so observers stay in
+  // sync.
+  const dualOutput = useDualOutput();
+  const confirmRequestMap = useRef(new Map<string, string>()); // requestId → callId
+  const confirmCallIdMap = useRef(new Map<string, string>()); // callId → requestId
+  const confirmEmitted = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!dualOutput || !dualOutput.isConnected) return;
+    for (const tc of pendingToolCalls) {
+      if (
+        tc.status === 'awaiting_approval' &&
+        !confirmEmitted.current.has(tc.request.callId)
+      ) {
+        const requestId = crypto.randomUUID();
+        confirmRequestMap.current.set(requestId, tc.request.callId);
+        confirmCallIdMap.current.set(tc.request.callId, requestId);
+        confirmEmitted.current.add(tc.request.callId);
+        dualOutput.emitPermissionRequest(
+          requestId,
+          tc.request.name,
+          tc.request.callId,
+          tc.request.args,
+        );
+      }
+    }
+    // Detect tools that left awaiting_approval (TUI-native resolution) so we
+    // can emit a matching control_response back to external consumers.
+    for (const [callId, requestId] of confirmCallIdMap.current) {
+      const tc = pendingToolCalls.find((t) => t.request.callId === callId);
+      if (
+        tc &&
+        tc.status !== 'awaiting_approval' &&
+        confirmEmitted.current.has(callId)
+      ) {
+        const allowed = tc.status !== 'cancelled' && tc.status !== 'error';
+        dualOutput.emitControlResponse(requestId, allowed);
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      }
+    }
+  }, [dualOutput, pendingToolCalls]);
+
+  // Keep latest state in refs so the confirmation handler (registered once)
+  // always reads current values without needing re-registration.
+  const pendingToolCallsRef = useRef(pendingToolCalls);
+  pendingToolCallsRef.current = pendingToolCalls;
+  const dualOutputRef = useRef(dualOutput);
+  dualOutputRef.current = dualOutput;
+
+  // Route confirmation_response commands written to --input-file back into
+  // the tool's onConfirm handler. Registered once (deps: [remoteInput]) to
+  // avoid teardown/re-registration churn on every pendingToolCalls change.
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setConfirmationHandler(
+      (requestId: string, allowed: boolean) => {
+        const callId = confirmRequestMap.current.get(requestId);
+        if (!callId) {
+          dualOutputRef.current?.emitControlError(
+            requestId,
+            'unknown request_id (already resolved, cancelled, or never issued)',
+          );
+          return;
+        }
+        const tc = pendingToolCallsRef.current.find(
+          (t) =>
+            t.request.callId === callId && t.status === 'awaiting_approval',
+        );
+        if (!tc) {
+          dualOutputRef.current?.emitControlError(
+            requestId,
+            'tool call is no longer awaiting approval',
+          );
+          return;
+        }
+        const waitingTc = tc as WaitingToolCall;
+        if (!waitingTc.confirmationDetails?.onConfirm) {
+          dualOutputRef.current?.emitControlError(
+            requestId,
+            'tool call has no onConfirm handler',
+          );
+          return;
+        }
+        void waitingTc.confirmationDetails.onConfirm(
+          allowed
+            ? ToolConfirmationOutcome.ProceedOnce
+            : ToolConfirmationOutcome.Cancel,
+        );
+        // Do NOT clean up maps here — let the mirror useEffect (line ~870)
+        // detect the state transition and emit control_response + clean up,
+        // keeping the emission path symmetric for both TUI-native and
+        // external-initiated resolutions.
+      },
+    );
+
+    return () => {
+      remoteInput.setConfirmationHandler(() => {});
+    };
+  }, [remoteInput]);
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -957,6 +1252,14 @@ export const AppContainer = (props: AppContainerProps) => {
         speculationRef.current = IDLE_SPECULATION;
       }
 
+      if (
+        streamingState === StreamingState.Idle &&
+        isSlashCommand(submittedValue)
+      ) {
+        void submitQuery(submittedValue);
+        return;
+      }
+
       addMessage(submittedValue);
     },
     [
@@ -993,6 +1296,14 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
+  const rawStickyTodos = useMemo(
+    () => getStickyTodos(historyManager.history, pendingHistoryItems),
+    [historyManager.history, pendingHistoryItems],
+  );
+  const stickyTodos = useStableStickyTodos(rawStickyTodos);
+
+  // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
+  useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
 
   cancelHandlerRef.current = useCallback(() => {
     const pendingHistoryItems = [
@@ -1000,28 +1311,22 @@ export const AppContainer = (props: AppContainerProps) => {
       ...pendingGeminiHistoryItems,
     ];
     if (isToolExecuting(pendingHistoryItems)) {
-      buffer.setText(''); // Just clear the prompt
+      // Tool-cancel: drop both buffer and queue so nothing auto-fires later.
+      buffer.setText('');
+      clearQueue();
       return;
     }
 
-    // Move any queued follow-up messages back into the buffer so the user
-    // can edit or resubmit them. Otherwise leave the buffer alone — in
-    // particular, do NOT repopulate it with the previous prompt; the user
-    // can still recall it via history navigation (Up/Ctrl+P).
-    //
-    // popAllMessages is atomic via the queue's synchronous ref, matching
-    // the drain behavior used during tool completion.
+    // Restore queued input joined into the buffer for editing.
     const popped = popAllMessages();
     if (popped) {
       const currentText = buffer.text;
-      // Preserve any in-progress draft the user typed since submitting (this
-      // is reachable via Ctrl+C cancel, which fires regardless of buffer
-      // content). Mirrors the popQueueIntoInput convention in InputPrompt.
       buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
     }
   }, [
     buffer,
     popAllMessages,
+    clearQueue,
     pendingSlashCommandHistoryItems,
     pendingGeminiHistoryItems,
   ]);
@@ -1029,8 +1334,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleClearScreen = useCallback(() => {
     historyManager.clearItems();
     clearScreen();
-    refreshStatic();
-  }, [historyManager, refreshStatic]);
+    remountStaticHistory();
+  }, [historyManager, remountStaticHistory]);
 
   const { handleInput: vimHandleInput } = useVim(buffer, handleFinalSubmit);
 
@@ -1048,42 +1353,19 @@ export const AppContainer = (props: AppContainerProps) => {
     (streamingState === StreamingState.Idle ||
       streamingState === StreamingState.Responding);
 
-  const [controlsHeight, setControlsHeight] = useState(0);
-
-  useLayoutEffect(() => {
-    if (mainControlsRef.current) {
-      const fullFooterMeasurement = measureElement(mainControlsRef.current);
-      if (fullFooterMeasurement.height > 0) {
-        setControlsHeight(fullFooterMeasurement.height);
-      }
-    }
-  }, [buffer, terminalWidth, terminalHeight]);
-
-  // agentViewState is declared earlier (before handleFinalSubmit) so it
-  // is available for input routing. Referenced here for layout computation.
-
-  // Compute available terminal height based on controls measurement.
-  // When in-process agents are present the AgentTabBar renders an extra
-  // row at the top of the layout; subtract it so downstream consumers
-  // (shell, transcript, etc.) don't overestimate available space.
-  const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
-  const availableTerminalHeight = Math.max(
-    0,
-    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
-  );
-
-  config.setShellExecutionConfig({
-    terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
-    terminalHeight: Math.max(
-      Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
-      1,
-    ),
-    pager: settings.merged.tools?.shell?.pager,
-    showColor: settings.merged.tools?.shell?.showColor,
-  });
-
   const isFocused = useFocus();
   useBracketedPaste();
+
+  useAwaySummary({
+    enabled: settings.merged.general?.showSessionRecap ?? false,
+    config,
+    isFocused,
+    isIdle: streamingState === StreamingState.Idle,
+    addItem: historyManager.addItem,
+    history: historyManager.history,
+    awayThresholdMinutes:
+      settings.merged.general?.sessionRecapAwayThresholdMinutes,
+  });
 
   // Context file names computation
   const contextFileNames = useMemo(() => {
@@ -1097,16 +1379,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initial prompt handling
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);
   const initialPromptSubmitted = useRef(false);
-
-  useEffect(() => {
-    if (activePtyId) {
-      ShellExecutionService.resizePty(
-        activePtyId,
-        Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
-        Math.max(Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING), 1),
-      );
-    }
-  }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
   useEffect(() => {
     if (
@@ -1140,24 +1412,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Generate prompt suggestions when streaming completes
   const followupSuggestionsEnabled =
     settings.merged.ui?.enableFollowupSuggestions === true;
-
-  // Resolve fastModel, validating it belongs to the current authType.
-  // If the configured fastModel is from a different provider, the API call
-  // would fail silently (DashScope/Qwen client rejects unknown model IDs),
-  // so fall back to the main model instead.
-  const resolveFastModel = useCallback((): string | undefined => {
-    const fastModel = settings.merged.fastModel;
-    if (!fastModel) return undefined;
-    const currentAuthType = config.getContentGeneratorConfig()?.authType;
-    if (!currentAuthType) return undefined;
-    const availableModels = config
-      .getModelsConfig()
-      .getAvailableModelsForAuthType(currentAuthType);
-    const belongsToCurrentAuth = availableModels.some(
-      (m) => m.id === fastModel,
-    );
-    return belongsToCurrentAuth ? fastModel : undefined;
-  }, [settings.merged.fastModel, config]);
 
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
@@ -1210,7 +1464,7 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
-      const fastModel = resolveFastModel();
+      const fastModel = config.getFastModel();
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
         model: fastModel,
@@ -1320,6 +1574,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const dialogsVisibleRef = useRef(false);
+  const [isRewindSelectorOpen, setIsRewindSelectorOpen] = useState(false);
+  const [rewindEscPending, setRewindEscPending] = useState(false);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
@@ -1333,7 +1589,120 @@ export const AppContainer = (props: AppContainerProps) => {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener();
-  const isInitialMount = useRef(true);
+  const {
+    isFeedbackDialogOpen,
+    openFeedbackDialog,
+    closeFeedbackDialog,
+    temporaryCloseFeedbackDialog,
+    submitFeedback,
+  } = useFeedbackDialog({
+    config,
+    settings,
+    streamingState,
+    history: historyManager.history,
+    sessionStats,
+  });
+  const dialogsVisible =
+    showWelcomeBackDialog ||
+    shouldShowIdePrompt ||
+    shouldShowCommandMigrationNudge ||
+    isFolderTrustDialogOpen ||
+    !!shellConfirmationRequest ||
+    !!confirmationRequest ||
+    confirmUpdateExtensionRequests.length > 0 ||
+    !!codingPlanUpdateRequest ||
+    settingInputRequests.length > 0 ||
+    pluginChoiceRequests.length > 0 ||
+    !!loopDetectionConfirmationRequest ||
+    isThemeDialogOpen ||
+    isSettingsDialogOpen ||
+    isMemoryDialogOpen ||
+    isModelDialogOpen ||
+    isManageModelsDialogOpen ||
+    isTrustDialogOpen ||
+    activeArenaDialog !== null ||
+    isPermissionsDialogOpen ||
+    isAuthDialogOpen ||
+    isAuthenticating ||
+    isEditorDialogOpen ||
+    showIdeRestartPrompt ||
+    isSubagentCreateDialogOpen ||
+    isAgentsManagerDialogOpen ||
+    isMcpDialogOpen ||
+    isHooksDialogOpen ||
+    isApprovalModeDialogOpen ||
+    isResumeDialogOpen ||
+    isDeleteDialogOpen ||
+    isExtensionsManagerDialogOpen ||
+    isRewindSelectorOpen ||
+    bgTasksDialogOpen;
+  dialogsVisibleRef.current = dialogsVisible;
+  const shouldShowStickyTodos =
+    stickyTodos !== null &&
+    !dialogsVisible &&
+    !isFeedbackDialogOpen &&
+    streamingState !== StreamingState.WaitingForConfirmation;
+  const stickyTodoWidth = Math.min(mainAreaWidth, 64);
+  const stickyTodoMaxVisibleItems =
+    getStickyTodoMaxVisibleItems(terminalHeight);
+  const stickyTodosLayoutKey = shouldShowStickyTodos
+    ? getStickyTodosLayoutKey(
+        stickyTodos,
+        stickyTodoWidth,
+        stickyTodoMaxVisibleItems,
+      )
+    : 'hidden';
+  const [controlsHeight, setControlsHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    if (!mainControlsRef.current) {
+      setControlsHeight((previousHeight) =>
+        previousHeight === 0 ? previousHeight : 0,
+      );
+      return;
+    }
+
+    const fullFooterMeasurement = measureElement(mainControlsRef.current);
+    setControlsHeight((previousHeight) =>
+      previousHeight === fullFooterMeasurement.height
+        ? previousHeight
+        : fullFooterMeasurement.height,
+    );
+  }, [
+    buffer,
+    terminalWidth,
+    terminalHeight,
+    btwItem,
+    dialogsVisible,
+    stickyTodosLayoutKey,
+  ]);
+
+  // agentViewState is declared earlier (before handleFinalSubmit) so it
+  // is available for input routing. Referenced here for layout computation.
+  const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
+  const availableTerminalHeight = Math.max(
+    0,
+    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
+  );
+
+  config.setShellExecutionConfig({
+    terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
+    terminalHeight: Math.max(
+      Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
+      1,
+    ),
+    pager: settings.merged.tools?.shell?.pager,
+    showColor: settings.merged.tools?.shell?.showColor,
+  });
+  useEffect(() => {
+    if (activePtyId) {
+      ShellExecutionService.resizePty(
+        activePtyId,
+        Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
+        Math.max(Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING), 1),
+      );
+    }
+  }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -1341,21 +1710,6 @@ export const AppContainer = (props: AppContainerProps) => {
       setShowIdeRestartPrompt(true);
     }
   }, [ideNeedsRestart]);
-
-  useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-
-    const handler = setTimeout(() => {
-      refreshStatic();
-    }, 300);
-
-    return () => {
-      clearTimeout(handler);
-    };
-  }, [terminalWidth, refreshStatic]);
 
   useEffect(() => {
     const unsubscribe = ideContextStore.subscribe(setIdeContextState);
@@ -1366,6 +1720,99 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
     setShowEscapePrompt(showPrompt);
   }, []);
+
+  // --- Rewind selector callbacks ---
+  const openRewindSelector = useCallback(() => {
+    if (streamingState !== StreamingState.Idle) return;
+    if (config.getIdeMode()) return;
+    if (dialogsVisibleRef.current) return;
+    const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
+    if (!hasUserTurns) return;
+    setIsRewindSelectorOpen(true);
+  }, [streamingState, config, historyManager.history]);
+  openRewindSelectorRef.current = openRewindSelector;
+
+  const closeRewindSelector = useCallback(() => {
+    setIsRewindSelectorOpen(false);
+  }, []);
+
+  const handleRewindConfirm = useCallback(
+    (userItem: HistoryItem) => {
+      const geminiClient = config.getGeminiClient();
+      if (!geminiClient) return;
+
+      // 1. Compute values from current history BEFORE truncation
+      const originalHistory = historyManager.history;
+      const originalLength = originalHistory.length;
+
+      let targetTurnIndex = 0;
+      for (const h of originalHistory) {
+        if (h.id === userItem.id) break;
+        if (isRealUserTurn(h)) targetTurnIndex++;
+      }
+
+      // 2. Compute API truncation point
+      const apiHistory = geminiClient.getHistory();
+      const apiTruncateIndex = computeApiTruncationIndex(
+        originalHistory,
+        userItem.id,
+        apiHistory,
+      );
+
+      // Abort if the target turn is unreachable (e.g., absorbed by compression)
+      if (apiTruncateIndex < 0) {
+        historyManager.addItem(
+          {
+            type: 'error',
+            text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+          },
+          Date.now(),
+        );
+        setIsRewindSelectorOpen(false);
+        return;
+      }
+
+      // 3. Truncate API history to the target point.
+      // Do NOT strip thought parts — reasoning models (e.g. DeepSeek) require
+      // reasoning_content continuity across all turns in the conversation.
+      geminiClient.truncateHistory(apiTruncateIndex);
+
+      // 4. Truncate UI history (keep everything before the target item)
+      const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+      historyManager.loadHistory(truncatedUi);
+
+      // 5. Re-render the terminal
+      refreshStatic();
+
+      // 6. Pre-populate input with the original user text
+      if (userItem.type === 'user' && userItem.text) {
+        buffer.setText(userItem.text);
+      }
+
+      // 7. Add info message
+      historyManager.addItem(
+        {
+          type: 'info',
+          text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
+        },
+        Date.now(),
+      );
+
+      // 8. Record the rewind event — re-roots the parentUuid chain so
+      //    rewound messages end up on a dead branch during resume.
+      config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+        truncatedCount: originalLength - truncatedUi.length,
+      });
+
+      // 9. Close the selector
+      setIsRewindSelectorOpen(false);
+    },
+    [config, historyManager, refreshStatic, buffer],
+  );
+
+  const handleDoubleEscRewind = useDoublePress(openRewindSelector, (pending) =>
+    setRewindEscPending(pending),
+  );
 
   const handleIdePromptComplete = useCallback(
     (result: IdeIntegrationNudgeResult) => {
@@ -1488,6 +1935,8 @@ export const AppContainer = (props: AppContainerProps) => {
     elapsedTime,
     settings,
     config,
+    terminal,
+    pendingToolCalls,
   });
 
   // Dialog close functionality
@@ -1503,11 +1952,15 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    isMemoryDialogOpen,
+    closeMemoryDialog,
     activeArenaDialog,
     closeArenaDialog,
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
+    isBackgroundTasksDialogOpen: bgTasksDialogOpen,
+    closeBackgroundTasksDialog: closeBgTasksDialog,
   });
 
   const handleExit = useCallback(
@@ -1658,6 +2111,20 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
+        // Input is empty and idle — double-ESC opens rewind selector
+        if (
+          streamingState === StreamingState.Idle &&
+          !dialogsVisibleRef.current
+        ) {
+          if (escapeTimerRef.current) {
+            clearTimeout(escapeTimerRef.current);
+            escapeTimerRef.current = null;
+          }
+          setEscapePressedOnce(false);
+          handleDoubleEscRewind();
+          return;
+        }
+
         // No action available, reset the flag
         if (escapeTimerRef.current) {
           clearTimeout(escapeTimerRef.current);
@@ -1754,6 +2221,7 @@ export const AppContainer = (props: AppContainerProps) => {
       compactMode,
       setCompactMode,
       refreshStatic,
+      handleDoubleEscRewind,
     ],
   );
 
@@ -1795,52 +2263,40 @@ export const AppContainer = (props: AppContainerProps) => {
     stdout,
   ]);
 
-  const nightly = props.version.includes('nightly');
+  // Drain queued messages when idle. `queueDrainNonce` re-fires the effect
+  // after each submission settles so multi-step queues drain end-to-end.
+  const queueDrainingRef = useRef(false);
+  const [queueDrainNonce, setQueueDrainNonce] = useState(0);
+  useEffect(() => {
+    if (queueDrainingRef.current) return;
+    if (!isConfigInitialized) return;
+    if (streamingState !== StreamingState.Idle) return;
+    if (dialogsVisible) return;
+    if (messageQueue.length === 0) return;
 
-  const dialogsVisible =
-    showWelcomeBackDialog ||
-    shouldShowIdePrompt ||
-    shouldShowCommandMigrationNudge ||
-    isFolderTrustDialogOpen ||
-    !!shellConfirmationRequest ||
-    !!confirmationRequest ||
-    confirmUpdateExtensionRequests.length > 0 ||
-    !!codingPlanUpdateRequest ||
-    settingInputRequests.length > 0 ||
-    pluginChoiceRequests.length > 0 ||
-    !!loopDetectionConfirmationRequest ||
-    isThemeDialogOpen ||
-    isSettingsDialogOpen ||
-    isModelDialogOpen ||
-    isTrustDialogOpen ||
-    activeArenaDialog !== null ||
-    isPermissionsDialogOpen ||
-    isAuthDialogOpen ||
-    isAuthenticating ||
-    isEditorDialogOpen ||
-    showIdeRestartPrompt ||
-    isSubagentCreateDialogOpen ||
-    isAgentsManagerDialogOpen ||
-    isMcpDialogOpen ||
-    isHooksDialogOpen ||
-    isApprovalModeDialogOpen ||
-    isResumeDialogOpen ||
-    isExtensionsManagerDialogOpen;
-  dialogsVisibleRef.current = dialogsVisible;
+    // Two-phase: batch plain prompts as one turn, else pop next slash command.
+    const plainPrompts = drainQueue();
+    const submission =
+      plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();
+    if (submission === null) return;
 
-  const {
-    isFeedbackDialogOpen,
-    openFeedbackDialog,
-    closeFeedbackDialog,
-    temporaryCloseFeedbackDialog,
-    submitFeedback,
-  } = useFeedbackDialog({
-    config,
-    settings,
+    queueDrainingRef.current = true;
+    Promise.resolve(submitQuery(submission)).finally(() => {
+      queueDrainingRef.current = false;
+      setQueueDrainNonce((n) => n + 1);
+    });
+  }, [
+    isConfigInitialized,
     streamingState,
-    history: historyManager.history,
-    sessionStats,
-  });
+    dialogsVisible,
+    messageQueue,
+    drainQueue,
+    popNextSegment,
+    submitQuery,
+    queueDrainNonce,
+  ]);
+
+  const nightly = props.version.includes('nightly');
 
   const uiState: UIState = useMemo(
     () => ({
@@ -1853,6 +2309,7 @@ export const AppContainer = (props: AppContainerProps) => {
       authError,
       isAuthDialogOpen,
       pendingAuthType,
+      externalAuthState,
       // Qwen OAuth state
       qwenAuthState,
       editorError,
@@ -1860,13 +2317,17 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
+      isManageModelsDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      resumeMatchedSessions,
+      isDeleteDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -1913,6 +2374,7 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      stickyTodos,
       btwItem,
       setBtwItem,
       cancelBtw,
@@ -1947,9 +2409,18 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Real-time token display
+      streamingResponseLengthRef,
+      isReceivingContent,
+      // Session name
+      sessionName,
+      setSessionName,
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
+      // Rewind selector
+      isRewindSelectorOpen,
+      rewindEscPending,
     }),
     [
       isThemeDialogOpen,
@@ -1959,6 +2430,7 @@ export const AppContainer = (props: AppContainerProps) => {
       authError,
       isAuthDialogOpen,
       pendingAuthType,
+      externalAuthState,
       // Qwen OAuth state
       qwenAuthState,
       editorError,
@@ -1966,13 +2438,17 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
+      isManageModelsDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      resumeMatchedSessions,
+      isDeleteDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -2018,6 +2494,7 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      stickyTodos,
       btwItem,
       setBtwItem,
       cancelBtw,
@@ -2054,9 +2531,18 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Real-time token display
+      streamingResponseLengthRef,
+      isReceivingContent,
+      // Session name
+      sessionName,
+      setSessionName,
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
+      // Rewind selector
+      isRewindSelectorOpen,
+      rewindEscPending,
     ],
   );
 
@@ -2064,6 +2550,7 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -2073,11 +2560,16 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelAuthentication,
       handleCodingPlanSubmit,
       handleAlibabaStandardSubmit,
+      handleOpenRouterSubmit,
+      handleCustomApiKeySubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
+      openManageModelsDialog,
+      closeManageModelsDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2115,15 +2607,24 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Delete session dialog
+      openDeleteDialog,
+      closeDeleteDialog,
+      handleDelete,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Rewind selector
+      openRewindSelector,
+      closeRewindSelector,
+      handleRewindConfirm,
     }),
     [
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -2133,11 +2634,16 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelAuthentication,
       handleCodingPlanSubmit,
       handleAlibabaStandardSubmit,
+      handleOpenRouterSubmit,
+      handleCustomApiKeySubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
+      openManageModelsDialog,
+      closeManageModelsDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2173,11 +2679,19 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Delete session dialog
+      openDeleteDialog,
+      closeDeleteDialog,
+      handleDelete,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Rewind selector
+      openRewindSelector,
+      closeRewindSelector,
+      handleRewindConfirm,
     ],
   );
 

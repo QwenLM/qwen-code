@@ -5,14 +5,21 @@
 The status line lets you run a shell command whose output is displayed in the footer's left section. The command receives structured JSON context via stdin, so it can show session-aware information like the current model, token usage, git branch, or anything else you can script.
 
 ```
-With status line (default approval mode — 1 row):
+Single-line status (default approval mode — 1 row):
 ┌─────────────────────────────────────────────────────────────────┐
 │  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
 └─────────────────────────────────────────────────────────────────┘
 
-With status line + non-default mode (2 rows):
+Multi-line status (up to 2 lines — 2 rows):
 ┌─────────────────────────────────────────────────────────────────┐
-│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
+│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
+└─────────────────────────────────────────────────────────────────┘
+
+Multi-line status + non-default mode (3 rows max):
+┌─────────────────────────────────────────────────────────────────┐
+│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
 │  auto-accept edits (shift + tab to cycle)                       │  ← mode indicator
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -53,10 +60,11 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 }
 ```
 
-| Field     | Type        | Required | Description                                                                           |
-| --------- | ----------- | -------- | ------------------------------------------------------------------------------------- |
-| `type`    | `"command"` | Yes      | Must be `"command"`                                                                   |
-| `command` | string      | Yes      | Shell command to execute. Receives JSON via stdin, first line of stdout is displayed. |
+| Field             | Type        | Required | Description                                                                                                                       |
+| ----------------- | ----------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `type`            | `"command"` | Yes      | Must be `"command"`                                                                                                               |
+| `command`         | string      | Yes      | Shell command to execute. Receives JSON via stdin, stdout is displayed (up to 2 lines).                                           |
+| `refreshInterval` | number      | No       | Re-run the command every N seconds (minimum 1). Useful for data that changes without an Agent state event (clock, quota, uptime). |
 
 ## JSON input
 
@@ -181,6 +189,24 @@ Output: `my-project (main)`
 
 Output: `+120/-30 lines`
 
+### Live clock and git branch
+
+Use `refreshInterval` when the statusline shows data that changes without an Agent event (e.g. the clock, uptime, or rate-limit counters):
+
+```json
+{
+  "ui": {
+    "statusLine": {
+      "type": "command",
+      "command": "input=$(cat); branch=$(echo \"$input\" | jq -r '.git.branch // \"no-git\"'); echo \"$(date +%H:%M:%S)  ($branch)\"",
+      "refreshInterval": 1
+    }
+  }
+}
+```
+
+Output (refreshed every second): `14:32:07  (main)`
+
 ### Script file for complex commands
 
 For longer commands, save a script file at `~/.qwen/statusline-command.sh`:
@@ -218,9 +244,9 @@ Then reference it in settings:
 
 ## Behavior
 
-- **Update triggers**: The status line updates when the model changes, a new message is sent (token count changes), vim mode is toggled, git branch changes, tool calls complete, or file changes occur. Updates are debounced (300ms).
+- **Update triggers**: The status line updates when the model changes, a new message is sent (token count changes), vim mode is toggled, git branch changes, tool calls complete, or file changes occur. Updates are debounced (300ms). Set `refreshInterval` (seconds) to additionally re-run the command on a timer — useful for data that changes without an Agent event (clock, rate limits, build status).
 - **Timeout**: Commands that take longer than 5 seconds are killed. The status line clears on failure.
-- **Output**: Only the first line of stdout is used. The text is rendered with dimmed colors in the footer's left section and truncated if it exceeds the available width.
+- **Output**: Multi-line output is supported (up to 2 lines; extra lines are discarded). Each line is rendered as a separate row with dimmed colors in the footer's left section. Lines that exceed the available width are truncated.
 - **Hot reload**: Changes to `ui.statusLine` in settings take effect immediately — no restart required.
 - **Shell**: Commands run via `/bin/sh` on macOS/Linux. On Windows, `cmd.exe` is used by default — wrap POSIX commands with `bash -c "..."` or point to a bash script (e.g. `bash ~/.qwen/statusline-command.sh`).
 - **Removal**: Delete the `ui.statusLine` key from settings to disable. The "? for shortcuts" hint returns.
@@ -231,5 +257,5 @@ Then reference it in settings:
 | ----------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Status line not showing | Config at wrong path   | Must be under `ui.statusLine`, not root-level `statusLine`                                                                                                                                                                                                                                                                                                                                             |
 | Empty output            | Command fails silently | Test manually: `echo '{"session_id":"test","version":"0.14.1","model":{"display_name":"test"},"context_window":{"context_window_size":0,"used_percentage":0,"remaining_percentage":100,"current_usage":0,"total_input_tokens":0,"total_output_tokens":0},"workspace":{"current_dir":"/tmp"},"metrics":{"models":{},"files":{"total_lines_added":0,"total_lines_removed":0}}}' \| sh -c 'your_command'` |
-| Stale data              | No trigger fired       | Send a message or switch models to trigger an update                                                                                                                                                                                                                                                                                                                                                   |
+| Stale data              | No trigger fired       | Send a message or switch models to trigger an update — or set `refreshInterval` to re-run the command on a timer                                                                                                                                                                                                                                                                                       |
 | Command too slow        | Complex script         | Optimize the script or move heavy work to a background cache                                                                                                                                                                                                                                                                                                                                           |

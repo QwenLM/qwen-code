@@ -169,6 +169,48 @@ describe('QwenSessionUpdateHandler', () => {
         locations: undefined,
       });
     });
+
+    it('forwards rawOutput for structured agent execution updates', () => {
+      const rawOutput = {
+        type: 'task_execution',
+        subagentName: 'Explore',
+        taskDescription: 'Explore auth logic',
+        taskPrompt: 'Inspect auth flow implementation',
+        status: 'running',
+        toolCalls: [
+          {
+            callId: 'child-1',
+            name: 'read',
+            status: 'executing',
+          },
+        ],
+      };
+
+      const toolCallUpdate = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-agent',
+          kind: 'other',
+          title: 'Launch agent',
+          status: 'in_progress',
+          rawOutput,
+        },
+      } as SessionNotification;
+
+      handler.handleSessionUpdate(toolCallUpdate);
+
+      expect(mockCallbacks.onToolCall).toHaveBeenCalledWith({
+        toolCallId: 'call-agent',
+        kind: 'other',
+        title: 'Launch agent',
+        status: 'in_progress',
+        rawInput: undefined,
+        rawOutput,
+        content: undefined,
+        locations: undefined,
+      });
+    });
   });
 
   describe('plan handling', () => {
@@ -307,6 +349,46 @@ describe('QwenSessionUpdateHandler', () => {
       handler.handleSessionUpdate(commandsUpdate);
 
       expect(mockCallbacks.onAvailableCommands).toHaveBeenCalledWith([]);
+    });
+  });
+
+  describe('available skills handling', () => {
+    it('reads available skills from available_commands_update metadata', () => {
+      mockCallbacks.onAvailableSkills = vi.fn();
+
+      const commandsUpdate = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: {
+            availableSkills: ['code-review-expert', 'verification-pack'],
+          },
+        },
+      } as unknown as SessionNotification;
+
+      handler.handleSessionUpdate(commandsUpdate);
+
+      expect(mockCallbacks.onAvailableSkills).toHaveBeenCalledWith([
+        'code-review-expert',
+        'verification-pack',
+      ]);
+    });
+
+    it('clears available skills when metadata is absent', () => {
+      mockCallbacks.onAvailableSkills = vi.fn();
+
+      const commandsUpdate = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+        },
+      } as unknown as SessionNotification;
+
+      handler.handleSessionUpdate(commandsUpdate);
+
+      expect(mockCallbacks.onAvailableSkills).toHaveBeenCalledWith([]);
     });
   });
 

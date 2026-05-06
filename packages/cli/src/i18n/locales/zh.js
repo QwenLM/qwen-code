@@ -413,6 +413,8 @@ export default {
   'Tool Schema Compliance': '工具 Schema 兼容性',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
+  'Auto (detect terminal theme)': '自动（检测终端主题）',
+  Auto: '自动',
   Text: '文本',
   JSON: 'JSON',
   Plan: '规划',
@@ -575,6 +577,7 @@ export default {
   '(user)': '（用户）',
   '[not set]': '［未设置］',
   '[value stored in keychain]': '［值存储在钥匙串中］',
+  'Value:': '值：',
   'Manage extension settings.': '管理扩展设置。',
   'You need to specify a command (set or list).':
     '您需要指定命令（set 或 list）。',
@@ -612,7 +615,6 @@ export default {
   'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
     '解析 {{terminalName}} keybindings.json 失败。文件包含无效的 JSON。请手动修复文件或删除它以允许自动配置。',
   'Error: {{error}}': '错误：{{error}}',
-  'Value:': '值：',
   'Shift+Enter binding already exists': 'Shift+Enter 绑定已存在',
   'Ctrl+Enter binding already exists': 'Ctrl+Enter 绑定已存在',
   'Existing keybindings detected. Will not modify to avoid conflicts.':
@@ -910,6 +912,41 @@ export default {
     '用法：/memory add [--global|--project] <要记住的文本>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     '正在尝试保存到记忆 {{scope}}："{{fact}}"',
+  'Open auto-memory folder': '打开自动记忆文件夹',
+  'Auto-memory: {{status}}': '自动记忆：{{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    '自动整理：{{status}} · {{lastDream}} · /dream 立即运行',
+  never: '从未',
+  on: '开',
+  off: '关',
+  '✦ dreaming': '✦ 整理中',
+  'Remove matching entries from managed auto-memory.':
+    '从托管自动记忆中删除匹配的条目。',
+  'Usage: /forget <memory text to remove>': '用法：/forget <要删除的记忆文本>',
+  'No managed auto-memory entries matched: {{query}}':
+    '没有匹配的托管自动记忆条目：{{query}}',
+  'Show managed auto-memory status.': '显示托管自动记忆状态',
+  'Run managed auto-memory extraction for the current session.':
+    '为当前会话运行托管自动记忆提炼',
+  'Managed auto-memory root: {{root}}': '托管自动记忆根目录：{{root}}',
+  'Managed auto-memory topics:': '托管自动记忆主题：',
+  'No extraction cursor found yet.': '尚未找到提炼游标。',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    '游标：session={{sessionId}}，offset={{offset}}，updated={{updatedAt}}',
+  'No chat client available to extract memory.':
+    '没有可用于提炼记忆的聊天客户端。',
+  'Managed auto-memory extraction is already running.':
+    '托管自动记忆提炼已在运行中。',
+  'Managed auto-memory extraction found no new durable memories.':
+    '托管自动记忆提炼未发现新的持久记忆。',
+  'Consolidate managed auto-memory topic files.': '整理托管自动记忆主题文件',
+  'Managed auto-memory dream found nothing to improve.':
+    '托管自动记忆 dream 未发现可改进内容。',
+  'Deduplicated entries: {{count}}': '去重条目数：{{count}}',
+  'Save a durable memory using the save_memory tool.':
+    '使用 save_memory 工具保存一条持久记忆',
+  'Usage: /remember [--global|--project] <text to remember>':
+    '用法：/remember [--global|--project] <要记住的文本>',
 
   // ============================================================================
   // Commands - MCP
@@ -999,6 +1036,12 @@ export default {
     '按 Enter 开始认证，Esc 返回',
   'Authenticating... Please complete the login in your browser.':
     '认证中... 请在浏览器中完成登录。',
+  'Press c to copy the authorization URL to your clipboard.':
+    '按 c 复制授权 URL 到剪贴板。',
+  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
+    '已向终端发送复制请求；若粘贴为空，请手动复制上方 URL。',
+  'Cannot write to terminal — copy the URL above manually.':
+    '无法写入终端，请手动复制上方 URL。',
   'Press Enter or Esc to go back': '按 Enter 或 Esc 返回',
 
   // MCP Server Detail
@@ -1017,7 +1060,7 @@ export default {
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
-  required: '必填',
+  required: '必需',
   Type: '类型',
   Enum: '枚举',
   Parameters: '参数',
@@ -1109,7 +1152,7 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '设置用于输入建议和推测执行的轻量模型',
@@ -1117,6 +1160,8 @@ export default {
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
     '当前认证类型 ({{authType}}) 没有可用的模型',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
@@ -1258,6 +1303,8 @@ export default {
     '付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
   'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
   'Bring your own API key': '使用自己的 API 密钥',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    '基于浏览器的第三方提供商认证（例如 OpenRouter、ModelScope）',
   'Use coding plan credentials or your own api-keys/providers.':
     '使用 Coding Plan 凭证或您自己的 API 密钥/提供商。',
   OpenAI: 'OpenAI',
@@ -1574,6 +1621,7 @@ export default {
   'Command Format Migration': '命令格式迁移',
   'Found {{count}} TOML command file:': '发现 {{count}} 个 TOML 命令文件：',
   'Found {{count}} TOML command files:': '发现 {{count}} 个 TOML 命令文件：',
+  'Current tasks': '当前任务',
   '... and {{count}} more': '... 以及其他 {{count}} 个',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'TOML 格式已弃用。是否将它们迁移到 Markdown 格式？',
@@ -1732,6 +1780,11 @@ export default {
   // Context Usage
   // ============================================================================
   'Context Usage': '上下文使用情况',
+  '% used': '% 已用',
+  '% context used': '% 上下文已用',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    '上下文超出限制！请使用 /compress 或 /clear 来减少上下文。',
+  'Use /compress or /clear': '使用 /compress 或 /clear',
   'Context window': '上下文窗口',
   Used: '已用',
   Free: '空闲',

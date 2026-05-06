@@ -348,6 +348,8 @@ export default {
   'Tool Schema Compliance': 'Werkzeug-Schema-Konformität',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
+  'Auto (detect terminal theme)': 'Automatisch (Terminal-Theme erkennen)',
+  Auto: 'Automatisch',
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
@@ -901,6 +903,45 @@ export default {
     'Verwendung: /memory add [--global|--project] <zu merkender Text>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Versuche im Speicher {{scope}} zu speichern: "{{fact}}"',
+  'Open auto-memory folder': 'Auto-Speicher-Ordner öffnen',
+  'Auto-memory: {{status}}': 'Auto-Speicher: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Auto-Konsolidierung: {{status}} · {{lastDream}} · /dream zum Ausführen',
+  never: 'nie',
+  on: 'ein',
+  off: 'aus',
+  '❆ dreaming': '❆ konsolidiert',
+  'Remove matching entries from managed auto-memory.':
+    'Passende Einträge aus dem verwalteten Auto-Speicher entfernen.',
+  'Usage: /forget <memory text to remove>':
+    'Verwendung: /forget <zu entfernender Erinnerungstext>',
+  'No managed auto-memory entries matched: {{query}}':
+    'Keine verwalteten Auto-Speicher-Einträge gefunden: {{query}}',
+  'Show managed auto-memory status.':
+    'Status des verwalteten Auto-Speichers anzeigen.',
+  'Run managed auto-memory extraction for the current session.':
+    'Verwaltete Auto-Speicher-Extraktion für die aktuelle Sitzung ausführen.',
+  'Managed auto-memory root: {{root}}':
+    'Verwalteter Auto-Speicher-Stamm: {{root}}',
+  'Managed auto-memory topics:': 'Verwaltete Auto-Speicher-Themen:',
+  'No extraction cursor found yet.': 'Noch kein Extraktions-Cursor gefunden.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Cursor: Sitzung={{sessionId}}, Offset={{offset}}, Aktualisiert={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'Kein Chat-Client verfügbar, um Erinnerungen zu extrahieren.',
+  'Managed auto-memory extraction is already running.':
+    'Verwaltete Auto-Speicher-Extraktion läuft bereits.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Verwaltete Auto-Speicher-Extraktion hat keine neuen dauerhaften Erinnerungen gefunden.',
+  'Consolidate managed auto-memory topic files.':
+    'Verwaltete Auto-Speicher-Themendateien konsolidieren.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Auto-Speicher-Konsolidierung hat nichts zu verbessern gefunden.',
+  'Deduplicated entries: {{count}}': 'Deduplizierte Einträge: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Eine dauerhafte Erinnerung mit dem save_memory-Tool speichern.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Verwendung: /remember [--global|--project] <zu merkender Text>',
 
   // ============================================================================
   // Commands - MCP
@@ -1004,7 +1045,7 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Modell für diese Sitzung wechseln (--fast für Vorschlagsmodell)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Leichteres Modell für Eingabevorschläge und spekulative Ausführung festlegen',
@@ -1014,6 +1055,8 @@ export default {
     'Authentifizierungstyp nicht verfügbar.',
   'No models available for the current authentication type ({{authType}}).':
     'Keine Modelle für den aktuellen Authentifizierungstyp ({{authType}}) verfügbar.',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
@@ -1274,6 +1317,8 @@ export default {
     'Kostenpflichtig \u00B7 Bis zu 6.000 Anfragen/5 Std. \u00B7 Alle Alibaba Cloud Coding Plan Modelle',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': 'Eigenen API-Schlüssel verwenden',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Browserbasierte Authentifizierung mit externen Anbietern (z. B. OpenRouter, ModelScope)',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Verwenden Sie Coding Plan-Anmeldedaten oder Ihre eigenen API-Schlüssel/Anbieter.',
@@ -1588,6 +1633,7 @@ export default {
   'Found {{count}} TOML command file:': '{{count}} TOML-Befehlsdatei gefunden:',
   'Found {{count}} TOML command files:':
     '{{count}} TOML-Befehlsdateien gefunden:',
+  'Current tasks': 'Aktuelle Aufgaben',
   '... and {{count}} more': '... und {{count}} weitere',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Das TOML-Format ist veraltet. Möchten Sie sie ins Markdown-Format migrieren?',
@@ -1872,6 +1918,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'Kontextnutzung',
+  '% used': '% verwendet',
+  '% context used': '% Kontext verwendet',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'Kontext überschreitet Limit! Verwenden Sie /compress oder /clear zum Reduzieren.',
+  'Use /compress or /clear': 'Verwenden Sie /compress oder /clear',
   'No API response yet. Send a message to see actual usage.':
     'Noch keine API-Antwort. Senden Sie eine Nachricht, um die tatsächliche Nutzung anzuzeigen.',
   'Estimated pre-conversation overhead':

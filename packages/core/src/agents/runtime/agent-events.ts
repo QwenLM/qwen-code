@@ -35,6 +35,7 @@ export type AgentEvent =
   | 'tool_output_update'
   | 'tool_waiting_approval'
   | 'usage_metadata'
+  | 'external_message'
   | 'finish'
   | 'error'
   | 'status_change';
@@ -51,6 +52,8 @@ export enum AgentEventType {
   TOOL_OUTPUT_UPDATE = 'tool_output_update',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
   USAGE_METADATA = 'usage_metadata',
+  /** External user message injected mid-run (e.g. via send_message). */
+  EXTERNAL_MESSAGE = 'external_message',
   FINISH = 'finish',
   ERROR = 'error',
   STATUS_CHANGE = 'status_change',
@@ -133,6 +136,13 @@ export interface AgentToolOutputUpdateEvent {
   outputChunk: ToolResultDisplay;
   /** PTY process PID — present when the tool runs in an interactive shell. */
   pid?: number;
+  /**
+   * Wall-clock timestamp (ms since epoch) when the tool transitioned into
+   * `executing` in the scheduler. Emitted once per call, from the first
+   * scheduler update that sees the transition. Consumers should keep the
+   * first value they see and ignore later events that re-carry it.
+   */
+  executionStartTime?: number;
   timestamp: number;
 }
 
@@ -149,6 +159,13 @@ export interface AgentApprovalRequestEvent {
     outcome: ToolConfirmationOutcome,
     payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
   ) => Promise<void>;
+  timestamp: number;
+}
+
+export interface AgentExternalMessageEvent {
+  subagentId: string;
+  /** Raw message text (without any framing prefix). */
+  text: string;
   timestamp: number;
 }
 
@@ -197,6 +214,7 @@ export interface AgentEventMap {
   [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
+  [AgentEventType.EXTERNAL_MESSAGE]: AgentExternalMessageEvent;
   [AgentEventType.FINISH]: AgentFinishEvent;
   [AgentEventType.ERROR]: AgentErrorEvent;
   [AgentEventType.STATUS_CHANGE]: AgentStatusChangeEvent;

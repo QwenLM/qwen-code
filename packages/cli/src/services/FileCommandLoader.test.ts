@@ -308,6 +308,33 @@ describe('FileCommandLoader', () => {
     }
   });
 
+  it('skips auto-discovered commands in bare mode', async () => {
+    const userCommandsDir = Storage.getUserCommandsDir();
+    const projectCommandsDir = new Storage(
+      process.cwd(),
+    ).getProjectCommandsDir();
+    mock({
+      [userCommandsDir]: {
+        'user.toml': 'prompt = "User prompt"',
+      },
+      [projectCommandsDir]: {
+        'project.toml': 'prompt = "Project prompt"',
+      },
+    });
+
+    const mockConfig = {
+      getProjectRoot: vi.fn(() => process.cwd()),
+      getExtensions: vi.fn(() => []),
+      getFolderTrustFeature: vi.fn(() => false),
+      getFolderTrust: vi.fn(() => false),
+      getBareMode: vi.fn(() => true),
+    } as unknown as Config;
+    const loader = new FileCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toEqual([]);
+  });
+
   it('ignores files with TOML syntax errors', async () => {
     const userCommandsDir = Storage.getUserCommandsDir();
     mock({

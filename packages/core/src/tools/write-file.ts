@@ -9,6 +9,7 @@ import path from 'node:path';
 import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { isAutoMemPath } from '../memory/paths.js';
 import type {
   FileDiff,
   ToolCallConfirmationDetails,
@@ -31,7 +32,7 @@ import {
   detectLineEnding,
 } from '../services/fileSystemService.js';
 import type { LineEnding } from '../services/fileSystemService.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
+import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -100,9 +101,14 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Write operations always need user confirmation.
+   * Write operations always need user confirmation, except for managed
+   * auto-memory files which are written autonomously by the model.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    const projectRoot = this.config.getProjectRoot();
+    if (isAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
+      return 'allow';
+    }
     return 'ask';
   }
 
@@ -234,6 +240,20 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           lineEnding: detectedLineEnding,
         },
       });
+
+      // Mark the cache entry written, capturing the post-write stats
+      // so a follow-up Read sees `lastReadAt < lastWriteAt` and falls
+      // through to the full pipeline instead of returning the
+      // pre-write placeholder. Best-effort: a stat failure here does
+      // not undo the successful write — the next Read will re-stat
+      // and either see fresh content or treat the entry as stale.
+      try {
+        const postWriteStats = fs.statSync(file_path);
+        this.config.getFileReadCache().recordWrite(file_path, postWriteStats);
+      } catch {
+        // Non-fatal: leaving a stale entry is preferable to failing
+        // the user-visible Write on a transient stat failure.
+      }
 
       // Generate diff for display result
       const fileName = path.basename(file_path);
@@ -384,7 +404,10 @@ export class WriteFileTool
   protected override validateToolParamValues(
     params: WriteFileToolParams,
   ): string | null {
-    const filePath = params.file_path;
+    // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
+    // that may reach the LLM via at-completion or manual typing.
+    const filePath = unescapePath(params.file_path.trim());
+    params.file_path = filePath;
 
     if (!filePath) {
       return `Missing or empty "file_path"`;

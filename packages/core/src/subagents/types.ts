@@ -101,6 +101,13 @@ export interface SubagentConfig {
   color?: string;
 
   /**
+   * When true, this agent always runs as a background task when spawned.
+   * OR'd with the `run_in_background` tool parameter — if either is true,
+   * the agent runs in the background.
+   */
+  background?: boolean;
+
+  /**
    * Indicates whether this is a built-in agent.
    * Built-in agents cannot be modified or deleted.
    */

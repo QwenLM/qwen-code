@@ -364,8 +364,10 @@ export async function handleAtCommand({
         description: file.isDirectory
           ? `Read directory ${path.basename(file.filePath)}`
           : `Read file ${path.basename(file.filePath)}`,
-        status: ToolCallStatus.Success,
-        resultDisplay: undefined,
+        status: file.error ? ToolCallStatus.Error : ToolCallStatus.Success,
+        resultDisplay: file.error
+          ? `Failed to read ${path.basename(file.filePath)}: ${file.error}`
+          : undefined,
         confirmationDetails: undefined,
       }),
     );

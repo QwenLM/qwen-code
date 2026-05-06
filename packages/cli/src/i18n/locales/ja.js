@@ -315,6 +315,8 @@ export default {
   'Vision Model Preview': 'ビジョンモデルプレビュー',
   'Tool Schema Compliance': 'ツールスキーマ準拠',
   'Auto (detect from system)': '自動(システムから検出)',
+  'Auto (detect terminal theme)': '自動（端末テーマを検出）',
+  Auto: '自動',
   'check session stats. Usage: /stats [model|tools]':
     'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
@@ -661,6 +663,45 @@ export default {
     '使い方: /memory add [--global|--project] <記憶するテキスト>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'メモリ {{scope}} への保存を試行中: "{{fact}}"',
+  'Open auto-memory folder': '自動メモリフォルダを開く',
+  'Auto-memory: {{status}}': '自動メモリ: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    '自動統合: {{status}} · {{lastDream}} · /dream で実行',
+  never: '未実行',
+  on: 'オン',
+  off: 'オフ',
+  '❆ dreaming': '❆ 整理中',
+  'Remove matching entries from managed auto-memory.':
+    'マネージド自動メモリから一致するエントリを削除する。',
+  'Usage: /forget <memory text to remove>':
+    '使い方: /forget <削除するメモリテキスト>',
+  'No managed auto-memory entries matched: {{query}}':
+    '一致するマネージド自動メモリエントリなし: {{query}}',
+  'Show managed auto-memory status.':
+    'マネージド自動メモリのステータスを表示する。',
+  'Run managed auto-memory extraction for the current session.':
+    '現在のセッションのマネージド自動メモリ抽出を実行する。',
+  'Managed auto-memory root: {{root}}':
+    'マネージド自動メモリのルート: {{root}}',
+  'Managed auto-memory topics:': 'マネージド自動メモリのトピック:',
+  'No extraction cursor found yet.': 'まだ抽出カーソルが見つかりません。',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'カーソル: セッション={{sessionId}}, オフセット={{offset}}, 更新={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'メモリを抽出できるチャットクライアントがありません。',
+  'Managed auto-memory extraction is already running.':
+    'マネージド自動メモリ抽出はすでに実行中です。',
+  'Managed auto-memory extraction found no new durable memories.':
+    'マネージド自動メモリ抽出で新しい永続メモリは見つかりませんでした。',
+  'Consolidate managed auto-memory topic files.':
+    'マネージド自動メモリトピックファイルを統合する。',
+  'Managed auto-memory dream found nothing to improve.':
+    '自動メモリ統合で改善するものは見つかりませんでした。',
+  'Deduplicated entries: {{count}}': '重複除去したエントリ: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'save_memoryツールを使用して永続メモリを保存する。',
+  'Usage: /remember [--global|--project] <text to remember>':
+    '使い方: /remember [--global|--project] <覚えておくテキスト>',
   // MCP
   'Authenticate with an OAuth-enabled MCP server':
     'OAuth対応のMCPサーバーで認証',
@@ -756,7 +797,7 @@ export default {
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'このセッションのモデルを切り替え（--fast で提案モデルを設定）',
   'Set a lighter model for prompt suggestions and speculative execution':
     'プロンプト提案と投機的実行用の軽量モデルを設定',
@@ -765,6 +806,8 @@ export default {
   'Authentication type not available.': '認証タイプが利用できません',
   'No models available for the current authentication type ({{authType}}).':
     '現在の認証タイプ({{authType}})で利用可能なモデルはありません',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
   // Clear
   'Starting a new session, resetting chat, and clearing terminal.':
     '新しいセッションを開始し、チャットをリセットし、ターミナルをクリアしています',
@@ -962,6 +1005,8 @@ export default {
     '進捗: {{done}}/{{total}} タスク完了',
   ', {{inProgress}} in progress': '、{{inProgress}} 進行中',
   'Pending Tasks:': '保留中のタスク:',
+  'Current tasks': '現在のタスク',
+  '... and {{count}} more': '... 他 {{count}} 件',
   'What would you like to do?': '何をしますか?',
   'Choose how to proceed with your session:':
     'セッションの続行方法を選択してください:',
@@ -993,6 +1038,8 @@ export default {
     '有料 \u00B7 5時間最大6,000リクエスト \u00B7 すべての Alibaba Cloud Coding Plan モデル',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': '自分のAPIキーを使用',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'サードパーティプロバイダーによるブラウザベースの認証（例：OpenRouter、ModelScope）',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Coding Planの認証情報またはご自身のAPIキー/プロバイダーをご利用ください。',
@@ -1368,6 +1415,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'コンテキスト使用量',
+  '% used': '% 使用',
+  '% context used': '% コンテキスト使用',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'コンテキストが制限を超えています！/compress または /clear を使用して減らしてください。',
+  'Use /compress or /clear': '/compress または /clear を使用',
   'No API response yet. Send a message to see actual usage.':
     'API応答はありません。メッセージを送信して実際の使用量を確認してください。',
   'Estimated pre-conversation overhead': '推定事前会話オーバーヘッド',

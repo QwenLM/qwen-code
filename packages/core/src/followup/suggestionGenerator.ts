@@ -11,7 +11,7 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { getCacheSafeParams, runForkedQuery } from './forkedQuery.js';
+import { getCacheSafeParams, runForkedAgent } from '../utils/forkedAgent.js';
 import {
   uiTelemetryService,
   EVENT_API_RESPONSE,
@@ -152,9 +152,13 @@ async function generateViaForkedQuery(
   modelOverride?: string,
 ): Promise<string | null> {
   const model = modelOverride || config.getModel();
+  const cacheSafeParams = getCacheSafeParams();
+  if (!cacheSafeParams) return null;
   const startTime = Date.now();
-  const result = await runForkedQuery(config, SUGGESTION_PROMPT, {
-    abortSignal,
+  const result = await runForkedAgent({
+    config,
+    userMessage: SUGGESTION_PROMPT,
+    cacheSafeParams,
     jsonSchema: SUGGESTION_SCHEMA,
     model,
   });

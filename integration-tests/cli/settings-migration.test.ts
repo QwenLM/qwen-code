@@ -83,10 +83,10 @@ describe('settings-migration', () => {
       // Write V1 settings directly (overwrites the one created by setup)
       overwriteSettingsFile(rig, v1Settings);
 
-      // Run CLI with --help to trigger migration without API calls
-      // We expect this to fail due to missing API key, but migration should still occur
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls.
+      // `--help` is intentionally side-effect-free and does not load settings.
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail, we just need the settings file to be processed
       }
@@ -126,9 +126,9 @@ describe('settings-migration', () => {
       // Use fixture with arrays, null values, and string booleans
       overwriteSettingsFile(rig, v1ArrayAndNullSettings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -151,9 +151,9 @@ describe('settings-migration', () => {
       // Use fixture where V1 flat keys (ui, general) conflict with V2/V3 nested structure
       overwriteSettingsFile(rig, v1ParentCollisionSettings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -178,9 +178,9 @@ describe('settings-migration', () => {
       // Use fixture with $version as string and string boolean values
       overwriteSettingsFile(rig, v1VersionStringSettings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -215,9 +215,9 @@ describe('settings-migration', () => {
       // Write V2 settings directly (overwrites the one created by setup)
       overwriteSettingsFile(rig, v2Settings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -292,9 +292,9 @@ describe('settings-migration', () => {
 
       overwriteSettingsFile(rig, cleanV2Settings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -320,9 +320,9 @@ describe('settings-migration', () => {
 
       overwriteSettingsFile(rig, legacyVersionWithoutMigratableKeys);
 
-      // Run CLI with --help to trigger settings load/write path
+      // Run CLI with `mcp list` to trigger settings load/write path
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -361,9 +361,9 @@ describe('settings-migration', () => {
       };
       overwriteSettingsFile(rig, mixedNonBooleanDisableSettings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -426,9 +426,9 @@ describe('settings-migration', () => {
       // Use fixture with both disable* and enable* keys
       overwriteSettingsFile(rig, v2PreexistingEnableSettings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -491,9 +491,9 @@ describe('settings-migration', () => {
       // Use fixture with V3 format but still has legacy disable* keys
       overwriteSettingsFile(rig, v3LegacyDisableSettings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -545,9 +545,9 @@ describe('settings-migration', () => {
       // Use fixture with future version ($version: 999)
       overwriteSettingsFile(rig, v999FutureVersionSettings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -571,23 +571,23 @@ describe('settings-migration', () => {
 
       overwriteSettingsFile(rig, v1Settings);
 
-      // Run CLI multiple times with --help
+      // Run CLI multiple times with `mcp list`
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
       const firstRunSettings = readSettingsFile(rig);
 
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
       const secondRunSettings = readSettingsFile(rig);
 
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }
@@ -606,9 +606,9 @@ describe('settings-migration', () => {
       // Use v1ComplexSettings fixture which has custom user settings
       overwriteSettingsFile(rig, v1ComplexSettings);
 
-      // Run CLI with --help to trigger migration without API calls
+      // Run CLI with `mcp list` to trigger loadSettings() + migration without API calls
       try {
-        await rig.runCommand(['--help']);
+        await rig.runCommand(['mcp', 'list']);
       } catch {
         // Expected to potentially fail
       }

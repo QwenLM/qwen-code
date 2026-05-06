@@ -598,6 +598,7 @@ export class QwenLogger {
       properties: {
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
       },
     });
 
@@ -615,13 +616,13 @@ export class QwenLogger {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
       },
       snapshots: JSON.stringify({
         input_token_count: event.input_token_count,
         output_token_count: event.output_token_count,
         cached_content_token_count: event.cached_content_token_count,
         thoughts_token_count: event.thoughts_token_count,
-        tool_token_count: event.tool_token_count,
       }),
     });
 
@@ -653,6 +654,7 @@ export class QwenLogger {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
         error_message: event.error_message,
         error_type: event.error_type,
       },

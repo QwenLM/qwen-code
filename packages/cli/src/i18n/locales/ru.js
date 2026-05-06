@@ -369,6 +369,8 @@ export default {
   'Tool Schema Compliance': 'Соответствие схеме инструмента',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
+  'Auto (detect terminal theme)': 'Авто (определить тему терминала)',
+  Auto: 'Авто',
   Text: 'Текст',
   JSON: 'JSON',
   Plan: 'План',
@@ -909,6 +911,44 @@ export default {
     'Использование: /memory add [--global|--project] <текст для запоминания>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Попытка сохранить в память {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Открыть папку автопамяти',
+  'Auto-memory: {{status}}': 'Автопамять: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Автоконсолидация: {{status}} · {{lastDream}} · /dream для запуска',
+  never: 'никогда',
+  on: 'вкл',
+  off: 'выкл',
+  '❆ dreaming': '❆ консолидация',
+  'Remove matching entries from managed auto-memory.':
+    'Удалить совпадающие записи из управляемой автопамяти.',
+  'Usage: /forget <memory text to remove>':
+    'Использование: /forget <текст воспоминания для удаления>',
+  'No managed auto-memory entries matched: {{query}}':
+    'Не найдено совпадающих записей автопамяти: {{query}}',
+  'Show managed auto-memory status.': 'Показать статус управляемой автопамяти.',
+  'Run managed auto-memory extraction for the current session.':
+    'Запустить извлечение управляемой автопамяти для текущей сессии.',
+  'Managed auto-memory root: {{root}}':
+    'Корневая директория управляемой автопамяти: {{root}}',
+  'Managed auto-memory topics:': 'Темы управляемой автопамяти:',
+  'No extraction cursor found yet.': 'Курсор извлечения ещё не найден.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Курсор: сессия={{sessionId}}, смещение={{offset}}, обновлено={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'Нет доступного чат-клиента для извлечения памяти.',
+  'Managed auto-memory extraction is already running.':
+    'Извлечение управляемой автопамяти уже выполняется.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Извлечение управляемой автопамяти не нашло новых долгосрочных воспоминаний.',
+  'Consolidate managed auto-memory topic files.':
+    'Консолидировать файлы тем управляемой автопамяти.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Консолидация автопамяти не нашла чего улучшать.',
+  'Deduplicated entries: {{count}}': 'Удалено дубликатов: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Сохранить долгосрочную память с помощью инструмента save_memory.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Использование: /remember [--global|--project] <текст для запоминания>',
 
   // ============================================================================
   // Команды - MCP
@@ -1012,7 +1052,7 @@ export default {
   // ============================================================================
   // Команды - Модель
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Переключение модели для этой сессии (--fast для модели подсказок)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Установить облегчённую модель для подсказок и спекулятивного выполнения',
@@ -1021,6 +1061,8 @@ export default {
   'Authentication type not available.': 'Тип авторизации недоступен.',
   'No models available for the current authentication type ({{authType}}).':
     'Нет доступных моделей для текущего типа авторизации ({{authType}}).',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Команды - Очистка
@@ -1204,6 +1246,8 @@ export default {
     'Платно \u00B7 До 6 000 запросов/5 часов \u00B7 Все модели Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': 'Используйте свой API-ключ',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Браузерная аутентификация с использованием сторонних провайдеров (например, OpenRouter, ModelScope)',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Используйте учетные данные Coding Plan или свои собственные API-ключи/провайдеры.',
@@ -1511,6 +1555,7 @@ export default {
   'Found {{count}} TOML command file:': 'Найден {{count}} файл команд TOML:',
   'Found {{count}} TOML command files:':
     'Найдено {{count}} файлов команд TOML:',
+  'Current tasks': 'Текущие задачи',
   '... and {{count}} more': '... и ещё {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Формат TOML устарел. Хотите перенести их в формат Markdown?',
@@ -1798,6 +1843,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'Использование контекста',
+  '% used': '% использовано',
+  '% context used': '% контекста использовано',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'Контекст превышает лимит! Используйте /compress или /clear для уменьшения.',
+  'Use /compress or /clear': 'Используйте /compress или /clear',
   'No API response yet. Send a message to see actual usage.':
     'Пока нет ответа от API. Отправьте сообщение, чтобы увидеть фактическое использование.',
   'Estimated pre-conversation overhead':

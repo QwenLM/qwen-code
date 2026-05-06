@@ -13,6 +13,7 @@ import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type {
   CommandContext,
+  CommandSource,
   SlashCommand,
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
@@ -36,6 +37,9 @@ import { AtFileProcessor } from './prompt-processors/atFileProcessor.js';
 export interface CommandDefinition {
   prompt: string;
   description?: string;
+  argumentHint?: string;
+  whenToUse?: string;
+  disableModelInvocation?: boolean;
 }
 
 const debugLogger = createDebugLogger('COMMAND_FACTORY');
@@ -111,6 +115,15 @@ export function createSlashCommandFromDefinition(
     description,
     kind: CommandKind.FILE,
     extensionName,
+    source: (extensionName
+      ? 'plugin-command'
+      : 'skill-dir-command') as CommandSource,
+    sourceLabel: extensionName ? `Plugin: ${extensionName}` : 'Custom',
+    modelInvocable: definition.disableModelInvocation
+      ? false
+      : !extensionName || !!(definition.description || definition.whenToUse),
+    argumentHint: definition.argumentHint,
+    whenToUse: definition.whenToUse,
     action: async (
       context: CommandContext,
       _args: string,

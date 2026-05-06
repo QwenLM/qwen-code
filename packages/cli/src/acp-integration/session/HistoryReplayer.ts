@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ChatRecord, AgentResultDisplay } from '@qwen-code/qwen-code-core';
+import type {
+  ChatRecord,
+  AgentResultDisplay,
+  SlashCommandRecordPayload,
+  NotificationRecordPayload,
+} from '@qwen-code/qwen-code-core';
 import type {
   Content,
   GenerateContentResponseUsageMetadata,
@@ -49,6 +54,21 @@ export class HistoryReplayer {
     this.setActiveRecordId(record.uuid, record.timestamp);
     switch (record.type) {
       case 'user':
+        // Notification/cron records hold raw XML/prompt the user never
+        // typed; replay the friendly displayText so the assistant's reply
+        // has an antecedent in the ACP transcript.
+        if (record.subtype === 'notification' || record.subtype === 'cron') {
+          const displayText = (
+            record.systemPayload as NotificationRecordPayload | undefined
+          )?.displayText;
+          if (displayText) {
+            await this.messageEmitter.emitUserMessage(
+              displayText,
+              record.timestamp,
+            );
+          }
+          break;
+        }
         if (record.message) {
           await this.replayContent(record.message, 'user', record.timestamp);
         }
@@ -71,8 +91,14 @@ export class HistoryReplayer {
         await this.replayToolResult(record);
         break;
 
+      case 'system':
+        if (record.subtype === 'slash_command') {
+          await this.replaySlashCommandResult(record);
+        }
+        // Other system subtypes (compression, telemetry, at_command) are skipped.
+        break;
+
       default:
-        // Skip system records (compression, telemetry, slash commands)
         break;
     }
     this.setActiveRecordId(null);
@@ -202,6 +228,29 @@ export class HistoryReplayer {
     // Only emit if we captured at least one token metric
     if (Object.keys(usageMetadata).length > 0) {
       await this.messageEmitter.emitUsageMetadata(usageMetadata);
+    }
+  }
+
+  /**
+   * Replays a slash_command system record by re-emitting its output as an
+   * agent message chunk. This allows Zed to reconstruct the correct turn
+   * structure (user → agent) on session resume without polluting model context.
+   */
+  private async replaySlashCommandResult(record: ChatRecord): Promise<void> {
+    const payload = record.systemPayload as
+      | SlashCommandRecordPayload
+      | undefined;
+    if (payload?.phase !== 'result' || !payload.outputHistoryItems?.length) {
+      return;
+    }
+    for (const item of payload.outputHistoryItems) {
+      const text = typeof item['text'] === 'string' ? item['text'] : '';
+      if (text) {
+        await this.messageEmitter.emitAgentMessage(
+          text.replace(/\n/g, '  \n'),
+          record.timestamp,
+        );
+      }
     }
   }
 

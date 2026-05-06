@@ -16,7 +16,7 @@ import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { QWEN_CONFIG_DIR } from '../tools/memoryTool.js';
+import { QWEN_CONFIG_DIR } from '../memory/const.js';
 
 // Mock tool names if they are dynamically generated or complex
 vi.mock('../tools/ls', () => ({ LSTool: { Name: 'list_directory' } }));
@@ -333,7 +333,7 @@ describe('Model-specific tool call formats', () => {
     expect(prompt).toContain('<tool_call>');
     expect(prompt).toContain('{"name": "run_shell_command"');
     expect(prompt).toContain(
-      '"arguments": {"command": "node server.js &", "is_background": true}',
+      '"arguments": {"command": "node server.js", "is_background": true}',
     );
     expect(prompt).toContain('</tool_call>');
 

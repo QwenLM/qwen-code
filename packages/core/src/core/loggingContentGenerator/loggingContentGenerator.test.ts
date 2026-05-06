@@ -41,15 +41,15 @@ vi.mock('../../utils/openaiLogger.js', () => ({
 }));
 
 const realConvertGeminiRequestToOpenAI =
-  OpenAIContentConverter.prototype.convertGeminiRequestToOpenAI;
+  OpenAIContentConverter.convertGeminiRequestToOpenAI;
 const convertGeminiRequestToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter.prototype, 'convertGeminiRequestToOpenAI')
+  .spyOn(OpenAIContentConverter, 'convertGeminiRequestToOpenAI')
   .mockReturnValue([{ role: 'user', content: 'converted' }]);
 const convertGeminiToolsToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter.prototype, 'convertGeminiToolsToOpenAI')
+  .spyOn(OpenAIContentConverter, 'convertGeminiToolsToOpenAI')
   .mockResolvedValue([{ type: 'function', function: { name: 'tool' } }]);
 const convertGeminiResponseToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter.prototype, 'convertGeminiResponseToOpenAI')
+  .spyOn(OpenAIContentConverter, 'convertGeminiResponseToOpenAI')
   .mockReturnValue({
     id: 'openai-response',
     object: 'chat.completion',
@@ -57,10 +57,6 @@ const convertGeminiResponseToOpenAISpy = vi
     model: 'test-model',
     choices: [],
   } as OpenAI.Chat.ChatCompletion);
-const setModalitiesSpy = vi.spyOn(
-  OpenAIContentConverter.prototype,
-  'setModalities',
-);
 
 const createConfig = (overrides: Record<string, unknown> = {}): Config => {
   const configContent = {
@@ -121,7 +117,6 @@ describe('LoggingContentGenerator', () => {
     convertGeminiRequestToOpenAISpy.mockClear();
     convertGeminiToolsToOpenAISpy.mockClear();
     convertGeminiResponseToOpenAISpy.mockClear();
-    setModalitiesSpy.mockClear();
   });
 
   it('logs request/response, normalizes thought parts, and logs OpenAI interaction', async () => {
@@ -409,13 +404,10 @@ describe('LoggingContentGenerator', () => {
   });
 
   it('uses generator modalities when converting logged OpenAI requests', async () => {
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(function (
-      this: OpenAIContentConverter,
-      request,
-      options,
-    ) {
-      return realConvertGeminiRequestToOpenAI.call(this, request, options);
-    });
+    convertGeminiRequestToOpenAISpy.mockImplementationOnce(
+      (request, requestContext, options) =>
+        realConvertGeminiRequestToOpenAI(request, requestContext, options),
+    );
 
     const wrapped = createWrappedGenerator(
       vi
@@ -458,7 +450,14 @@ describe('LoggingContentGenerator', () => {
 
     await generator.generateContent(request, 'prompt-5');
 
-    expect(setModalitiesSpy).toHaveBeenCalledWith({ image: true });
+    expect(convertGeminiRequestToOpenAISpy).toHaveBeenCalledWith(
+      request,
+      expect.objectContaining({
+        model: 'test-model',
+        modalities: { image: true },
+      }),
+      { cleanOrphanToolCalls: false },
+    );
 
     const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
       ?.value as { logInteraction: ReturnType<typeof vi.fn> };

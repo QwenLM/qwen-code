@@ -135,6 +135,43 @@ describe('GitWorktreeService', () => {
     expect(hoistedMockCheckIsRepo).toHaveBeenNthCalledWith(2);
   });
 
+  it('initializeRepository should initialize a new repo on main', async () => {
+    hoistedMockCheckIsRepo.mockResolvedValue(false);
+    const service = new GitWorktreeService('/repo');
+
+    const result = await service.initializeRepository();
+
+    expect(result).toEqual({ initialized: true });
+    expect(hoistedMockInit).toHaveBeenCalledWith(false);
+    expect(hoistedMockRaw).toHaveBeenCalledWith([
+      'symbolic-ref',
+      'HEAD',
+      'refs/heads/main',
+    ]);
+    expect(hoistedMockAdd).toHaveBeenCalledWith('.');
+    expect(hoistedMockCommit).toHaveBeenCalledWith('Initial commit', {
+      '--allow-empty': null,
+    });
+    expect(hoistedMockInit.mock.invocationCallOrder[0]!).toBeLessThan(
+      hoistedMockRaw.mock.invocationCallOrder[0]!,
+    );
+    expect(hoistedMockRaw.mock.invocationCallOrder[0]!).toBeLessThan(
+      hoistedMockCommit.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('initializeRepository should not update HEAD for an existing repo', async () => {
+    hoistedMockCheckIsRepo.mockResolvedValue(true);
+    const service = new GitWorktreeService('/repo');
+
+    const result = await service.initializeRepository();
+
+    expect(result).toEqual({ initialized: false });
+    expect(hoistedMockInit).not.toHaveBeenCalled();
+    expect(hoistedMockRaw).not.toHaveBeenCalled();
+    expect(hoistedMockCommit).not.toHaveBeenCalled();
+  });
+
   it('createWorktree should create a sanitized branch and worktree path', async () => {
     const service = new GitWorktreeService('/repo');
 

@@ -14,6 +14,7 @@ import type {
 } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { HistoryItemBtw } from '../types.js';
 import { MessageType } from '../types.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
@@ -110,6 +111,7 @@ describe('useSlashCommandProcessor', () => {
   const mockLoadHistory = vi.fn();
   const mockOpenThemeDialog = vi.fn();
   const mockOpenAuthDialog = vi.fn();
+  const mockOpenMemoryDialog = vi.fn();
   const mockOpenModelDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
 
@@ -126,6 +128,7 @@ describe('useSlashCommandProcessor', () => {
     mockFileLoadCommands.mockResolvedValue([]);
     mockMcpLoadCommands.mockResolvedValue([]);
     mockOpenModelDialog.mockClear();
+    mockOpenMemoryDialog.mockClear();
   });
 
   const setupProcessorHook = (
@@ -149,11 +152,13 @@ describe('useSlashCommandProcessor', () => {
         vi.fn(), // toggleVimEnabled
         false, // isProcessing
         setIsProcessing,
+        { current: true }, // isIdleRef
         vi.fn(), // setGeminiMdFileCount
         {
           openAuthDialog: mockOpenAuthDialog,
           openThemeDialog: mockOpenThemeDialog,
           openEditorDialog: vi.fn(),
+          openMemoryDialog: mockOpenMemoryDialog,
           openSettingsDialog: vi.fn(),
           openModelDialog: mockOpenModelDialog,
           openTrustDialog: vi.fn(),
@@ -429,6 +434,44 @@ describe('useSlashCommandProcessor', () => {
       expect(mockOpenModelDialog).toHaveBeenCalled();
     });
 
+    it('should handle "dialog: memory" action', async () => {
+      const command = createTestCommand({
+        name: 'memorycmd',
+        action: vi.fn().mockResolvedValue({ type: 'dialog', dialog: 'memory' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/memorycmd');
+      });
+
+      expect(mockOpenMemoryDialog).toHaveBeenCalled();
+    });
+
+    it('should pass interactive execution mode to command actions', async () => {
+      const action = vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'info',
+        content: 'ok',
+      });
+      const command = createTestCommand({
+        name: 'interactivecmd',
+        action,
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/interactivecmd');
+      });
+
+      expect(action).toHaveBeenCalledWith(
+        expect.objectContaining({ executionMode: 'interactive' }),
+        '',
+      );
+    });
+
     it('should handle "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
@@ -458,7 +501,7 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
-    it('should strip thoughts when handling "load_history" action', async () => {
+    it('should preserve thoughts when handling "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
         stripThoughtsFromHistory: vi.fn(),
@@ -488,7 +531,7 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockClient.setHistory).toHaveBeenCalledTimes(1);
-      expect(mockClient.stripThoughtsFromHistory).toHaveBeenCalledWith();
+      expect(mockClient.stripThoughtsFromHistory).not.toHaveBeenCalled();
     });
 
     it('should handle a "quit" action', async () => {
@@ -923,11 +966,13 @@ describe('useSlashCommandProcessor', () => {
           vi.fn(), // toggleVimEnabled
           false, // isProcessing
           vi.fn(), // setIsProcessing
+          { current: true }, // isIdleRef
           vi.fn(), // setGeminiMdFileCount
           {
             openAuthDialog: mockOpenAuthDialog,
             openThemeDialog: mockOpenThemeDialog,
             openEditorDialog: vi.fn(),
+            openMemoryDialog: mockOpenMemoryDialog,
             openSettingsDialog: vi.fn(),
             openModelDialog: vi.fn(),
             openTrustDialog: vi.fn(),
@@ -1080,6 +1125,55 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand('/unknown');
       });
       expect(logSlashCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ui.clear and /btw dialog', () => {
+    it('should dismiss an active btw dialog when ui.clear is called', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.commandContext).toBeDefined());
+
+      const btwItem: HistoryItemBtw = {
+        type: MessageType.BTW,
+        btw: { question: 'why?', answer: '', isPending: true },
+      };
+
+      act(() => {
+        result.current.commandContext.ui.setBtwItem(btwItem);
+      });
+      await waitFor(() => {
+        expect(result.current.commandContext.ui.btwItem).toEqual(btwItem);
+      });
+
+      act(() => {
+        result.current.commandContext.ui.clear();
+      });
+
+      await waitFor(() => {
+        expect(result.current.commandContext.ui.btwItem).toBeNull();
+      });
+    });
+
+    it('should abort the in-flight btw request when ui.clear is called', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.commandContext).toBeDefined());
+
+      const abortController = new AbortController();
+      const abortSpy = vi.spyOn(abortController, 'abort');
+
+      act(() => {
+        result.current.commandContext.ui.btwAbortControllerRef.current =
+          abortController;
+      });
+
+      act(() => {
+        result.current.commandContext.ui.clear();
+      });
+
+      expect(abortSpy).toHaveBeenCalledTimes(1);
+      expect(
+        result.current.commandContext.ui.btwAbortControllerRef.current,
+      ).toBeNull();
     });
   });
 });
