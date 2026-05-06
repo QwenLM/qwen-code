@@ -435,7 +435,6 @@ describe('ChatRecordingService', () => {
       version: 1,
       surface: 'cli',
       fileStates: {},
-      baselines: {},
       promptCount: 0,
       promptCountAtLastCommit: 0,
     };

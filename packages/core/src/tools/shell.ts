@@ -1943,8 +1943,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       // null = analysis failed (shallow clone, --amend without reflog,
       // partial diff failure, etc.). Leave `committedAbsolutePaths`
-      // null so the finally block falls back to a full clear and we
-      // don't leak stale per-file attributions into the next commit.
+      // null so the finally block calls `noteCommitWithoutClearing()`
+      // — snapshotting the prompt counter while leaving per-file
+      // attributions intact. (Earlier revisions of this code did a
+      // wholesale clear here, but that erased pending unstaged AI
+      // edits for files outside the just-failed commit; the
+      // smaller-evil trade-off is documented in the finally block.)
       // Skip the note write entirely — emitting a structurally valid
       // but factually wrong all-zero note is worse than no note.
       if (stagedInfo === null) {
@@ -2109,8 +2113,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * - `null` when analysis itself failed (shallow clone with no parent
    *   object, --amend with no reflog, partial diff failure, exception).
    *   The caller treats this as "could not determine the committed
-   *   set" and falls back to a full clear so stale per-file state
-   *   doesn't leak into a subsequent commit.
+   *   set" and falls back to `noteCommitWithoutClearing()` — snapshots
+   *   the prompt counter but leaves per-file attribution intact, so
+   *   pending AI edits for files NOT in the just-committed set don't
+   *   get wiped along with the analysis failure. (The just-committed
+   *   file's stale entry may re-attribute on a later commit; that's
+   *   the smaller evil compared to wholesale loss.)
    */
   private async getCommittedFileInfo(
     cwd: string,
