@@ -356,8 +356,7 @@ describe('mermaid image renderer', () => {
     tempDirs.push(binDir);
     createFakeMmdc(binDir);
     createFakeChafa(binDir, [
-      'process.stderr.write("x".repeat(50 * 1024));',
-      'process.exit(1);',
+      'process.stderr.write("x".repeat(50 * 1024), () => process.exit(1));',
     ]);
 
     const result = await renderMermaidImageAsync({
@@ -385,10 +384,15 @@ describe('mermaid image renderer', () => {
     tempDirs.push(binDir);
     createFakeMmdc(binDir);
     createFakeChafa(binDir, [
-      'for (let i = 0; i < 80; i++) {',
-      '  process.stderr.write("x".repeat(1024));',
-      '}',
-      'process.exit(1);',
+      'let remaining = 80;',
+      'const writeNext = () => {',
+      '  if (remaining-- <= 0) {',
+      '    process.exit(1);',
+      '    return;',
+      '  }',
+      '  process.stderr.write("x".repeat(1024), writeNext);',
+      '};',
+      'writeNext();',
     ]);
 
     const result = await renderMermaidImageAsync({
