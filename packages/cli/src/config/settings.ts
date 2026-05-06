@@ -60,8 +60,18 @@ function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
 export type { Settings, MemoryImportFormat };
 
 export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
-export const USER_SETTINGS_PATH = Storage.getGlobalSettingsPath();
-export const USER_SETTINGS_DIR = path.dirname(USER_SETTINGS_PATH);
+
+// Lazy getters: must NOT be top-level consts. `QWEN_HOME` may be resolved
+// from `~/.env` or `~/.qwen/.env` by `preResolveHomeEnvOverrides()` in
+// `loadSettings()`, which runs after this module is imported. A const
+// captured here would freeze the pre-bootstrap value and split state across
+// callers (#3159793469, #3177804507).
+export function getUserSettingsPath(): string {
+  return Storage.getGlobalSettingsPath();
+}
+export function getUserSettingsDir(): string {
+  return path.dirname(getUserSettingsPath());
+}
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
 // QWEN_HOME and QWEN_RUNTIME_DIR control where global state (settings, OAuth
@@ -733,11 +743,11 @@ export function loadSettings(
   workspaceDir: string = process.cwd(),
 ): LoadedSettings {
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
-  // BEFORE any path resolution that depends on them. The exported
-  // `USER_SETTINGS_PATH` const was captured at module load and may now be
-  // stale, so re-resolve the user settings path locally afterwards.
+  // BEFORE any code reads a path derived from them. After this call, the
+  // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
+  // return the post-bootstrap value.
   preResolveHomeEnvOverrides();
-  const userSettingsPath = Storage.getGlobalSettingsPath();
+  const userSettingsPath = getUserSettingsPath();
 
   let systemSettings: Settings = {};
   let systemDefaultSettings: Settings = {};

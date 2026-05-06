@@ -58,6 +58,35 @@ function resolvePath(dir) {
   return resolved;
 }
 
+// Mirror `preResolveHomeEnvOverrides()` from packages/cli/src/config/settings.ts:
+// the main CLI may have read QWEN_HOME from ~/.env or ~/.qwen/.env at startup.
+// Without this bootstrap, the CLI would route to a custom config dir while
+// this helper still reads ~/.qwen/settings.json, splitting sandbox detection.
+// Project .env files are deliberately excluded — only home-scoped files are
+// consulted so a project repo can never redirect global state.
+if (!process.env.QWEN_HOME || !process.env.QWEN_RUNTIME_DIR) {
+  const homeQwenDir = process.env.QWEN_HOME
+    ? resolvePath(process.env.QWEN_HOME)
+    : join(os.homedir(), '.qwen');
+  const candidates = [join(homeQwenDir, '.env')];
+  if (!process.env.QWEN_HOME) {
+    candidates.push(join(os.homedir(), '.env'));
+  }
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const parsed = dotenv.parse(readFileSync(candidate, 'utf-8'));
+      for (const key of ['QWEN_HOME', 'QWEN_RUNTIME_DIR']) {
+        if (parsed[key] && !Object.hasOwn(process.env, key)) {
+          process.env[key] = parsed[key];
+        }
+      }
+    } catch {
+      // Match dotenv's quiet-mode behavior used elsewhere.
+    }
+  }
+}
+
 if (!qwenSandbox) {
   const configDir = process.env.QWEN_HOME
     ? resolvePath(process.env.QWEN_HOME)

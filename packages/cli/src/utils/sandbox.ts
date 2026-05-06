@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { quote, parse } from 'shell-quote';
 import {
-  USER_SETTINGS_DIR,
+  getUserSettingsDir,
   SETTINGS_DIRECTORY_NAME,
 } from '../config/settings.js';
 import { promisify } from 'node:util';
@@ -434,7 +434,7 @@ export async function start_sandbox(
 
   // mount user settings directory inside container, after creating if missing
   // note user/home changes inside sandbox and we mount at BOTH paths for consistency
-  const userSettingsDirOnHost = USER_SETTINGS_DIR;
+  const userSettingsDirOnHost = getUserSettingsDir();
   const userSettingsDirInSandbox = getContainerPath(
     `/home/node/${SETTINGS_DIRECTORY_NAME}`,
   );

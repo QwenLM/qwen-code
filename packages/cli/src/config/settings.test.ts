@@ -45,7 +45,7 @@ import { isWorkspaceTrusted } from './trustedFolders.js';
 import {
   getSettingsWarnings,
   loadSettings,
-  USER_SETTINGS_PATH, // This IS the mocked path.
+  getUserSettingsPath,
   getSystemSettingsPath,
   getSystemDefaultsPath,
   SettingScope,
@@ -57,6 +57,12 @@ import {
 } from './settings.js';
 import { needsMigration } from './migration/index.js';
 import { QWEN_DIR } from '@qwen-code/qwen-code-core';
+
+// Resolve the (mocked) user-settings path once at module load. Tests mock
+// `os.homedir`, so the value is stable across the suite. Production callers
+// must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`
+// resolved from `~/.env` after module load.
+const USER_SETTINGS_PATH = getUserSettingsPath();
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
 // Use the (mocked) SETTINGS_DIRECTORY_NAME for consistency
@@ -3186,10 +3192,9 @@ describe('Settings Loading and Merging', () => {
 
         const loaded = loadSettings(MOCK_WORKSPACE_DIR);
 
-        // Without the pre-pass fix, USER_SETTINGS_PATH (frozen at module load)
-        // would still point at the legacy ~/.qwen/settings.json while other
-        // Storage paths use /tmp/from-user-env. The pre-pass keeps them
-        // consistent.
+        // The pre-pass propagates QWEN_HOME from ~/.qwen/.env into
+        // process.env so subsequent path getters (which now read it lazily)
+        // route to /tmp/from-user-env consistently.
         expect(process.env['QWEN_HOME']).toEqual('/tmp/from-user-env');
         expect(loaded.user.path).toEqual(customSettingsPath);
         cwdSpy.mockRestore();
