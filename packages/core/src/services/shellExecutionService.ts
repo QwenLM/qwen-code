@@ -53,10 +53,11 @@ const PROMOTE_DRAIN_TIMEOUT_MS = 200;
  *     future-untyped variants) defaults to `'cancel'` so the historical
  *     kill behavior is preserved as the safe fallback.
  *
- * Exported for direct unit testing of all six edge cases (null /
- * non-object / `{}` no own kind / prototype-only kind / unknown kind /
- * throwing accessor) — the integration tests only exercise the three
- * happy-path inputs.
+ * Exported for direct unit testing of all eight cases (null /
+ * undefined / non-object / `{}` no own kind / prototype-only kind /
+ * unknown kind / throwing-accessor / Proxy trap, plus the two
+ * happy-path inputs) — the integration tests only exercise the three
+ * happy-path scenarios.
  */
 export function getShellAbortReasonKind(
   reason: unknown,
