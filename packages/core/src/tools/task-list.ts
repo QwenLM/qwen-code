@@ -85,7 +85,7 @@ class TaskListInvocation extends BaseToolInvocation<
 
     // Include unread leader messages if called by the
     // leader (no teammate identity = leader context).
-    const manager = this.config.getTeamManager?.();
+    const manager = this.config.getTeamManager();
     if (manager && !getTeamName()) {
       try {
         const msgs = await manager.getLeaderMessages();

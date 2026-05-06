@@ -235,6 +235,12 @@ export class SendMessageTool extends BaseDeclarativeTool<
           },
         },
         required: ['message'],
+        // Either a teammate recipient (`to`) or a background-task
+        // (`task_id`) must be specified — they correspond to the
+        // two routing modes. Letting the model send `{message}`
+        // alone wastes a round-trip on the runtime "Recipient is
+        // required" error.
+        oneOf: [{ required: ['to'] }, { required: ['task_id'] }],
         additionalProperties: false,
       },
     );

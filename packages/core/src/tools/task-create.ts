@@ -81,10 +81,12 @@ export class TaskCreateTool extends BaseDeclarativeTool<
           subject: {
             type: 'string',
             description: 'Short title for the task.',
+            maxLength: 200,
           },
           description: {
             type: 'string',
             description: 'Detailed description of the task.',
+            maxLength: 10000,
           },
           activeForm: {
             type: 'string',

@@ -209,7 +209,12 @@ export async function updateTask(
       }
     }
     if (updates.owner !== undefined) {
-      task.owner = updates.owner ?? undefined;
+      // Treat empty string as unassign (per the task_update
+      // schema: "Set to empty string to unassign"). The previous
+      // `?? undefined` only nullified actual null/undefined and
+      // stored "" verbatim, so the model following the schema
+      // ended up with `owner: ""` instead of unassigned.
+      task.owner = updates.owner ? updates.owner : undefined;
     }
     if (updates.subject !== undefined) {
       task.subject = updates.subject;
@@ -223,6 +228,19 @@ export async function updateTask(
     if (updates.metadata !== undefined) {
       task.metadata = task.metadata ?? {};
       for (const [key, value] of Object.entries(updates.metadata)) {
+        // Skip dangerous keys. JSON.parse exposes `__proto__` as
+        // an own property, so without this filter a teammate-
+        // controlled `metadata: { "__proto__": {x:1} }` would
+        // re-parent task.metadata via the __proto__ setter. Bounded
+        // (per-task, doesn't survive JSON.stringify) but blocked
+        // for hygiene since metadata is teammate-controlled.
+        if (
+          key === '__proto__' ||
+          key === 'constructor' ||
+          key === 'prototype'
+        ) {
+          continue;
+        }
         if (value === null) {
           delete task.metadata[key];
         } else {

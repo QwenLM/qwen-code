@@ -94,8 +94,11 @@ export function formatAgentId(name: string, teamName: string): string {
 }
 
 /**
- * Generate a unique teammate name that doesn't conflict with
- * existing members. Appends `-2`, `-3`, etc. on collision.
+ * Validate and return a sanitized teammate name. Throws if the
+ * name is empty, reserved, or collides with an existing member —
+ * the caller (Agent tool) requires `name` to be explicit, so a
+ * collision is a model error worth surfacing rather than auto-
+ * suffixing silently into a teammate the model didn't ask for.
  */
 export function generateUniqueTeammateName(
   baseName: string,
@@ -122,9 +125,12 @@ export function generateUniqueTeammateName(
 
   const existingNames = new Set(existingMembers.map((m) => m.name));
   if (existingNames.has(sanitized)) {
+    // Listing the existing names so the model can pick a non-
+    // colliding one on the retry without another round-trip.
+    const existingList = [...existingNames].join(', ') || '<none>';
     throw new Error(
-      `A teammate named "${sanitized}" already exists in this team. ` +
-        `Choose a different name.`,
+      `A teammate named "${sanitized}" already exists in this team ` +
+        `(existing: ${existingList}). Choose a different name.`,
     );
   }
 
