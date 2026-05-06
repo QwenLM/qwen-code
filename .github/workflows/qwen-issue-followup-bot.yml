@@ -129,7 +129,11 @@ jobs:
 
           require_repo_match() {
             # Reject unless exactly one --repo value equals expected_repo.
-            local original=("$@") seen=0 expect='' arg
+            # Accepts the full command (e.g. "issue view 123 --repo …") so
+            # that reject() can log the subcommand name.
+            local original=("$@")
+            shift 2  # skip subcommand verb pair (e.g. "issue" "view")
+            local seen=0 expect='' arg
             while (($# > 0)); do
               arg="$1"; shift
               if [[ "${expect}" == 'repo' ]]; then
@@ -148,7 +152,10 @@ jobs:
           }
 
           validate_issue_edit_args() {
-            local original=("$@") target_count=0 add_label_count=0 repo_count=0 expect='' arg
+            # Accepts the full command so that reject() logs the subcommand.
+            local original=("$@")
+            shift 2  # skip "issue" "edit"
+            local target_count=0 add_label_count=0 repo_count=0 expect='' arg
 
             while (($# > 0)); do
               arg="$1"; shift
@@ -179,7 +186,10 @@ jobs:
           }
 
           validate_issue_comment_args() {
-            local original=("$@") target_count=0 body_count=0 repo_count=0 expect='' arg
+            # Accepts the full command so that reject() logs the subcommand.
+            local original=("$@")
+            shift 2  # skip "issue" "comment"
+            local target_count=0 body_count=0 repo_count=0 expect='' arg
 
             while (($# > 0)); do
               arg="$1"; shift
@@ -214,19 +224,19 @@ jobs:
           # default reject.
           case "${1:-} ${2:-}" in
             'issue view'|'issue list'|'label list')
-              require_repo_match "${@:3}"
+              require_repo_match "$@"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
             'issue comment')
               require_write_enabled "$@"
-              validate_issue_comment_args "${@:3}"
+              validate_issue_comment_args "$@"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
             'issue edit')
               require_write_enabled "$@"
-              validate_issue_edit_args "${@:3}"
+              validate_issue_edit_args "$@"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
