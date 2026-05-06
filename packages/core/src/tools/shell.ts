@@ -351,6 +351,17 @@ const GIT_GLOBAL_FLAGS_TAKES_VALUE = new Set([
 // Flags whose presence shifts cwd interpretation.
 const GIT_GLOBAL_FLAGS_SHIFTS_CWD = new Set(['-C', '--git-dir', '--work-tree']);
 
+// `-C .` and `-C` to an empty string are no-op cwd shifts; treating
+// them as cwd-changing would suppress attribution for `git -C . commit`
+// (a common alias for "explicit current dir"). Same for the absolute
+// path that resolves to cwd at runtime — but we only have the literal
+// argv at parse time, so the cheap textual comparison is what we can
+// reasonably check here.
+function isNoopCwdTarget(target: string): boolean {
+  const t = target.trim();
+  return t === '' || t === '.' || t === './';
+}
+
 function parseGitInvocation(tokens: string[]): {
   subcommand: string | undefined;
   changesCwd: boolean;
@@ -360,7 +371,16 @@ function parseGitInvocation(tokens: string[]): {
   while (i < tokens.length) {
     const t = tokens[i]!;
     if (GIT_GLOBAL_FLAGS_TAKES_VALUE.has(t)) {
-      if (GIT_GLOBAL_FLAGS_SHIFTS_CWD.has(t)) changesCwd = true;
+      const value = tokens[i + 1] ?? '';
+      // For `-C` specifically, the value is the new cwd. `-C .` is
+      // a no-op so don't flip changesCwd. (`--git-dir`/`--work-tree`
+      // path arguments aren't cwd in the same sense — leave those
+      // unconditional.)
+      if (t === '-C') {
+        if (!isNoopCwdTarget(value)) changesCwd = true;
+      } else if (GIT_GLOBAL_FLAGS_SHIFTS_CWD.has(t)) {
+        changesCwd = true;
+      }
       i += 2;
       continue;
     }
@@ -370,12 +390,13 @@ function parseGitInvocation(tokens: string[]): {
       i++;
       continue;
     }
-    // Attached-value form for `-C`: `git -C/path commit ...`. Git
-    // accepts both `-C path` (handled above by TAKES_VALUE) and the
-    // concatenated form. shell-quote tokenises the latter as a single
-    // `-Cpath` token.
+    // Attached-value form for `-C`: `git -C/path commit ...` and
+    // `git -C. commit ...`. Git accepts both `-C path` (handled
+    // above by TAKES_VALUE) and the concatenated form. shell-quote
+    // tokenises the latter as a single `-Cpath` token.
     if (t.length > 2 && t.startsWith('-C')) {
-      changesCwd = true;
+      const value = t.slice(2);
+      if (!isNoopCwdTarget(value)) changesCwd = true;
       i++;
       continue;
     }
@@ -1321,13 +1342,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // and so attribution still runs after a `git commit && cd ..`
     // chain (which would have failed an "any cd anywhere" gate).
     const commitCtx = gitCommitContext(strippedCommand);
-    // Capture preHead whenever ANY git commit was attempted in the
-    // chain — even non-attributable ones — so the post-command branch
-    // can detect HEAD movement and clear stale singleton state.
-    // Without this, `cd subdir && git commit` (a real same-repo
-    // commit) would skip attribution AND fail to clear pending
-    // attributions, leaking them into the next foreground commit.
-    const preHead: string | null = commitCtx.hasCommit
+    // Capture preHead only when the commit will actually be
+    // attributed in our cwd: that's the only consumer (the
+    // `attributableInCwd` branch below feeds preHead into
+    // `attachCommitAttribution`). For non-attributable
+    // hasCommit cases (`cd /elsewhere && git commit`,
+    // `git -C /other commit`), no consumer reads preHead and the
+    // ~10–50 ms execFileSync is dead work that just blocks the
+    // event loop before the user's real command spawns.
+    const preHead: string | null = commitCtx.attributableInCwd
       ? this.getGitHeadSync(cwd)
       : null;
 

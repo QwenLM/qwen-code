@@ -1897,6 +1897,33 @@ describe('ShellTool', () => {
         );
       });
 
+      // `git -C .` (or `-C ./` or `-C .` attached as `-C.`) is a
+      // semantic no-op — the cwd doesn't actually change. The
+      // previous "any -C → cwd-shifted" rule silently skipped
+      // attribution for what's basically `git commit` with an
+      // explicit cwd marker. Treat dot-form as in-cwd.
+      it.each([
+        ['git -C . commit', 'git -C . commit -m "in cwd"'],
+        ['git -C ./ commit', 'git -C ./ commit -m "in cwd"'],
+        ['git -C. commit (attached)', 'git -C. commit -m "in cwd"'],
+      ])('should add co-author for %s', async (_label, command) => {
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        expect(observed).toContain('Co-authored-by:');
+      });
+
       // git's global flags (`-c`, `--no-pager`, etc.) push the
       // subcommand past index 1; a fixed-position check at arg1 used
       // to silently skip these forms. Make sure we still inject the
