@@ -45,8 +45,14 @@ vi.mock('../../auth/providers/oauth/openrouterOAuth.js', () => ({
   })),
   getOpenRouterModelsWithFallback: vi.fn(async () => [
     {
-      id: 'openai/gpt-4o-mini:free',
-      name: 'OpenRouter · GPT-4o mini',
+      id: 'z-ai/glm-4.5-air:free',
+      name: 'OpenRouter · GLM 4.5 Air',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      envKey: 'OPENROUTER_API_KEY',
+    },
+    {
+      id: 'openai/gpt-oss-120b:free',
+      name: 'OpenRouter · GPT OSS 120B',
       baseUrl: 'https://openrouter.ai/api/v1',
       envKey: 'OPENROUTER_API_KEY',
     },
@@ -219,8 +225,14 @@ describe('useAuthCommand', () => {
       'modelProviders.openai',
       [
         {
-          id: 'openai/gpt-4o-mini:free',
-          name: 'OpenRouter · GPT-4o mini',
+          id: 'z-ai/glm-4.5-air:free',
+          name: 'OpenRouter · GLM 4.5 Air',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          envKey: 'OPENROUTER_API_KEY',
+        },
+        {
+          id: 'openai/gpt-oss-120b:free',
+          name: 'OpenRouter · GPT OSS 120B',
           baseUrl: 'https://openrouter.ai/api/v1',
           envKey: 'OPENROUTER_API_KEY',
         },
@@ -229,8 +241,14 @@ describe('useAuthCommand', () => {
     expect(config.reloadModelProvidersConfig).toHaveBeenCalledWith({
       [AuthType.USE_OPENAI]: [
         {
-          id: 'openai/gpt-4o-mini:free',
-          name: 'OpenRouter · GPT-4o mini',
+          id: 'z-ai/glm-4.5-air:free',
+          name: 'OpenRouter · GLM 4.5 Air',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          envKey: 'OPENROUTER_API_KEY',
+        },
+        {
+          id: 'openai/gpt-oss-120b:free',
+          name: 'OpenRouter · GPT OSS 120B',
           baseUrl: 'https://openrouter.ai/api/v1',
           envKey: 'OPENROUTER_API_KEY',
         },

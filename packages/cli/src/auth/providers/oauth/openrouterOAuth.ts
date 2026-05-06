@@ -11,7 +11,7 @@ import open from 'open';
 import { type ProviderModelConfig as ModelConfig } from '@qwen-code/qwen-code-core';
 
 export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
-export const OPENROUTER_DEFAULT_MODEL = 'qwen/qwen3-coder:free';
+export const OPENROUTER_DEFAULT_MODEL = 'z-ai/glm-4.5-air:free';
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 export const OPENROUTER_OAUTH_AUTHORIZE_URL = 'https://openrouter.ai/auth';
 export const OPENROUTER_OAUTH_EXCHANGE_URL =
@@ -25,32 +25,14 @@ const OPENROUTER_MINIMUM_TEXT_MODELS = 1;
 
 export const OPENROUTER_DEFAULT_MODELS: ModelConfig[] = [
   {
-    id: 'qwen/qwen3-coder:free',
-    name: 'OpenRouter · Qwen3 Coder',
-    baseUrl: OPENROUTER_BASE_URL,
-    envKey: OPENROUTER_ENV_KEY,
-  },
-  {
-    id: 'deepseek/deepseek-chat-v3.1:free',
-    name: 'OpenRouter · DeepSeek V3.1',
-    baseUrl: OPENROUTER_BASE_URL,
-    envKey: OPENROUTER_ENV_KEY,
-  },
-  {
-    id: 'glm/glm-4.5-air:free',
+    id: 'z-ai/glm-4.5-air:free',
     name: 'OpenRouter · GLM 4.5 Air',
     baseUrl: OPENROUTER_BASE_URL,
     envKey: OPENROUTER_ENV_KEY,
   },
   {
-    id: 'google/gemini-2.5-flash:free',
-    name: 'OpenRouter · Gemini 2.5 Flash',
-    baseUrl: OPENROUTER_BASE_URL,
-    envKey: OPENROUTER_ENV_KEY,
-  },
-  {
-    id: 'meta-llama/llama-3.3-70b-instruct:free',
-    name: 'OpenRouter · Llama 3.3 70B Instruct',
+    id: 'openai/gpt-oss-120b:free',
+    name: 'OpenRouter · GPT OSS 120B',
     baseUrl: OPENROUTER_BASE_URL,
     envKey: OPENROUTER_ENV_KEY,
   },
@@ -310,11 +292,8 @@ function buildOpenRouterHeaders() {
 }
 
 const OPENROUTER_RECOMMENDED_FREE_MODEL_IDS = [
-  'qwen/qwen3-coder:free',
-  'deepseek/deepseek-chat-v3.1:free',
-  'glm/glm-4.5-air:free',
-  'google/gemini-2.5-flash:free',
-  'meta-llama/llama-3.3-70b-instruct:free',
+  'z-ai/glm-4.5-air:free',
+  'openai/gpt-oss-120b:free',
 ];
 const OPENROUTER_RECOMMENDED_MODEL_LIMIT =
   OPENROUTER_RECOMMENDED_FREE_MODEL_IDS.length;

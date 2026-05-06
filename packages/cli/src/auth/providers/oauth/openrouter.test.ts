@@ -27,8 +27,8 @@ describe('openRouterProvider', () => {
       apiKey: 'or-key',
       models: [
         {
-          id: 'qwen/qwen3-coder:free',
-          name: 'OpenRouter · Qwen3 Coder',
+          id: 'z-ai/glm-4.5-air:free',
+          name: 'OpenRouter · GLM 4.5 Air',
           baseUrl: 'https://openrouter.ai/api/v1',
           envKey: 'OPENROUTER_API_KEY',
         },
@@ -48,15 +48,15 @@ describe('openRouterProvider', () => {
         OPENROUTER_API_KEY: 'or-key',
       },
       modelSelection: {
-        modelId: 'qwen/qwen3-coder:free',
+        modelId: 'z-ai/glm-4.5-air:free',
       },
       modelProviders: [
         {
           authType: AuthType.USE_OPENAI,
           models: [
             {
-              id: 'qwen/qwen3-coder:free',
-              name: 'OpenRouter · Qwen3 Coder',
+              id: 'z-ai/glm-4.5-air:free',
+              name: 'OpenRouter · GLM 4.5 Air',
               baseUrl: 'https://openrouter.ai/api/v1',
               envKey: 'OPENROUTER_API_KEY',
             },

@@ -71,39 +71,21 @@ vi.mock('../../auth/providers/oauth/openrouter.js', () => ({
       OPENROUTER_API_KEY: apiKey,
     },
     modelSelection: {
-      modelId: 'qwen/qwen3-coder:free',
+      modelId: 'z-ai/glm-4.5-air:free',
     },
     modelProviders: [
       {
         authType: 'openai',
         models: [
           {
-            id: 'qwen/qwen3-coder:free',
-            name: 'OpenRouter · Qwen3 Coder',
-            baseUrl: 'https://openrouter.ai/api/v1',
-            envKey: 'OPENROUTER_API_KEY',
-          },
-          {
-            id: 'deepseek/deepseek-chat-v3.1:free',
-            name: 'OpenRouter · DeepSeek V3.1',
-            baseUrl: 'https://openrouter.ai/api/v1',
-            envKey: 'OPENROUTER_API_KEY',
-          },
-          {
-            id: 'glm/glm-4.5-air:free',
+            id: 'z-ai/glm-4.5-air:free',
             name: 'OpenRouter · GLM 4.5 Air',
             baseUrl: 'https://openrouter.ai/api/v1',
             envKey: 'OPENROUTER_API_KEY',
           },
           {
-            id: 'google/gemini-2.5-flash:free',
-            name: 'OpenRouter · Gemini 2.5 Flash',
-            baseUrl: 'https://openrouter.ai/api/v1',
-            envKey: 'OPENROUTER_API_KEY',
-          },
-          {
-            id: 'meta-llama/llama-3.3-70b-instruct:free',
-            name: 'OpenRouter · Llama 3.3 70B Instruct',
+            id: 'openai/gpt-oss-120b:free',
+            name: 'OpenRouter · GPT OSS 120B',
             baseUrl: 'https://openrouter.ai/api/v1',
             envKey: 'OPENROUTER_API_KEY',
           },
@@ -193,7 +175,7 @@ describe('handleQwenAuth openrouter', () => {
     expect(mockSetValue).toHaveBeenCalledWith(
       'user',
       'model.name',
-      'qwen/qwen3-coder:free',
+      'z-ai/glm-4.5-air:free',
     );
 
     const modelProvidersCall = mockSetValue.mock.calls.find(
@@ -202,32 +184,14 @@ describe('handleQwenAuth openrouter', () => {
     expect(modelProvidersCall).toBeDefined();
     expect(modelProvidersCall?.[2]).toEqual([
       {
-        id: 'qwen/qwen3-coder:free',
-        name: 'OpenRouter · Qwen3 Coder',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'deepseek/deepseek-chat-v3.1:free',
-        name: 'OpenRouter · DeepSeek V3.1',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'glm/glm-4.5-air:free',
+        id: 'z-ai/glm-4.5-air:free',
         name: 'OpenRouter · GLM 4.5 Air',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
       {
-        id: 'google/gemini-2.5-flash:free',
-        name: 'OpenRouter · Gemini 2.5 Flash',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'meta-llama/llama-3.3-70b-instruct:free',
-        name: 'OpenRouter · Llama 3.3 70B Instruct',
+        id: 'openai/gpt-oss-120b:free',
+        name: 'OpenRouter · GPT OSS 120B',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
@@ -241,13 +205,13 @@ describe('handleQwenAuth openrouter', () => {
     expect(mockReloadModelProvidersConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         [AuthType.USE_OPENAI]: expect.arrayContaining([
-          expect.objectContaining({ id: 'qwen/qwen3-coder:free' }),
+          expect.objectContaining({ id: 'z-ai/glm-4.5-air:free' }),
         ]),
       }),
     );
     expect(mockSyncAfterAuthRefresh).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
-      'qwen/qwen3-coder:free',
+      'z-ai/glm-4.5-air:free',
     );
     expect(mockRefreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
     expect(process.env['OPENROUTER_API_KEY']).toBe('or-key-123');
@@ -282,32 +246,14 @@ describe('handleQwenAuth openrouter', () => {
     );
     expect(modelProvidersCall?.[2]).toEqual([
       {
-        id: 'qwen/qwen3-coder:free',
-        name: 'OpenRouter · Qwen3 Coder',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'deepseek/deepseek-chat-v3.1:free',
-        name: 'OpenRouter · DeepSeek V3.1',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'glm/glm-4.5-air:free',
+        id: 'z-ai/glm-4.5-air:free',
         name: 'OpenRouter · GLM 4.5 Air',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
       {
-        id: 'google/gemini-2.5-flash:free',
-        name: 'OpenRouter · Gemini 2.5 Flash',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'meta-llama/llama-3.3-70b-instruct:free',
-        name: 'OpenRouter · Llama 3.3 70B Instruct',
+        id: 'openai/gpt-oss-120b:free',
+        name: 'OpenRouter · GPT OSS 120B',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
@@ -352,7 +298,7 @@ describe('handleQwenAuth openrouter', () => {
     expect(mockReloadModelProvidersConfig).toHaveBeenCalled();
     expect(mockSyncAfterAuthRefresh).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
-      'qwen/qwen3-coder:free',
+      'z-ai/glm-4.5-air:free',
     );
     expect(mockRefreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });

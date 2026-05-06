@@ -508,14 +508,8 @@ describe('openrouterOAuth', () => {
     ]);
   });
 
-  it('selects five reliable popular free OpenRouter models', () => {
+  it('selects verified free OpenRouter models', () => {
     const recommended = selectRecommendedOpenRouterModels([
-      {
-        id: 'qwen/qwen3-coder:free',
-        name: 'OpenRouter · Qwen3 Coder',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
       {
         id: 'qwen/qwen3-max',
         name: 'OpenRouter · Qwen3 Max',
@@ -523,26 +517,14 @@ describe('openrouterOAuth', () => {
         envKey: 'OPENROUTER_API_KEY',
       },
       {
-        id: 'glm/glm-4.5-air:free',
+        id: 'z-ai/glm-4.5-air:free',
         name: 'OpenRouter · GLM 4.5 Air',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
       {
-        id: 'deepseek/deepseek-chat-v3.1:free',
-        name: 'OpenRouter · DeepSeek V3.1',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'google/gemini-2.5-flash:free',
-        name: 'OpenRouter · Gemini 2.5 Flash',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        envKey: 'OPENROUTER_API_KEY',
-      },
-      {
-        id: 'meta-llama/llama-3.3-70b-instruct:free',
-        name: 'OpenRouter · Llama 3.3 70B Instruct',
+        id: 'openai/gpt-oss-120b:free',
+        name: 'OpenRouter · GPT OSS 120B',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
@@ -562,11 +544,8 @@ describe('openrouterOAuth', () => {
     ]);
 
     expect(recommended.map((model) => model.id)).toEqual([
-      'qwen/qwen3-coder:free',
-      'deepseek/deepseek-chat-v3.1:free',
-      'glm/glm-4.5-air:free',
-      'google/gemini-2.5-flash:free',
-      'meta-llama/llama-3.3-70b-instruct:free',
+      'z-ai/glm-4.5-air:free',
+      'openai/gpt-oss-120b:free',
     ]);
   });
 
@@ -585,15 +564,15 @@ describe('openrouterOAuth', () => {
         envKey: 'OPENROUTER_API_KEY',
       },
       {
-        id: 'qwen/qwen3-coder:free',
-        name: 'OpenRouter · Qwen3 Coder',
+        id: 'z-ai/glm-4.5-air:free',
+        name: 'OpenRouter · GLM 4.5 Air',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
     ]);
 
     expect(recommended.map((model) => model.id)).toEqual([
-      'qwen/qwen3-coder:free',
+      'z-ai/glm-4.5-air:free',
       'custom/experimental-free-model:free',
     ]);
   });
@@ -601,18 +580,18 @@ describe('openrouterOAuth', () => {
   it('prefers the default OpenRouter model when it remains enabled', () => {
     expect(
       getPreferredOpenRouterModelId([
-        { id: 'deepseek/deepseek-chat-v3.1:free' },
-        { id: 'qwen/qwen3-coder:free' },
+        { id: 'openai/gpt-oss-120b:free' },
+        { id: 'z-ai/glm-4.5-air:free' },
       ] as never),
-    ).toBe('qwen/qwen3-coder:free');
+    ).toBe('z-ai/glm-4.5-air:free');
   });
 
   it('falls back to the first enabled OpenRouter model when the default is unavailable', () => {
     expect(
       getPreferredOpenRouterModelId([
-        { id: 'deepseek/deepseek-chat-v3.1:free' },
+        { id: 'openai/gpt-oss-120b:free' },
       ] as never),
-    ).toBe('deepseek/deepseek-chat-v3.1:free');
+    ).toBe('openai/gpt-oss-120b:free');
   });
 
   it('falls back to default models when dynamic fetch fails', async () => {
