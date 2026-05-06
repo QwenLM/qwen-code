@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -234,8 +235,7 @@ describe('resolveCustomBanner', () => {
     // pulling in a native dep. If `mkfifo` isn't available (very rare on
     // POSIX dev boxes) we skip the assertion rather than fail the suite.
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('node:child_process').execFileSync('mkfifo', [fifoPath]);
+      execFileSync('mkfifo', [fifoPath]);
     } catch {
       return;
     }
