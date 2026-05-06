@@ -52,7 +52,7 @@ export interface SessionPickerProps {
   enablePreview?: boolean;
 
   /**
-   * Enable multi-select mode. Tab toggles a checkbox on the cursor item;
+   * Enable multi-select mode. Space toggles a checkbox on the cursor item;
    * Enter commits the checked set via {@link onConfirmMulti}. With nothing
    * checked, Enter falls back to single-select via {@link onSelect}.
    */
@@ -67,7 +67,7 @@ export interface SessionPickerProps {
   /**
    * Session IDs the user is not allowed to check (e.g. the current
    * active session can't be batch-deleted). They render with a hint and
-   * Tab is a no-op while the cursor is on them.
+   * Space is a no-op while the cursor is on them.
    */
   disabledIds?: readonly string[];
 }
@@ -376,15 +376,30 @@ export function SessionPicker(props: SessionPickerProps) {
                 {t('Space to preview · ')}
               </Text>
             )}
-            {enableMultiSelect && (
-              <Text color={theme.text.secondary}>
-                {picker.checkedIds.size > 0
-                  ? t('Space to toggle · {{count}} selected · ', {
-                      count: String(picker.checkedIds.size),
-                    })
-                  : t('Space to select multiple · ')}
-              </Text>
-            )}
+            {enableMultiSelect &&
+              (() => {
+                // Count only checked items that are currently visible *and*
+                // committable (i.e. not disabled). This is the exact set
+                // Enter would commit — so the footer can't say "3 selected"
+                // while Enter is about to delete 0.
+                const visibleCheckedCount = picker.filteredSessions.reduce(
+                  (n, s) =>
+                    picker.checkedIds.has(s.sessionId) &&
+                    !picker.disabledIdSet.has(s.sessionId)
+                      ? n + 1
+                      : n,
+                  0,
+                );
+                return (
+                  <Text color={theme.text.secondary}>
+                    {picker.checkedIds.size > 0
+                      ? t('Space to toggle · {{count}} selected · ', {
+                          count: String(visibleCheckedCount),
+                        })
+                      : t('Space to select multiple · ')}
+                  </Text>
+                );
+              })()}
             <Text color={theme.text.secondary}>
               {t('↑↓ to navigate · Esc to cancel')}
             </Text>

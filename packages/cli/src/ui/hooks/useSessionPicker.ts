@@ -54,7 +54,7 @@ export interface UseSessionPickerOptions {
    */
   enablePreview?: boolean;
   /**
-   * Enable multi-select mode. Tab toggles selection on the cursor item,
+   * Enable multi-select mode. Space toggles selection on the cursor item,
    * Enter commits — invoking {@link onConfirmMulti} when one or more items
    * are checked, falling back to {@link onSelect} (single-select) otherwise.
    * Disabled by default.
@@ -68,7 +68,7 @@ export interface UseSessionPickerOptions {
   /**
    * Session IDs that cannot be checked in multi-select mode (e.g. the
    * currently active session must not be deletable). They remain
-   * navigable but Tab is a no-op on them and they never appear in the
+   * navigable but Space is a no-op on them and they never appear in the
    * commit set.
    */
   disabledIds?: readonly string[];
@@ -143,7 +143,7 @@ export function useSessionPicker({
   const [viewMode, setViewMode] = useState<'list' | 'preview'>('list');
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
 
-  // Multi-select state. Empty until the user actively toggles Tab; an
+  // Multi-select state. Empty until the user actively toggles Space; an
   // empty set means "no multi-selection in progress" and the picker keeps
   // its single-select semantics on Enter.
   const [checkedIds, setCheckedIds] = useState<ReadonlySet<string>>(
@@ -327,6 +327,13 @@ export function useSessionPicker({
             onConfirmMulti(orderedIds);
             return;
           }
+          // Multi-selection is in progress but every checked item is hidden
+          // by the current filter (or disabled). Falling through to
+          // single-select on the cursor row would silently delete a
+          // different session — exactly the opposite of what the footer's
+          // "N selected" hint promised. Stay in multi-select mode and let
+          // the user adjust the filter or selection.
+          return;
         }
 
         const session = filteredSessions[selectedIndex];

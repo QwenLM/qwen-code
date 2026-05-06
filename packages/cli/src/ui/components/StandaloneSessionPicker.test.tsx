@@ -1040,5 +1040,131 @@ describe('SessionPicker', () => {
       const after = lastFrame() ?? '';
       expect(after).toContain('1 selected');
     });
+
+    it('should not silently fall through to single-select when checked items are hidden by branch filter', async () => {
+      // Regression for the data-loss bug: with N items checked but all of
+      // them filtered out by the branch toggle, Enter must NOT delete the
+      // unchecked highlighted row. Stay in multi-select mode instead.
+      const sessions = [
+        createMockSession({
+          sessionId: 'feat-1',
+          prompt: 'feature one',
+          gitBranch: 'feature',
+        }),
+        createMockSession({
+          sessionId: 'feat-2',
+          prompt: 'feature two',
+          gitBranch: 'feature',
+        }),
+        createMockSession({
+          sessionId: 'main-1',
+          prompt: 'main one',
+          gitBranch: 'main',
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      const onSelect = vi.fn();
+      const onConfirmMulti = vi.fn();
+
+      const { stdin } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={service as never}
+            onSelect={onSelect}
+            onCancel={() => {}}
+            currentBranch="main"
+            enableMultiSelect
+            onConfirmMulti={onConfirmMulti}
+          />
+        </KeypressProvider>,
+      );
+
+      await wait(100);
+
+      // Check the two feature sessions while the list is unfiltered.
+      stdin.write(' '); // check feat-1
+      await wait(20);
+      stdin.write('\u001B[B'); // down to feat-2
+      await wait(20);
+      stdin.write(' '); // check feat-2
+      await wait(20);
+
+      // Toggle branch filter — only "main" sessions remain visible; both
+      // checked items are now hidden.
+      stdin.write('B');
+      await wait(50);
+
+      // Enter should NOT silently delete the visible main session.
+      stdin.write('\r');
+      await wait(50);
+
+      expect(onConfirmMulti).not.toHaveBeenCalled();
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it('should show the filtered-visible count in the footer, not the total checked count', async () => {
+      // Widen the terminal so the footer (branch hint + multi-select hint
+      // + nav hint) stays on one line — at the default 80 cols ink
+      // line-wraps "2 selecte" / "d" across rows and the substring match
+      // would silently miss the regression we want to catch.
+      Object.defineProperty(process.stdout, 'columns', {
+        value: 200,
+        configurable: true,
+      });
+
+      const sessions = [
+        createMockSession({
+          sessionId: 'feat-1',
+          prompt: 'feature one',
+          gitBranch: 'feature',
+        }),
+        createMockSession({
+          sessionId: 'feat-2',
+          prompt: 'feature two',
+          gitBranch: 'feature',
+        }),
+        createMockSession({
+          sessionId: 'main-1',
+          prompt: 'main one',
+          gitBranch: 'main',
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+
+      const { stdin, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={service as never}
+            onSelect={() => {}}
+            onCancel={() => {}}
+            currentBranch="main"
+            enableMultiSelect
+            onConfirmMulti={() => {}}
+          />
+        </KeypressProvider>,
+      );
+
+      await wait(100);
+
+      // Check both feature sessions.
+      stdin.write(' ');
+      await wait(20);
+      stdin.write('\u001B[B');
+      await wait(20);
+      stdin.write(' ');
+      await wait(20);
+
+      const beforeFilter = lastFrame() ?? '';
+      expect(beforeFilter).toContain('2 selected');
+
+      // Apply branch filter — feature sessions are hidden, so the
+      // committable count drops to 0 even though checkedIds.size === 2.
+      stdin.write('B');
+      await wait(50);
+
+      const afterFilter = lastFrame() ?? '';
+      expect(afterFilter).toContain('0 selected');
+      expect(afterFilter).not.toContain('2 selected');
+    });
   });
 });

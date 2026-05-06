@@ -141,11 +141,15 @@ describe('useDeleteCommand', () => {
       expect(item.text).toContain('current active');
     });
 
-    it('reports a partial failure when some ids could not be removed', async () => {
+    it('reports a partial failure with type=error and surfaces failing ids + reason', async () => {
+      // Use long, distinguishable ids so we can assert they were truncated
+      // to the 8-char prefix the toast is supposed to show.
       const removeSessions = vi.fn().mockResolvedValue({
-        removed: ['a'],
-        notFound: ['b'],
-        errors: [{ sessionId: 'c', error: new Error('boom') }],
+        removed: ['aaaaaaaa-removed'],
+        notFound: ['bbbbbbbb-missing'],
+        errors: [
+          { sessionId: 'cccccccc-failed', error: new Error('disk full') },
+        ],
       });
       const { config } = createConfig({
         currentSessionId: 'current',
@@ -157,7 +161,11 @@ describe('useDeleteCommand', () => {
       );
 
       await act(async () => {
-        result.current.handleDeleteMany(['a', 'b', 'c']);
+        result.current.handleDeleteMany([
+          'aaaaaaaa-removed',
+          'bbbbbbbb-missing',
+          'cccccccc-failed',
+        ]);
         await flushAsync();
       });
 
@@ -165,9 +173,47 @@ describe('useDeleteCommand', () => {
         { type: string; text: string },
         number,
       ];
-      expect(item.type).toBe('info');
+      // Partial failure must look distinct from a clean delete.
+      expect(item.type).toBe('error');
       expect(item.text).toContain('1');
       expect(item.text).toContain('2');
+      // Failing ids (truncated to 8 chars) must be visible so the user can
+      // identify them.
+      expect(item.text).toContain('bbbbbbbb');
+      expect(item.text).toContain('cccccccc');
+      // First underlying error message should be surfaced.
+      expect(item.text).toContain('disk full');
+    });
+
+    it('truncates failing-id list to 3 with overflow indicator', async () => {
+      const removeSessions = vi.fn().mockResolvedValue({
+        removed: ['ok'],
+        notFound: ['n1', 'n2', 'n3', 'n4', 'n5'],
+        errors: [],
+      });
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['ok', 'n1', 'n2', 'n3', 'n4', 'n5']);
+        await flushAsync();
+      });
+
+      const [item] = addItem.mock.calls[0] as [
+        { type: string; text: string },
+        number,
+      ];
+      // Three samples shown, the rest collapsed into "+2 more".
+      expect(item.text).toContain('n1');
+      expect(item.text).toContain('n2');
+      expect(item.text).toContain('n3');
+      expect(item.text).toContain('+2 more');
     });
 
     it('reports an error when the call throws', async () => {

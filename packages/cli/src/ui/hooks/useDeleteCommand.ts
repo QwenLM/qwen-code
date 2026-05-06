@@ -125,7 +125,11 @@ export function useDeleteCommand(
         const result = await sessionService.removeSessions(filtered);
 
         const removedCount = result.removed.length;
-        const failedCount = result.notFound.length + result.errors.length;
+        const failedIds = [
+          ...result.notFound,
+          ...result.errors.map((e) => e.sessionId),
+        ];
+        const failedCount = failedIds.length;
 
         if (removedCount > 0 && failedCount === 0) {
           addItem?.(
@@ -138,14 +142,28 @@ export function useDeleteCommand(
             Date.now(),
           );
         } else if (removedCount > 0 && failedCount > 0) {
+          // Surface which sessions failed (and the first error detail) so
+          // the user can act on it — the bare aggregate count makes
+          // filesystem issues invisible. Use type='error' so partial
+          // success is visually distinct from a clean delete.
+          const sampleIds = failedIds
+            .slice(0, 3)
+            .map((id) => id.slice(0, 8))
+            .join(', ');
+          const overflow = failedCount > 3 ? `, +${failedCount - 3} more` : '';
+          const firstError = result.errors[0]?.error.message;
+          const reason = firstError ? ` — ${firstError}` : '';
           addItem?.(
             {
-              type: 'info',
+              type: 'error',
               text: t(
-                'Deleted {{removed}} session(s); {{failed}} could not be deleted.',
+                'Deleted {{removed}} session(s); {{failed}} could not be deleted ({{ids}}{{overflow}}){{reason}}.',
                 {
                   removed: String(removedCount),
                   failed: String(failedCount),
+                  ids: sampleIds,
+                  overflow,
+                  reason,
                 },
               ),
             },
