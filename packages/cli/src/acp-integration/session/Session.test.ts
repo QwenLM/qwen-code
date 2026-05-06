@@ -594,6 +594,33 @@ describe('Session', () => {
       });
     });
 
+    it('honors explicit input override for built-in commands without input metadata', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'diagnostics',
+          description: 'Run diagnostics',
+          kind: 'built-in',
+          acceptsInput: true,
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'diagnostics',
+              description: 'Run diagnostics',
+              input: { hint: '' },
+            },
+          ],
+        },
+      });
+    });
+
     it('attaches available skills to available_commands_update metadata', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {

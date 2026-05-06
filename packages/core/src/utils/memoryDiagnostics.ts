@@ -7,6 +7,12 @@
 import { readdir, readFile } from 'node:fs/promises';
 import process from 'node:process';
 import v8 from 'node:v8';
+import { createDebugLogger } from './debugLogger.js';
+import { formatMemoryUsage } from './formatters.js';
+
+const RSS_HEAP_GAP_RATIO = 10;
+const RSS_HEAP_GAP_MIN_BYTES = 256 * 1024 * 1024;
+const debugLogger = createDebugLogger('MEMORY_DIAGNOSTICS');
 
 export interface MemoryDiagnostics {
   timestamp: string;
@@ -61,7 +67,8 @@ export interface MemoryRisk {
     | 'active-handles'
     | 'active-requests'
     | 'fd-leak'
-    | 'native-memory-pressure';
+    | 'native-memory-pressure'
+    | 'rss-heap-gap';
   message: string;
 }
 
@@ -96,17 +103,19 @@ export async function collectMemoryDiagnostics(
   const heapStatistics = options.heapStatistics?.() ?? v8.getHeapStatistics();
   const resourceUsage = options.resourceUsage?.() ?? process.resourceUsage();
   const uptimeSeconds = options.uptimeSeconds?.() ?? process.uptime();
-  const openFileDescriptors = await optionalProbe(
-    options.openFileDescriptors ?? countOpenFileDescriptors,
-  );
-  const smapsRollup = await optionalProbe(
-    options.smapsRollup ?? readProcSmapsRollup,
-  );
-  const v8HeapSpaces = mapHeapSpaces(
-    await optionalSyncProbe(
-      options.heapSpaceStatistics ?? (() => v8.getHeapSpaceStatistics()),
-    ),
-  );
+  const [openFileDescriptors, smapsRollup, heapSpaceStatistics] =
+    await Promise.all([
+      optionalProbe(
+        'openFileDescriptors',
+        options.openFileDescriptors ?? countOpenFileDescriptors,
+      ),
+      optionalProbe('smapsRollup', options.smapsRollup ?? readProcSmapsRollup),
+      optionalSyncProbe(
+        'heapSpaceStatistics',
+        options.heapSpaceStatistics ?? (() => v8.getHeapSpaceStatistics()),
+      ),
+    ]);
+  const v8HeapSpaces = mapHeapSpaces(heapSpaceStatistics);
 
   // process.resourceUsage().maxRSS is in kilobytes on Linux but bytes on
   // macOS/Windows. Normalise to bytes for a consistent diagnostic unit.
@@ -166,19 +175,29 @@ function mapHeapSpaces(
 }
 
 function getActiveHandlesCount(probe?: () => number): number {
-  if (probe) {
-    return probe();
+  try {
+    if (probe) {
+      return probe();
+    }
+    const internals = process as unknown as ProcessInternals;
+    return internals._getActiveHandles?.().length ?? 0;
+  } catch (error) {
+    logProbeFailure('activeHandles', error);
+    return 0;
   }
-  const internals = process as unknown as ProcessInternals;
-  return internals._getActiveHandles?.().length ?? 0;
 }
 
 function getActiveRequestsCount(probe?: () => number): number {
-  if (probe) {
-    return probe();
+  try {
+    if (probe) {
+      return probe();
+    }
+    const internals = process as unknown as ProcessInternals;
+    return internals._getActiveRequests?.().length ?? 0;
+  } catch (error) {
+    logProbeFailure('activeRequests', error);
+    return 0;
   }
-  const internals = process as unknown as ProcessInternals;
-  return internals._getActiveRequests?.().length ?? 0;
 }
 
 async function countOpenFileDescriptors(): Promise<number> {
@@ -190,21 +209,31 @@ async function readProcSmapsRollup(): Promise<string> {
 }
 
 async function optionalProbe<T>(
+  name: string,
   probe: () => Promise<T>,
 ): Promise<T | undefined> {
   try {
     return await probe();
-  } catch {
+  } catch (error) {
+    logProbeFailure(name, error);
     return undefined;
   }
 }
 
-async function optionalSyncProbe<T>(probe: () => T): Promise<T | undefined> {
+async function optionalSyncProbe<T>(
+  name: string,
+  probe: () => T,
+): Promise<T | undefined> {
   try {
     return probe();
-  } catch {
+  } catch (error) {
+    logProbeFailure(name, error);
     return undefined;
   }
+}
+
+function logProbeFailure(name: string, error: unknown): void {
+  debugLogger.debug(`memory diagnostics probe failed: ${name}`, error);
 }
 
 function analyzeMemoryDiagnostics(
@@ -254,11 +283,26 @@ function analyzeMemoryDiagnostics(
     });
   }
 
+  // Use mallocedMemory instead of rss - heapUsed. RSS includes normal process
+  // overhead such as code segments, shared libraries, stacks, and mapped files,
+  // which creates false positives on healthy Node.js processes.
   const nativeMemory = diagnostics.v8HeapStats.mallocedMemory;
   if (nativeMemory > diagnostics.memoryUsage.heapUsed * 2) {
     risks.push({
       type: 'native-memory-pressure',
-      message: `Native malloced memory (${nativeMemory} bytes) is more than 2× heap used (${diagnostics.memoryUsage.heapUsed} bytes).`,
+      message: `V8 native malloced memory (${formatMemoryUsage(nativeMemory)}) is more than 2× heap used (${formatMemoryUsage(diagnostics.memoryUsage.heapUsed)}).`,
+    });
+  }
+
+  if (
+    diagnostics.memoryUsage.heapUsed > 0 &&
+    diagnostics.memoryUsage.rss >= RSS_HEAP_GAP_MIN_BYTES &&
+    diagnostics.memoryUsage.rss >
+      diagnostics.memoryUsage.heapUsed * RSS_HEAP_GAP_RATIO
+  ) {
+    risks.push({
+      type: 'rss-heap-gap',
+      message: `RSS (${formatMemoryUsage(diagnostics.memoryUsage.rss)}) is more than ${RSS_HEAP_GAP_RATIO}× heap used (${formatMemoryUsage(diagnostics.memoryUsage.heapUsed)}). Check native addons, libuv buffers, mapped files, or retained tool output.`,
     });
   }
 

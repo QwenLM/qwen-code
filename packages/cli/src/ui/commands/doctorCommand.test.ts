@@ -123,8 +123,8 @@ describe('doctorCommand', () => {
         heapSizeLimit: 4_000,
         totalHeapSize: 2_000,
         usedHeapSize: 1_000,
-        mallocedMemory: 10,
-        peakMallocedMemory: 20,
+        mallocedMemory: 2_048,
+        peakMallocedMemory: 4_096,
         detachedContexts: 0,
         nativeContexts: 1,
       },
@@ -153,6 +153,7 @@ describe('doctorCommand', () => {
     expect(doctorCommand.description).toBe(
       'Run installation and environment diagnostics',
     );
+    expect(doctorCommand.acceptsInput).toBe(false);
   });
 
   it('should complete memory subcommand names', async () => {
@@ -709,6 +710,9 @@ describe('doctorCommand', () => {
     expect(result?.type === 'message' ? result.content : '').toContain(
       'heapUsed',
     );
+    expect(result?.type === 'message' ? result.content : '').toContain(
+      'v8MallocedMemory: 2.0 KB',
+    );
   });
 
   it('should render small memory values without rounding to zero MiB', async () => {
@@ -726,9 +730,10 @@ describe('doctorCommand', () => {
     expect(doctorCommand.subCommands?.map((command) => command.name)).toContain(
       'memory',
     );
+    expect(getMemoryCommand().argumentHint).toBe('[--json]');
   });
 
-  it('should keep memory diagnostics successful when risk indicators exist', async () => {
+  it('should render risk indicators without failing memory diagnostics', async () => {
     vi.mocked(collectMemoryDiagnostics).mockResolvedValue({
       timestamp: '2026-05-01T10:00:00.000Z',
       uptimeSeconds: 60,
@@ -762,12 +767,49 @@ describe('doctorCommand', () => {
         recommendation: 'WARNING: 1 potential leak indicator(s) found.',
       },
     });
-    const result = await getMemoryCommand().action!(mockContext, '--json');
+    const result = await getMemoryCommand().action!(mockContext, '');
 
     expect(result).toEqual(
       expect.objectContaining({
         type: 'message',
         messageType: 'info',
+      }),
+    );
+    expect(result?.type === 'message' ? result.content : '').toContain(
+      'heap-pressure: Heap pressure detected.',
+    );
+  });
+
+  it('should skip memory diagnostics when already aborted', async () => {
+    const abortController = new AbortController();
+    abortController.abort();
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      abortSignal: abortController.signal,
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await getMemoryCommand().action!(mockContext, '');
+
+    expect(result).toBeUndefined();
+    expect(collectMemoryDiagnostics).not.toHaveBeenCalled();
+  });
+
+  it('should return an error message when memory diagnostics fail', async () => {
+    vi.mocked(collectMemoryDiagnostics).mockRejectedValueOnce(
+      new Error('probe failed'),
+    );
+
+    const result = await getMemoryCommand().action!(mockContext, '');
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('probe failed'),
       }),
     );
   });

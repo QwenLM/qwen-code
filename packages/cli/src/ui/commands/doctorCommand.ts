@@ -230,21 +230,43 @@ export const doctorCommand: SlashCommand = {
       },
       kind: CommandKind.BUILT_IN,
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      argumentHint: '[--json]',
       action: memoryDoctorAction,
     },
   ],
 };
 
-async function memoryDoctorAction(_context: CommandContext, args = '') {
+async function memoryDoctorAction(context: CommandContext, args = '') {
+  if (context.abortSignal?.aborted) {
+    return;
+  }
+
   const tokens = args.trim().split(/\s+/).filter(Boolean);
-  const diagnostics = await collectMemoryDiagnostics();
-  return {
-    type: 'message' as const,
-    messageType: 'info' as const,
-    content: tokens.includes('--json')
-      ? JSON.stringify(diagnostics, null, 2)
-      : formatMemoryDiagnostics(diagnostics),
-  };
+  try {
+    const diagnostics = await collectMemoryDiagnostics();
+
+    if (context.abortSignal?.aborted) {
+      return;
+    }
+
+    return {
+      type: 'message' as const,
+      messageType: 'info' as const,
+      content: tokens.includes('--json')
+        ? JSON.stringify(diagnostics, null, 2)
+        : formatMemoryDiagnostics(diagnostics),
+    };
+  } catch (error) {
+    if (context.abortSignal?.aborted) {
+      return;
+    }
+
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: `Failed to collect memory diagnostics: ${formatError(error)}`,
+    };
+  }
 }
 
 function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
@@ -265,6 +287,8 @@ function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
     `external: ${formatMemoryUsage(diagnostics.memoryUsage.external)}`,
     `arrayBuffers: ${formatMemoryUsage(diagnostics.memoryUsage.arrayBuffers)}`,
     `v8HeapLimit: ${formatMemoryUsage(diagnostics.v8HeapStats.heapSizeLimit)}`,
+    `v8MallocedMemory: ${formatMemoryUsage(diagnostics.v8HeapStats.mallocedMemory)}`,
+    `v8PeakMallocedMemory: ${formatMemoryUsage(diagnostics.v8HeapStats.peakMallocedMemory)}`,
     `activeHandles: ${diagnostics.activeHandles}`,
     `activeRequests: ${diagnostics.activeRequests}`,
     `openFileDescriptors: ${diagnostics.openFileDescriptors ?? 'unavailable'}`,
@@ -272,4 +296,8 @@ function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
     risks,
     `recommendation: ${diagnostics.analysis.recommendation}`,
   ].join('\n');
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

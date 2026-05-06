@@ -4,10 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const debugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => debugLogger,
+}));
+
 import { collectMemoryDiagnostics } from './memoryDiagnostics.js';
 
 describe('collectMemoryDiagnostics', () => {
+  afterEach(() => {
+    debugLogger.debug.mockReset();
+    vi.restoreAllMocks();
+  });
+
   it('captures memory, V8, resource, handle, fd, smaps, and risk data', async () => {
     const diagnostics = await collectMemoryDiagnostics({
       now: () => new Date('2026-05-01T10:00:00.000Z'),
@@ -125,6 +139,13 @@ describe('collectMemoryDiagnostics', () => {
         expect.objectContaining({ type: 'native-memory-pressure' }),
       ]),
     );
+
+    const nativeRisk = diagnostics.analysis.risks.find(
+      (risk) => risk.type === 'native-memory-pressure',
+    );
+    expect(nativeRisk?.message).toContain('3.9 KB');
+    expect(nativeRisk?.message).toContain('1.6 KB');
+    expect(nativeRisk?.message).not.toContain('4000 bytes');
   });
 
   it('does not multiply maxRSS by 1024 on non-Linux platforms', async () => {
@@ -206,6 +227,8 @@ describe('collectMemoryDiagnostics', () => {
       heapSpaceStatistics: () => {
         throw new Error('not available');
       },
+      activeHandles: () => 0,
+      activeRequests: () => 0,
       openFileDescriptors: async () => {
         throw new Error('not available');
       },
@@ -221,6 +244,112 @@ describe('collectMemoryDiagnostics', () => {
     expect(diagnostics.analysis.recommendation).toContain(
       'No obvious leak indicators',
     );
+    expect(debugLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('heapSpaceStatistics'),
+      expect.any(Error),
+    );
+    expect(debugLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('openFileDescriptors'),
+      expect.any(Error),
+    );
+    expect(debugLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('smapsRollup'),
+      expect.any(Error),
+    );
+  });
+
+  it('treats active handle and request probe failures as zero counts', async () => {
+    const diagnostics = await collectMemoryDiagnostics({
+      memoryUsage: () => ({
+        heapUsed: 100,
+        heapTotal: 200,
+        rss: 300,
+        external: 10,
+        arrayBuffers: 5,
+      }),
+      heapStatistics: () => ({
+        heap_size_limit: 1_000,
+        total_heap_size: 200,
+        total_heap_size_executable: 0,
+        total_physical_size: 200,
+        used_heap_size: 100,
+        malloced_memory: 0,
+        peak_malloced_memory: 0,
+        does_zap_garbage: 0,
+        number_of_native_contexts: 1,
+        number_of_detached_contexts: 0,
+        total_available_size: 900,
+        total_global_handles_size: 0,
+        used_global_handles_size: 0,
+        external_memory: 10,
+      }),
+      activeHandles: () => {
+        throw new Error('handles unavailable');
+      },
+      activeRequests: () => {
+        throw new Error('requests unavailable');
+      },
+    });
+
+    expect(diagnostics.activeHandles).toBe(0);
+    expect(diagnostics.activeRequests).toBe(0);
+    expect(diagnostics.analysis.risks).toEqual([]);
+  });
+
+  it('starts independent optional probes before awaiting slow probes', async () => {
+    let resolveFileDescriptors: ((count: number) => void) | undefined;
+    const fileDescriptors = new Promise<number>((resolve) => {
+      resolveFileDescriptors = resolve;
+    });
+    let smapsStarted = false;
+    let heapSpacesStarted = false;
+
+    const diagnosticsPromise = collectMemoryDiagnostics({
+      memoryUsage: () => ({
+        heapUsed: 100,
+        heapTotal: 200,
+        rss: 300,
+        external: 10,
+        arrayBuffers: 5,
+      }),
+      heapStatistics: () => ({
+        heap_size_limit: 1_000,
+        total_heap_size: 200,
+        total_heap_size_executable: 0,
+        total_physical_size: 200,
+        used_heap_size: 100,
+        malloced_memory: 0,
+        peak_malloced_memory: 0,
+        does_zap_garbage: 0,
+        number_of_native_contexts: 1,
+        number_of_detached_contexts: 0,
+        total_available_size: 900,
+        total_global_handles_size: 0,
+        used_global_handles_size: 0,
+        external_memory: 10,
+      }),
+      heapSpaceStatistics: () => {
+        heapSpacesStarted = true;
+        return [];
+      },
+      activeHandles: () => 0,
+      activeRequests: () => 0,
+      openFileDescriptors: () => fileDescriptors,
+      smapsRollup: async () => {
+        smapsStarted = true;
+        return 'Rss: 300 kB';
+      },
+    });
+
+    await Promise.resolve();
+    expect(smapsStarted).toBe(true);
+    expect(heapSpacesStarted).toBe(true);
+
+    resolveFileDescriptors?.(4);
+    const diagnostics = await diagnosticsPromise;
+
+    expect(diagnostics.openFileDescriptors).toBe(4);
+    expect(diagnostics.smapsRollup).toBe('Rss: 300 kB');
   });
 
   it('flags unusually high active requests', async () => {
@@ -288,6 +417,45 @@ describe('collectMemoryDiagnostics', () => {
     expect(diagnostics.analysis.risks).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: 'native-memory-pressure' }),
+      ]),
+    );
+  });
+
+  it('flags RSS that is much larger than JS heap with a high floor', async () => {
+    const diagnostics = await collectMemoryDiagnostics({
+      memoryUsage: () => ({
+        heapUsed: 50 * 1024 * 1024,
+        heapTotal: 64 * 1024 * 1024,
+        rss: 800 * 1024 * 1024,
+        external: 10,
+        arrayBuffers: 5,
+      }),
+      heapStatistics: () => ({
+        heap_size_limit: 512 * 1024 * 1024,
+        total_heap_size: 64 * 1024 * 1024,
+        total_heap_size_executable: 0,
+        total_physical_size: 64 * 1024 * 1024,
+        used_heap_size: 50 * 1024 * 1024,
+        malloced_memory: 512 * 1024,
+        peak_malloced_memory: 1024 * 1024,
+        does_zap_garbage: 0,
+        number_of_native_contexts: 1,
+        number_of_detached_contexts: 0,
+        total_available_size: 450 * 1024 * 1024,
+        total_global_handles_size: 0,
+        used_global_handles_size: 0,
+        external_memory: 10,
+      }),
+      activeHandles: () => 0,
+      activeRequests: () => 0,
+    });
+
+    expect(diagnostics.analysis.risks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'rss-heap-gap',
+          message: expect.stringContaining('800.0 MB'),
+        }),
       ]),
     );
   });
