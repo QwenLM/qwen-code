@@ -154,6 +154,32 @@ describe('FileReadCache', () => {
       }
     });
 
+    it('does NOT preserve lastReadWasFull when a drifted (mutated) fingerprint arrives', () => {
+      // Maintainer-review regression: T0 full read at fingerprint
+      // X → T1 external write advances on-disk to Y → T2 partial
+      // read records at Y. Sticky-on-true used to silently keep
+      // lastReadWasFull=true from T0 even though it described
+      // different bytes; a follow-up Edit then ran against bytes
+      // the model only saw the first 10 lines of.
+      const cache = new FileReadCache();
+      cache.recordRead('/x/foo.ts', makeStats({ mtimeMs: 1000, size: 100 }), {
+        full: true,
+        cacheable: true,
+      });
+      // Drift: external write advances mtime+size.
+      cache.recordRead('/x/foo.ts', makeStats({ mtimeMs: 2000, size: 200 }), {
+        full: false,
+        cacheable: true,
+      });
+      const result = cache.check(makeStats({ mtimeMs: 2000, size: 200 }));
+      expect(result.state).toBe('fresh');
+      if (result.state === 'fresh') {
+        // Reset to this read's actual shape, not sticky-on-true
+        // from the prior full read of different bytes.
+        expect(result.entry.lastReadWasFull).toBe(false);
+      }
+    });
+
     it('preserves earlier lastReadCacheable on a subsequent non-cacheable read', () => {
       // Symmetric to lastReadWasFull. A model that once read a
       // file as text and later read it as a structured payload

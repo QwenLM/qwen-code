@@ -987,10 +987,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.config.isTrustedFolder(),
       );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
-      const agentConfig =
-        resolvedApprovalMode !== this.config.getApprovalMode()
-          ? createApprovalModeOverride(this.config, resolvedApprovalMode)
-          : this.config;
+      // ALWAYS produce a child Config via Object.create, even when the
+      // approval mode is identical to the parent. Subagents must run
+      // against an isolated FileReadCache so a parent's prior_read
+      // entries cannot satisfy enforcement on a path the subagent's
+      // transcript never contained — see the per-Config own-property
+      // machinery in `Config.getFileReadCache()`. Reusing
+      // `this.config` directly here would short-circuit that
+      // isolation for the same-mode path, which is the common case.
+      const agentConfig = createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode,
+      );
 
       // Create the subagent. Fork bypasses SubagentManager because its
       // runtime configs are synthesized from the parent's cache-safe params.

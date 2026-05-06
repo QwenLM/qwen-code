@@ -101,16 +101,21 @@ export class FileReadCache {
    *    false for binary / image / audio / video / PDF / notebook.
    *
    * The `lastReadWasFull` and `lastReadCacheable` flags are
-   * **sticky-on-true**: a partial / non-cacheable read records the
-   * timestamp but does not flip a previously-`true` flag back to
-   * `false`. The reason is that prior-read enforcement on Edit /
-   * WriteFile asks "has the model seen these bytes (or fully
-   * authored them)?", not "what was the *most recent* read shape?"
-   * — pre-fix, a `WriteFile(create) → ReadFile(offset/limit) → Edit`
-   * sequence would reject the Edit because the partial read clobbered
-   * the `lastReadWasFull = true` that `recordWrite` had stamped, and
-   * the same shape applies to a full text read followed by a partial
-   * one. The fast-path file_unchanged check still gates on the
+   * **sticky-on-true** when the recorded fingerprint matches the
+   * existing entry's `(mtimeMs, sizeBytes)`. That preserves the
+   * model's read-rights across `Read full → Read partial` and
+   * `WriteFile(create) → Read partial → Edit` sequences against
+   * the same bytes.
+   *
+   * When the fingerprint drifts — i.e. the file was mutated between
+   * the prior record and this one — the flags are **reset** to
+   * exactly what this read produced. Sticky-on-true across drift
+   * would let a `Read full @X → external write → Read partial @Y →
+   * Edit` sequence pass enforcement against bytes the model only
+   * saw the first 10 lines of, exactly the regression flagged in
+   * the maintainer review.
+   *
+   * The fast-path `file_unchanged` check still gates on the
    * incoming request's own `isFullRead` (in `read-file.ts`), so a
    * partial read does not get a placeholder it shouldn't.
    */
@@ -119,13 +124,28 @@ export class FileReadCache {
     stats: Stats,
     opts: { full: boolean; cacheable: boolean },
   ): FileReadEntry {
+    const key = FileReadCache.inodeKey(stats);
+    const existing = this.byInode.get(key);
+    const sameFingerprint =
+      existing !== undefined &&
+      existing.mtimeMs === stats.mtimeMs &&
+      existing.sizeBytes === stats.size;
     const entry = this.upsert(absPath, stats);
     entry.lastReadAt = Date.now();
-    if (opts.full) {
-      entry.lastReadWasFull = true;
-    }
-    if (opts.cacheable) {
-      entry.lastReadCacheable = true;
+    if (sameFingerprint) {
+      // Same bytes the entry already described — sticky-on-true
+      // preserves prior `true` flags from full reads or writes.
+      if (opts.full) {
+        entry.lastReadWasFull = true;
+      }
+      if (opts.cacheable) {
+        entry.lastReadCacheable = true;
+      }
+    } else {
+      // Drift detected (or fresh entry): the prior flags described
+      // different bytes. Reset to what this read actually produced.
+      entry.lastReadWasFull = opts.full;
+      entry.lastReadCacheable = opts.cacheable;
     }
     return entry;
   }
