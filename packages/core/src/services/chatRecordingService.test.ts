@@ -505,6 +505,37 @@ describe('ChatRecordingService', () => {
         afterFailure + 1,
       );
     });
+
+    // appendRecord can throw SYNCHRONOUSLY before returning a promise
+    // (e.g. ensureConversationFile fails because the conversation
+    // file can't be created). Without rollback in the outer catch,
+    // the dedup key stays set on a write that never happened, so
+    // all future identical snapshots get suppressed.
+    it('should retry an identical snapshot after a synchronous failure', async () => {
+      // First call: force writeFileSync (used by ensureConversationFile
+      // to wx-create the JSONL file) to throw a non-EEXIST error.
+      // ensureConversationFile rethrows that, which propagates through
+      // appendRecord SYNCHRONOUSLY before any promise is returned.
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        const e = new Error(
+          'EACCES: permission denied',
+        ) as NodeJS.ErrnoException;
+        e.code = 'EACCES';
+        throw e;
+      });
+
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      // Sync failure: writeLine never reached.
+      expect(vi.mocked(jsonl.writeLine)).not.toHaveBeenCalled();
+
+      // Identical snapshot on retry: dedup key should have been
+      // rolled back so this fires a fresh write.
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      expect(vi.mocked(jsonl.writeLine)).toHaveBeenCalledTimes(1);
+    });
   });
 
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)

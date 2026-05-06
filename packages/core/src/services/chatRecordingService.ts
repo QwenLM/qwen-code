@@ -1007,8 +1007,9 @@ export class ChatRecordingService {
    * than being permanently suppressed.
    */
   recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
+    let json: string | undefined;
     try {
-      const json = JSON.stringify(snapshot);
+      json = JSON.stringify(snapshot);
       if (json === this.lastAttributionSnapshotJson) {
         return;
       }
@@ -1021,13 +1022,24 @@ export class ChatRecordingService {
 
       this.lastAttributionSnapshotJson = json;
       this.appendRecord(record).catch(() => {
-        // Write failed — only roll back if the key still belongs to
-        // our snapshot (a later distinct write may have overwritten it).
+        // Async write failed — only roll back if the key still
+        // belongs to our snapshot (a later distinct write may have
+        // overwritten it).
         if (this.lastAttributionSnapshotJson === json) {
           this.lastAttributionSnapshotJson = undefined;
         }
       });
     } catch (error) {
+      // appendRecord (and createBaseRecord/JSON.stringify) can throw
+      // synchronously — e.g. ensureConversationFile() fails because
+      // the project temp dir isn't writable. The .catch() handler
+      // attached to the promise never runs in that case, so we'd
+      // otherwise leave the dedup key set without a write ever
+      // having landed and permanently suppress identical retries.
+      // Roll back here too.
+      if (json !== undefined && this.lastAttributionSnapshotJson === json) {
+        this.lastAttributionSnapshotJson = undefined;
+      }
       debugLogger.error('Error saving attribution snapshot:', error);
     }
   }
