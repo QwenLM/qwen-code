@@ -15,10 +15,12 @@ import type { AlibabaModelStudioFlowProps } from './AuthFlowTypes.js';
 export function AlibabaModelStudioFlow({
   viewLevel,
   items,
+  initialIndex,
   baseUrlItems,
   baseUrlIndex,
   subscriptionApiKeyPlan,
   onSelect,
+  onHighlight,
   onBaseUrlSelect,
   onBaseUrlHighlight,
   onApiKeySubmit,
@@ -30,8 +32,9 @@ export function AlibabaModelStudioFlow({
         <Box marginTop={1}>
           <DescriptiveRadioButtonSelect
             items={items}
-            initialIndex={0}
+            initialIndex={initialIndex}
             onSelect={onSelect}
+            onHighlight={onHighlight}
             itemGap={1}
           />
         </Box>
@@ -47,9 +50,6 @@ export function AlibabaModelStudioFlow({
   if (viewLevel === 'base-url-select') {
     return (
       <>
-        <Box marginTop={1}>
-          <Text color={theme.text.primary}>{t('Choose a Base URL')}</Text>
-        </Box>
         <Box marginTop={1}>
           <DescriptiveRadioButtonSelect
             items={baseUrlItems}

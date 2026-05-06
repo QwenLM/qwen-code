@@ -43,9 +43,13 @@ function createSettings(modelProviders = {}) {
 }
 
 function createConfig() {
+  const modelsConfig = {
+    syncAfterAuthRefresh: vi.fn(),
+  };
   return {
     reloadModelProvidersConfig: vi.fn(),
     refreshAuth: vi.fn(async () => undefined),
+    getModelsConfig: vi.fn(() => modelsConfig),
   };
 }
 
@@ -134,6 +138,10 @@ describe('applyProviderInstallPlan', () => {
         },
       ],
     });
+    expect(config.getModelsConfig().syncAfterAuthRefresh).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'new-model',
+    );
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 

@@ -37,13 +37,13 @@ describe('api key provider', () => {
             {
               id: 'deepseek-v4-flash',
               name: '[DeepSeek] deepseek-v4-flash',
-              baseUrl: 'https://api.deepseek.com/v1',
+              baseUrl: 'https://api.deepseek.com',
               envKey: 'DEEPSEEK_API_KEY',
             },
             {
               id: 'deepseek-v4-pro',
               name: '[DeepSeek] deepseek-v4-pro',
-              baseUrl: 'https://api.deepseek.com/v1',
+              baseUrl: 'https://api.deepseek.com',
               envKey: 'DEEPSEEK_API_KEY',
             },
           ],
@@ -61,7 +61,7 @@ describe('api key provider', () => {
       provider.ownsModel?.({
         id: 'deepseek-v4-flash',
         name: '[DeepSeek] deepseek-v4-flash',
-        baseUrl: 'https://api.deepseek.com/v1',
+        baseUrl: 'https://api.deepseek.com',
         envKey: 'DEEPSEEK_API_KEY',
       }),
     ).toBe(true);
@@ -69,7 +69,7 @@ describe('api key provider', () => {
       provider.ownsModel?.({
         id: 'custom-deepseek-compatible',
         name: '[Custom] custom-deepseek-compatible',
-        baseUrl: 'https://api.deepseek.com/v1',
+        baseUrl: 'https://api.deepseek.com',
         envKey: 'DEEPSEEK_API_KEY',
       }),
     ).toBe(false);

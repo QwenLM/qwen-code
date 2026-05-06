@@ -40,6 +40,7 @@ import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstal
 import {
   createCustomProviderInstallPlan,
   customProvider,
+  generateCustomApiKeyEnvKey,
 } from '../../auth/providers/custom/index.js';
 import {
   createOpenRouterProviderInstallPlan,
@@ -61,25 +62,6 @@ import {
   createApiKeyLlmProvider,
   createApiKeyProviderInstallPlan,
 } from '../../auth/setupMethods/apiKey/index.js';
-
-/**
- * Generate a Qwen-managed env key from protocol and base URL.
- * Format: QWEN_CUSTOM_API_KEY_${PROTOCOL}_${NORMALIZED_BASE_URL}
- */
-export function generateCustomApiKeyEnvKey(
-  protocol: string,
-  baseUrl: string,
-): string {
-  const normalize = (value: string) =>
-    value
-      .trim()
-      .toUpperCase()
-      .replace(/[^A-Z0-9]+/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_+|_+$/g, '');
-
-  return `QWEN_CUSTOM_API_KEY_${normalize(protocol)}_${normalize(baseUrl)}`;
-}
 
 /**
  * Normalize model IDs: split by comma, trim, deduplicate, remove empty.
@@ -228,6 +210,15 @@ export const useAuthCommand = (
     [onAuthError, pendingAuthType, config],
   );
 
+  const completeAuthentication = useCallback(() => {
+    setAuthError(null);
+    setAuthState(AuthState.Authenticated);
+    setPendingAuthType(undefined);
+    setIsAuthDialogOpen(false);
+    setIsAuthenticating(false);
+    onAuthChange?.();
+  }, [onAuthChange]);
+
   const handleAuthSuccess = useCallback(
     async (authType: AuthType) => {
       if (authType === AuthType.QWEN_OAUTH) {
@@ -244,14 +235,7 @@ export const useAuthCommand = (
         }
       }
 
-      setAuthError(null);
-      setAuthState(AuthState.Authenticated);
-      setPendingAuthType(undefined);
-      setIsAuthDialogOpen(false);
-      setIsAuthenticating(false);
-
-      // Trigger UI refresh to update header information
-      onAuthChange?.();
+      completeAuthentication();
 
       // Add success message to history
       addItem(
@@ -268,7 +252,7 @@ export const useAuthCommand = (
       const authEvent = new AuthEvent(authType, 'manual', 'success');
       logAuth(config, authEvent);
     },
-    [settings, handleAuthFailure, config, addItem, onAuthChange],
+    [settings, handleAuthFailure, completeAuthentication, addItem, config],
   );
 
   const performAuth = useCallback(
@@ -405,12 +389,7 @@ export const useAuthCommand = (
           provider,
         });
 
-        setAuthError(null);
-        setAuthState(AuthState.Authenticated);
-        setPendingAuthType(undefined);
-        setIsAuthDialogOpen(false);
-        setIsAuthenticating(false);
-        onAuthChange?.();
+        completeAuthentication();
 
         addItem(
           {
@@ -443,7 +422,7 @@ export const useAuthCommand = (
         handleAuthFailure(error);
       }
     },
-    [settings, config, handleAuthFailure, addItem, onAuthChange],
+    [settings, config, completeAuthentication, addItem, handleAuthFailure],
   );
 
   const handleCodingPlanSubmit = useCallback(
@@ -489,12 +468,7 @@ export const useAuthCommand = (
           provider: createApiKeyLlmProvider(provider),
         });
 
-        setAuthError(null);
-        setAuthState(AuthState.Authenticated);
-        setPendingAuthType(undefined);
-        setIsAuthDialogOpen(false);
-        setIsAuthenticating(false);
-        onAuthChange?.();
+        completeAuthentication();
 
         addItem(
           {
@@ -532,7 +506,7 @@ export const useAuthCommand = (
         handleAuthFailure(error);
       }
     },
-    [settings, config, handleAuthFailure, addItem, onAuthChange],
+    [settings, config, completeAuthentication, addItem, handleAuthFailure],
   );
 
   const handleApiKeyProviderSubmit = useCallback(
@@ -603,13 +577,8 @@ export const useAuthCommand = (
         refreshAuth: false,
       });
 
-      setAuthError(null);
       setExternalAuthState(null);
-      setAuthState(AuthState.Authenticated);
-      setPendingAuthType(undefined);
-      setIsAuthDialogOpen(false);
-      setIsAuthenticating(false);
-      onAuthChange?.();
+      completeAuthentication();
 
       addItem(
         {
@@ -653,9 +622,9 @@ export const useAuthCommand = (
   }, [
     settings,
     config,
-    handleAuthFailure,
+    completeAuthentication,
     addItem,
-    onAuthChange,
+    handleAuthFailure,
     setOpenRouterAuthAbortController,
   ]);
 
@@ -722,12 +691,7 @@ export const useAuthCommand = (
           provider: customProvider,
         });
 
-        setAuthError(null);
-        setAuthState(AuthState.Authenticated);
-        setPendingAuthType(undefined);
-        setIsAuthDialogOpen(false);
-        setIsAuthenticating(false);
-        onAuthChange?.();
+        completeAuthentication();
 
         addItem(
           {
@@ -753,19 +717,11 @@ export const useAuthCommand = (
         handleAuthFailure(error);
       }
     },
-    [settings, config, handleAuthFailure, addItem, onAuthChange],
+    [settings, config, completeAuthentication, addItem, handleAuthFailure],
   );
 
-  /**
-   /**
-    * We previously used a useEffect to trigger authentication automatically when
-    * settings.security.auth.selectedType changed. This caused problems: if authentication failed,
-    * the UI could get stuck, since settings.json would update before success. Now, we
-    * update selectedType in settings only when authentication fully succeeds.
-    * Authentication is triggered explicitly—either during initial app startup or when the
-    * user switches methods—not reactively through settings changes. This avoids repeated
-    * or broken authentication cycles.
-    */
+  // Authentication only runs from explicit user or startup actions; selectedType
+  // is persisted after success to avoid retry loops when a method fails.
   useEffect(() => {
     const defaultAuthType = process.env['QWEN_DEFAULT_AUTH_TYPE'];
     if (

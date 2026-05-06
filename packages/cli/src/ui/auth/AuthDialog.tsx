@@ -44,11 +44,8 @@ import {
   type ApiKeyProviderRegion,
   type ApiKeyProviderRegionConfig,
 } from '../../auth/setupMethods/apiKey/index.js';
-import {
-  generateCustomApiKeyEnvKey,
-  normalizeCustomModelIds,
-  maskApiKey,
-} from './useAuth.js';
+import { generateCustomApiKeyEnvKey } from '../../auth/providers/custom/index.js';
+import { normalizeCustomModelIds, maskApiKey } from './useAuth.js';
 import type {
   ApiKeyOption,
   MainOption,
@@ -134,6 +131,9 @@ export function AuthDialog(): React.JSX.Element {
   const [presetApiKeyRegionIndex, setPresetApiKeyRegionIndex] =
     useState<number>(0);
   const [apiKeyTypeIndex, setApiKeyTypeIndex] = useState<number>(0);
+  const [alibabaModelStudioIndex, setAlibabaModelStudioIndex] =
+    useState<number>(0);
+  const [mainAuthIndex, setMainAuthIndex] = useState<number | null>(null);
   const [oauthProviderIndex, setOAuthProviderIndex] = useState<number>(0);
   const [presetApiKeyProvider, setPresetApiKeyProvider] =
     useState<ApiKeyProviderConfig>(API_KEY_PROVIDERS.alibabaStandard);
@@ -334,7 +334,7 @@ export function AuthDialog(): React.JSX.Element {
     return 'THIRD_PARTY_PROVIDERS';
   };
 
-  const initialAuthIndex = Math.max(
+  const defaultAuthIndex = Math.max(
     0,
     mainItems.findIndex((item) => {
       // Priority 1: pendingAuthType
@@ -360,6 +360,7 @@ export function AuthDialog(): React.JSX.Element {
       return item.value === 'ALIBABA_MODELSTUDIO';
     }),
   );
+  const initialAuthIndex = mainAuthIndex ?? defaultAuthIndex;
 
   const handleMainSelect = async (value: MainOption) => {
     setErrorMessage(null);
@@ -502,7 +503,11 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    await handleSubscriptionPlanSubmit(activeSubscriptionPlan, apiKey, baseUrl);
+    await handleSubscriptionPlanSubmit(
+      activeSubscriptionPlan,
+      apiKey,
+      activeSubscriptionPlan === 'coding' ? baseUrl : undefined,
+    );
   };
 
   const handlePresetApiKeySubmit = () => {
@@ -783,6 +788,10 @@ export function AuthDialog(): React.JSX.Element {
           items={mainItems}
           initialIndex={initialAuthIndex}
           onSelect={handleMainSelect}
+          onHighlight={(value) => {
+            const index = mainItems.findIndex((item) => item.value === value);
+            setMainAuthIndex(index);
+          }}
           itemGap={1}
         />
       </Box>
@@ -885,37 +894,37 @@ export function AuthDialog(): React.JSX.Element {
       case 'main':
         return t('Select Authentication Method');
       case 'alibaba-modelstudio-select':
-        return t('Alibaba ModelStudio');
+        return t('Alibaba ModelStudio \u00B7 Step 1/3 \u00B7 Access Method');
       case 'base-url-select':
-        return t('Select Base URL for Coding Plan');
+        return t('Alibaba ModelStudio \u00B7 Step 2/3 \u00B7 Region');
       case 'api-key-input':
         return activeSubscriptionPlan === 'token'
-          ? t('Enter Token Plan API Key')
-          : t('Enter Coding Plan API Key');
+          ? t('Alibaba ModelStudio \u00B7 Step 2/2 \u00B7 API Key')
+          : t('Alibaba ModelStudio \u00B7 Step 3/3 \u00B7 API Key');
       case 'api-key-type-select':
-        return t('Select Third-party Provider');
+        return t('Third-party Providers \u00B7 Step 1/3 \u00B7 Provider');
       case 'preset-api-key-region-select':
-        return t('Select Region for {{providerName}}', {
-          providerName: presetApiKeyProvider.title,
-        });
+        return t('Alibaba ModelStudio \u00B7 Step 2/4 \u00B7 Region');
       case 'preset-api-key-input':
-        return t('Enter {{providerName}}', {
-          providerName: presetApiKeyProvider.title,
-        });
+        return presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
+          ? t('Alibaba ModelStudio \u00B7 Step 3/4 \u00B7 API Key')
+          : t('Third-party Providers \u00B7 Step 2/3 \u00B7 API Key');
       case 'preset-model-id-input':
-        return t('Enter Model IDs');
+        return presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
+          ? t('Alibaba ModelStudio \u00B7 Step 4/4 \u00B7 Models')
+          : t('Third-party Providers \u00B7 Step 3/3 \u00B7 Models');
       case 'custom-protocol-select':
-        return t('Custom Provider · Step 1/6 · Protocol');
+        return t('Custom Provider \u00B7 Step 1/6 \u00B7 Protocol');
       case 'custom-base-url-input':
-        return t('Step 2/6 \u00B7 Base URL');
+        return t('Custom Provider \u00B7 Step 2/6 \u00B7 Base URL');
       case 'custom-api-key-input':
-        return t('Step 3/6 \u00B7 API Key');
+        return t('Custom Provider \u00B7 Step 3/6 \u00B7 API Key');
       case 'custom-model-id-input':
-        return t('Step 4/6 \u00B7 Model IDs');
+        return t('Custom Provider \u00B7 Step 4/6 \u00B7 Model IDs');
       case 'custom-advanced-config':
-        return t('Step 5/6 \u00B7 Advanced Config');
+        return t('Custom Provider \u00B7 Step 5/6 \u00B7 Advanced Config');
       case 'custom-review-json':
-        return t('Step 6/6 \u00B7 Review');
+        return t('Custom Provider \u00B7 Step 6/6 \u00B7 Review');
       case 'oauth-provider-select':
         return t('Select OAuth Provider');
       default:
@@ -937,10 +946,17 @@ export function AuthDialog(): React.JSX.Element {
       <AlibabaModelStudioFlow
         viewLevel={viewLevel}
         items={alibabaModelStudioItems}
+        initialIndex={alibabaModelStudioIndex}
         baseUrlItems={baseUrlItems}
         baseUrlIndex={baseUrlIndex}
         subscriptionApiKeyPlan={getSubscriptionApiKeyInputPlan()}
         onSelect={handleAlibabaModelStudioSelect}
+        onHighlight={(value) => {
+          const index = alibabaModelStudioItems.findIndex(
+            (item) => item.value === value,
+          );
+          setAlibabaModelStudioIndex(index);
+        }}
         onBaseUrlSelect={handleBaseUrlSelect}
         onBaseUrlHighlight={(value) => {
           const index = baseUrlItems.findIndex((item) => item.value === value);

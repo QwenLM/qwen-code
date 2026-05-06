@@ -11,7 +11,7 @@ import open from 'open';
 import { type ProviderModelConfig as ModelConfig } from '@qwen-code/qwen-code-core';
 
 export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
-export const OPENROUTER_DEFAULT_MODEL = 'openai/gpt-4o-mini';
+export const OPENROUTER_DEFAULT_MODEL = 'qwen/qwen3-coder:free';
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 export const OPENROUTER_OAUTH_AUTHORIZE_URL = 'https://openrouter.ai/auth';
 export const OPENROUTER_OAUTH_EXCHANGE_URL =
@@ -25,20 +25,32 @@ const OPENROUTER_MINIMUM_TEXT_MODELS = 1;
 
 export const OPENROUTER_DEFAULT_MODELS: ModelConfig[] = [
   {
-    id: 'openai/gpt-4o-mini',
-    name: 'OpenRouter · GPT-4o mini',
+    id: 'qwen/qwen3-coder:free',
+    name: 'OpenRouter · Qwen3 Coder',
     baseUrl: OPENROUTER_BASE_URL,
     envKey: OPENROUTER_ENV_KEY,
   },
   {
-    id: 'anthropic/claude-3.7-sonnet',
-    name: 'OpenRouter · Claude 3.7 Sonnet',
+    id: 'deepseek/deepseek-chat-v3.1:free',
+    name: 'OpenRouter · DeepSeek V3.1',
     baseUrl: OPENROUTER_BASE_URL,
     envKey: OPENROUTER_ENV_KEY,
   },
   {
-    id: 'google/gemini-2.5-flash',
+    id: 'glm/glm-4.5-air:free',
+    name: 'OpenRouter · GLM 4.5 Air',
+    baseUrl: OPENROUTER_BASE_URL,
+    envKey: OPENROUTER_ENV_KEY,
+  },
+  {
+    id: 'google/gemini-2.5-flash:free',
     name: 'OpenRouter · Gemini 2.5 Flash',
+    baseUrl: OPENROUTER_BASE_URL,
+    envKey: OPENROUTER_ENV_KEY,
+  },
+  {
+    id: 'meta-llama/llama-3.3-70b-instruct:free',
+    name: 'OpenRouter · Llama 3.3 70B Instruct',
     baseUrl: OPENROUTER_BASE_URL,
     envKey: OPENROUTER_ENV_KEY,
   },
@@ -297,8 +309,15 @@ function buildOpenRouterHeaders() {
   };
 }
 
-const OPENROUTER_MODEL_PRIORITY_PREFIXES = ['qwen/', 'glm/', 'minimax/'];
-const OPENROUTER_RECOMMENDED_MODEL_LIMIT = 16;
+const OPENROUTER_RECOMMENDED_FREE_MODEL_IDS = [
+  'qwen/qwen3-coder:free',
+  'deepseek/deepseek-chat-v3.1:free',
+  'glm/glm-4.5-air:free',
+  'google/gemini-2.5-flash:free',
+  'meta-llama/llama-3.3-70b-instruct:free',
+];
+const OPENROUTER_RECOMMENDED_MODEL_LIMIT =
+  OPENROUTER_RECOMMENDED_FREE_MODEL_IDS.length;
 const OPENROUTER_FREE_MODEL_ID_HINT = ':free';
 
 export function getPreferredOpenRouterModelId(
@@ -318,13 +337,13 @@ function isOpenRouterFreeModelId(modelId: string): boolean {
   );
 }
 
-function getOpenRouterModelPriority(modelId: string): number {
+function getOpenRouterRecommendedFreeModelPriority(modelId: string): number {
   const normalizedId = modelId.toLowerCase();
-  const matchedIndex = OPENROUTER_MODEL_PRIORITY_PREFIXES.findIndex((prefix) =>
-    normalizedId.startsWith(prefix),
+  const matchedIndex = OPENROUTER_RECOMMENDED_FREE_MODEL_IDS.findIndex(
+    (recommendedId) => recommendedId === normalizedId,
   );
   return matchedIndex === -1
-    ? OPENROUTER_MODEL_PRIORITY_PREFIXES.length
+    ? OPENROUTER_RECOMMENDED_FREE_MODEL_IDS.length
     : matchedIndex;
 }
 
@@ -333,16 +352,17 @@ function isOpenRouterFreeConfig(model: ModelConfig): boolean {
 }
 
 function compareOpenRouterModels(a: ModelConfig, b: ModelConfig): number {
+  const recommendedFreeDiff =
+    getOpenRouterRecommendedFreeModelPriority(a.id) -
+    getOpenRouterRecommendedFreeModelPriority(b.id);
+  if (recommendedFreeDiff !== 0) {
+    return recommendedFreeDiff;
+  }
+
   const freeDiff =
     Number(isOpenRouterFreeConfig(b)) - Number(isOpenRouterFreeConfig(a));
   if (freeDiff !== 0) {
     return freeDiff;
-  }
-
-  const priorityDiff =
-    getOpenRouterModelPriority(a.id) - getOpenRouterModelPriority(b.id);
-  if (priorityDiff !== 0) {
-    return priorityDiff;
   }
 
   return a.id.localeCompare(b.id);
@@ -382,14 +402,6 @@ function toOpenRouterModelConfig(
   };
 }
 
-function chooseRepresentativeModel(
-  models: ModelConfig[],
-  predicate: (model: ModelConfig) => boolean,
-  selectedIds: Set<string>,
-): ModelConfig | undefined {
-  return models.find((model) => predicate(model) && !selectedIds.has(model.id));
-}
-
 function addRecommendedModel(
   target: ModelConfig[],
   model: ModelConfig | undefined,
@@ -407,72 +419,30 @@ export function selectRecommendedOpenRouterModels(
   models: ModelConfig[],
   limit = OPENROUTER_RECOMMENDED_MODEL_LIMIT,
 ): ModelConfig[] {
-  if (models.length <= limit) {
-    return models;
-  }
-
   const sorted = [...models].sort(compareOpenRouterModels);
   const recommended: ModelConfig[] = [];
   const selectedIds = new Set<string>();
 
-  const freeModels = sorted.filter((model) => isOpenRouterFreeConfig(model));
-  for (const model of freeModels.slice(0, Math.min(limit, 6))) {
-    addRecommendedModel(recommended, model, selectedIds, limit);
-  }
-
-  for (const prefix of OPENROUTER_MODEL_PRIORITY_PREFIXES) {
+  for (const recommendedId of OPENROUTER_RECOMMENDED_FREE_MODEL_IDS) {
     addRecommendedModel(
       recommended,
-      chooseRepresentativeModel(
-        sorted,
-        (model) => model.id.toLowerCase().startsWith(prefix),
-        selectedIds,
+      sorted.find(
+        (model) =>
+          model.id.toLowerCase() === recommendedId &&
+          isOpenRouterFreeConfig(model),
       ),
       selectedIds,
       limit,
     );
   }
-
-  for (const family of ['anthropic/', 'google/', 'openai/']) {
-    addRecommendedModel(
-      recommended,
-      chooseRepresentativeModel(
-        sorted,
-        (model) => model.id.toLowerCase().startsWith(family),
-        selectedIds,
-      ),
-      selectedIds,
-      limit,
-    );
-  }
-
-  addRecommendedModel(
-    recommended,
-    chooseRepresentativeModel(
-      sorted,
-      (model) => model.capabilities?.vision === true,
-      selectedIds,
-    ),
-    selectedIds,
-    limit,
-  );
-
-  addRecommendedModel(
-    recommended,
-    chooseRepresentativeModel(
-      sorted,
-      (model) => (model.generationConfig?.contextWindowSize || 0) >= 1000000,
-      selectedIds,
-    ),
-    selectedIds,
-    limit,
-  );
 
   for (const model of sorted) {
     if (recommended.length >= limit) {
       break;
     }
-    addRecommendedModel(recommended, model, selectedIds, limit);
+    if (isOpenRouterFreeConfig(model)) {
+      addRecommendedModel(recommended, model, selectedIds, limit);
+    }
   }
 
   return recommended;

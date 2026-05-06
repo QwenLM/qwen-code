@@ -16,18 +16,24 @@ const {
   mockBackupSettingsFile,
   mockLoadCliConfig,
   mockReloadModelProvidersConfig,
+  mockSyncAfterAuthRefresh,
 } = vi.hoisted(() => {
   const mockRefreshAuth = vi.fn();
   const mockReloadModelProvidersConfig = vi.fn();
+  const mockSyncAfterAuthRefresh = vi.fn();
   return {
     mockRefreshAuth,
     mockSetValue: vi.fn(),
     mockForScope: vi.fn(() => ({ path: '/user.json' })),
     mockBackupSettingsFile: vi.fn(),
     mockReloadModelProvidersConfig,
+    mockSyncAfterAuthRefresh,
     mockLoadCliConfig: vi.fn(async () => ({
       refreshAuth: mockRefreshAuth,
       reloadModelProvidersConfig: mockReloadModelProvidersConfig,
+      getModelsConfig: vi.fn(() => ({
+        syncAfterAuthRefresh: mockSyncAfterAuthRefresh,
+      })),
     })),
   };
 });
@@ -65,21 +71,39 @@ vi.mock('../../auth/providers/oauth/openrouter.js', () => ({
       OPENROUTER_API_KEY: apiKey,
     },
     modelSelection: {
-      modelId: 'openai/gpt-4o-mini:free',
+      modelId: 'qwen/qwen3-coder:free',
     },
     modelProviders: [
       {
         authType: 'openai',
         models: [
           {
-            id: 'openai/gpt-4o-mini:free',
-            name: 'OpenRouter · GPT-4o mini',
+            id: 'qwen/qwen3-coder:free',
+            name: 'OpenRouter · Qwen3 Coder',
             baseUrl: 'https://openrouter.ai/api/v1',
             envKey: 'OPENROUTER_API_KEY',
           },
           {
-            id: 'anthropic/claude-3.7-sonnet',
-            name: 'OpenRouter · Claude 3.7 Sonnet',
+            id: 'deepseek/deepseek-chat-v3.1:free',
+            name: 'OpenRouter · DeepSeek V3.1',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+          {
+            id: 'glm/glm-4.5-air:free',
+            name: 'OpenRouter · GLM 4.5 Air',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+          {
+            id: 'google/gemini-2.5-flash:free',
+            name: 'OpenRouter · Gemini 2.5 Flash',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+          {
+            id: 'meta-llama/llama-3.3-70b-instruct:free',
+            name: 'OpenRouter · Llama 3.3 70B Instruct',
             baseUrl: 'https://openrouter.ai/api/v1',
             envKey: 'OPENROUTER_API_KEY',
           },
@@ -169,7 +193,7 @@ describe('handleQwenAuth openrouter', () => {
     expect(mockSetValue).toHaveBeenCalledWith(
       'user',
       'model.name',
-      'openai/gpt-4o-mini:free',
+      'qwen/qwen3-coder:free',
     );
 
     const modelProvidersCall = mockSetValue.mock.calls.find(
@@ -178,14 +202,32 @@ describe('handleQwenAuth openrouter', () => {
     expect(modelProvidersCall).toBeDefined();
     expect(modelProvidersCall?.[2]).toEqual([
       {
-        id: 'openai/gpt-4o-mini:free',
-        name: 'OpenRouter · GPT-4o mini',
+        id: 'qwen/qwen3-coder:free',
+        name: 'OpenRouter · Qwen3 Coder',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
       {
-        id: 'anthropic/claude-3.7-sonnet',
-        name: 'OpenRouter · Claude 3.7 Sonnet',
+        id: 'deepseek/deepseek-chat-v3.1:free',
+        name: 'OpenRouter · DeepSeek V3.1',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'glm/glm-4.5-air:free',
+        name: 'OpenRouter · GLM 4.5 Air',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'google/gemini-2.5-flash:free',
+        name: 'OpenRouter · Gemini 2.5 Flash',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'meta-llama/llama-3.3-70b-instruct:free',
+        name: 'OpenRouter · Llama 3.3 70B Instruct',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
@@ -199,9 +241,13 @@ describe('handleQwenAuth openrouter', () => {
     expect(mockReloadModelProvidersConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         [AuthType.USE_OPENAI]: expect.arrayContaining([
-          expect.objectContaining({ id: 'openai/gpt-4o-mini:free' }),
+          expect.objectContaining({ id: 'qwen/qwen3-coder:free' }),
         ]),
       }),
+    );
+    expect(mockSyncAfterAuthRefresh).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen/qwen3-coder:free',
     );
     expect(mockRefreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
     expect(process.env['OPENROUTER_API_KEY']).toBe('or-key-123');
@@ -236,14 +282,32 @@ describe('handleQwenAuth openrouter', () => {
     );
     expect(modelProvidersCall?.[2]).toEqual([
       {
-        id: 'openai/gpt-4o-mini:free',
-        name: 'OpenRouter · GPT-4o mini',
+        id: 'qwen/qwen3-coder:free',
+        name: 'OpenRouter · Qwen3 Coder',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
       {
-        id: 'anthropic/claude-3.7-sonnet',
-        name: 'OpenRouter · Claude 3.7 Sonnet',
+        id: 'deepseek/deepseek-chat-v3.1:free',
+        name: 'OpenRouter · DeepSeek V3.1',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'glm/glm-4.5-air:free',
+        name: 'OpenRouter · GLM 4.5 Air',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'google/gemini-2.5-flash:free',
+        name: 'OpenRouter · Gemini 2.5 Flash',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'meta-llama/llama-3.3-70b-instruct:free',
+        name: 'OpenRouter · Llama 3.3 70B Instruct',
         baseUrl: 'https://openrouter.ai/api/v1',
         envKey: 'OPENROUTER_API_KEY',
       },
@@ -286,6 +350,10 @@ describe('handleQwenAuth openrouter', () => {
       'or-key-dynamic',
     );
     expect(mockReloadModelProvidersConfig).toHaveBeenCalled();
+    expect(mockSyncAfterAuthRefresh).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen/qwen3-coder:free',
+    );
     expect(mockRefreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 });

@@ -27,8 +27,8 @@ describe('openRouterProvider', () => {
       apiKey: 'or-key',
       models: [
         {
-          id: 'openai/gpt-4o-mini:free',
-          name: 'OpenRouter · GPT-4o mini',
+          id: 'qwen/qwen3-coder:free',
+          name: 'OpenRouter · Qwen3 Coder',
           baseUrl: 'https://openrouter.ai/api/v1',
           envKey: 'OPENROUTER_API_KEY',
         },
@@ -48,15 +48,15 @@ describe('openRouterProvider', () => {
         OPENROUTER_API_KEY: 'or-key',
       },
       modelSelection: {
-        modelId: 'openai/gpt-4o-mini:free',
+        modelId: 'qwen/qwen3-coder:free',
       },
       modelProviders: [
         {
           authType: AuthType.USE_OPENAI,
           models: [
             {
-              id: 'openai/gpt-4o-mini:free',
-              name: 'OpenRouter · GPT-4o mini',
+              id: 'qwen/qwen3-coder:free',
+              name: 'OpenRouter · Qwen3 Coder',
               baseUrl: 'https://openrouter.ai/api/v1',
               envKey: 'OPENROUTER_API_KEY',
             },

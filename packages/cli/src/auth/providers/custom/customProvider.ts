@@ -11,6 +11,25 @@ import type {
   CustomProviderInstallInput,
 } from './customProviderWizardTypes.js';
 
+export const CUSTOM_API_KEY_ENV_PREFIX = 'QWEN_CUSTOM_API_KEY_';
+
+export function generateCustomApiKeyEnvKey(
+  protocol: string,
+  baseUrl: string,
+): string {
+  const normalize = (value: string) =>
+    value
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+
+  return `${CUSTOM_API_KEY_ENV_PREFIX}${normalize(protocol)}_${normalize(
+    baseUrl,
+  )}`;
+}
+
 function buildCustomGenerationConfig(
   generationConfig: CustomProviderGenerationConfigInput | undefined,
 ): ProviderModelConfig['generationConfig'] | undefined {
@@ -104,7 +123,7 @@ export const customProvider: LlmProvider = {
   ownsModel(model) {
     return (
       typeof model.envKey === 'string' &&
-      model.envKey.startsWith('QWEN_CUSTOM_API_KEY_')
+      model.envKey.startsWith(CUSTOM_API_KEY_ENV_PREFIX)
     );
   },
   async createInstallPlan(input) {

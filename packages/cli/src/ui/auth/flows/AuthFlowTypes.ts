@@ -84,10 +84,12 @@ export interface SubscriptionApiKeyPlan {
 export interface AlibabaModelStudioFlowProps {
   viewLevel: ViewLevel;
   items: AlibabaModelStudioItem[];
+  initialIndex: number;
   baseUrlItems: BaseUrlItem[];
   baseUrlIndex: number;
   subscriptionApiKeyPlan: SubscriptionApiKeyPlan;
   onSelect: (value: SubscribeOption | ApiKeyOption) => void;
+  onHighlight: (value: SubscribeOption | ApiKeyOption) => void;
   onBaseUrlSelect: (baseUrl: string) => void;
   onBaseUrlHighlight: (baseUrl: string) => void;
   onApiKeySubmit: (apiKey: string) => void;

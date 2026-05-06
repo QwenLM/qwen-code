@@ -16,8 +16,8 @@ export const ALIBABA_STANDARD_API_KEY_PROVIDER =
   defineApiKeyProvider<AlibabaStandardRegion>({
     id: 'alibabaStandard',
     option: 'ALIBABA_STANDARD_API_KEY',
-    title: 'Alibaba Cloud ModelStudio Standard API Key',
-    description: 'Quick setup for Model Studio (China/International)',
+    title: 'Standard API Key',
+    description: 'Connect with an existing ModelStudio API key',
     envKey: 'DASHSCOPE_API_KEY',
     modelNamePrefix: 'ModelStudio Standard',
     defaultModelIds: 'qwen3.5-plus,glm-5,kimi-k2.5',

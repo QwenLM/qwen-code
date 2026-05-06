@@ -134,6 +134,11 @@ export async function applyProviderInstallPlan(
   }
 
   config.reloadModelProvidersConfig(updatedModelProviders);
+  if (plan.modelSelection?.modelId) {
+    config
+      .getModelsConfig()
+      .syncAfterAuthRefresh(plan.authType, plan.modelSelection.modelId);
+  }
   if (refreshAuth) {
     await config.refreshAuth(plan.authType);
   }

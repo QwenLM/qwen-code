@@ -16,17 +16,13 @@ export {
 } from '../../providers/alibaba/modelStudio.js';
 export { DEEPSEEK_API_KEY_PROVIDER } from '../../providers/thirdParty/deepseek.js';
 export { HUGGINGFACE_API_KEY_PROVIDER } from '../../providers/thirdParty/huggingface.js';
-export { MINIMAX_API_KEY_PROVIDER } from '../../providers/thirdParty/minimax.js';
 export { OPENAI_API_KEY_PROVIDER } from '../../providers/thirdParty/openai.js';
-export { XIAOMI_API_KEY_PROVIDER } from '../../providers/thirdParty/xiaomi.js';
 export { ZAI_API_KEY_PROVIDER } from '../../providers/thirdParty/zai.js';
 
 import { ALIBABA_STANDARD_API_KEY_PROVIDER } from '../../providers/alibaba/modelStudio.js';
 import { DEEPSEEK_API_KEY_PROVIDER } from '../../providers/thirdParty/deepseek.js';
 import { HUGGINGFACE_API_KEY_PROVIDER } from '../../providers/thirdParty/huggingface.js';
-import { MINIMAX_API_KEY_PROVIDER } from '../../providers/thirdParty/minimax.js';
 import { OPENAI_API_KEY_PROVIDER } from '../../providers/thirdParty/openai.js';
-import { XIAOMI_API_KEY_PROVIDER } from '../../providers/thirdParty/xiaomi.js';
 import { ZAI_API_KEY_PROVIDER } from '../../providers/thirdParty/zai.js';
 import type {
   AnyApiKeyProviderConfig,
@@ -40,9 +36,7 @@ export const API_KEY_PROVIDERS = {
   deepseek: DEEPSEEK_API_KEY_PROVIDER,
   openai: OPENAI_API_KEY_PROVIDER,
   huggingface: HUGGINGFACE_API_KEY_PROVIDER,
-  minimax: MINIMAX_API_KEY_PROVIDER,
   zai: ZAI_API_KEY_PROVIDER,
-  xiaomi: XIAOMI_API_KEY_PROVIDER,
 } as const satisfies Record<string, AnyApiKeyProviderConfig>;
 
 export type ApiKeyProviderId = keyof typeof API_KEY_PROVIDERS;

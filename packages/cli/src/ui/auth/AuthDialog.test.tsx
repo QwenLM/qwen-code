@@ -168,7 +168,11 @@ const navigateToCustomProtocolSelect = async (
   await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Third-party Providers');
   await moveDownAndWaitForSelection(stdin, lastFrame, 'OAuth');
-  await moveDownAndWaitForSelection(stdin, lastFrame, 'Custom Provider');
+  await vi.waitFor(() => {
+    expect(lastFrame()).toContain('Custom Provider');
+  });
+  stdin.write('\u001b[B');
+  await waitForSelectedOption(lastFrame, 'Custom Provider');
   await pressEnterAndWaitFor(
     stdin,
     lastFrame,
@@ -181,7 +185,11 @@ const navigateToCustomBaseUrlInput = async (
   lastFrame: () => string | undefined,
 ) => {
   await navigateToCustomProtocolSelect(stdin, lastFrame);
-  await pressEnterAndWaitFor(stdin, lastFrame, 'Step 2/6 · Base URL');
+  await pressEnterAndWaitFor(
+    stdin,
+    lastFrame,
+    'Custom Provider · Step 2/6 · Base URL',
+  );
 };
 
 const navigateToCustomApiKeyInput = async (
@@ -189,7 +197,11 @@ const navigateToCustomApiKeyInput = async (
   lastFrame: () => string | undefined,
 ) => {
   await navigateToCustomBaseUrlInput(stdin, lastFrame);
-  await pressEnterAndWaitFor(stdin, lastFrame, 'Step 3/6 · API Key');
+  await pressEnterAndWaitFor(
+    stdin,
+    lastFrame,
+    'Custom Provider · Step 3/6 · API Key',
+  );
 };
 
 const navigateToCustomModelIdInput = async (
@@ -199,7 +211,11 @@ const navigateToCustomModelIdInput = async (
 ) => {
   await navigateToCustomApiKeyInput(stdin, lastFrame);
   await typeText(stdin, apiKey);
-  await pressEnterAndWaitFor(stdin, lastFrame, 'Step 4/6 · Model IDs');
+  await pressEnterAndWaitFor(
+    stdin,
+    lastFrame,
+    'Custom Provider · Step 4/6 · Model IDs',
+  );
 };
 
 const navigateToCustomAdvancedConfig = async (
@@ -210,7 +226,11 @@ const navigateToCustomAdvancedConfig = async (
 ) => {
   await navigateToCustomModelIdInput(stdin, lastFrame, apiKey);
   await typeText(stdin, modelIds);
-  await pressEnterAndWaitFor(stdin, lastFrame, 'Step 5/6 · Advanced Config');
+  await pressEnterAndWaitFor(
+    stdin,
+    lastFrame,
+    'Custom Provider · Step 5/6 · Advanced Config',
+  );
 };
 
 describe('AuthDialog', () => {
@@ -711,6 +731,81 @@ describe('AuthDialog', () => {
     unmount();
   });
 
+  it('should preserve the selected main entry when returning from each top-level flow', async () => {
+    const createSettings = () =>
+      new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+    const cases = [
+      {
+        label: 'Alibaba ModelStudio',
+        childTitle: 'Alibaba ModelStudio · Step 1/3 · Access Method',
+      },
+      {
+        label: 'Third-party Providers',
+        childTitle: 'Third-party Providers · Step 1/3 · Provider',
+      },
+      {
+        label: 'OAuth',
+        childTitle: 'Select OAuth Provider',
+      },
+      {
+        label: 'Custom Provider',
+        childTitle: 'Custom Provider · Step 1/6 · Protocol',
+      },
+    ];
+
+    for (const testCase of cases) {
+      const { stdin, lastFrame, unmount } = renderAuthDialog(createSettings());
+      await wait();
+
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      while (
+        !lastFrame()?.match(
+          new RegExp(`›\\s*(?:\\d+\\.\\s*)?${escapeRegExp(testCase.label)}`),
+        )
+      ) {
+        stdin.write('\u001b[B');
+        await wait();
+      }
+      await pressEnterAndWaitFor(stdin, lastFrame, testCase.childTitle);
+      stdin.write('\u001b');
+      await waitForSelectedOption(lastFrame, testCase.label);
+
+      unmount();
+    }
+  });
+
   it('should go back from Coding Plan region selection to Alibaba ModelStudio', async () => {
     const settings: LoadedSettings = new LoadedSettings(
       {
@@ -749,20 +844,24 @@ describe('AuthDialog', () => {
     await wait();
 
     await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
-    await pressEnterAndWaitFor(stdin, lastFrame, 'Alibaba ModelStudio');
-    await waitForSelectedOption(lastFrame, 'Alibaba Cloud Coding Plan');
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Select Region for Coding Plan',
+      'Alibaba ModelStudio · Step 1/3 · Access Method',
+    );
+    await waitForSelectedOption(lastFrame, 'Coding Plan');
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Alibaba ModelStudio · Step 2/3 · Region',
     );
     stdin.write('\u001b');
 
     await vi.waitFor(() => {
       const frame = lastFrame();
       expect(frame).toContain('Alibaba ModelStudio');
-      expect(frame).toContain('Alibaba Cloud Coding Plan');
-      expect(frame).toContain('Alibaba Cloud Token Plan');
+      expect(frame).toContain('Coding Plan');
+      expect(frame).toContain('Token Plan');
     });
 
     unmount();
@@ -810,14 +909,22 @@ describe('AuthDialog', () => {
       lastFrame,
       'Third-party Providers',
     );
-    await pressEnterAndWaitFor(stdin, lastFrame, 'Select Third-party Provider');
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Third-party Providers · Step 1/3 · Provider',
+    );
     await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
-    await pressEnterAndWaitFor(stdin, lastFrame, 'Enter DeepSeek API Key');
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Third-party Providers · Step 2/3 · API Key',
+    );
     stdin.write('\u001b');
 
     await vi.waitFor(() => {
       const frame = lastFrame();
-      expect(frame).toContain('Select Third-party Provider');
+      expect(frame).toContain('Third-party Providers · Step 1/3 · Provider');
       expect(frame).toContain('DeepSeek API Key');
     });
 
@@ -866,13 +973,17 @@ describe('AuthDialog', () => {
       lastFrame,
       'Third-party Providers',
     );
-    await pressEnterAndWaitFor(stdin, lastFrame, 'Select Third-party Provider');
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Third-party Providers · Step 1/3 · Provider',
+    );
 
     await vi.waitFor(() => {
       const frame = lastFrame();
       expect(frame).toContain('DeepSeek API Key');
       expect(frame).toContain('OpenAI API Key');
-      expect(frame).not.toContain('Alibaba Cloud ModelStudio Standard API Key');
+      expect(frame).not.toContain('Standard API Key');
     });
 
     unmount();
@@ -915,13 +1026,17 @@ describe('AuthDialog', () => {
     const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
     await wait();
 
-    await pressEnterAndWaitFor(stdin, lastFrame, 'Alibaba ModelStudio');
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Alibaba ModelStudio · Step 1/3 · Access Method',
+    );
 
     await vi.waitFor(() => {
       const frame = lastFrame();
-      expect(frame).toContain('Alibaba Cloud Coding Plan');
-      expect(frame).toContain('Alibaba Cloud Token Plan');
-      expect(frame).toContain('Dedicated API key and base URL');
+      expect(frame).toContain('Coding Plan');
+      expect(frame).toContain('Token Plan');
+      expect(frame).toContain('Usage-based billing with dedicated endpoint');
     });
 
     unmount();
@@ -971,19 +1086,17 @@ describe('AuthDialog', () => {
 
     await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
     stdin.write('\r');
-    await waitForSelectedOption(lastFrame, 'Alibaba Cloud Coding Plan');
-    await moveDownAndWaitForSelection(
+    await waitForSelectedOption(lastFrame, 'Coding Plan');
+    await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
+    await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Alibaba Cloud Token Plan',
+      'Alibaba ModelStudio · Step 2/2 · API Key',
     );
-    await pressEnterAndWaitFor(stdin, lastFrame, 'Enter Token Plan API Key');
     await vi.waitFor(() => {
       const frame = lastFrame();
-      expect(frame).toContain(
-        'You can get your Alibaba Cloud Token Plan API key here',
-      );
-      expect(frame).toContain('url=3029263');
+      expect(frame).toContain('You can get your Token Plan API key here');
+      expect(frame).toContain('url=3028856');
     });
     await typeText(stdin, 'sk-token-plan');
     stdin.write('\r');
@@ -991,8 +1104,64 @@ describe('AuthDialog', () => {
       expect(handleSubscriptionPlanSubmit).toHaveBeenCalledWith(
         'token',
         'sk-token-plan',
-        'china',
+        undefined,
       );
+    });
+
+    unmount();
+  });
+
+  it('should return from Token Plan API key input to Token Plan selection', async () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+    await wait();
+
+    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+    stdin.write('\r');
+    await waitForSelectedOption(lastFrame, 'Coding Plan');
+    await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Alibaba ModelStudio · Step 2/2 · API Key',
+    );
+    stdin.write('\u001b');
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Alibaba ModelStudio');
+      expectSelectedOption(lastFrame(), 'Token Plan');
     });
 
     unmount();
@@ -1165,7 +1334,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
 
       await vi.waitFor(() => {
         const frame = lastFrame();
-        expect(frame).toContain('Step 2/6 · Base URL');
+        expect(frame).toContain('Custom Provider · Step 2/6 · Base URL');
         expect(frame).toContain('Enter the API endpoint');
       });
 
@@ -1202,11 +1371,15 @@ describe('AuthDialog Custom API Key Wizard', () => {
         'sk-test-key-12345',
         'qwen/qwen3-coder,gpt-4.1',
       );
-      await pressEnterAndWaitFor(stdin, lastFrame, 'Step 6/6 · Review');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 6/6 · Review',
+      );
 
       await vi.waitFor(() => {
         const frame = lastFrame();
-        expect(frame).toContain('Step 6/6 · Review');
+        expect(frame).toContain('Custom Provider · Step 6/6 · Review');
         expect(frame).toContain('The following JSON will be saved');
         expect(frame).toContain('QWEN_CUSTOM_API_KEY_OPENAI');
         expect(frame).toContain('qwen/qwen3-coder');
@@ -1247,7 +1420,11 @@ describe('AuthDialog Custom API Key Wizard', () => {
         'sk-test',
         'model-1,model-2',
       );
-      await pressEnterAndWaitFor(stdin, lastFrame, 'Step 6/6 · Review');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 6/6 · Review',
+      );
 
       await vi.waitFor(() => {
         const frame = lastFrame();
@@ -1303,7 +1480,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
 
       await vi.waitFor(() => {
         const frame = lastFrame();
-        expect(frame).toContain('Step 5/6 · Advanced Config');
+        expect(frame).toContain('Custom Provider · Step 5/6 · Advanced Config');
         expect(frame).toContain(
           'Optional: configure advanced generation settings',
         );
@@ -1348,7 +1525,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
 
       await vi.waitFor(() => {
         const frame = lastFrame();
-        expect(frame).toContain('Step 5/6 · Advanced Config');
+        expect(frame).toContain('Custom Provider · Step 5/6 · Advanced Config');
       });
 
       // Toggle thinking (press Space — thinking is initially focused)

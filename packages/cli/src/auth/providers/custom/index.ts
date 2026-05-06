@@ -5,8 +5,10 @@
  */
 
 export {
+  CUSTOM_API_KEY_ENV_PREFIX,
   createCustomProviderInstallPlan,
   customProvider,
+  generateCustomApiKeyEnvKey,
 } from './customProvider.js';
 export type {
   CustomProviderGenerationConfigInput,

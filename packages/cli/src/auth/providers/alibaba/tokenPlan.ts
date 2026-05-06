@@ -37,9 +37,9 @@ export interface TokenPlanInstallInput {
 export const TOKEN_PLAN_OPTION = {
   id: 'token',
   option: 'TOKEN_PLAN',
-  title: 'Alibaba Cloud Token Plan',
+  title: 'Token Plan',
   description:
-    'For teams/companies · Credits deducted by token usage · Dedicated API key and base URL',
+    'For teams and companies · Usage-based billing with dedicated endpoint',
 } as const;
 
 export function computeTokenPlanVersion(
@@ -82,7 +82,7 @@ export function getTokenPlanConfig(): TokenPlanConfig {
     documentationUrl:
       'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
     apiKeyUrl:
-      'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3029263',
+      'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
     usageDocumentationUrl:
       'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
   };

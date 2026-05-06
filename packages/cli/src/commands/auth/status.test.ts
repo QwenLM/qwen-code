@@ -128,7 +128,7 @@ describe('showAuthStatus', () => {
     await showAuthStatus();
 
     expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('Alibaba Cloud Coding Plan'),
+      expect.stringContaining('Coding Plan'),
     );
     expect(writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('API key configured'),

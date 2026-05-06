@@ -33,10 +33,15 @@ describe('useCodingPlanUpdates', () => {
     user: { settings: {} },
   };
 
+  const mockModelsConfig = {
+    syncAfterAuthRefresh: vi.fn(),
+  };
+
   const mockConfig = {
     reloadModelProvidersConfig: vi.fn(),
     refreshAuth: vi.fn(),
     getModel: vi.fn().mockReturnValue('qwen3.5-plus'),
+    getModelsConfig: vi.fn(() => mockModelsConfig),
   };
 
   const mockAddItem = vi.fn();
@@ -46,6 +51,7 @@ describe('useCodingPlanUpdates', () => {
     mockSettings.merged.modelProviders = {};
     mockSettings.merged.codingPlan = {};
     mockConfig.getModel.mockReturnValue('qwen3.5-plus');
+    mockModelsConfig.syncAfterAuthRefresh.mockClear();
     delete process.env[CODING_PLAN_ENV_KEY];
   });
 
@@ -103,7 +109,7 @@ describe('useCodingPlanUpdates', () => {
     });
 
     expect(result.current.codingPlanUpdateRequest?.prompt).toContain(
-      'Alibaba Cloud Coding Plan',
+      'Coding Plan',
     );
   });
 
@@ -153,6 +159,10 @@ describe('useCodingPlanUpdates', () => {
       CODING_PLAN_CHINA_BASE_URL,
     );
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3.5-plus',
+    );
     expect(mockConfig.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 

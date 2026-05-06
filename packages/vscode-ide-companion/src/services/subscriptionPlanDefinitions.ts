@@ -108,9 +108,8 @@ const ALIBABA_SUBSCRIPTION_MODELS = [
 const CODING_PLAN: SubscriptionPlanDefinition<'coding'> = {
   id: 'coding',
   option: 'CODING_PLAN',
-  title: 'Alibaba Cloud Coding Plan',
-  description:
-    'For individual developers · Pay per model call · 5-hour/weekly quotas',
+  title: 'Coding Plan',
+  description: 'For individual developers · Weekly quota included',
   envKey: CODING_PLAN_ENV_KEY,
   modelNamePrefix: 'ModelStudio Coding Plan',
   authEventType: 'coding-plan',
@@ -119,13 +118,13 @@ const CODING_PLAN: SubscriptionPlanDefinition<'coding'> = {
   regions: [
     {
       id: CodingPlanRegion.CHINA,
-      title: '阿里云百炼 (aliyun.com)',
+      title: 'China (Beijing)',
       endpoint: 'https://coding.dashscope.aliyuncs.com/v1',
       documentationUrl: 'https://help.aliyun.com/zh/model-studio/coding-plan',
     },
     {
       id: CodingPlanRegion.GLOBAL,
-      title: 'Alibaba Cloud (alibabacloud.com)',
+      title: 'Singapore (International)',
       endpoint: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       documentationUrl:
         'https://www.alibabacloud.com/help/en/model-studio/coding-plan',
@@ -138,9 +137,9 @@ const CODING_PLAN: SubscriptionPlanDefinition<'coding'> = {
 const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
   id: 'token',
   option: 'TOKEN_PLAN',
-  title: 'Alibaba Cloud Token Plan',
+  title: 'Token Plan',
   description:
-    'For teams/companies · Credits deducted by token usage · Dedicated API key and base URL',
+    'For teams and companies · Usage-based billing with dedicated endpoint',
   envKey: TOKEN_PLAN_ENV_KEY,
   modelNamePrefix: 'ModelStudio Token Plan',
   authEventType: 'coding-plan',
@@ -150,7 +149,7 @@ const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
   documentationUrl:
     'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
   apiKeyUrl:
-    'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3029263',
+    'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
   usageDocumentationUrl:
     'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
   models: ALIBABA_SUBSCRIPTION_MODELS,

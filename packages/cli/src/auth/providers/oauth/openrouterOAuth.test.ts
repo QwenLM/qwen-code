@@ -508,94 +508,111 @@ describe('openrouterOAuth', () => {
     ]);
   });
 
-  it('selects a recommended OpenRouter subset instead of returning the full catalog', () => {
-    const recommended = selectRecommendedOpenRouterModels(
-      [
-        {
-          id: 'qwen/qwen3-coder:free',
-          name: 'OpenRouter · Qwen3 Coder',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'qwen/qwen3-max',
-          name: 'OpenRouter · Qwen3 Max',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'glm/glm-4.5-air:free',
-          name: 'OpenRouter · GLM 4.5 Air',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'minimax/minimax-m1',
-          name: 'OpenRouter · MiniMax M1',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'anthropic/claude-3.7-sonnet',
-          name: 'OpenRouter · Claude 3.7 Sonnet',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'google/gemini-2.5-flash',
-          name: 'OpenRouter · Gemini 2.5 Flash',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'openai/gpt-5-mini',
-          name: 'OpenRouter · GPT-5 Mini',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-          capabilities: { vision: true },
-        },
-        {
-          id: 'deepseek/deepseek-r1',
-          name: 'OpenRouter · DeepSeek R1',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-          generationConfig: { contextWindowSize: 1048576 },
-        },
-        {
-          id: 'meta/llama-3.3-70b',
-          name: 'OpenRouter · Llama 3.3 70B',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-      ],
-      6,
-    );
+  it('selects five reliable popular free OpenRouter models', () => {
+    const recommended = selectRecommendedOpenRouterModels([
+      {
+        id: 'qwen/qwen3-coder:free',
+        name: 'OpenRouter · Qwen3 Coder',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'qwen/qwen3-max',
+        name: 'OpenRouter · Qwen3 Max',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'glm/glm-4.5-air:free',
+        name: 'OpenRouter · GLM 4.5 Air',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'deepseek/deepseek-chat-v3.1:free',
+        name: 'OpenRouter · DeepSeek V3.1',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'google/gemini-2.5-flash:free',
+        name: 'OpenRouter · Gemini 2.5 Flash',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'meta-llama/llama-3.3-70b-instruct:free',
+        name: 'OpenRouter · Llama 3.3 70B Instruct',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'anthropic/claude-3.7-sonnet',
+        name: 'OpenRouter · Claude 3.7 Sonnet',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'openai/gpt-5-mini',
+        name: 'OpenRouter · GPT-5 Mini',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+        capabilities: { vision: true },
+      },
+    ]);
 
     expect(recommended.map((model) => model.id)).toEqual([
       'qwen/qwen3-coder:free',
+      'deepseek/deepseek-chat-v3.1:free',
       'glm/glm-4.5-air:free',
-      'qwen/qwen3-max',
-      'minimax/minimax-m1',
-      'anthropic/claude-3.7-sonnet',
-      'google/gemini-2.5-flash',
+      'google/gemini-2.5-flash:free',
+      'meta-llama/llama-3.3-70b-instruct:free',
+    ]);
+  });
+
+  it('fills missing preferred free OpenRouter models with other free models', () => {
+    const recommended = selectRecommendedOpenRouterModels([
+      {
+        id: 'custom/experimental-free-model:free',
+        name: 'OpenRouter · Experimental Free Model',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'anthropic/claude-3.7-sonnet',
+        name: 'OpenRouter · Claude 3.7 Sonnet',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'qwen/qwen3-coder:free',
+        name: 'OpenRouter · Qwen3 Coder',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+    ]);
+
+    expect(recommended.map((model) => model.id)).toEqual([
+      'qwen/qwen3-coder:free',
+      'custom/experimental-free-model:free',
     ]);
   });
 
   it('prefers the default OpenRouter model when it remains enabled', () => {
     expect(
       getPreferredOpenRouterModelId([
-        { id: 'anthropic/claude-3.7-sonnet' },
-        { id: 'openai/gpt-4o-mini' },
+        { id: 'deepseek/deepseek-chat-v3.1:free' },
+        { id: 'qwen/qwen3-coder:free' },
       ] as never),
-    ).toBe('openai/gpt-4o-mini');
+    ).toBe('qwen/qwen3-coder:free');
   });
 
   it('falls back to the first enabled OpenRouter model when the default is unavailable', () => {
     expect(
       getPreferredOpenRouterModelId([
-        { id: 'anthropic/claude-3.7-sonnet' },
+        { id: 'deepseek/deepseek-chat-v3.1:free' },
       ] as never),
-    ).toBe('anthropic/claude-3.7-sonnet');
+    ).toBe('deepseek/deepseek-chat-v3.1:free');
   });
 
   it('falls back to default models when dynamic fetch fails', async () => {

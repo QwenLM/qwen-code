@@ -48,13 +48,13 @@ export interface CodingPlanInstallInput {
 export const CODING_PLAN_ENDPOINTS: readonly CodingPlanEndpoint[] = [
   {
     id: 'aliyun',
-    title: '阿里云百炼 (aliyun.com)',
+    title: 'China (Beijing)',
     baseUrl: CODING_PLAN_CHINA_BASE_URL,
     documentationUrl: 'https://help.aliyun.com/zh/model-studio/coding-plan',
   },
   {
     id: 'alibabacloud',
-    title: 'Alibaba Cloud (alibabacloud.com)',
+    title: 'Singapore (International)',
     baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
     documentationUrl:
       'https://www.alibabacloud.com/help/en/model-studio/coding-plan',
@@ -65,9 +65,8 @@ export const CODING_PLAN_ENDPOINTS: readonly CodingPlanEndpoint[] = [
 export const CODING_PLAN_OPTION = {
   id: 'coding',
   option: 'CODING_PLAN',
-  title: 'Alibaba Cloud Coding Plan',
-  description:
-    'For individual developers · Pay per model call · 5-hour/weekly quotas',
+  title: 'Coding Plan',
+  description: 'For individual developers · Weekly quota included',
 } as const;
 
 export function computeCodingPlanVersion(

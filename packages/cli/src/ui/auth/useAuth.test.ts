@@ -9,10 +9,10 @@ import { renderHook, act } from '@testing-library/react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import {
   useAuthCommand,
-  generateCustomApiKeyEnvKey,
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
+import { generateCustomApiKeyEnvKey } from '../../auth/providers/custom/index.js';
 import {
   OPENROUTER_OAUTH_CALLBACK_URL,
   createOpenRouterOAuthSession,
@@ -72,12 +72,18 @@ const createSettings = () => ({
   })),
 });
 
-const createConfig = () => ({
-  getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-  getUsageStatisticsEnabled: vi.fn(() => false),
-  reloadModelProvidersConfig: vi.fn(),
-  refreshAuth: vi.fn(async () => undefined),
-});
+const createConfig = () => {
+  const modelsConfig = {
+    syncAfterAuthRefresh: vi.fn(),
+  };
+  return {
+    getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+    getUsageStatisticsEnabled: vi.fn(() => false),
+    reloadModelProvidersConfig: vi.fn(),
+    refreshAuth: vi.fn(async () => undefined),
+    getModelsConfig: vi.fn(() => modelsConfig),
+  };
+};
 
 describe('useAuthCommand', () => {
   beforeEach(() => {
@@ -278,13 +284,13 @@ describe('useAuthCommand', () => {
         {
           id: 'deepseek-v4-flash',
           name: '[DeepSeek] deepseek-v4-flash',
-          baseUrl: 'https://api.deepseek.com/v1',
+          baseUrl: 'https://api.deepseek.com',
           envKey: 'DEEPSEEK_API_KEY',
         },
         {
           id: 'deepseek-v4-pro',
           name: '[DeepSeek] deepseek-v4-pro',
-          baseUrl: 'https://api.deepseek.com/v1',
+          baseUrl: 'https://api.deepseek.com',
           envKey: 'DEEPSEEK_API_KEY',
         },
       ],
@@ -436,7 +442,7 @@ describe('useAuthCommand', () => {
         {
           id: 'deepseek-v4-flash',
           name: '[DeepSeek] deepseek-v4-flash',
-          baseUrl: 'https://api.deepseek.com/v1',
+          baseUrl: 'https://api.deepseek.com',
           envKey: 'DEEPSEEK_API_KEY',
         },
         {
@@ -487,7 +493,7 @@ describe('useAuthCommand', () => {
         {
           id: 'deepseek-v4-flash',
           name: '[DeepSeek] deepseek-v4-flash',
-          baseUrl: 'https://api.deepseek.com/v1',
+          baseUrl: 'https://api.deepseek.com',
           envKey: 'DEEPSEEK_API_KEY',
         },
         {
