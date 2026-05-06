@@ -136,7 +136,13 @@ describe('FileReadCache', () => {
       }
     });
 
-    it('overwrites earlier lastReadWasFull on subsequent reads', () => {
+    it('preserves earlier lastReadWasFull on a subsequent partial read (sticky-on-true)', () => {
+      // Prior-read enforcement asks "has the model seen these
+      // bytes (or fully authored them)?" — once a full read has
+      // happened, a follow-up offset/limit read should not revoke
+      // the model's right to mutate the file. Pre-fix this was
+      // the cause of the `WriteFile(create) → ReadFile(offset/limit)
+      // → Edit` regression flagged by the maintainer review.
       const cache = new FileReadCache();
       const stats = makeStats();
       cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
@@ -144,7 +150,24 @@ describe('FileReadCache', () => {
       const result = cache.check(stats);
       expect(result.state).toBe('fresh');
       if (result.state === 'fresh') {
-        expect(result.entry.lastReadWasFull).toBe(false);
+        expect(result.entry.lastReadWasFull).toBe(true);
+      }
+    });
+
+    it('preserves earlier lastReadCacheable on a subsequent non-cacheable read', () => {
+      // Symmetric to lastReadWasFull. A model that once read a
+      // file as text and later read it as a structured payload
+      // (image, PDF, etc. — though uncommon in practice for a
+      // single inode) keeps the right to edit the bytes it saw
+      // as text.
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: false });
+      const result = cache.check(stats);
+      expect(result.state).toBe('fresh');
+      if (result.state === 'fresh') {
+        expect(result.entry.lastReadCacheable).toBe(true);
       }
     });
 

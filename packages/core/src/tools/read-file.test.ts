@@ -795,6 +795,36 @@ describe('ReadFileTool', () => {
         }
       });
 
+      it('records SVG-as-text reads with cacheable=true so a follow-up Edit passes enforcement', async () => {
+        // Pre-fix the SVG branch in fileUtils.ts returned content
+        // without `originalLineCount`, which collapsed
+        // ReadFileToolInvocation's `cacheable` derivation to
+        // false. EditTool's prior-read enforcement then mistook
+        // the just-read SVG for a "non-text payload" and rejected
+        // a subsequent in-place edit.
+        const svgPath = path.join(tempRootDir, 'icon.svg');
+        await fsp.writeFile(
+          svgPath,
+          '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n',
+          'utf-8',
+        );
+
+        const result = await read({ file_path: svgPath });
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.returnDisplay).toMatch(/^Read SVG as text:/);
+
+        // The cache must record this as a full, cacheable read so
+        // that prior-read enforcement on Edit / WriteFile would
+        // recognise it as the model having seen the bytes.
+        const status = fileReadCache.check(fs.statSync(svgPath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
+          expect(status.entry.lastReadAt).toBeDefined();
+          expect(status.entry.lastReadWasFull).toBe(true);
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
+      });
+
       it('does not return the placeholder for image files', async () => {
         const imagePath = path.join(tempRootDir, 'pic.png');
         const pngHeader = Buffer.from([

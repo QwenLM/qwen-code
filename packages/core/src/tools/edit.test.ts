@@ -1239,6 +1239,47 @@ describe('EditTool', () => {
       expect(fs.readFileSync(newPath, 'utf8')).toBe('second content\n');
     });
 
+    it('allows Edit after Write→partial-Read (sticky-on-true preserves write-author rights)', async () => {
+      // Reproduction for the maintainer-review regression: pre-fix,
+      // a partial read recorded `lastReadWasFull = false` and
+      // clobbered the `true` that recordWrite had stamped at
+      // create time, so this Edit would then be rejected with
+      // EDIT_REQUIRES_PRIOR_READ even though the model had
+      // authored the file's full content.
+      const newPath = path.join(rootDir, 'write-then-partial-read.txt');
+      (mockConfig.getApprovalMode as Mock).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const created = await tool
+        .build({
+          file_path: newPath,
+          old_string: '',
+          new_string: 'line one\nline two\nline three\n',
+        })
+        .execute(abortSignal);
+      expect(created.error).toBeUndefined();
+
+      // Simulate a partial follow-up Read (offset/limit). Pre-fix
+      // this overwrote lastReadWasFull/lastReadCacheable to false.
+      fileReadCache.recordRead(newPath, fs.statSync(newPath), {
+        full: false,
+        cacheable: true,
+      });
+
+      const edited = await tool
+        .build({
+          file_path: newPath,
+          old_string: 'line two',
+          new_string: 'second line',
+        })
+        .execute(abortSignal);
+      expect(edited.error).toBeUndefined();
+      expect(fs.readFileSync(newPath, 'utf8')).toBe(
+        'line one\nsecond line\nline three\n',
+      );
+    });
+
     it('allows a chain of edits without re-reading between them', async () => {
       // After the first Edit, recordWrite stamps `lastWriteAt`. The
       // second Edit's stat will still match the cache entry (because

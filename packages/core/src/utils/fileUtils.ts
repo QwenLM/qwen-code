@@ -698,9 +698,20 @@ export async function processSingleFileContent(
           };
         }
         const content = await readFileWithEncoding(filePath);
+        // Populate `originalLineCount` and `isTruncated` so the
+        // ReadFile cache treats this exactly like a successful text
+        // read: ReadFileToolInvocation derives `cacheable` from
+        // those two fields, and an SVG-as-text read needs to be
+        // cacheable to keep working as an editable text file. Pre-fix,
+        // the absent `originalLineCount` collapsed cacheable to false
+        // and a follow-up Edit on the just-read SVG would be rejected
+        // as a "non-text payload" — a regression flagged by the
+        // independent maintainer review.
         return {
           llmContent: content,
           returnDisplay: `Read SVG as text: ${relativePathForDisplay}`,
+          originalLineCount: content.split('\n').length,
+          isTruncated: false,
         };
       }
       case 'text': {

@@ -99,6 +99,20 @@ export class FileReadCache {
    *  - `cacheable` — the produced content is suitable for substitution
    *    with a `file_unchanged` placeholder. Set true for plain text,
    *    false for binary / image / audio / video / PDF / notebook.
+   *
+   * The `lastReadWasFull` and `lastReadCacheable` flags are
+   * **sticky-on-true**: a partial / non-cacheable read records the
+   * timestamp but does not flip a previously-`true` flag back to
+   * `false`. The reason is that prior-read enforcement on Edit /
+   * WriteFile asks "has the model seen these bytes (or fully
+   * authored them)?", not "what was the *most recent* read shape?"
+   * — pre-fix, a `WriteFile(create) → ReadFile(offset/limit) → Edit`
+   * sequence would reject the Edit because the partial read clobbered
+   * the `lastReadWasFull = true` that `recordWrite` had stamped, and
+   * the same shape applies to a full text read followed by a partial
+   * one. The fast-path file_unchanged check still gates on the
+   * incoming request's own `isFullRead` (in `read-file.ts`), so a
+   * partial read does not get a placeholder it shouldn't.
    */
   recordRead(
     absPath: string,
@@ -107,8 +121,12 @@ export class FileReadCache {
   ): FileReadEntry {
     const entry = this.upsert(absPath, stats);
     entry.lastReadAt = Date.now();
-    entry.lastReadWasFull = opts.full;
-    entry.lastReadCacheable = opts.cacheable;
+    if (opts.full) {
+      entry.lastReadWasFull = true;
+    }
+    if (opts.cacheable) {
+      entry.lastReadCacheable = true;
+    }
     return entry;
   }
 
