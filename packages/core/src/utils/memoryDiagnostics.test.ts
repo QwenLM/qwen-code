@@ -28,20 +28,20 @@ describe('collectMemoryDiagnostics', () => {
       sessionId: 'session-123',
       qwenVersion: '0.15.6',
       memoryUsage: () => ({
-        heapUsed: 1_600,
-        heapTotal: 2_000,
-        rss: 5_000,
+        heapUsed: 32 * 1024 * 1024,
+        heapTotal: 40 * 1024 * 1024,
+        rss: 100 * 1024 * 1024,
         external: 700,
         arrayBuffers: 300,
       }),
       heapStatistics: () => ({
-        heap_size_limit: 2_000,
-        total_heap_size: 2_000,
+        heap_size_limit: 40 * 1024 * 1024,
+        total_heap_size: 40 * 1024 * 1024,
         total_heap_size_executable: 0,
-        total_physical_size: 2_000,
-        used_heap_size: 1_600,
-        malloced_memory: 4_000,
-        peak_malloced_memory: 4_500,
+        total_physical_size: 40 * 1024 * 1024,
+        used_heap_size: 32 * 1024 * 1024,
+        malloced_memory: 80 * 1024 * 1024,
+        peak_malloced_memory: 90 * 1024 * 1024,
         does_zap_garbage: 0,
         number_of_native_contexts: 2,
         number_of_detached_contexts: 1,
@@ -78,7 +78,7 @@ describe('collectMemoryDiagnostics', () => {
         involuntaryContextSwitches: 0,
       }),
       uptimeSeconds: () => 60,
-      activeHandles: () => 101,
+      activeHandles: () => 300,
       activeRequests: () => 3,
       openFileDescriptors: async () => 501,
       smapsRollup: async () => 'Rss: 5000 kB',
@@ -92,18 +92,18 @@ describe('collectMemoryDiagnostics', () => {
       qwenVersion: '0.15.6',
       uptimeSeconds: 60,
       memoryUsage: {
-        heapUsed: 1_600,
-        heapTotal: 2_000,
-        rss: 5_000,
+        heapUsed: 32 * 1024 * 1024,
+        heapTotal: 40 * 1024 * 1024,
+        rss: 100 * 1024 * 1024,
         external: 700,
         arrayBuffers: 300,
       },
       v8HeapStats: {
-        heapSizeLimit: 2_000,
-        totalHeapSize: 2_000,
-        usedHeapSize: 1_600,
-        mallocedMemory: 4_000,
-        peakMallocedMemory: 4_500,
+        heapSizeLimit: 40 * 1024 * 1024,
+        totalHeapSize: 40 * 1024 * 1024,
+        usedHeapSize: 32 * 1024 * 1024,
+        mallocedMemory: 80 * 1024 * 1024,
+        peakMallocedMemory: 90 * 1024 * 1024,
         detachedContexts: 1,
         nativeContexts: 2,
       },
@@ -120,7 +120,7 @@ describe('collectMemoryDiagnostics', () => {
         userCPUTime: 10,
         systemCPUTime: 20,
       },
-      activeHandles: 101,
+      activeHandles: 300,
       activeRequests: 3,
       openFileDescriptors: 501,
       smapsRollup: 'Rss: 5000 kB',
@@ -143,9 +143,82 @@ describe('collectMemoryDiagnostics', () => {
     const nativeRisk = diagnostics.analysis.risks.find(
       (risk) => risk.type === 'native-memory-pressure',
     );
-    expect(nativeRisk?.message).toContain('3.9 KB');
-    expect(nativeRisk?.message).toContain('1.6 KB');
-    expect(nativeRisk?.message).not.toContain('4000 bytes');
+    expect(nativeRisk?.message).toContain('80.0 MB');
+    expect(nativeRisk?.message).toContain('32.0 MB');
+  });
+
+  it('does not flag native pressure when malloced memory is below the absolute floor', async () => {
+    const diagnostics = await collectMemoryDiagnostics({
+      memoryUsage: () => ({
+        heapUsed: 1_600,
+        heapTotal: 2_000,
+        rss: 5_000,
+        external: 700,
+        arrayBuffers: 300,
+      }),
+      heapStatistics: () => ({
+        heap_size_limit: 2_000,
+        total_heap_size: 2_000,
+        total_heap_size_executable: 0,
+        total_physical_size: 2_000,
+        used_heap_size: 1_600,
+        // 32 MB malloced, well above 2× the tiny heap but below the 64 MB
+        // floor — should not flag as a leak indicator.
+        malloced_memory: 32 * 1024 * 1024,
+        peak_malloced_memory: 32 * 1024 * 1024,
+        does_zap_garbage: 0,
+        number_of_native_contexts: 1,
+        number_of_detached_contexts: 0,
+        total_available_size: 400,
+        total_global_handles_size: 0,
+        used_global_handles_size: 0,
+        external_memory: 700,
+      }),
+      activeHandles: () => 0,
+      activeRequests: () => 0,
+    });
+
+    expect(diagnostics.analysis.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'native-memory-pressure' }),
+      ]),
+    );
+  });
+
+  it('does not flag active-handles below the 256 threshold', async () => {
+    const diagnostics = await collectMemoryDiagnostics({
+      memoryUsage: () => ({
+        heapUsed: 100,
+        heapTotal: 200,
+        rss: 300,
+        external: 10,
+        arrayBuffers: 5,
+      }),
+      heapStatistics: () => ({
+        heap_size_limit: 1_000,
+        total_heap_size: 200,
+        total_heap_size_executable: 0,
+        total_physical_size: 200,
+        used_heap_size: 100,
+        malloced_memory: 0,
+        peak_malloced_memory: 0,
+        does_zap_garbage: 0,
+        number_of_native_contexts: 1,
+        number_of_detached_contexts: 0,
+        total_available_size: 900,
+        total_global_handles_size: 0,
+        used_global_handles_size: 0,
+        external_memory: 10,
+      }),
+      activeHandles: () => 200,
+      activeRequests: () => 0,
+    });
+
+    expect(diagnostics.analysis.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'active-handles' }),
+      ]),
+    );
   });
 
   it('does not multiply maxRSS by 1024 on non-Linux platforms', async () => {

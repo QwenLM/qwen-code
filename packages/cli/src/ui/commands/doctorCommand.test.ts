@@ -813,4 +813,82 @@ describe('doctorCommand', () => {
       }),
     );
   });
+
+  it('should reject unknown arguments with a usage hint', async () => {
+    const result = await getMemoryCommand().action!(mockContext, '--bogus');
+
+    expect(collectMemoryDiagnostics).not.toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('--bogus'),
+      }),
+    );
+    expect(result?.type === 'message' ? result.content : '').toContain(
+      '/doctor memory [--json]',
+    );
+  });
+
+  it('should suppress JSON output when aborted between probe and return', async () => {
+    const abortController = new AbortController();
+    vi.mocked(collectMemoryDiagnostics).mockImplementationOnce(async () => {
+      abortController.abort();
+      return {
+        timestamp: '2026-05-01T10:00:00.000Z',
+        uptimeSeconds: 1,
+        memoryUsage: {
+          heapUsed: 1,
+          heapTotal: 1,
+          rss: 1,
+          external: 0,
+          arrayBuffers: 0,
+        },
+        v8HeapStats: {
+          heapSizeLimit: 1,
+          totalHeapSize: 1,
+          usedHeapSize: 1,
+          mallocedMemory: 0,
+          peakMallocedMemory: 0,
+          detachedContexts: 0,
+          nativeContexts: 1,
+        },
+        resourceUsage: { maxRSS: 0, userCPUTime: 0, systemCPUTime: 0 },
+        activeHandles: 0,
+        activeRequests: 0,
+        platform: 'darwin',
+        nodeVersion: 'v20.19.0',
+        analysis: { risks: [], recommendation: '' },
+      };
+    });
+
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      abortSignal: abortController.signal,
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await getMemoryCommand().action!(mockContext, '--json');
+
+    expect(result).toBeUndefined();
+  });
+
+  it('should render expanded fields in readable summary', async () => {
+    const result = await getMemoryCommand().action!(mockContext, '');
+    const content = result?.type === 'message' ? result.content : '';
+
+    expect(content).toContain('detachedContexts: 0');
+    expect(content).toContain('nativeContexts: 1');
+    expect(content).toContain('maxRSS:');
+    expect(content).toContain('userCPUTime:');
+    expect(content).toContain('systemCPUTime:');
+    expect(content).toContain('smapsRollup:');
+  });
+
+  it('should advertise the memory subcommand on the parent doctor argumentHint', () => {
+    expect(doctorCommand.argumentHint).toBe('[memory]');
+  });
 });

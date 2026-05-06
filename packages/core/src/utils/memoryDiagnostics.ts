@@ -12,6 +12,13 @@ import { formatMemoryUsage } from './formatters.js';
 
 const RSS_HEAP_GAP_RATIO = 10;
 const RSS_HEAP_GAP_MIN_BYTES = 256 * 1024 * 1024;
+// Native pressure can look extreme during early startup when heap is tiny.
+// Require an absolute floor before the ratio check so cold processes don't
+// flag spurious risks.
+const NATIVE_MEMORY_PRESSURE_MIN_BYTES = 64 * 1024 * 1024;
+const ACTIVE_HANDLES_THRESHOLD = 256;
+const ACTIVE_REQUESTS_THRESHOLD = 100;
+const OPEN_FD_THRESHOLD = 500;
 const debugLogger = createDebugLogger('MEMORY_DIAGNOSTICS');
 
 export interface MemoryDiagnostics {
@@ -89,6 +96,10 @@ export interface MemoryDiagnosticsOptions {
   nodeVersion?: string;
 }
 
+// `_getActiveHandles` / `_getActiveRequests` are undocumented Node internals.
+// They've been stable for years but are not part of the public API and could
+// change in a future Node release. Both call sites guard with try/catch and
+// fall back to 0, so a removal degrades gracefully.
 interface ProcessInternals {
   _getActiveHandles?: () => unknown[];
   _getActiveRequests?: () => unknown[];
@@ -259,14 +270,14 @@ function analyzeMemoryDiagnostics(
     });
   }
 
-  if (diagnostics.activeHandles > 100) {
+  if (diagnostics.activeHandles > ACTIVE_HANDLES_THRESHOLD) {
     risks.push({
       type: 'active-handles',
       message: `${diagnostics.activeHandles} active handle(s) detected.`,
     });
   }
 
-  if (diagnostics.activeRequests > 100) {
+  if (diagnostics.activeRequests > ACTIVE_REQUESTS_THRESHOLD) {
     risks.push({
       type: 'active-requests',
       message: `${diagnostics.activeRequests} active request(s) detected.`,
@@ -275,7 +286,7 @@ function analyzeMemoryDiagnostics(
 
   if (
     diagnostics.openFileDescriptors !== undefined &&
-    diagnostics.openFileDescriptors > 500
+    diagnostics.openFileDescriptors > OPEN_FD_THRESHOLD
   ) {
     risks.push({
       type: 'fd-leak',
@@ -285,9 +296,13 @@ function analyzeMemoryDiagnostics(
 
   // Use mallocedMemory instead of rss - heapUsed. RSS includes normal process
   // overhead such as code segments, shared libraries, stacks, and mapped files,
-  // which creates false positives on healthy Node.js processes.
+  // which creates false positives on healthy Node.js processes. Also gate on
+  // an absolute floor so tiny startup heaps don't trip the 2× ratio.
   const nativeMemory = diagnostics.v8HeapStats.mallocedMemory;
-  if (nativeMemory > diagnostics.memoryUsage.heapUsed * 2) {
+  if (
+    nativeMemory >= NATIVE_MEMORY_PRESSURE_MIN_BYTES &&
+    nativeMemory > diagnostics.memoryUsage.heapUsed * 2
+  ) {
     risks.push({
       type: 'native-memory-pressure',
       message: `V8 native malloced memory (${formatMemoryUsage(nativeMemory)}) is more than 2× heap used (${formatMemoryUsage(diagnostics.memoryUsage.heapUsed)}).`,
