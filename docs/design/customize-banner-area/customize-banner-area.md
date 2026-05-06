@@ -41,10 +41,10 @@ breaks into the following regions:
 │                                                                             │
 │   ┌──── Logo Column ─────┐  gap=2  ┌──── Info Panel (bordered) ──────────┐  │
 │   │                      │         │                                     │  │
-│   │  ███ QWEN ASCII ███  │         │  ① Title:   >_ Qwen Code (vX.Y.Z)   │  │
-│   │  ███   ART ART  ███  │         │                                     │  │
-│   │  ███ QWEN ASCII ███  │         │  ② Status:  Qwen OAuth | qwen-coder │  │
-│   │                      │         │  ③ Path:    ~/projects/example      │  │
+│   │  ███ QWEN ASCII ███  │         │  ① Title:    >_ Qwen Code (vX.Y.Z)  │  │
+│   │  ███   ART ART  ███  │         │  ② Subtitle: «blank, or override»   │  │
+│   │  ███ QWEN ASCII ███  │         │  ③ Status:   Qwen OAuth | qwen-…    │  │
+│   │                      │         │  ④ Path:     ~/projects/example     │  │
 │   └──────── A ───────────┘         └──────────────── B ──────────────────┘  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -364,29 +364,34 @@ Where `banner-large.txt` contains the stacked-words ANSI Shadow output
      "ui": {                                    │
        "hideBanner": false,                     │  showBanner =
        "customBannerTitle": "Acme",             │      !screenReader
-       "customAsciiArt": …                      │   && !ui.hideBanner
+       "customBannerSubtitle": "Built-in …",    │   && !ui.hideBanner
+       "customAsciiArt": …                      │
      }                                          │
    }                                            ▼
         │                              <Header
-        ▼                                customAsciiArt={resolved}
-   loadSettings()                        customBannerTitle="Acme"
-   merge user / workspace                version=… model=… authType=…
-        │                                workingDirectory=… />
-        ▼                                          │
-   resolveCustomBanner(merged, paths)              ▼
-   ┌─────────────────────────┐         packages/cli/src/ui/components/
-   │ 1. normalize to         │         Header.tsx
-   │    { small, large }     │           │
-   │ 2. resolve each tier:   │           │  pick tier by
-   │    string → as-is       │           │    availableTerminalWidth
-   │    {path} → fs.read     │           │
+        ▼                                customAsciiArt={resolved.asciiArt}
+   loadSettings()                        customBannerTitle={resolved.title}
+   merge user / workspace                customBannerSubtitle={resolved.subtitle}
+        │                                version=… model=… authType=…
+        ▼                                workingDirectory=… />
+   resolveCustomBanner(settings)                  │
+   ┌─────────────────────────┐                    ▼
+   │ 1. normalize to         │         packages/cli/src/ui/components/
+   │    { small, large }     │         Header.tsx
+   │ 2. resolve each tier:   │           │
+   │    string → as-is       │           │  pick tier by
+   │    {path} → fs.read     │           │    availableTerminalWidth
    │      O_NOFOLLOW         │           ▼
    │      ≤ 64 KB            │         render Logo Column
-   │ 3. sanitize:            │         render Info Panel:
-   │    stripControlSeqs     │           Title  = customBannerTitle
-   │    ≤ 200 lines × 200    │                 ?? '>_ Qwen Code'
-   │    cols                 │           Status = locked
-   │ 4. memoize by source    │           Path   = locked
+   │ 3. sanitize art:        │         render Info Panel:
+   │    stripControlSeqs     │           Title    = customBannerTitle
+   │    ≤ 200 lines × 200    │                   ?? '>_ Qwen Code'
+   │    cols                 │           Subtitle = customBannerSubtitle
+   │ 4. sanitize title +     │                   ?? blank spacer row
+   │    subtitle (single-    │           Status   = locked
+   │    line, ≤ 80 / 160     │           Path     = locked
+   │    chars)               │
+   │ 5. memoize by source    │
    └─────────────────────────┘
 ```
 
@@ -449,9 +454,9 @@ function pickTier(
 
 ## Settings schema additions
 
-Three new properties are appended to the `ui` object in
+Four new properties are appended to the `ui` object in
 `packages/cli/src/config/settingsSchema.ts`, immediately after
-`shellOutputMaxLines` (around line 720):
+`shellOutputMaxLines`:
 
 ```ts
 hideBanner: {
@@ -473,6 +478,16 @@ customBannerTitle: {
     'Replace the default ">_ Qwen Code" title shown in the banner info panel. The version suffix is always appended.',
   showInDialog: false,
 },
+customBannerSubtitle: {
+  type: 'string',
+  label: 'Custom Banner Subtitle',
+  category: 'UI',
+  requiresRestart: false,
+  default: '' as string,
+  description:
+    'Optional subtitle line rendered between the banner title and the auth/model line. When unset, the info panel keeps its blank spacer row.',
+  showInDialog: false,
+},
 customAsciiArt: {
   type: 'object',
   label: 'Custom ASCII Art',
@@ -482,13 +497,19 @@ customAsciiArt: {
   description:
     'Replace the default QWEN ASCII art. Accepts an inline string, {"path": "..."}, or {"small": ..., "large": ...} for width-aware selection.',
   showInDialog: false,
+  // The runtime accepts a union the SettingDefinition `type` field can't
+  // express. The override is emitted verbatim by the JSON-schema generator
+  // so VS Code accepts every documented shape (string, {path}, or
+  // {small,large}) without flagging the bare-string form.
+  jsonSchemaOverride: { /* string | {path} | {small,large} oneOf … */ },
 },
 ```
 
 `hideBanner` mirrors the existing `hideTips` pattern (`showInDialog:
-true`). The two free-form fields stay out of the in-app settings dialog
-because a multi-line ASCII editor in the TUI dialog is its own project;
-power users edit `settings.json` directly.
+true`). The three free-form fields (title, subtitle, art) stay out of
+the in-app settings dialog because a multi-line ASCII editor in the
+TUI dialog is its own project; power users edit `settings.json`
+directly.
 
 ## Wiring changes
 
@@ -501,7 +522,7 @@ the file and line range from the current `main`.
 const showBanner = !config.getScreenReader() && !settings.merged.ui?.hideBanner;
 ```
 
-`packages/cli/src/ui/components/AppHeader.tsx:64-71` — pass the resolved
+`packages/cli/src/ui/components/AppHeader.tsx` — pass the resolved
 banner into `<Header>`:
 
 ```tsx
@@ -510,17 +531,19 @@ banner into `<Header>`:
   authDisplayType={authDisplayType}
   model={model}
   workingDirectory={targetDir}
-  customAsciiArt={resolvedCustomAsciiArt /* { small?, large? } */}
-  customBannerTitle={resolvedCustomBannerTitle /* string | undefined */}
+  customAsciiArt={resolvedBanner?.asciiArt /* { small?, large? } */}
+  customBannerTitle={resolvedBanner?.title /* string | undefined */}
+  customBannerSubtitle={resolvedBanner?.subtitle /* string | undefined */}
 />
 ```
 
-`packages/cli/src/ui/components/Header.tsx:28-34` — extend `HeaderProps`:
+`packages/cli/src/ui/components/Header.tsx` — extend `HeaderProps`:
 
 ```ts
 interface HeaderProps {
   customAsciiArt?: { small?: string; large?: string };
   customBannerTitle?: string;
+  customBannerSubtitle?: string;
   version: string;
   authDisplayType?: AuthDisplayType;
   model: string;
@@ -542,15 +565,20 @@ const tier = pickTier(
 const displayLogo = tier ?? shortAsciiLogo;
 ```
 
-`packages/cli/src/ui/components/Header.tsx:144` — render the title from
-the prop:
+`packages/cli/src/ui/components/Header.tsx` — render the title from
+the prop, and use the subtitle prop in place of the blank spacer row
+when set:
 
 ```tsx
 <Text bold color={theme.text.accent}>
-  {customBannerTitle && customBannerTitle.trim()
-    ? customBannerTitle
-    : '>_ Qwen Code'}
+  {customBannerTitle ? customBannerTitle : '>_ Qwen Code'}
 </Text>
+…
+{customBannerSubtitle ? (
+  <Text color={theme.text.secondary}>{customBannerSubtitle}</Text>
+) : (
+  <Text> </Text>
+)}
 ```
 
 **New file**: `packages/cli/src/ui/utils/customBanner.ts` — the resolver.
@@ -560,17 +588,19 @@ Exports:
 export interface ResolvedBanner {
   asciiArt: { small?: string; large?: string };
   title?: string;
+  subtitle?: string;
 }
 
-export function resolveCustomBanner(
-  settings: LoadedSettings,
-  paths: { userDir: string; workspaceDir?: string },
-): ResolvedBanner;
+export function resolveCustomBanner(settings: LoadedSettings): ResolvedBanner;
 ```
 
 The resolver does the normalization, file reads, sanitization, and
 caching described in the resolution pipeline above. It is called once
-during CLI startup and re-run on settings hot-reload events.
+during CLI startup and re-run on settings hot-reload events. Per-scope
+file paths come from `settings.system.path` / `settings.workspace.path`
+/ `settings.user.path` directly so each `{ path }` resolves against
+the file that declared it; workspace settings are skipped entirely
+when `settings.isTrusted` is false.
 
 ## Alternative approaches considered
 
@@ -680,15 +710,16 @@ the path-form, read from disk. Both surfaces are attack-reachable if a
 hostile or compromised settings file is loaded. The same threat model
 that drives the session-title feature applies here.
 
-| Concern                                      | Guard                                                                                                      |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| ANSI / OSC-8 / CSI injection in art or title | `stripTerminalControlSequences` (shared with session-title) before render and before any cache write.      |
-| Oversize file freezes startup                | 64 KB hard cap on file reads.                                                                              |
-| Pathological art freezes layout              | 200 lines × 200 cols cap on each resolved string. Excess is truncated; a `[BANNER]` warn is logged.        |
-| Symlink redirect on the path form            | `O_NOFOLLOW` on file reads (Windows: plain read-only; constant not exposed).                               |
-| Missing or unreadable file                   | Catch, log `[BANNER]` warn, fall back to default. Never throw into the UI.                                 |
-| Title with newlines or excess length         | Strip newlines, cap at 80 characters.                                                                      |
-| Race on settings reload                      | Resolution is memoized by source (path or string hash). Reloads invalidate cache for changed sources only. |
+| Concern                                                 | Guard                                                                                                                                                                                                             |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ANSI / OSC-8 / CSI injection in art, title, or subtitle | Banner-specific stripper (`sanitizeArt` / `sanitizeSingleLine`): drops OSC / CSI / SS2 / SS3 leaders and replaces every other C0 / C1 control byte (and DEL) with a space. Applied before render and cache write. |
+| Oversize file freezes startup                           | 64 KB hard cap on file reads.                                                                                                                                                                                     |
+| Pathological art freezes layout                         | 200 lines × 200 cols cap on each resolved string. Excess is truncated; a `[BANNER]` warn is logged.                                                                                                               |
+| Symlink redirect on the path form                       | `O_NOFOLLOW` on file reads (Windows: plain read-only; constant not exposed).                                                                                                                                      |
+| Missing or unreadable file                              | Catch, log `[BANNER]` warn, fall back to default. Never throw into the UI.                                                                                                                                        |
+| Title or subtitle with newlines / excess length         | Newlines folded to spaces; capped at 80 (title) / 160 (subtitle) characters.                                                                                                                                      |
+| Untrusted workspace influencing rendering or file reads | When `settings.isTrusted` is false, the resolver skips `settings.workspace` entirely (mirrors the trust gate that `settings.merged` applies).                                                                     |
+| Race on settings reload                                 | Resolution is memoized by source (path or string hash) per call. Reloads re-run the resolver and re-read affected files.                                                                                          |
 
 Failure mode summary: every soft failure ends in `shortAsciiLogo` (or
 the locked default title) plus a debug-log warn. Hard failures
@@ -718,20 +749,28 @@ should pass.
 1. `~/.qwen/settings.json` with `customBannerTitle: "Acme CLI"` and an
    inline `customAsciiArt` string → `qwen` shows the new title and art;
    version suffix still present.
-2. `hideBanner: true` → `qwen` starts with no banner; tips and chat
+2. `customBannerSubtitle: "Built-in Acme Skills"` → the subtitle row
+   renders between the title and the auth/model line in the secondary
+   text color; auth, model, and path still visible. Unsetting it
+   restores the blank spacer row (back-compat).
+3. `hideBanner: true` → `qwen` starts with no banner; tips and chat
    render normally.
-3. `customAsciiArt: { "path": "./brand.txt" }` in a workspace
+4. `customAsciiArt: { "path": "./brand.txt" }` in a workspace
    `settings.json`, with `brand.txt` next to it in `.qwen/` → loads
    from disk on workspace open.
-4. `customAsciiArt: { "small": "...", "large": "..." }` → resize the
+5. `customAsciiArt: { "small": "...", "large": "..." }` → resize the
    terminal between wide / medium / narrow; large at wide widths,
    small at medium widths, logo column hidden at narrow widths, info
    panel always visible.
-5. Inject `\x1b[31mhostile` into `customBannerTitle` → renders as
-   literal text, not interpreted as red.
-6. Point `path` at a missing file → CLI starts; `[BANNER]` warn
+6. Inject `\x1b[31mhostile` into `customBannerTitle` _and_
+   `customBannerSubtitle` → both render as literal text, not
+   interpreted as red.
+7. Point `path` at a missing file → CLI starts; `[BANNER]` warn
    appears in `~/.qwen/debug/<sessionId>.txt`; default art renders.
-7. `npm test` and `npm run typecheck` pass for the CLI package; unit
+8. Open the worktree with workspace trust off → workspace-defined
+   `customAsciiArt` (including `{ path }` entries) is silently
+   ignored; user-scope settings still apply.
+9. `npm test` and `npm run typecheck` pass for the CLI package; unit
    tests in `customBanner.test.ts` cover each accepted shape and each
    failure path (missing file, oversize file, ANSI injection, malformed
    object).
