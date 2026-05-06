@@ -1576,7 +1576,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const [renderMode, setRenderMode] = useState<RenderMode>(
     configuredRenderMode === 'raw' ? 'raw' : 'render',
   );
+  const renderModeConfigMountedRef = useRef(false);
   useEffect(() => {
+    if (!renderModeConfigMountedRef.current) {
+      renderModeConfigMountedRef.current = true;
+      return;
+    }
+
     setRenderMode(configuredRenderMode === 'raw' ? 'raw' : 'render');
   }, [configuredRenderMode]);
   const renderModeMountedRef = useRef(false);
@@ -2178,7 +2184,14 @@ export const AppContainer = (props: AppContainerProps) => {
         setConstrainHeight(true);
       }
 
-      if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
+      const isRenderModeToggle =
+        keyMatchers[Command.TOGGLE_RENDER_MODE](key) ||
+        (key.name === 'm' && key.meta && !key.ctrl && !key.paste) ||
+        (key.sequence === 'µ' && !key.ctrl && !key.paste);
+
+      if (isRenderModeToggle) {
+        setRenderMode((current) => (current === 'render' ? 'raw' : 'render'));
+      } else if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
         const newValue = !showToolDescriptions;
         setShowToolDescriptions(newValue);
 
@@ -2206,8 +2219,6 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
-      } else if (keyMatchers[Command.TOGGLE_RENDER_MODE](key)) {
-        setRenderMode(renderMode === 'render' ? 'raw' : 'render');
       }
     },
     [
@@ -2243,7 +2254,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
-      renderMode,
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,

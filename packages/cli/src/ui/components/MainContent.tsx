@@ -267,6 +267,11 @@ export const MainContent = () => {
 
   return (
     <>
+      {/*
+        renderMode is intentionally omitted here. AppContainer calls
+        refreshStatic() when renderMode changes, which updates
+        historyRemountKey; including both would remount Static twice.
+      */}
       <Static
         key={`${historyRemountKey}-${uiState.currentModel}`}
         items={[

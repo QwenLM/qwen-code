@@ -25,6 +25,15 @@ interface MermaidDiagramProps {
 
 const MERMAID_PADDING = 1;
 
+interface MermaidImageState {
+  key: string;
+  result: MermaidImageRenderResult;
+}
+
+function getRenderErrorReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
   source,
   sourceCopyCommand,
@@ -34,37 +43,57 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
 }) => {
   const writeRaw = useTerminalOutput();
   const preparedTerminalImageSequence = React.useRef<string | null>(null);
-  const [image, setImage] = React.useState<MermaidImageRenderResult | null>(
+  const availableTerminalHeightRef = React.useRef(availableTerminalHeight);
+  const [imageState, setImageState] = React.useState<MermaidImageState | null>(
     null,
   );
   const innerWidth = Math.max(8, contentWidth - MERMAID_PADDING);
+  const imageKey = `${source}\0${innerWidth}`;
+  const image =
+    imageState?.key === imageKey && !isPending ? imageState.result : null;
   const visual = React.useMemo(
     () => renderMermaidVisual(source, innerWidth),
     [source, innerWidth],
   );
 
   React.useEffect(() => {
+    availableTerminalHeightRef.current = availableTerminalHeight;
+  }, [availableTerminalHeight]);
+
+  React.useEffect(() => {
     if (isPending) {
-      setImage(null);
+      setImageState(null);
       return;
     }
 
     let cancelled = false;
-    setImage(null);
     void renderMermaidImageAsync({
       source,
       contentWidth: innerWidth,
-      availableTerminalHeight,
-    }).then((result) => {
-      if (!cancelled) {
-        setImage(result);
-      }
-    });
+      availableTerminalHeight: availableTerminalHeightRef.current,
+    }).then(
+      (result) => {
+        if (!cancelled) {
+          setImageState({ key: imageKey, result });
+        }
+      },
+      (error: unknown) => {
+        if (!cancelled) {
+          setImageState({
+            key: imageKey,
+            result: {
+              kind: 'unavailable',
+              reason: getRenderErrorReason(error),
+            },
+          });
+        }
+      },
+    );
 
     return () => {
       cancelled = true;
     };
-  }, [availableTerminalHeight, innerWidth, isPending, source]);
+  }, [imageKey, innerWidth, isPending, source]);
 
   const kittySequence =
     image?.kind === 'terminal-image' &&

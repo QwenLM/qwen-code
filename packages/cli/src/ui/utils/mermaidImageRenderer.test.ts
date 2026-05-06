@@ -53,6 +53,29 @@ function createFakeMmdc(binDir: string, bodyLines?: string[]): void {
   fs.chmodSync(fakeMmdc, 0o755);
 }
 
+function createFakeChafa(binDir: string, bodyLines?: string[]): void {
+  const fakeChafaScript = path.join(binDir, 'fake-chafa.cjs');
+  const defaultBodyLines = [
+    'process.stdout.write("ansi line 1\\nansi line 2\\n");',
+  ];
+  fs.writeFileSync(
+    fakeChafaScript,
+    (bodyLines ?? defaultBodyLines).join('\n'),
+    'utf8',
+  );
+
+  const fakeChafa =
+    process.platform === 'win32'
+      ? path.join(binDir, 'chafa.cmd')
+      : path.join(binDir, 'chafa');
+  const command =
+    process.platform === 'win32'
+      ? `@echo off\r\n"${process.execPath}" "${fakeChafaScript}" %*\r\n`
+      : ['#!/usr/bin/env node', ...(bodyLines ?? defaultBodyLines)].join('\n');
+  fs.writeFileSync(fakeChafa, command, 'utf8');
+  fs.chmodSync(fakeChafa, 0o755);
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -278,6 +301,83 @@ describe('mermaid image renderer', () => {
 
     expect(result.kind).toBe('terminal-image');
     expect(result.kind === 'terminal-image' && result.protocol).toBe('iterm2');
+  });
+
+  it('renders Mermaid through chafa when terminal images are unavailable', () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-chafa-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+    createFakeChafa(binDir);
+
+    const result = renderMermaidImageSync({
+      source: 'flowchart TD\n  A[Start] --> B[ANSI sync]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'off',
+      },
+    });
+
+    expect(result.kind).toBe('ansi');
+    expect(result.kind === 'ansi' && result.lines).toEqual([
+      'ansi line 1',
+      'ansi line 2',
+    ]);
+  });
+
+  it('renders Mermaid through chafa asynchronously for interactive UI callers', async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-chafa-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+    createFakeChafa(binDir);
+
+    const result = await renderMermaidImageAsync({
+      source: 'flowchart TD\n  A[Start] --> B[ANSI async]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'off',
+      },
+    });
+
+    expect(result.kind).toBe('ansi');
+    expect(result.kind === 'ansi' && result.lines).toEqual([
+      'ansi line 1',
+      'ansi line 2',
+    ]);
+  });
+
+  it('bounds retained renderer output from async command failures', async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-chafa-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+    createFakeChafa(binDir, [
+      'process.stderr.write("x".repeat(50 * 1024));',
+      'process.exit(1);',
+    ]);
+
+    const result = await renderMermaidImageAsync({
+      source: 'flowchart TD\n  A[Start] --> B[Large stderr]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'off',
+      },
+    });
+
+    expect(result.kind).toBe('unavailable');
+    expect(result.kind === 'unavailable' && result.reason.length).toBeLessThan(
+      17 * 1024,
+    );
+    expect(result.kind === 'unavailable' && result.reason).toContain(
+      'renderer output truncated',
+    );
   });
 
   it('renders Kitty terminal images as virtual placements', () => {

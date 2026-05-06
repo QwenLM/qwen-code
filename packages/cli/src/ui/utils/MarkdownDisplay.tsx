@@ -416,7 +416,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           marker={marker}
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
-          enableInlineMath={renderVisualBlocks}
+          renderVisualBlocks={renderVisualBlocks}
         />,
       );
     } else if (olMatch) {
@@ -431,7 +431,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           marker={marker}
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
-          enableInlineMath={renderVisualBlocks}
+          renderVisualBlocks={renderVisualBlocks}
         />,
       );
     } else {
@@ -743,7 +743,7 @@ interface RenderListItemProps {
   marker: string;
   leadingWhitespace?: string;
   textColor?: string;
-  enableInlineMath?: boolean;
+  renderVisualBlocks?: boolean;
 }
 
 const RenderListItemInternal: React.FC<RenderListItemProps> = ({
@@ -752,10 +752,10 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
   marker,
   leadingWhitespace = '',
   textColor = theme.text.primary,
-  enableInlineMath = true,
+  renderVisualBlocks = true,
 }) => {
   const taskMatch = itemText.match(/^\[([ xX])\]\s+(.*)$/);
-  const isTaskItem = taskMatch !== null && enableInlineMath;
+  const isTaskItem = taskMatch !== null && renderVisualBlocks;
   const isTaskChecked = taskMatch?.[1]?.toLowerCase() === 'x';
   const effectiveItemText = isTaskItem ? taskMatch[2] : itemText;
   const prefix = isTaskItem
@@ -779,7 +779,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
           <RenderInline
             text={effectiveItemText}
             textColor={textColor}
-            enableInlineMath={enableInlineMath}
+            enableInlineMath={renderVisualBlocks}
           />
         </Text>
       </Box>

@@ -63,6 +63,8 @@ const PNG_CACHE_BYTE_LIMIT = 32 * 1024 * 1024;
 const DEFAULT_RENDER_TIMEOUT_MS = 8000;
 const DEFAULT_MERMAID_RENDER_WIDTH = 1280;
 const MAX_MERMAID_PNG_BYTES = 8 * 1024 * 1024;
+const MAX_RENDERER_OUTPUT_CHARS = 16 * 1024;
+const OUTPUT_TRUNCATION_MARKER = '\n... renderer output truncated ...';
 const NPX_MERMAID_CLI = 'npx:@mermaid-js/mermaid-cli@11.12.0';
 const PNG_SIGNATURE = '89504e470d0a1a0a';
 const KITTY_PLACEHOLDER = '\u{10EEEE}';
@@ -1029,7 +1031,8 @@ function renderPngWithChafa(
           ...process.env,
           ...env,
         },
-        timeout: 2000,
+        shell: shouldRunThroughShell(chafa),
+        timeout: getMermaidRenderTimeout(env),
       },
     );
 
@@ -1078,7 +1081,8 @@ async function renderPngWithChafaAsync(
           ...process.env,
           ...env,
         },
-        timeout: 2000,
+        shell: shouldRunThroughShell(chafa),
+        timeout: getMermaidRenderTimeout(env),
       },
     );
 
@@ -1139,10 +1143,10 @@ function runCommand(
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
-      stdout += chunk;
+      stdout = appendBoundedRendererOutput(stdout, chunk);
     });
     child.stderr?.on('data', (chunk: string) => {
-      stderr += chunk;
+      stderr = appendBoundedRendererOutput(stderr, chunk);
     });
     child.on('error', (error) => {
       if (settled) return;
@@ -1157,6 +1161,22 @@ function runCommand(
       resolve({ status, stdout, stderr });
     });
   });
+}
+
+function appendBoundedRendererOutput(current: string, chunk: string): string {
+  if (current.endsWith(OUTPUT_TRUNCATION_MARKER)) {
+    return current;
+  }
+
+  const next = current + chunk;
+  if (next.length <= MAX_RENDERER_OUTPUT_CHARS) {
+    return next;
+  }
+
+  return (
+    next.slice(0, MAX_RENDERER_OUTPUT_CHARS - OUTPUT_TRUNCATION_MARKER.length) +
+    OUTPUT_TRUNCATION_MARKER
+  );
 }
 
 function fitImageToTerminal(

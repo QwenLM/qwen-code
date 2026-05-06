@@ -72,4 +72,61 @@ describe('MermaidDiagram', () => {
 
     expect(mockedRenderMermaidImageAsync).not.toHaveBeenCalled();
   });
+
+  it('does not restart image rendering for height-only resizes', async () => {
+    mockedRenderMermaidImageAsync.mockResolvedValue({
+      kind: 'unavailable',
+      reason: 'disabled',
+      showReason: false,
+    });
+
+    const { rerender } = render(
+      <MermaidDiagram
+        source={'flowchart TD\nA[Start] --> B[End]'}
+        sourceCopyCommand="/copy mermaid 1"
+        contentWidth={80}
+        isPending={false}
+        availableTerminalHeight={20}
+      />,
+    );
+
+    await vi.waitFor(() => {
+      expect(mockedRenderMermaidImageAsync).toHaveBeenCalledTimes(1);
+    });
+
+    rerender(
+      <MermaidDiagram
+        source={'flowchart TD\nA[Start] --> B[End]'}
+        sourceCopyCommand="/copy mermaid 1"
+        contentWidth={80}
+        isPending={false}
+        availableTerminalHeight={8}
+      />,
+    );
+
+    expect(mockedRenderMermaidImageAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the wireframe fallback when async image rendering rejects', async () => {
+    mockedRenderMermaidImageAsync.mockRejectedValueOnce(
+      new Error('renderer exploded'),
+    );
+
+    const { lastFrame } = render(
+      <MermaidDiagram
+        source={'flowchart TD\nA[Start] --> B[End]'}
+        sourceCopyCommand="/copy mermaid 1"
+        contentWidth={80}
+        isPending={false}
+        availableTerminalHeight={20}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Mermaid flowchart (TD)');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain(
+        'Image rendering unavailable: renderer exploded',
+      );
+    });
+  });
 });
