@@ -85,14 +85,18 @@ export interface SettingDefinition {
    * migration is still pending. Has no runtime effect — it's purely a
    * compatibility hint for editors.
    *
-   * Restricted to JSON-Schema primitive types: the schema generator emits
-   * `{ type: <legacyType> }` for each entry, and JSON Schema's `type`
-   * keyword does not accept `'enum'` or `'object'` as a literal value.
-   * Allowing the full SettingsType union here would let `legacyTypes:
-   * ['enum']` slip in and produce a syntactically invalid
-   * `settings.schema.json`. Future legacy shapes that need `enum` /
-   * complex object compatibility should land their own branch in
-   * `convertSettingToJsonSchema` instead of widening this set.
+   * Narrowed to the subset our generator can faithfully emit as a
+   * one-liner `{ type: <legacyType> }` schema fragment. `'enum'` is
+   * not a valid JSON Schema `type` value at all (enum constraints
+   * use the `enum` keyword, not `type: 'enum'`), so allowing it here
+   * would silently produce an invalid `settings.schema.json`.
+   * `'object'` IS a valid JSON Schema type, but a bare
+   * `{ type: 'object' }` legacy entry would accept ANY object value
+   * — most likely not what the field's pre-expansion shape actually
+   * permitted. Future legacy shapes that need `enum` / structured-
+   * object compatibility should land their own branch in
+   * `convertSettingToJsonSchema` (with proper `enum:` / `properties:`
+   * companions) instead of widening this set.
    */
   legacyTypes?: ReadonlyArray<'boolean' | 'string' | 'number' | 'array'>;
 }

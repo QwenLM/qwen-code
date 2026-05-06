@@ -40,7 +40,7 @@ const EXCLUDED_FILENAMES = new Set([
 // and treating every one as generated would silently drop AI edits
 // to those files. Auto-generated `.d.ts` (e.g. `tsc --declaration`
 // output) tends to live under `/dist/`, `/build/`, or `/out/`,
-// which are already covered by `EXCLUDED_DIRECTORIES`.
+// which are already covered by `EXCLUDED_DIRECTORY_SEGMENTS`.
 const EXCLUDED_EXTENSIONS = new Set([
   '.min.js',
   '.min.css',
