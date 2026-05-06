@@ -17,6 +17,12 @@ describe('token plan provider', () => {
     const config = getTokenPlanConfig();
     const plan = createTokenPlanInstallPlan({ apiKey: 'sk-token' });
 
+    expect(config.template.map((model) => model.id)).toEqual([
+      'qwen3.6-plus',
+      'deepseek-v3.2',
+      'glm-5',
+      'MiniMax-M2.5',
+    ]);
     expect(plan.providerId).toBe('token-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [config.envKey]: 'sk-token' });

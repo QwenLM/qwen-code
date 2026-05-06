@@ -7,11 +7,18 @@
 import { createHash } from 'node:crypto';
 import { AuthType, type ProviderModelConfig } from '@qwen-code/qwen-code-core';
 import type { LlmProvider, ProviderInstallPlan } from '../../types.js';
-import { ALIBABA_MODELSTUDIO_MODELS } from './modelStudioModels.js';
+import type { AlibabaModelStudioModelSpec } from './modelStudioModels.js';
 
 export const TOKEN_PLAN_ENV_KEY = 'BAILIAN_TOKEN_PLAN_API_KEY';
 export const TOKEN_PLAN_BASE_URL =
   'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+
+const TOKEN_PLAN_MODELS: readonly AlibabaModelStudioModelSpec[] = [
+  { id: 'qwen3.6-plus', contextWindowSize: 1000000, enableThinking: true },
+  { id: 'deepseek-v3.2', contextWindowSize: 131072, enableThinking: true },
+  { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
+  { id: 'MiniMax-M2.5', contextWindowSize: 196608, enableThinking: true },
+];
 
 export interface TokenPlanConfig {
   id: 'token';
@@ -49,7 +56,7 @@ export function computeTokenPlanVersion(
 }
 
 export function buildTokenPlanTemplate(): ProviderModelConfig[] {
-  return ALIBABA_MODELSTUDIO_MODELS.map((model) => ({
+  return TOKEN_PLAN_MODELS.map((model) => ({
     id: model.id,
     name: `[ModelStudio Token Plan] ${model.id}`,
     ...(model.description ? { description: model.description } : {}),

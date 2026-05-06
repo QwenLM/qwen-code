@@ -342,8 +342,29 @@ describe('useAuthCommand', () => {
       'modelProviders.openai',
       expect.arrayContaining([
         expect.objectContaining({
-          id: 'qwen3.5-plus',
-          name: '[ModelStudio Token Plan] qwen3.5-plus',
+          id: 'qwen3.6-plus',
+          name: '[ModelStudio Token Plan] qwen3.6-plus',
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+        }),
+        expect.objectContaining({
+          id: 'deepseek-v3.2',
+          name: '[ModelStudio Token Plan] deepseek-v3.2',
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+        }),
+        expect.objectContaining({
+          id: 'glm-5',
+          name: '[ModelStudio Token Plan] glm-5',
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+        }),
+        expect.objectContaining({
+          id: 'MiniMax-M2.5',
+          name: '[ModelStudio Token Plan] MiniMax-M2.5',
           baseUrl:
             'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
           envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
