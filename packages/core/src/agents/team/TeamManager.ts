@@ -15,6 +15,7 @@
  * flow through the event bridge to drive coordination logic.
  */
 
+import { randomBytes } from 'node:crypto';
 import type { Backend, AgentSpawnConfig } from '../backends/types.js';
 import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
 import { AgentEventType } from '../runtime/agent-events.js';
@@ -126,6 +127,18 @@ export class TeamManager {
 
   /** Tracks how far we've read in the leader inbox. */
   private lastInboxOffset = 0;
+
+  /** Serialises read+slice+advance over `lastInboxOffset` so
+   *  pollLeaderInbox and getLeaderMessages can't double-deliver. */
+  private inboxAccessLock: Promise<void> = Promise.resolve();
+
+  /** Per-session nonce woven into the teammate-message envelope
+   *  so a teammate's body cannot spoof the closing tag and inject
+   *  a forged envelope (e.g. one claiming `from="leader"`) into
+   *  the leader's conversation. Generated once per TeamManager
+   *  instance so the leader's own pattern matching can recognise
+   *  the envelope, while teammates have no way to learn it. */
+  private readonly envelopeNonce: string = randomBytes(8).toString('hex');
 
   /** Names of teammates with a pending leader-requested shutdown.
    *  Gates both the per-idle mailbox read in flushNextMessage and
@@ -459,18 +472,41 @@ export class TeamManager {
   async getLeaderMessages(): Promise<
     Array<{ from: string; text: string; timestamp: string }>
   > {
+    return this.withInboxLock(async () => {
+      try {
+        const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
+        if (inbox.length <= this.lastInboxOffset) return [];
+        const newMessages = inbox.slice(this.lastInboxOffset);
+        this.lastInboxOffset = inbox.length;
+        return newMessages.map((m) => ({
+          from: m.from,
+          text: m.text,
+          timestamp: m.timestamp,
+        }));
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  /**
+   * Serialise read+slice+advance against `lastInboxOffset`. Both
+   * pollLeaderInbox (500ms timer) and getLeaderMessages (task_list
+   * tool result) await readInbox before slicing, which without a
+   * lock lets them both observe the same offset and deliver the
+   * same messages twice.
+   */
+  private async withInboxLock<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.inboxAccessLock;
+    let release!: () => void;
+    this.inboxAccessLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
     try {
-      const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
-      if (inbox.length <= this.lastInboxOffset) return [];
-      const newMessages = inbox.slice(this.lastInboxOffset);
-      this.lastInboxOffset = inbox.length;
-      return newMessages.map((m) => ({
-        from: m.from,
-        text: m.text,
-        timestamp: m.timestamp,
-      }));
-    } catch {
-      return [];
+      return await fn();
+    } finally {
+      release();
     }
   }
 
@@ -522,36 +558,45 @@ export class TeamManager {
     if (!this.leaderMessageCallback) {
       return;
     }
-    try {
-      const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
-      if (inbox.length <= this.lastInboxOffset) {
-        // No new messages — check if all teammates are done.
-        const terminated = this.allTeammatesTerminated();
-        if (terminated) {
-          this.stopLeaderInboxPolling();
-          this.teamEventEmitter.emit(TeamEventType.ALL_TEAMMATES_TERMINATED, {
-            timestamp: Date.now(),
-          });
+    const newMessages = await this.withInboxLock(async () => {
+      try {
+        const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
+        if (inbox.length <= this.lastInboxOffset) {
+          return [];
         }
-        return;
+        const slice = inbox.slice(this.lastInboxOffset);
+        this.lastInboxOffset = inbox.length;
+        return slice;
+      } catch {
+        // Inbox may not exist yet.
+        return [];
       }
+    });
 
-      const newMessages = inbox.slice(this.lastInboxOffset);
-      this.lastInboxOffset = inbox.length;
-
-      const formatted = newMessages
-        .map(
-          (m) =>
-            `<teammate_message from="${m.from}">` +
-            `\n${m.text}\n` +
-            `</teammate_message>`,
-        )
-        .join('\n\n');
-
-      this.leaderMessageCallback(formatted);
-    } catch {
-      // Inbox may not exist yet.
+    if (newMessages.length === 0) {
+      // No new messages — check if all teammates are done.
+      const terminated = this.allTeammatesTerminated();
+      if (terminated) {
+        this.stopLeaderInboxPolling();
+        this.teamEventEmitter.emit(TeamEventType.ALL_TEAMMATES_TERMINATED, {
+          timestamp: Date.now(),
+        });
+      }
+      return;
     }
+
+    // Wrap each teammate message in a per-session nonce-tagged
+    // envelope. The body is interpolated raw, but a teammate
+    // cannot spoof the closing tag without knowing `envelopeNonce`,
+    // so they cannot inject a forged envelope (e.g. one claiming
+    // `from="leader"`) into the leader's conversation.
+    const open = `<teammate_message_${this.envelopeNonce}`;
+    const close = `</teammate_message_${this.envelopeNonce}>`;
+    const formatted = newMessages
+      .map((m) => `${open} from="${m.from}">\n${m.text}\n${close}`)
+      .join('\n\n');
+
+    this.leaderMessageCallback(formatted);
   }
 
   /**
