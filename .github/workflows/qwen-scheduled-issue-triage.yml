@@ -34,13 +34,16 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           GITHUB_REPOSITORY: '${{ github.repository }}'
         run: |-
+          echo "🔍 Finding issues without labels..."
+          NO_LABEL_ISSUES=$(gh issue list --repo ${{ github.repository }} --search "is:open is:issue no:label" --json number,title,body)
+
           echo '🔍 Finding issues without labels...'
           NO_LABEL_ISSUES="$(gh issue list --repo "${GITHUB_REPOSITORY}" \
             --search 'is:open is:issue no:label' --json number,title,body)"
 
           echo '🏷️ Finding issues that need triage...'
           NEED_TRIAGE_ISSUES="$(gh issue list --repo "${GITHUB_REPOSITORY}" \
-            --search "is:open is:issue label:\"status/needs-triage\""  --limit 1000 --json number,title,body)"
+            --search "is:open is:issue label:\"status/need-triage\""  --limit 1000 --json number,title,body)"
 
           echo '🔄 Merging and deduplicating issues...'
           ISSUES="$(echo "${NO_LABEL_ISSUES}" "${NEED_TRIAGE_ISSUES}" | jq -c -s 'add | unique_by(.number)')"
@@ -98,7 +101,7 @@ jobs:
             10. For each issue please check if CLI version is present, this is usually in the output of the /about command and will look like 0.1.5
               - Anything more than 6 versions older than the most recent should add the status/need-retesting label
             11. If you see that the issue doesn't look like it has sufficient information recommend the status/need-information label
-              - After applying appropriate labels to an issue, remove the "status/needs-triage" label if present: `gh issue edit ISSUE_NUMBER --repo ${{ github.repository }} --remove-label "status/needs-triage"`
+              - After applying appropriate labels to an issue, remove the "status/need-triage" label if present: `gh issue edit ISSUE_NUMBER --repo ${{ github.repository }} --remove-label "status/need-triage"`
               - Execute one `gh issue edit` command per issue, wait for success before proceeding to the next
             Process each issue sequentially and confirm each labeling operation before moving to the next issue.
 
