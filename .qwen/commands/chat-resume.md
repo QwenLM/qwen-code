@@ -1,5 +1,7 @@
 # chat-resume.md — Resume a Saved Session
 
+**Note**: Direct invocation (`/chat-resume name`) bypasses the router's argument parsing, locale detection, and name validation. Use `/chat -r name` instead.
+
 1. Validate `{{name}}` (Common rules): `^[a-zA-Z0-9_.-]+$`, ≤128, ≠ `.`/`..`/`__proto__`/`constructor`/`prototype`.
 2. Look up ID in index (`.qwen/chat-index.json` in project root, NOT runtime base). Missing/not found → show list + "Session not found", stop.
 3. **Validate loaded ID**: The ID from index must match UUID format (`^[a-fA-F0-9-]+$`, allows hyphens). If ID contains any shell metacharacters (`$`, `` ` ``, `;`, `|`, `>`, `<`, `&`, `(`, `)`, spaces), reject it: "Error: Invalid session ID from index. Aborted." — **DO NOT execute any shell command with this ID**.

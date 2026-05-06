@@ -1,5 +1,7 @@
 # chat-delete.md — Remove a Session Name from Index
 
+**Note**: Direct invocation (`/chat-delete name`) bypasses the router's argument parsing, locale detection, and name validation. Use `/chat -d name` instead.
+
 1. **Validate `{{name}}`**: `^[a-zA-Z0-9_.-]+$`, ≤128, ≠ `.`/`..`/`__proto__`/`constructor`/`prototype`. Invalid → error, stop.
 2. **Read index**: Read `.qwen/chat-index.json` (project root, NOT runtime base). **JSON parse error → output `"chat-index.json is malformed. Fix it manually before deleting."` and stop. Do NOT proceed.**
 3. If `{{name}}` NOT found: show list + "Session not in index", stop.

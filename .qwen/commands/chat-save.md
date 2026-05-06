@@ -1,5 +1,7 @@
 # chat-save.md — Save Current Session
 
+**Note**: Direct invocation (`/chat-save name`) bypasses the router's argument parsing, locale detection, and name validation. Use `/chat -s name` instead.
+
 1. Validate `{{name}}`: `^[a-zA-Z0-9_.-]+$`, ≤128, ≠ `.`/`..`/`__proto__`/`constructor`/`prototype`. Invalid → error, stop.
 2. Read `.qwen/chat-index.json` (project root, NOT runtime base). File not found → `{}`. **JSON parse error → output `"chat-index.json is malformed. Fix it manually before saving."` and stop. Do NOT overwrite.**
 3. If `{{name}}` in index → ask "Overwrite? (yes/no)". ≠ yes → stop.
