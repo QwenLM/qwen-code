@@ -36,6 +36,58 @@ export enum ToolErrorType {
   EDIT_EXPECTED_OCCURRENCE_MISMATCH = 'edit_expected_occurrence_mismatch',
   EDIT_NO_CHANGE = 'edit_no_change',
   EDIT_NO_CHANGE_LLM_JUDGEMENT = 'edit_no_change_llm_judgement',
+  // Returned when Edit / WriteFile is asked to mutate a file in a
+  // state the session-scoped FileReadCache cannot vouch for. Three
+  // cases share this code:
+  //
+  //   1. The file has not been read this session via ReadFile (the
+  //      original "model never saw the bytes" case).
+  //   2. The file was read only as a partial / ranged / truncated
+  //      view, so the model has not seen the full text content the
+  //      mutation could touch.
+  //   3. The file is a structural dead end that no amount of
+  //      re-reading can change:
+  //        - non-text payloads (binary / image / audio / video /
+  //          PDF / notebook) — read_file returns these as
+  //          structured values that Edit / WriteFile cannot mutate
+  //          safely; the rejection message tells the model to use
+  //          a different tool (shell with a binary-aware writer).
+  //        - special files (FIFO / socket / character or block
+  //          device) — read_file rejects these as "not a regular
+  //          file", so an enforcement loop on read_file would
+  //          never terminate; the rejection points the model at
+  //          shell instead.
+  //
+  // Despite the `EDIT_` prefix this code is shared between EditTool
+  // and WriteFileTool: the boundary it guards is "the model is about
+  // to mutate bytes it has not legitimately seen", which both tools
+  // can hit. The prefix is kept for backwards-compatibility with
+  // logs/dashboards already keyed on it; consumers that need to
+  // distinguish edit-vs-write should look at the originating tool
+  // name in the surrounding ToolCallEvent rather than the error
+  // code itself.
+  //
+  // Note for operators routing alerts: a single `edit_requires_prior_read`
+  // signal can mean any of the three cases above. If per-cause monitoring
+  // becomes important, splitting this into separate codes (e.g.
+  // `EDIT_NO_PRIOR_READ`, `EDIT_PARTIAL_PRIOR_READ`,
+  // `EDIT_TARGET_NOT_TEXT_EDITABLE`) is a follow-up; for now the
+  // originating tool name and the message text already disambiguate.
+  EDIT_REQUIRES_PRIOR_READ = 'edit_requires_prior_read',
+  // Returned when Edit / WriteFile is asked to mutate a file the model
+  // *has* read this session, but the on-disk bytes have changed since
+  // (mtime or size differs from the recorded fingerprint). The model
+  // is expected to re-read with ReadFile to refresh its mental model
+  // before retrying the edit.
+  FILE_CHANGED_SINCE_READ = 'file_changed_since_read',
+  // Returned when Edit / WriteFile cannot determine whether the model
+  // has read a file because `fs.stat` itself failed for a reason
+  // other than ENOENT (typically EACCES, EBUSY, or an NFS hiccup).
+  // Distinct from EDIT_REQUIRES_PRIOR_READ ("definitely not read")
+  // because the model may have legitimately read the file — we just
+  // cannot verify. Operators monitoring on error codes can route this
+  // separately.
+  PRIOR_READ_VERIFICATION_FAILED = 'prior_read_verification_failed',
 
   // Glob-specific Errors
   GLOB_EXECUTION_ERROR = 'glob_execution_error',
