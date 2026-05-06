@@ -242,7 +242,7 @@ describe('mermaid image renderer', () => {
     );
   });
 
-  it('renders Mermaid through mmdc asynchronously for interactive UI callers', async () => {
+  it('renders Mermaid through Kitty asynchronously for interactive UI callers', async () => {
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
     tempDirs.push(binDir);
     createFakeMmdc(binDir);
@@ -254,12 +254,32 @@ describe('mermaid image renderer', () => {
       env: {
         PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
         QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
-        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'iterm2',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
       },
     });
 
     expect(result.kind).toBe('terminal-image');
-    expect(result.kind === 'terminal-image' && result.protocol).toBe('iterm2');
+    expect(result.kind === 'terminal-image' && result.protocol).toBe('kitty');
+  });
+
+  it('does not render iTerm2 images asynchronously because placement is cursor-bound', async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+
+    const result = await renderMermaidImageAsync({
+      source: 'flowchart TD\n  A[Start] --> B[No async iTerm2]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'iterm2',
+      },
+    });
+
+    expect(result.kind).toBe('unavailable');
+    expect(result.kind === 'unavailable' && result.reason).toContain('iTerm2');
   });
 
   it('honors the configured terminal cell aspect ratio when fitting images', () => {
@@ -325,6 +345,85 @@ describe('mermaid image renderer', () => {
       'ansi line 1',
       'ansi line 2',
     ]);
+  });
+
+  it('honors the Mermaid image disable flag over chafa fallback rendering', () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-chafa-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+    createFakeChafa(binDir);
+
+    const result = renderMermaidImageSync({
+      source: 'flowchart TD\n  A[Start] --> B[Disabled]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_DISABLE_MERMAID_IMAGES: '1',
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'off',
+      },
+    });
+
+    expect(result.kind).toBe('unavailable');
+    expect(result.kind === 'unavailable' && result.reason).toContain(
+      'QWEN_CODE_DISABLE_MERMAID_IMAGES',
+    );
+  });
+
+  it('honors the Mermaid image disable flag in async rendering', async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-chafa-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+    createFakeChafa(binDir);
+
+    const result = await renderMermaidImageAsync({
+      source: 'flowchart TD\n  A[Start] --> B[Disabled async]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_DISABLE_MERMAID_IMAGES: '1',
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'off',
+      },
+    });
+
+    expect(result.kind).toBe('unavailable');
+    expect(result.kind === 'unavailable' && result.reason).toContain(
+      'QWEN_CODE_DISABLE_MERMAID_IMAGES',
+    );
+  });
+
+  it('does not forward API credentials to external renderers', () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-env-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir, [
+      'const fs = require("node:fs");',
+      'if (process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY) {',
+      '  console.error("secret leaked");',
+      '  process.exit(5);',
+      '}',
+      'const out = process.argv[process.argv.indexOf("-o") + 1];',
+      `fs.writeFileSync(out, Buffer.from("${PNG_1X1.toString(
+        'base64',
+      )}", "base64"));`,
+    ]);
+
+    const result = renderMermaidImageSync({
+      source: 'flowchart TD\n  A[Start] --> B[Env]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        OPENAI_API_KEY: 'should-not-leak',
+        GEMINI_API_KEY: 'should-not-leak',
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+      },
+    });
+
+    expect(result.kind).toBe('terminal-image');
   });
 
   it('renders Mermaid through chafa asynchronously for interactive UI callers', async () => {

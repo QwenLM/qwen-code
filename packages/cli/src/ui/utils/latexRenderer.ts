@@ -48,6 +48,13 @@ const COMMAND_REPLACEMENTS: Record<string, string> = {
   '\\Rightarrow': '⇒',
   '\\Leftarrow': '⇐',
 };
+const COMMAND_REPLACEMENT_REGEX = new RegExp(
+  Object.keys(COMMAND_REPLACEMENTS)
+    .sort((a, b) => b.length - a.length)
+    .map((command) => command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|'),
+  'g',
+);
 
 const SUPERSCRIPT: Record<string, string> = {
   '0': '⁰',
@@ -134,9 +141,10 @@ export function renderInlineLatex(input: string): string {
       convertScript(braced ?? single ?? '', SUBSCRIPT),
   );
 
-  for (const [command, replacement] of Object.entries(COMMAND_REPLACEMENTS)) {
-    output = output.split(command).join(replacement);
-  }
+  output = output.replace(
+    COMMAND_REPLACEMENT_REGEX,
+    (command) => COMMAND_REPLACEMENTS[command] ?? command,
+  );
 
   return output
     .replace(/\\left|\\right/g, '')

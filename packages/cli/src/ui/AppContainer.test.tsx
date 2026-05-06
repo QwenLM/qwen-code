@@ -18,6 +18,7 @@ import {
   AppContainer,
   dedupeNewestFirst,
   getNextRenderMode,
+  handleRenderModeToggleKey,
   isRenderModeToggleKey,
 } from './AppContainer.js';
 import ansiEscapes from 'ansi-escapes';
@@ -1032,7 +1033,17 @@ describe('AppContainer State Management', () => {
       expect(getNextRenderMode(getNextRenderMode('render'))).toBe('render');
     });
 
-    it('registers the global render shortcut handler', () => {
+    it('delegates render mode shortcuts to the shared toggle handler', () => {
+      const optionMKey: Key = {
+        name: 'm',
+        ctrl: false,
+        meta: true,
+        shift: false,
+        paste: false,
+        sequence: 'µ',
+      };
+      const setRenderMode = vi.fn();
+
       render(
         <AppContainer
           config={mockConfig}
@@ -1043,10 +1054,16 @@ describe('AppContainer State Management', () => {
       );
 
       expect(capturedRenderMode).toBe('render');
-      const handleKeypress = mockedUseKeypress.mock.calls[0]?.[0] as
-        | ((key: Key) => void)
-        | undefined;
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('handleRenderModeToggleKey'),
+        ) as ((key: Key) => void) | undefined;
       expect(handleKeypress).toBeDefined();
+      expect(handleRenderModeToggleKey(optionMKey, setRenderMode)).toBe(true);
+      expect(setRenderMode).toHaveBeenCalledWith(getNextRenderMode);
     });
   });
 

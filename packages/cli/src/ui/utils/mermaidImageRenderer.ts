@@ -64,10 +64,29 @@ const DEFAULT_RENDER_TIMEOUT_MS = 8000;
 const DEFAULT_MERMAID_RENDER_WIDTH = 1280;
 const MAX_MERMAID_PNG_BYTES = 8 * 1024 * 1024;
 const MAX_RENDERER_OUTPUT_CHARS = 16 * 1024;
+const MAX_RENDER_TIMEOUT_MS = 60_000;
 const OUTPUT_TRUNCATION_MARKER = '\n... renderer output truncated ...';
 const NPX_MERMAID_CLI = 'npx:@mermaid-js/mermaid-cli@11.12.0';
 const PNG_SIGNATURE = '89504e470d0a1a0a';
 const KITTY_PLACEHOLDER = '\u{10EEEE}';
+const RENDERER_ENV_ALLOWLIST = [
+  'PATH',
+  'PATHEXT',
+  'HOME',
+  'USERPROFILE',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'SystemRoot',
+  'WINDIR',
+  'COMSPEC',
+  'LOCALAPPDATA',
+  'APPDATA',
+  'CHROME_PATH',
+  'PUPPETEER_EXECUTABLE_PATH',
+  'PUPPETEER_CACHE_DIR',
+  'PLAYWRIGHT_BROWSERS_PATH',
+] as const;
 const KITTY_PLACEHOLDER_DIACRITICS = [
   '\u{305}',
   '\u{30D}',
@@ -332,12 +351,32 @@ export function readPngSize(png: Buffer): PngSize | null {
   };
 }
 
+function isMermaidImageRenderingDisabled(env: NodeJS.ProcessEnv): boolean {
+  return env['QWEN_CODE_DISABLE_MERMAID_IMAGES'] === '1';
+}
+
+function unavailableImageRenderingDisabled(): MermaidImageUnavailableResult {
+  return {
+    kind: 'unavailable',
+    reason:
+      'Mermaid image rendering is disabled via QWEN_CODE_DISABLE_MERMAID_IMAGES.',
+  };
+}
+
+/**
+ * @internal Test-oriented sync renderer; the interactive TUI uses the async
+ * renderer to keep external processes outside React render.
+ */
 export function renderMermaidImageSync({
   source,
   contentWidth,
   availableTerminalHeight,
   env = process.env,
 }: MermaidImageRenderOptions): MermaidImageRenderResult {
+  if (isMermaidImageRenderingDisabled(env)) {
+    return unavailableImageRenderingDisabled();
+  }
+
   const imageRendering = env['QWEN_CODE_MERMAID_IMAGE_RENDERING'];
   if (
     imageRendering !== '1' &&
@@ -470,6 +509,10 @@ export async function renderMermaidImageAsync({
   availableTerminalHeight,
   env = process.env,
 }: MermaidImageRenderOptions): Promise<MermaidImageRenderResult> {
+  if (isMermaidImageRenderingDisabled(env)) {
+    return unavailableImageRenderingDisabled();
+  }
+
   const imageRendering = env['QWEN_CODE_MERMAID_IMAGE_RENDERING'];
   if (
     imageRendering !== '1' &&
@@ -485,6 +528,15 @@ export async function renderMermaidImageAsync({
   }
 
   const protocol = detectTerminalImageProtocol(env);
+  if (protocol === 'iterm2') {
+    return {
+      kind: 'unavailable',
+      reason:
+        'iTerm2 inline image rendering is disabled in the async TUI path to avoid cursor-position races.',
+      showReason: false,
+    };
+  }
+
   const chafa = protocol ? null : findExecutable('chafa', env);
   if (!protocol && !chafa) {
     return {
@@ -870,10 +922,7 @@ function renderPngWithMmdc(
         : mmdcArgs;
     const result = spawnSync(command, args, {
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        ...env,
-      },
+      env: createRendererChildEnv(env),
       shell: shouldRunThroughShell(command),
       timeout: getMermaidRenderTimeout(env),
     });
@@ -936,10 +985,7 @@ async function renderPngWithMmdcAsync(
         ? ['-y', '@mermaid-js/mermaid-cli@11.12.0', ...mmdcArgs]
         : mmdcArgs;
     const result = await runCommand(command, args, {
-      env: {
-        ...process.env,
-        ...env,
-      },
+      env: createRendererChildEnv(env),
       shell: shouldRunThroughShell(command),
       timeout: getMermaidRenderTimeout(env),
     });
@@ -989,9 +1035,23 @@ function getMermaidRenderWidth(env: NodeJS.ProcessEnv): number {
 function getMermaidRenderTimeout(env: NodeJS.ProcessEnv): number {
   const configuredTimeout = Number(env['QWEN_CODE_MERMAID_RENDER_TIMEOUT_MS']);
   if (Number.isFinite(configuredTimeout) && configuredTimeout > 0) {
-    return Math.round(configuredTimeout);
+    return Math.min(Math.round(configuredTimeout), MAX_RENDER_TIMEOUT_MS);
   }
   return DEFAULT_RENDER_TIMEOUT_MS;
+}
+
+function createRendererChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const sourceEnv = { ...process.env, ...env };
+  const childEnv: NodeJS.ProcessEnv = {};
+
+  for (const key of RENDERER_ENV_ALLOWLIST) {
+    const value = sourceEnv[key];
+    if (value !== undefined) {
+      childEnv[key] = value;
+    }
+  }
+
+  return childEnv;
 }
 
 function getMermaidCellAspectRatio(env: NodeJS.ProcessEnv): number {
@@ -1027,10 +1087,7 @@ function renderPngWithChafa(
       ],
       {
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          ...env,
-        },
+        env: createRendererChildEnv(env),
         shell: shouldRunThroughShell(chafa),
         timeout: getMermaidRenderTimeout(env),
       },
@@ -1077,10 +1134,7 @@ async function renderPngWithChafaAsync(
         imagePath,
       ],
       {
-        env: {
-          ...process.env,
-          ...env,
-        },
+        env: createRendererChildEnv(env),
         shell: shouldRunThroughShell(chafa),
         timeout: getMermaidRenderTimeout(env),
       },
@@ -1110,6 +1164,11 @@ interface CommandResult {
   error?: string;
 }
 
+interface BoundedRendererOutput {
+  text: string;
+  truncated: boolean;
+}
+
 function runCommand(
   command: string,
   args: string[],
@@ -1125,8 +1184,8 @@ function runCommand(
       shell: options.shell,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
+    let stdout: BoundedRendererOutput = { text: '', truncated: false };
+    let stderr: BoundedRendererOutput = { text: '', truncated: false };
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
@@ -1172,32 +1231,36 @@ function runCommand(
   });
 }
 
-function appendBoundedRendererOutput(current: string, chunk: string): string {
-  if (current.endsWith(OUTPUT_TRUNCATION_MARKER)) {
+function appendBoundedRendererOutput(
+  current: BoundedRendererOutput,
+  chunk: string,
+): BoundedRendererOutput {
+  if (current.truncated) {
     return current;
   }
 
-  const next = current + chunk;
+  const next = current.text + chunk;
   if (next.length <= MAX_RENDERER_OUTPUT_CHARS) {
-    return next;
+    return { text: next, truncated: false };
   }
 
-  return (
-    next.slice(0, MAX_RENDERER_OUTPUT_CHARS - OUTPUT_TRUNCATION_MARKER.length) +
-    OUTPUT_TRUNCATION_MARKER
-  );
+  return {
+    text:
+      next.slice(
+        0,
+        MAX_RENDERER_OUTPUT_CHARS - OUTPUT_TRUNCATION_MARKER.length,
+      ) + OUTPUT_TRUNCATION_MARKER,
+    truncated: true,
+  };
 }
 
-function finalizeBoundedRendererOutput(output: string): string {
-  if (
-    output.length < MAX_RENDERER_OUTPUT_CHARS ||
-    output.endsWith(OUTPUT_TRUNCATION_MARKER)
-  ) {
-    return output;
+function finalizeBoundedRendererOutput(output: BoundedRendererOutput): string {
+  if (!output.truncated || output.text.endsWith(OUTPUT_TRUNCATION_MARKER)) {
+    return output.text;
   }
 
   return (
-    output.slice(
+    output.text.slice(
       0,
       MAX_RENDERER_OUTPUT_CHARS - OUTPUT_TRUNCATION_MARKER.length,
     ) + OUTPUT_TRUNCATION_MARKER

@@ -24,7 +24,6 @@ interface MermaidDiagramProps {
 }
 
 const MERMAID_PADDING = 1;
-const ESC = '\u001b';
 
 interface MermaidImageState {
   key: string;
@@ -33,17 +32,6 @@ interface MermaidImageState {
 
 function getRenderErrorReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-export function positionITerm2ImageAtReservedRows(
-  sequence: string,
-  rows: number,
-): string {
-  if (rows <= 0) {
-    return sequence;
-  }
-
-  return `${ESC}7${ESC}[${rows}A${sequence}${ESC}8`;
 }
 
 const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
@@ -115,6 +103,10 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
       : null;
 
   React.useEffect(() => {
+    preparedTerminalImageSequence.current = null;
+  }, [imageKey]);
+
+  React.useEffect(() => {
     if (
       !kittySequence ||
       preparedTerminalImageSequence.current === kittySequence
@@ -122,21 +114,8 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
       return;
     }
     preparedTerminalImageSequence.current = kittySequence;
-    writeRaw(kittySequence);
+    process.nextTick(() => writeRaw(kittySequence));
   }, [kittySequence, writeRaw]);
-
-  React.useEffect(() => {
-    if (
-      !image ||
-      image.kind !== 'terminal-image' ||
-      image.protocol !== 'iterm2' ||
-      preparedTerminalImageSequence.current === image.sequence
-    ) {
-      return;
-    }
-    preparedTerminalImageSequence.current = image.sequence;
-    writeRaw(positionITerm2ImageAtReservedRows(image.sequence, image.rows));
-  }, [image, writeRaw]);
 
   const titleWithSourceHint = (title: string) =>
     `${title} · source: ${sourceCopyCommand}`;
@@ -169,24 +148,6 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
             </Box>
           ))}
         </MaxSizedBox>
-      </Box>
-    );
-  }
-
-  if (image?.kind === 'terminal-image') {
-    return (
-      <Box
-        paddingLeft={MERMAID_PADDING}
-        flexDirection="column"
-        width={contentWidth}
-        flexShrink={0}
-      >
-        <Text bold color={theme.text.accent}>
-          {titleWithSourceHint(visual.title)}
-        </Text>
-        <Box flexDirection="column" height={image.rows}>
-          <Text> </Text>
-        </Box>
       </Box>
     );
   }

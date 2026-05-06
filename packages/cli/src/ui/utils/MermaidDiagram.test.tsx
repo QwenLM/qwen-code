@@ -6,10 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
-import {
-  MermaidDiagram,
-  positionITerm2ImageAtReservedRows,
-} from './MermaidDiagram.js';
+import { MermaidDiagram } from './MermaidDiagram.js';
 import { TerminalOutputProvider } from '../contexts/TerminalOutputContext.js';
 import { renderMermaidImageAsync } from './mermaidImageRenderer.js';
 
@@ -63,7 +60,7 @@ describe('MermaidDiagram', () => {
     });
   });
 
-  it('positions iTerm2 images at the reserved spacer rows', async () => {
+  it('does not emit delayed iTerm2 image sequences from the TUI', async () => {
     const writeRaw = vi.fn();
     mockedRenderMermaidImageAsync.mockResolvedValueOnce({
       kind: 'terminal-image',
@@ -86,14 +83,9 @@ describe('MermaidDiagram', () => {
     );
 
     await vi.waitFor(() => {
-      expect(writeRaw).toHaveBeenCalledWith(
-        '\x1b7\x1b[3A\x1b]1337;File=inline=1:payload\x07\x1b8',
-      );
+      expect(mockedRenderMermaidImageAsync).toHaveBeenCalled();
     });
-  });
-
-  it('does not reposition zero-height iTerm2 images', () => {
-    expect(positionITerm2ImageAtReservedRows('payload', 0)).toBe('payload');
+    expect(writeRaw).not.toHaveBeenCalled();
   });
 
   it('does not start image rendering while the Mermaid block is pending', () => {

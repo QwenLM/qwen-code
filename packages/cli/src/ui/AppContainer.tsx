@@ -11,6 +11,8 @@ import {
   useEffect,
   useRef,
   useLayoutEffect,
+  type Dispatch,
+  type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
 import { App } from './App.js';
@@ -176,6 +178,18 @@ export function isRenderModeToggleKey(key: Key): boolean {
 
 export function getNextRenderMode(current: RenderMode): RenderMode {
   return current === 'render' ? 'raw' : 'render';
+}
+
+export function handleRenderModeToggleKey(
+  key: Key,
+  setRenderMode: Dispatch<SetStateAction<RenderMode>>,
+): boolean {
+  if (!isRenderModeToggleKey(key)) {
+    return false;
+  }
+
+  setRenderMode(getNextRenderMode);
+  return true;
 }
 
 function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
@@ -2196,8 +2210,8 @@ export const AppContainer = (props: AppContainerProps) => {
         setConstrainHeight(true);
       }
 
-      if (isRenderModeToggleKey(key)) {
-        setRenderMode(getNextRenderMode);
+      if (handleRenderModeToggleKey(key, setRenderMode)) {
+        return;
       } else if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
         const newValue = !showToolDescriptions;
         setShowToolDescriptions(newValue);

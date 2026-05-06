@@ -24,6 +24,13 @@ const INLINE_MATH_PATTERN = new RegExp(
   String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
   'g',
 );
+const INLINE_MARKDOWN_REGEX =
+  /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|` +
+    String.raw`\`+.+?\`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)`,
+  'g',
+);
 
 const debugLogger = createDebugLogger('INLINE_MARKDOWN');
 
@@ -49,12 +56,9 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
   const inlineRegex = enableInlineMath
-    ? new RegExp(
-        String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|` +
-          String.raw`\`+.+?\`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)`,
-        'g',
-      )
-    : /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+    ? INLINE_MARKDOWN_WITH_MATH_REGEX
+    : INLINE_MARKDOWN_REGEX;
+  inlineRegex.lastIndex = 0;
   let match;
 
   while ((match = inlineRegex.exec(text)) !== null) {
