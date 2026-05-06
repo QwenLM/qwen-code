@@ -26,6 +26,8 @@ import {
   createDebugLogger,
   SendMessageType,
   TeamEventType,
+  ApprovalMode,
+  ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -289,17 +291,40 @@ export async function runNonInteractive(
         });
 
         // Route teammate tool approvals through the session's
-        // permission channel (stream-json SDK or local mode).
+        // permission channel.
         if (options.controlService) {
+          // Stream-json mode: SDK handles approvals.
           approvalListener = (event) => {
             void options.controlService!.permission.handleTeammateApproval(
               event,
             );
           };
-          manager
-            .getEventEmitter()
-            .on(TeamEventType.TEAMMATE_APPROVAL_REQUEST, approvalListener);
+        } else {
+          // Headless / non-stream-json mode: there is no UI to
+          // surface a prompt, so the only safe options are
+          // YOLO (auto-approve) or Cancel. Without this fallback
+          // listener, the event has no subscriber and the teammate
+          // hangs until its 600s stall timeout fires.
+          approvalListener = (event) => {
+            const mode = config.getApprovalMode();
+            if (mode === ApprovalMode.YOLO) {
+              void event.respond(ToolConfirmationOutcome.ProceedOnce);
+              return;
+            }
+            // Surface a clear reason on stderr — otherwise the
+            // failure looks like the teammate gave up for no reason.
+            process.stderr.write(
+              `[team] Auto-cancelling tool ${event.toolName} requested by ` +
+                `teammate "${event.teammateName}": current approval mode ` +
+                `(${mode}) cannot prompt in non-stream-json mode. ` +
+                `Use --yolo or stream-json to allow teammate tool calls.\n`,
+            );
+            void event.respond(ToolConfirmationOutcome.Cancel);
+          };
         }
+        manager
+          .getEventEmitter()
+          .on(TeamEventType.TEAMMATE_APPROVAL_REQUEST, approvalListener);
       }
     };
 
@@ -680,10 +705,23 @@ export async function runNonInteractive(
                 pendingTeammateMessages.push(status);
                 break;
               }
-              await teamManager.waitForTeammateActivity(
+              const waitResult = await teamManager.waitForTeammateActivity(
                 undefined,
                 abortController.signal,
               );
+              // Without this log a per-call 120s timeout silently
+              // retries until the 600s stall threshold trips —
+              // making "teammate stuck" debugging painful in
+              // production. `terminated`/`aborted` exit on their
+              // own through the loop conditions, so logging
+              // `timeout` is enough.
+              if (waitResult === 'timeout') {
+                debugLogger.warn(
+                  '[runNonInteractive] waitForTeammateActivity timed ' +
+                    'out (120s); will continue waiting until stall ' +
+                    'threshold or messages arrive.',
+                );
+              }
             }
 
             // Drain messages and loop back.
