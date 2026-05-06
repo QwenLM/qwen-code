@@ -744,6 +744,182 @@ body
     });
   });
 
+  describe('loadSkillsFromDir with nested directories', () => {
+    const testBaseDir = '/test/extension/skills';
+
+    it('should load skills from nested directories', async () => {
+      // Regression: skills in nested directories like
+      // .qwen/skills/category/skill-name/SKILL.md were not discovered
+      // because the scanner only checked top-level entries.
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'category',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([
+          {
+            name: 'nested-skill',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: nested-skill
+description: A nested skill
+---
+
+Nested skill body.
+`);
+
+      const skills = await loadSkillsFromDir(testBaseDir);
+
+      expect(skills).toHaveLength(1);
+      expect(skills[0]?.name).toBe('nested-skill');
+      expect(skills[0]?.description).toBe('A nested skill');
+    });
+
+    it('should load skills from deeply nested directories', async () => {
+      // Test 3 levels of nesting: base/level1/level2/deep-skill/SKILL.md
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'level1',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([
+          {
+            name: 'level2',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([
+          {
+            name: 'deep-skill',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: deep-skill
+description: A deeply nested skill
+---
+
+Deep skill body.
+`);
+
+      const skills = await loadSkillsFromDir(testBaseDir);
+
+      expect(skills).toHaveLength(1);
+      expect(skills[0]?.name).toBe('deep-skill');
+    });
+
+    it('should load multiple skills from nested structure', async () => {
+      // Load skills from: base/skill1/SKILL.md and base/category/skill2/SKILL.md
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'skill1',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+          {
+            name: 'category',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([
+          {
+            name: 'skill2',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValueOnce(`---
+name: skill1
+description: Top-level skill
+---
+
+Skill 1 body.
+`).mockResolvedValueOnce(`---
+name: skill2
+description: Nested skill
+---
+
+Skill 2 body.
+`);
+
+      const skills = await loadSkillsFromDir(testBaseDir);
+
+      expect(skills).toHaveLength(2);
+      expect(skills.map((s) => s.name).sort()).toEqual(['skill1', 'skill2']);
+    });
+
+    it('should skip symlinks that escape baseDir in nested traversal', async () => {
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'category',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([
+          {
+            name: 'escape-link',
+            isDirectory: () => false,
+            isFile: () => false,
+            isSymbolicLink: () => true,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s === testBaseDir || s === `${testBaseDir}/category`) {
+          return Promise.resolve(s);
+        }
+        return Promise.resolve('/etc/escape-target');
+      });
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => true,
+      } as unknown as Awaited<ReturnType<typeof fs.stat>>);
+
+      const skills = await loadSkillsFromDir(testBaseDir);
+
+      expect(skills).toHaveLength(0);
+    });
+  });
+
   describe('parseSkillContent model field', () => {
     const testFilePath = '/test/extension/skills/model-test/SKILL.md';
 

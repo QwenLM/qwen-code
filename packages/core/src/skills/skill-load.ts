@@ -21,16 +21,9 @@ export async function loadSkillsFromDir(
 ): Promise<SkillConfig[]> {
   debugLogger.debug(`Loading skills from directory (skill-load): ${baseDir}`);
   try {
-    const entries = await fs.readdir(baseDir, { withFileTypes: true });
-    const skills: SkillConfig[] = [];
-    debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
-
-    // Resolve baseDir once outside the loop. Symlink scope validation
-    // (in `validateSymlinkScope`) needs the canonical form to compare
-    // against; doing it per-entry would burn a syscall per directory
-    // entry for the same answer. `fs.readdir` succeeded just above so
-    // the directory exists — realpath should not throw here, but if it
-    // does we treat the whole directory as unreadable.
+    // Resolve baseDir once. Symlink scope validation needs the canonical
+    // form to compare against. `fs.readdir` succeeded just above so the
+    // directory exists — realpath should not throw here.
     let baseRealPath: string;
     try {
       baseRealPath = await fs.realpath(baseDir);
@@ -43,42 +36,15 @@ export async function loadSkillsFromDir(
       return [];
     }
 
-    for (const entry of entries) {
-      // Process directories and symlinks that resolve to directories.
-      // Plain files are silently skipped (each skill must be a directory).
-      const isDirectory = entry.isDirectory();
-      const isSymlink = entry.isSymbolicLink();
+    // Collect all skill directories recursively, then load skills.
+    const skillDirs = await collectSkillDirs(baseDir, baseRealPath);
+    debugLogger.debug(
+      `Found ${skillDirs.length} skill directories in ${baseDir}`,
+    );
 
-      if (!isDirectory && !isSymlink) {
-        debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
-        continue;
-      }
+    const skills: SkillConfig[] = [];
 
-      const skillDir = path.join(baseDir, entry.name);
-
-      // For symlinks, verify the target (a) resolves, (b) is a directory,
-      // and (c) stays within `baseDir`. Shared with `skill-manager.ts`
-      // so the two parsers can't drift on this code-execution-vector
-      // gate (skills can ship hooks that run shell commands).
-      if (isSymlink) {
-        const check = await validateSymlinkScope(skillDir, baseRealPath);
-        if (!check.ok) {
-          if (check.reason === 'escapes') {
-            debugLogger.warn(
-              `Skipping symlink ${entry.name} that escapes ${baseDir}`,
-            );
-          } else if (check.reason === 'not-directory') {
-            debugLogger.warn(
-              `Skipping symlink ${entry.name} that does not point to a directory`,
-            );
-          } else {
-            debugLogger.warn(
-              `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
-            );
-          }
-          continue;
-        }
-      }
+    for (const skillDir of skillDirs) {
       const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
 
       try {
@@ -89,11 +55,19 @@ export async function loadSkillsFromDir(
         const config = parseSkillContent(content, skillManifest);
         skills.push(config);
       } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : 'Unknown error';
-        debugLogger.error(
-          `Failed to parse skill at ${skillDir}: ${errorMessage}`,
-        );
+        // Only log errors for actual parse failures, not for missing SKILL.md
+        // (directories without SKILL.md are expected)
+        const isAccessError =
+          error instanceof Error &&
+          (error.message.includes('ENOENT') ||
+            error.message.includes('access'));
+        if (!isAccessError) {
+          const errorMessage =
+            error instanceof Error ? error.message : 'Unknown error';
+          debugLogger.error(
+            `Failed to parse skill at ${skillDir}: ${errorMessage}`,
+          );
+        }
         continue;
       }
     }
@@ -108,6 +82,51 @@ export async function loadSkillsFromDir(
     );
     return [];
   }
+}
+
+/**
+ * Recursively collect all directories that could contain a SKILL.md.
+ * Walks the directory tree depth-first, validating symlink scopes.
+ */
+async function collectSkillDirs(
+  dir: string,
+  baseRealPath: string,
+): Promise<string[]> {
+  const result: string[] = [];
+
+  let entries: Array<import('fs').Dirent>;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return result;
+  }
+
+  for (const entry of entries) {
+    const isDirectory = entry.isDirectory();
+    const isSymlink = entry.isSymbolicLink();
+
+    if (!isDirectory && !isSymlink) {
+      continue;
+    }
+
+    const entryPath = path.join(dir, entry.name);
+
+    // Validate symlink scope if needed.
+    if (isSymlink) {
+      const check = await validateSymlinkScope(entryPath, baseRealPath);
+      if (!check.ok) {
+        continue;
+      }
+    }
+
+    // This directory could contain a SKILL.md. Add it to results.
+    result.push(entryPath);
+
+    // Recurse into subdirectories to find nested skills.
+    result.push(...(await collectSkillDirs(entryPath, baseRealPath)));
+  }
+
+  return result;
 }
 
 export function parseSkillContent(

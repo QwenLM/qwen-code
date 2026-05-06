@@ -1428,9 +1428,7 @@ Symlink skill content`);
       vi.mocked(fs.realpath).mockImplementation((p) => {
         const s = String(p);
         if (s.endsWith('broken-symlink')) {
-          return Promise.reject(
-            new Error('ENOENT: no such file or directory'),
-          );
+          return Promise.reject(new Error('ENOENT: no such file or directory'));
         }
         return Promise.resolve(s);
       });
@@ -1530,6 +1528,94 @@ Symlinked skill content`);
         'regular-skill',
         'symlink-skill',
       ]);
+    });
+
+    it('should load skills from nested directories', async () => {
+      // Regression: skills in nested directories like
+      // .qwen/skills/category/skill-name/SKILL.md were not discovered
+      // because the scanner only checked top-level entries.
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'category',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+          {
+            name: 'top-level-skill',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([
+          {
+            name: 'nested-skill',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValueOnce(`---
+name: top-level-skill
+description: A top-level skill
+---
+
+Top-level skill content.`).mockResolvedValueOnce(`---
+name: nested-skill
+description: A nested skill
+---
+
+Nested skill content.`);
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(2);
+      expect(skills.map((s) => s.name).sort()).toEqual([
+        'nested-skill',
+        'top-level-skill',
+      ]);
+    });
+
+    it('should skip symlinks that escape baseDir in nested traversal', async () => {
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'category',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([
+          {
+            name: 'escape-link',
+            isDirectory: () => false,
+            isFile: () => false,
+            isSymbolicLink: () => true,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      vi.mocked(fs.realpath).mockImplementation((p) => {
+        const s = String(p);
+        if (s.endsWith('escape-link')) {
+          return Promise.resolve('/etc/escape-target');
+        }
+        return Promise.resolve(s);
+      });
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => true,
+      } as Awaited<ReturnType<typeof fs.stat>>);
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(0);
     });
   });
 
