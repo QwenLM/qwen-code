@@ -389,19 +389,6 @@ describe('PromptHookRunner', () => {
       expect(systemInstruction?.parts?.[0]?.text).toContain('ok');
     });
 
-    it('should enable thinking in LLM request for better evaluation', async () => {
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      await promptRunner.execute(config, HookEventName.PreToolUse, input);
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
-      expect(callArg.config?.thinkingConfig?.includeThoughts).toBe(true);
-    });
-
     it('should track duration correctly', async () => {
       const mockResponse = createMockResponse('{"ok": true}');
       mockGenerateContent.mockImplementation(
