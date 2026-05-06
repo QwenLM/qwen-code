@@ -237,6 +237,12 @@ export class SessionService {
   /**
    * Reads the UUID of the last record in a session JSONL file.
    * Uses a tail-read strategy for efficiency.
+   *
+   * Each physical line is routed through `jsonl.parseLineTolerant` so a
+   * `}{`-glued tail line (#3606 corruption shape) still yields its records
+   * instead of being silently skipped — otherwise `renameSession` would set
+   * `custom_title.parentUuid` to a stale uuid and `reconstructHistory` would
+   * truncate the chain on resume.
    */
   private readLastRecordUuid(filePath: string): string | null {
     try {
@@ -257,17 +263,17 @@ export class SessionService {
       const tail = buffer.toString('utf-8');
       const lines = tail.split('\n');
 
-      // Walk backwards to find the last valid record
+      // Walk physical lines bottom-up; on each line walk recovered records
+      // bottom-up too, so a `}{`-glued tail returns the *latest* record.
       for (let i = lines.length - 1; i >= 0; i--) {
         const trimmed = lines[i].trim();
         if (!trimmed) continue;
-        try {
-          const record = JSON.parse(trimmed) as ChatRecord;
-          if (record.uuid) {
+        const records = jsonl.parseLineTolerant<ChatRecord>(trimmed, filePath);
+        for (let j = records.length - 1; j >= 0; j--) {
+          const record = records[j];
+          if (record?.uuid) {
             return record.uuid;
           }
-        } catch {
-          continue;
         }
       }
 

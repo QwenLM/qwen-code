@@ -101,6 +101,15 @@ describe('parseLineTolerant', () => {
   it('returns [] when nothing balanced can be recovered', () => {
     expect(parseLineTolerant('not-json', '/tmp/x.jsonl')).toEqual([]);
   });
+
+  it('filters non-object JSON values (e.g. bare `null`) instead of forwarding them', () => {
+    // Without the filter, callers that do `record.type` would crash on the
+    // returned scalar; integration sites then propagate to outer catches and
+    // zero out whole counts.
+    expect(parseLineTolerant('null', '/tmp/x.jsonl')).toEqual([]);
+    expect(parseLineTolerant('42', '/tmp/x.jsonl')).toEqual([]);
+    expect(parseLineTolerant('"a string"', '/tmp/x.jsonl')).toEqual([]);
+  });
 });
 
 describe('read() / readLines() with malformed lines', () => {

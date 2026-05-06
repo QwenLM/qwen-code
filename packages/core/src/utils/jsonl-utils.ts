@@ -106,15 +106,24 @@ export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
 }
 
 /**
- * Parses a single physical JSONL line tolerantly. Returns the parsed objects:
+ * Parses a single physical JSONL line tolerantly. Returns the parsed records:
  * one if the line is well-formed, multiple if it is `}{`-glued from an
  * interrupted append (the #3606 corruption shape), zero if nothing can be
  * recovered. Use this from any streaming reader that walks JSONL line-by-line
  * and wants the same recovery semantics as `read()` / `readLines()`.
+ *
+ * Non-object JSON values (e.g. a bare `null` or `42` line) are filtered out:
+ * JSONL records in this codebase are always objects, and forwarding scalars
+ * would trip property accesses in callers (`record.type`, `record.uuid`).
  */
 export function parseLineTolerant<T>(line: string, filePath: string): T[] {
   try {
-    return [JSON.parse(line) as T];
+    const parsed = JSON.parse(line);
+    if (parsed !== null && typeof parsed === 'object') {
+      return [parsed as T];
+    }
+    debugLogger.warn(`Skipping non-object JSONL value in ${filePath}`);
+    return [];
   } catch {
     const fragments = _recoverObjectsFromLine<T>(line);
     if (fragments.length === 0) {
