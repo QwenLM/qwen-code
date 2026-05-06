@@ -169,12 +169,33 @@ function permissionModeToApprovalMode(mode: PermissionMode): ApprovalMode {
 
 /**
  * Creates a Config override with a different approval mode.
- * Uses prototype delegation to avoid mutating the parent config.
+ *
+ * Uses prototype delegation (Object.create) to avoid mutating the parent
+ * config, then rebuilds the override's tool registry so core tools
+ * (EditTool / WriteFileTool / ReadFileTool) are bound to the override
+ * rather than to the parent. Without the registry rebuild, the parent's
+ * cached tool instances continue to resolve `this.config` to the parent,
+ * defeating per-Config isolation of FileReadCache / approval mode for any
+ * code path that goes through the bound tool (which is the common case).
+ *
+ * Discovered tools (MCP / command-discovered) are *not* re-discovered —
+ * they are copied from the parent via {@link ToolRegistry.copyDiscoveredToolsFrom}
+ * so we don't pay the discovery cost again.
  */
-function createApprovalModeOverride(base: Config, mode: ApprovalMode): Config {
+export async function createApprovalModeOverride(
+  base: Config,
+  mode: ApprovalMode,
+): Promise<Config> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   override.getApprovalMode = (): ApprovalMode => mode;
+
+  const agentRegistry = await override.createToolRegistry(undefined, {
+    skipDiscovery: true,
+  });
+  agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
+  override.getToolRegistry = () => agentRegistry;
+
   return override as Config;
 }
 
@@ -996,21 +1017,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // `this.config` directly here would short-circuit that
       // isolation for the same-mode path, which is the common case.
       //
-      // Known partial fix: `Config.createToolRegistry` (called once at
-      // initialise time on the parent) bound `EditTool` / `WriteFileTool`
-      // instances against the parent. The subagent's
-      // `runtimeContext.getToolRegistry()` walks the prototype chain
-      // back to that parent registry, so tool invocations resolve
-      // `this.config` to the parent and reach the parent's
-      // FileReadCache rather than the wrapper's lazy-init one.
-      // `InProcessBackend.createPerAgentConfig` already does the right
-      // thing (`override.createToolRegistry()` + `copyDiscoveredToolsFrom`);
-      // bringing that here is a follow-up. Pre-PR there was no
-      // enforcement on subagent mutations at all, so the wrapper here
-      // is still strictly an improvement (the cache lazy-init does
-      // shield code that *consumes the Config directly* rather than
-      // through a parent-bound tool).
-      const agentConfig = createApprovalModeOverride(
+      // The override also rebuilds its own tool registry so core
+      // tools (`EditTool` / `WriteFileTool` / `ReadFileTool`) are
+      // bound to the override Config rather than the parent. Without
+      // that rebuild, the parent's cached tool instances continue to
+      // resolve `this.config` to the parent, reaching the parent's
+      // FileReadCache rather than the subagent's. See
+      // `createApprovalModeOverride` above for details.
+      const agentConfig = await createApprovalModeOverride(
         this.config,
         resolvedApprovalMode,
       );
