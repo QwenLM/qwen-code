@@ -66,8 +66,13 @@ export interface SessionPickerProps {
 
   /**
    * Session IDs the user is not allowed to check (e.g. the current
-   * active session can't be batch-deleted). They render with a hint and
-   * Space is a no-op while the cursor is on them.
+   * active session can't be batch-deleted). They render dimmed with a
+   * hint and Space is a no-op while the cursor is on them.
+   *
+   * Only takes effect when {@link enableMultiSelect} is true; in
+   * single-select mode this prop is silently ignored because there is
+   * no checkbox state to gate. Callers that need to forbid resuming a
+   * specific session should filter `initialSessions` instead.
    */
   disabledIds?: readonly string[];
 }

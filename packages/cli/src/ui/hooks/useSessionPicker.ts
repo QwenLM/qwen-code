@@ -70,6 +70,11 @@ export interface UseSessionPickerOptions {
    * currently active session must not be deletable). They remain
    * navigable but Space is a no-op on them and they never appear in the
    * commit set.
+   *
+   * Only consulted when {@link enableMultiSelect} is true. In
+   * single-select mode this option is silently inert because there is
+   * no checkbox state to gate — the Space binding routes to preview (or
+   * nothing) rather than to `toggleChecked`.
    */
   disabledIds?: readonly string[];
 }
