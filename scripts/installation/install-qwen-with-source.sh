@@ -253,7 +253,7 @@ install_nvm() {
 # Install Node.js via NVM
 # ============================================
 install_nodejs_with_nvm() {
-    local NODE_VERSION="${NODE_VERSION:-20}"
+    local NODE_VERSION="${NODE_VERSION:-22}"
     local NVM_DIR="${NVM_DIR:-${HOME}/.nvm}"
 
     # Ensure NVM is loaded
@@ -306,11 +306,11 @@ check_node_version() {
         return 1
     fi
 
-    if [[ "${major_version}" -ge 20 ]]; then
-        log_success "Node.js v${current_version} is already installed (>= 20)"
+    if [[ "${major_version}" -ge 22 ]]; then
+        log_success "Node.js v${current_version} is already installed (>= 22)"
         return 0
     else
-        log_warning "Node.js v${current_version} is installed but version < 20"
+        log_warning "Node.js v${current_version} is installed but version < 22"
         return 1
     fi
 }

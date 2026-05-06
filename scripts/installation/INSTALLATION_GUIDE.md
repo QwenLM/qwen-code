@@ -4,7 +4,7 @@ This guide describes how to install Node.js and Qwen Code with source informatio
 
 ## Overview
 
-The installation scripts automate the process of installing Node.js (if not present or below version 20) and Qwen Code, while capturing and storing the installation source information for analytics and tracking purposes.
+The installation scripts automate the process of installing Node.js (if not present or below version 22) and Qwen Code, while capturing and storing the installation source information for analytics and tracking purposes.
 
 ## Installation Scripts
 
@@ -20,7 +20,7 @@ We provide platform-specific installation scripts:
 #### Features:
 
 - Checks for existing Node.js installation and version
-- Installs Node.js 20+ if needed using NVM
+- Installs Node.js 22+ if needed using NVM
 - Installs Qwen Code globally with source information
 - Stores the source information in `~/.qwen/source.json`
 
@@ -186,7 +186,7 @@ If you prefer not to use the installation scripts or don't want source tracking:
 ### Prerequisites
 
 ```bash
-# Node.js 20+
+# Node.js 22+
 curl -qL https://www.npmjs.com/install.sh | sh
 ```
 

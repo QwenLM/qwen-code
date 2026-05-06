@@ -38,7 +38,7 @@ powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou
 
 **Prerequisites**
 
-Make sure you have Node.js 20 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
+Make sure you have Node.js 22 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
 
 **NPM**
 

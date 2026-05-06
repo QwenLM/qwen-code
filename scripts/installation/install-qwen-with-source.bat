@@ -53,12 +53,12 @@ if !ERRORLEVEL! EQU 0 (
         set "MAJOR_VERSION=%%a"
     )
     
-    if !MAJOR_VERSION! GEQ 20 (
+    if !MAJOR_VERSION! GEQ 22 (
         echo INFO: Node.js version !NODE_VERSION! is sufficient. Skipping Node.js installation.
         goto :InstallQwenCode
     ) else (
-        echo INFO: Node.js version !NODE_VERSION! is too low. Need version 20 or higher.
-        echo INFO: Installing Node.js 20+
+        echo INFO: Node.js version !NODE_VERSION! is too low. Need version 22 or higher.
+        echo INFO: Installing Node.js 22+
         call :InstallNodeJSDirectly
         if !ERRORLEVEL! NEQ 0 (
             echo ERROR: Failed to install Node.js. Cannot continue with Qwen Code installation.
@@ -66,7 +66,7 @@ if !ERRORLEVEL! EQU 0 (
         )
     )
 ) else (
-    echo INFO: Node.js not found. Installing Node.js 20+
+    echo INFO: Node.js not found. Installing Node.js 22+
     call :InstallNodeJSDirectly
     if !ERRORLEVEL! NEQ 0 (
         echo ERROR: Failed to install Node.js. Cannot continue with Qwen Code installation.
@@ -164,7 +164,7 @@ REM Function: InstallNodeJSDirectly
 REM Description: Download and install Node.js directly from official website
 REM ============================================================
 :InstallNodeJSDirectly
-echo INFO: Downloading Node.js LTS (20.x) from official website
+echo INFO: Downloading Node.js LTS (22.x) from official website
 
 REM Create temp directory for download
 set "TEMP_DIR=%TEMP%\qwen-nodejs-install"
@@ -176,8 +176,8 @@ if "%PROCESSOR_ARCHITECTURE%"=="x86" set "ARCH=x86"
 if "%PROCESSOR_ARCHITECTURE%"=="AMD64" set "ARCH=x64"
 if defined PROCESSOR_ARCHITEW6432 set "ARCH=x64"
 
-REM Set Node.js download URL (LTS version 20.x)
-set "NODE_VERSION=20.18.1"
+REM Set Node.js download URL (LTS version 22.x)
+set "NODE_VERSION=22.11.0"
 set "NODE_URL=https://nodejs.org/dist/v!NODE_VERSION!/node-v!NODE_VERSION!-!ARCH!.msi"
 set "NODE_INSTALLER=%TEMP_DIR%\nodejs-installer.msi"
 
