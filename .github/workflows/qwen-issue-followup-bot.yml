@@ -34,7 +34,7 @@ on:
         type: 'string'
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.event.issue.number || github.event.inputs.issue_number || 'batch' }}"
+  group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.issue.number || github.event.inputs.issue_number || 'batch' }}"
   cancel-in-progress: false
 
 defaults:
@@ -114,7 +114,11 @@ jobs:
           real_gh="${SAFE_GH_REAL:?SAFE_GH_REAL is required}"
 
           reject() {
-            echo "::error::Blocked gh command: gh $*" >&2
+            local command="${1:-}"
+            if [[ -n "${2:-}" ]]; then
+              command="${command} ${2}"
+            fi
+            echo "::error::Blocked gh command: gh ${command} [arguments omitted]" >&2
             exit 2
           }
 
