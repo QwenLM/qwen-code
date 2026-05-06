@@ -78,37 +78,3 @@ export function buildGitNotesCommand(
     ],
   };
 }
-
-/**
- * Format a human-readable summary of the attribution for logging/display.
- */
-export function formatAttributionSummary(note: CommitAttributionNote): string {
-  const lines: string[] = [];
-  lines.push(
-    `AI Attribution: ${note.summary.aiPercent}% AI, ${note.summary.totalFilesTouched} file(s)`,
-  );
-  lines.push(
-    `  AI chars: ${note.summary.aiChars}, Human chars: ${note.summary.humanChars}`,
-  );
-
-  for (const [filePath, data] of Object.entries(note.files)) {
-    const shortPath =
-      filePath.length > 60 ? '...' + filePath.slice(-57) : filePath;
-    lines.push(
-      `  ${shortPath}: ${data.percent}% AI (+${data.aiChars}/${data.humanChars}h)`,
-    );
-  }
-
-  if (note.excludedGeneratedCount > 0) {
-    lines.push(`  Excluded generated: ${note.excludedGeneratedCount} file(s)`);
-  }
-
-  return lines.join('\n');
-}
-
-/**
- * Get the git notes ref used for AI attribution.
- */
-export function getAttributionNotesRef(): string {
-  return GIT_NOTES_REF;
-}

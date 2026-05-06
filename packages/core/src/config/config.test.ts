@@ -1061,18 +1061,38 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
-    // settings.json is hand-editable; without per-field type checks
-    // a stored `{ commit: "false" }` would reach runtime as a truthy
-    // string and behave as if attribution were enabled. Coerce
-    // anything non-boolean to the schema default (true) so a
-    // misspelled setting can't quietly invert the user's intent.
+    // settings.json is hand-editable; without intent-aware string
+    // parsing a hand-edited `{ commit: "false" }` would silently
+    // inflate to `commit: true` (the previous "default-to-true on
+    // mismatch" policy). Honor common string disable-intent forms
+    // and fall through to disabled on genuinely unrecognisable
+    // input — safer-by-default than turning attribution on against
+    // the user's clear opt-out.
     it.each([
-      ['string "false"', 'false', true],
+      // Disable-intent strings.
+      ['string "false"', 'false', false],
+      ['string "FALSE"', 'FALSE', false],
+      ['string "no"', 'no', false],
+      ['string "off"', 'off', false],
+      ['string "0"', '0', false],
+      ['empty string', '', false],
+      // Enable-intent strings.
       ['string "true"', 'true', true],
-      ['number 0', 0, true],
-      ['null', null, true],
+      ['string "yes"', 'yes', true],
+      ['string "on"', 'on', true],
+      ['string "1"', '1', true],
+      // Numbers.
+      ['number 1', 1, true],
+      ['number 0', 0, false],
+      ['number 42', 42, false],
+      // Other types fall through to disabled.
+      ['null', null, false],
+      ['object', {}, false],
+      ['array', [], false],
+      // Unknown strings → disabled (don't quietly enable).
+      ['unknown string', 'maybe', false],
     ])(
-      'coerces non-boolean field (%s) to the schema default true',
+      'parses %s as %s for both commit and pr',
       (_label, badValue, expected) => {
         const config = new Config({
           ...baseParams,
@@ -1086,6 +1106,17 @@ describe('Server Config (config.ts)', () => {
         expect(settings.pr).toBe(expected);
       },
     );
+
+    // A genuinely-absent sub-field still defaults to true (schema default).
+    it('defaults absent commit/pr to true', () => {
+      const config = new Config({
+        ...baseParams,
+        gitCoAuthor: {} as { commit?: boolean; pr?: boolean },
+      });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(true);
+    });
   });
 
   describe('Telemetry Settings', () => {

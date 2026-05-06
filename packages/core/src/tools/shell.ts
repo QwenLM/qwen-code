@@ -1997,6 +1997,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     let committedAbsolutePaths: Set<string> | null = null;
+    // Separate from `committedAbsolutePaths` so a failed note write
+    // (oversized payload, `git notes` non-zero exit, exception) does
+    // NOT also delete the per-file attribution data the user might
+    // need to amend & retry. `shouldClear` flips to the partial-clear
+    // set only on (a) note-write success, or (b) attribution toggle
+    // OFF — both cases where the file is genuinely "done" from the
+    // attribution path's POV.
+    let shouldClear: Set<string> | null = null;
     let warning: string | null = null;
     try {
       // Analyze the just-committed files by diffing HEAD against its parent.
@@ -2086,7 +2094,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // earlier (already-committed) AI edits to the new commit.
       const gitCoAuthorSettings = this.config.getGitCoAuthor();
       if (!gitCoAuthorSettings.commit) {
-        return null; // finally block does the partial clear
+        // Toggle-off but the commit landed — partial-clear the files
+        // that just landed so re-enabling later doesn't re-attribute
+        // earlier (already-committed) AI edits to a future commit.
+        shouldClear = committedAbsolutePaths;
+        return null;
       }
 
       const note = attributionService.generateNotePayload(
@@ -2110,6 +2122,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
           'AI attribution note skipped: payload exceeded the 30 KB ' +
           'size cap (large generated-file exclusion list?). ' +
           'Co-authored-by trailer is unaffected.';
+        // Leave per-file state intact: the user might `git commit
+        // --amend` after pruning excluded paths, and partial-clearing
+        // here would erase the data they'd need to retry.
         return warning;
       }
 
@@ -2118,9 +2133,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Windows where the bash-style escape used previously is invalid
       // for cmd.exe / PowerShell. 5s timeout keeps a wedged repo from
       // stalling the user-visible turn.
-      const { exitCode, output } = await new Promise<{
+      const { exitCode, output, timedOut } = await new Promise<{
         exitCode: number | null;
         output: string;
+        timedOut: boolean;
       }>((resolve) => {
         const child = childProcess.execFile(
           notesCommand.command,
@@ -2129,13 +2145,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
           (error, stdout, stderr) => {
             const merged = (stdout || '') + (stderr || '');
             if (error) {
+              // execFile signals timeout via either `error.killed === true`
+              // + `error.signal === 'SIGTERM'` (default kill), or
+              // `error.code === 'ETIMEDOUT'` on some platforms. Detect
+              // both so the caller's warning can name the actual cause
+              // ("timed out") instead of mislabeling it as exit-code 1.
+              const errno = error as NodeJS.ErrnoException & {
+                killed?: boolean;
+                signal?: string | null;
+              };
+              const isTimeout =
+                errno.code === 'ETIMEDOUT' ||
+                (errno.killed === true && errno.signal === 'SIGTERM');
               const code =
-                typeof (error as NodeJS.ErrnoException).code === 'number'
-                  ? ((error as NodeJS.ErrnoException).code as unknown as number)
+                typeof errno.code === 'number'
+                  ? (errno.code as unknown as number)
                   : null;
-              resolve({ exitCode: code ?? 1, output: merged });
+              resolve({
+                exitCode: code ?? 1,
+                output: merged,
+                timedOut: isTimeout,
+              });
             } else {
-              resolve({ exitCode: 0, output: merged });
+              resolve({ exitCode: 0, output: merged, timedOut: false });
             }
           },
         );
@@ -2143,15 +2175,30 @@ export class ShellToolInvocation extends BaseToolInvocation<
       });
 
       if (exitCode !== 0) {
-        debugLogger.warn(`git notes exited with code ${exitCode}: ${output}`);
-        warning =
-          `AI attribution note skipped: \`git notes add\` exited ${exitCode}` +
-          (output ? ` (${output.trim().slice(0, 120)})` : '') +
-          '. Co-authored-by trailer is unaffected.';
+        if (timedOut) {
+          debugLogger.warn(`git notes timed out after 5s: ${output}`);
+          warning =
+            'AI attribution note skipped: `git notes add` timed out ' +
+            'after 5s' +
+            (output ? ` (${output.trim().slice(0, 120)})` : '') +
+            '. Co-authored-by trailer is unaffected.';
+        } else {
+          debugLogger.warn(`git notes exited with code ${exitCode}: ${output}`);
+          warning =
+            `AI attribution note skipped: \`git notes add\` exited ${exitCode}` +
+            (output ? ` (${output.trim().slice(0, 120)})` : '') +
+            '. Co-authored-by trailer is unaffected.';
+        }
+        // Note didn't land — leave per-file state intact so the user
+        // can amend the commit (or manually run `git notes add`)
+        // without losing attribution data they'd need to reproduce.
       } else {
         debugLogger.debug(
           `Attached AI attribution note: ${note.summary.aiPercent}% AI, ${note.summary.totalFilesTouched} file(s)`,
         );
+        // Successful note write — partial-clear the just-committed
+        // files so a later commit doesn't re-attribute them.
+        shouldClear = committedAbsolutePaths;
       }
     } catch (err) {
       debugLogger.warn(
@@ -2161,18 +2208,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `AI attribution note skipped: ${getErrorMessage(err)}. ` +
         'Co-authored-by trailer is unaffected.';
     } finally {
-      // Partial clear: only drop tracking for the files that actually
-      // landed in this commit. Files the AI edited but the user
-      // omitted from `git add` stay pending for a later commit.
-      // If we never determined the committed set (analysis failure:
-      // shallow clone, --amend without reflog, partial diff failure,
-      // exception), DO NOT wholesale-clear: that would erase pending
-      // AI edits for files the user never staged in this commit. The
-      // small risk is stale per-file state for the just-committed
-      // file (re-attributed if it appears in a future commit) — much
-      // less harmful than losing unrelated unstaged work.
-      if (committedAbsolutePaths) {
-        attributionService.clearAttributedFiles(committedAbsolutePaths);
+      // Partial clear: only drop tracking for files that landed in
+      // this commit AND the note write actually succeeded (or the
+      // user disabled the toggle). `shouldClear` stays null when the
+      // note was skipped (oversized payload, non-zero exit, exception)
+      // so the user can amend & retry without their per-file
+      // attribution being silently destroyed first. When `shouldClear`
+      // is null, just snapshot the prompt counter — DON'T
+      // wholesale-clear, since that would erase pending AI edits for
+      // files the user never staged in this commit.
+      if (shouldClear) {
+        attributionService.clearAttributedFiles(shouldClear);
       } else {
         attributionService.noteCommitWithoutClearing();
       }

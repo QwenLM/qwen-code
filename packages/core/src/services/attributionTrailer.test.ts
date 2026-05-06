@@ -5,11 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import {
-  buildGitNotesCommand,
-  formatAttributionSummary,
-  getAttributionNotesRef,
-} from './attributionTrailer.js';
+import { buildGitNotesCommand } from './attributionTrailer.js';
 import type { CommitAttributionNote } from './commitAttribution.js';
 
 const sampleNote: CommitAttributionNote = {
@@ -99,25 +95,6 @@ describe('attributionTrailer', () => {
       expect(cmd).not.toBeNull();
       const parsed = JSON.parse(cmd!.args[5]!);
       expect(parsed.files["it's-a-file.ts"].percent).toBe(67);
-    });
-  });
-
-  describe('formatAttributionSummary', () => {
-    it('should format a human-readable summary', () => {
-      const summary = formatAttributionSummary(sampleNote);
-      expect(summary).toContain('38% AI');
-      expect(summary).toContain('2 file(s)');
-      expect(summary).toContain('AI chars: 150');
-      expect(summary).toContain('Human chars: 250');
-      expect(summary).toContain('src/main.ts');
-      expect(summary).toContain('75% AI');
-      expect(summary).toContain('Excluded generated: 1 file(s)');
-    });
-  });
-
-  describe('getAttributionNotesRef', () => {
-    it('should return the expected ref', () => {
-      expect(getAttributionNotesRef()).toBe('refs/notes/ai-attribution');
     });
   });
 });

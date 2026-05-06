@@ -260,14 +260,33 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   if (typeof value === 'boolean') {
     return { commit: value, pr: value };
   }
-  // Defensive type-check on each sub-field. settings.json is
-  // user-editable (and the schema validator only runs in IDEs that
-  // load the bundled JSON schema) so a hand-edited
-  // `{ "commit": "false" }` would otherwise reach runtime as a
-  // truthy string and behave as if attribution were enabled. Coerce
-  // anything non-boolean to the schema default (true) so the user
-  // doesn't get surprise-on by a misspelled setting.
-  const pickBool = (v: unknown): boolean => (typeof v === 'boolean' ? v : true);
+  // Default to `true` (the schema default) ONLY when the sub-field
+  // is genuinely absent. For PRESENT-but-non-boolean values, honor
+  // common string forms (`"true"`/`"yes"`/`"on"`/`"1"` → true,
+  // `"false"`/`"no"`/`"off"`/`"0"`/`""` → false) and treat anything
+  // else as opt-out. settings.json is user-editable, and the previous
+  // "default-to-true on mismatch" policy meant a hand-edited
+  // `{ "commit": "false" }` silently activated attribution against
+  // the user's clear intent. Safer-by-default: ambiguous values
+  // disable rather than enable.
+  const pickBool = (v: unknown): boolean => {
+    if (v === undefined) return true;
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') {
+      const lowered = v.trim().toLowerCase();
+      if (
+        lowered === 'true' ||
+        lowered === 'yes' ||
+        lowered === 'on' ||
+        lowered === '1'
+      ) {
+        return true;
+      }
+      return false;
+    }
+    if (typeof v === 'number') return v === 1;
+    return false;
+  };
   return {
     commit: pickBool(value?.commit),
     pr: pickBool(value?.pr),
