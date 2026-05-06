@@ -379,18 +379,46 @@ export const directoryCommand: SlashCommand = {
         }
 
         try {
-          const workspaceSettings = settings.forScope(SettingScope.Workspace);
-          const existingIncludeDirectories =
-            workspaceSettings.originalSettings.context?.includeDirectories ??
-            [];
-          const includeDirectories = existingIncludeDirectories.filter(
-            (d: string) => d !== resolvedDirectory,
-          );
-          settings.setValue(
+          // Find the scope that actually contains this directory entry so
+          // we update the correct persisted setting. The merged workspace
+          // context is built from all scopes via MergeStrategy.CONCAT, so a
+          // directory added at user scope would reappear on restart if we
+          // only clear the workspace-scoped list.
+          const targetDir = canonicalDirectory;
+          let targetScope: SettingScope | null = null;
+          let existingDirs: string[] = [];
+
+          for (const scope of [
             SettingScope.Workspace,
-            'context.includeDirectories',
-            includeDirectories,
-          );
+            SettingScope.User,
+          ] as const) {
+            const scopeDirs =
+              settings.forScope(scope).originalSettings.context
+                ?.includeDirectories ?? [];
+            if (scopeDirs.includes(targetDir)) {
+              targetScope = scope;
+              existingDirs = scopeDirs;
+              break;
+            }
+            // Fall back to matching the absolute (non-canonical) path if the
+            // settings were saved with that spelling.
+            if (scopeDirs.includes(resolvedDirectory)) {
+              targetScope = scope;
+              existingDirs = scopeDirs;
+              break;
+            }
+          }
+
+          if (targetScope !== null) {
+            const includeDirectories = existingDirs.filter(
+              (d: string) => d !== targetDir && d !== resolvedDirectory,
+            );
+            settings.setValue(
+              targetScope,
+              'context.includeDirectories',
+              includeDirectories,
+            );
+          }
         } catch (error) {
           addItem(
             {

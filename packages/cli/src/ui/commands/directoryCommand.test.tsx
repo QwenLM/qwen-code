@@ -13,6 +13,7 @@ import {
   expandHomeDir,
 } from '@qwen-code/qwen-code-core';
 import type { CommandContext } from './types.js';
+
 import { MessageType } from '../types.js';
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
@@ -27,11 +28,27 @@ vi.mock('node:fs', async () => {
   };
 });
 
-vi.mock('@qwen-code/qwen-code-core', async () => {
-  const actual = await vi.importActual('@qwen-code/qwen-code-core');
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actual = await importOriginal<any>();
   return {
     ...actual,
     loadServerHierarchicalMemory: vi.fn(),
+    expandHomeDir: (p: string) => {
+      if (typeof p !== 'string') return p;
+      if (p.startsWith('~')) {
+        return path.join(os.homedir(), p.slice(1));
+      }
+      if (p.toLowerCase().startsWith('%userprofile%')) {
+        return path.join(os.homedir(), p.slice(13));
+      }
+      return p;
+    },
+    ConditionalRulesRegistry:
+      actual.ConditionalRulesRegistry ||
+      class {
+        constructor() {}
+      },
   };
 });
 
@@ -442,6 +459,82 @@ describe('directoryCommand', () => {
           text: `Removed directory: ${removableDir}`,
         }),
         expect.any(Number),
+      );
+    });
+
+    it('should remove a directory from user scope if not in workspace scope', async () => {
+      const userDir = path.normalize('/home/user/user-project');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        getInitialDirectories: vi.fn().mockReturnValue([]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+      } as unknown as Config;
+
+      // Not in workspace scope
+      mockContext.services.settings.workspace.originalSettings = {
+        context: { includeDirectories: [] },
+      };
+      // Is in user scope
+      mockContext.services.settings.user.originalSettings = {
+        context: { includeDirectories: [userDir] },
+      };
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, userDir);
+
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'context.includeDirectories',
+        [],
+      );
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: `Removed directory: ${userDir}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should match and remove from settings using canonical path', async () => {
+      const canonicalDir = path.normalize('/home/user/real-project');
+      const symlinkDir = path.normalize('/home/user/link-project');
+
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        getInitialDirectories: vi.fn().mockReturnValue([]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+      } as unknown as Config;
+
+      // Stored as canonical
+      mockContext.services.settings.workspace.originalSettings = {
+        context: { includeDirectories: [canonicalDir] },
+      };
+
+      // Input is symlink
+      vi.mocked(fs.realpathSync).mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('link-project'))
+          return canonicalDir;
+        return p as string;
+      });
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, symlinkDir);
+
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [],
       );
     });
 
