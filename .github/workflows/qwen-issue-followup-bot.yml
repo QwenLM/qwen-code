@@ -130,12 +130,54 @@ jobs:
 
           reject_if_arg_contains_secret() {
             for arg in "$@"; do
-              for secret in "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${BOT_GITHUB_TOKEN:-}" "${OPENAI_API_KEY:-}"; do
+              for secret in "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${BOT_GITHUB_TOKEN:-}" "${OPENAI_API_KEY:-}" "${OPENAI_BASE_URL:-}"; do
                 if [[ -n "${secret}" && "${arg}" == *"${secret}"* ]]; then
                   reject "$@"
                 fi
               done
             done
+          }
+
+          expected_repo="${REPOSITORY:-${GITHUB_REPOSITORY:-}}"
+
+          require_explicit_repo() {
+            local original=("$@")
+            local expect=''
+            local saw_repo='false'
+
+            if [[ -z "${expected_repo}" ]]; then
+              reject "${original[@]}"
+            fi
+
+            while (($# > 0)); do
+              local arg="$1"
+              shift
+
+              if [[ "${expect}" == 'repo' ]]; then
+                if [[ "${arg}" != "${expected_repo}" ]]; then
+                  reject "${original[@]}"
+                fi
+                saw_repo='true'
+                expect=''
+                continue
+              fi
+
+              case "${arg}" in
+                --repo|-R)
+                  expect='repo'
+                  ;;
+                --repo=*)
+                  if [[ "${arg#*=}" != "${expected_repo}" ]]; then
+                    reject "${original[@]}"
+                  fi
+                  saw_repo='true'
+                  ;;
+              esac
+            done
+
+            if [[ "${expect}" == 'repo' || "${saw_repo}" != 'true' ]]; then
+              reject "${original[@]}"
+            fi
           }
 
           validate_issue_edit_args() {
@@ -242,18 +284,21 @@ jobs:
 
           case "${1:-} ${2:-}" in
             'issue view'|'issue list'|'label list')
+              require_explicit_repo "${@:3}"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
             'issue comment')
               require_write_enabled "$@"
               validate_issue_comment_args "${@:3}"
+              require_explicit_repo "${@:3}"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
             'issue edit')
               require_write_enabled "$@"
               validate_issue_edit_args "${@:3}"
+              require_explicit_repo "${@:3}"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
@@ -287,7 +332,13 @@ jobs:
 
           echo "dry_run=${dry_run}" >> "${GITHUB_OUTPUT}"
           echo "scheduled_limit=${SCHEDULED_LIMIT_INPUT}" >> "${GITHUB_OUTPUT}"
-          echo "Issue follow-up dry_run=${dry_run}; scheduled_limit=${SCHEDULED_LIMIT_INPUT}"
+          echo "Issue follow-up resolved state:"
+          echo "  EVENT_NAME=${EVENT_NAME}"
+          echo "  DISPATCH_DRY_RUN=${DISPATCH_DRY_RUN}"
+          echo "  ISSUE_OPENED_DRY_RUN=${ISSUE_OPENED_DRY_RUN}"
+          echo "  SCHEDULE_DRY_RUN=${SCHEDULE_DRY_RUN}"
+          echo "  resolved dry_run=${dry_run}"
+          echo "  scheduled_limit=${SCHEDULED_LIMIT_INPUT}"
 
       - name: 'Run Qwen issue follow-up'
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
