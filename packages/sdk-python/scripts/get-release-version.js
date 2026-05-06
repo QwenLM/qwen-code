@@ -20,7 +20,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const PACKAGE_NAME = 'qwen-code-sdk';
-const TAG_PREFIX = 'sdk-python-';
+const TAG_PREFIX = 'sdk-python-v';
 const NETWORK_COMMAND_TIMEOUT_MS = 30_000;
 const LOCAL_COMMAND_TIMEOUT_MS = 10_000;
 
@@ -272,13 +272,13 @@ function isTimeoutError(error) {
   );
 }
 
-async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
+async function getReleaseState({ packageVersion, releaseVersion }, allVersions) {
   const state = {
     packageVersionExistsOnPyPI: allVersions.includes(packageVersion),
     gitTagExists: false,
     githubReleaseExists: false,
   };
-  const fullTag = `${TAG_PREFIX}${releaseTag}`;
+  const fullTag = `${TAG_PREFIX}${releaseVersion}`;
   try {
     const tagOutput = execSync(`git tag -l '${fullTag}'`, {
       timeout: LOCAL_COMMAND_TIMEOUT_MS,
@@ -480,7 +480,7 @@ async function getVersion(options = {}) {
     const releaseState = await getReleaseState(
       {
         packageVersion: versionData.packageVersion,
-        releaseTag: `v${versionData.releaseVersion}`,
+        releaseVersion: versionData.releaseVersion,
       },
       allVersions,
     );
@@ -526,11 +526,11 @@ async function getVersion(options = {}) {
 
     if (releaseState.githubReleaseExists) {
       console.error(
-        `GitHub release ${TAG_PREFIX}v${versionData.releaseVersion} already exists.`,
+        `GitHub release ${TAG_PREFIX}${versionData.releaseVersion} already exists.`,
       );
     } else if (releaseState.gitTagExists) {
       console.error(
-        `::warning::Orphan git tag ${TAG_PREFIX}v${versionData.releaseVersion} exists without a PyPI version or GitHub release. Skipping to next version slot.`,
+        `::warning::Orphan git tag ${TAG_PREFIX}${versionData.releaseVersion} exists without a PyPI version or GitHub release. Skipping to next version slot.`,
       );
     } else if (releaseState.packageVersionExistsOnPyPI) {
       console.error(
