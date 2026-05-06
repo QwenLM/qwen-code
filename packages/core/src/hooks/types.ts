@@ -214,9 +214,7 @@ export function getHookKey(hook: HookConfig): string {
         ? `${name}:${hook.id ?? 'function'}`
         : (hook.id ?? 'function');
     case HookType.Prompt:
-      return name
-        ? `${name}:${hook.prompt.slice(0, 50)}`
-        : hook.prompt.slice(0, 50);
+      return name ? `${name}:${hook.prompt}` : hook.prompt;
     default:
       return name || 'unknown';
   }
