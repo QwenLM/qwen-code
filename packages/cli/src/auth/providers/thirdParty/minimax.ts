@@ -6,22 +6,23 @@
 
 import { defineApiKeyProvider } from '../../setupMethods/apiKey/defineApiKeyProvider.js';
 
-export type MiniMaxApiKeyRegion = 'international' | 'china';
+export type MiniMaxApiKeyEndpointOption = 'international' | 'china';
 
 export const MINIMAX_INTERNATIONAL_BASE_URL = 'https://api.minimax.io/v1';
 export const MINIMAX_CHINA_BASE_URL = 'https://api.minimaxi.com/v1';
 
 export const MINIMAX_API_KEY_PROVIDER =
-  defineApiKeyProvider<MiniMaxApiKeyRegion>({
+  defineApiKeyProvider<MiniMaxApiKeyEndpointOption>({
     id: 'minimax',
     option: 'MINIMAX_API_KEY',
     title: 'MiniMax API Key',
     description: 'Quick setup for MiniMax models',
+    category: 'third-party',
     envKey: 'MINIMAX_API_KEY',
     modelNamePrefix: 'MiniMax',
     defaultModelIds:
       'MiniMax-M2.7,MiniMax-M2.7-highspeed,MiniMax-M2.5,MiniMax-M2.5-highspeed',
-    regions: [
+    endpointOptions: [
       {
         id: 'international',
         title: 'International',

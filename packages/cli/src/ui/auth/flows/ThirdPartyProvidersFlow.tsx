@@ -20,8 +20,8 @@ export function ThirdPartyProvidersFlow({
   preset,
   onSelect,
   onHighlight,
-  onRegionSelect,
-  onRegionHighlight,
+  onEndpointOptionSelect,
+  onEndpointOptionHighlight,
   onApiKeyChange,
   onApiKeySubmit,
   onModelIdChange,
@@ -48,15 +48,15 @@ export function ThirdPartyProvidersFlow({
     );
   }
 
-  if (viewLevel === 'preset-api-key-region-select') {
+  if (viewLevel === 'preset-api-key-endpoint-select') {
     return (
       <>
         <Box marginTop={1}>
           <DescriptiveRadioButtonSelect
-            items={preset.regionItems}
-            initialIndex={preset.regionIndex}
-            onSelect={onRegionSelect}
-            onHighlight={onRegionHighlight}
+            items={preset.endpointOptionItems}
+            initialIndex={preset.endpointOptionIndex}
+            onSelect={onEndpointOptionSelect}
+            onHighlight={onEndpointOptionHighlight}
             itemGap={1}
           />
         </Box>

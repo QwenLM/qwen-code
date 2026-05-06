@@ -16,18 +16,18 @@ export {
   isApiKeyProviderConfig,
 } from './definitions.js';
 export type {
-  AlibabaStandardRegion,
+  AlibabaStandardEndpointOption,
   AnyApiKeyProviderConfig,
   ApiKeyProviderConfig,
+  ApiKeyProviderEndpointOption,
+  ApiKeyProviderEndpointOptionConfig,
   ApiKeyProviderId,
-  ApiKeyProviderRegion,
-  ApiKeyProviderRegionConfig,
 } from './definitions.js';
 import {
   getApiKeyProviderEndpoint,
   isApiKeyProviderConfig,
   type ApiKeyProviderConfig,
-  type ApiKeyProviderRegion,
+  type ApiKeyProviderEndpointOption,
 } from './definitions.js';
 import type { LlmProvider, ProviderInstallPlan } from '../../types.js';
 
@@ -35,7 +35,7 @@ export interface ApiKeyProviderInstallInput {
   provider: ApiKeyProviderConfig;
   apiKey: string;
   modelIds: string[];
-  region?: ApiKeyProviderRegion;
+  endpointOption?: ApiKeyProviderEndpointOption;
 }
 
 export function buildApiKeyProviderModelConfigs(
@@ -55,9 +55,9 @@ export function createApiKeyProviderInstallPlan({
   provider,
   apiKey,
   modelIds,
-  region,
+  endpointOption,
 }: ApiKeyProviderInstallInput): ProviderInstallPlan {
-  const baseUrl = getApiKeyProviderEndpoint(provider, region);
+  const baseUrl = getApiKeyProviderEndpoint(provider, endpointOption);
   const models = buildApiKeyProviderModelConfigs(provider, modelIds, baseUrl);
 
   return {
@@ -98,7 +98,8 @@ export function createApiKeyLlmProvider(
     id: provider.id,
     label: provider.title,
     description: provider.description,
-    category: 'third-party',
+    category:
+      provider.category === 'alibaba' ? 'recommended' : provider.category,
     protocol: AuthType.USE_OPENAI,
     setupMethods: [{ type: 'api-key' }],
     ownsModel(model) {

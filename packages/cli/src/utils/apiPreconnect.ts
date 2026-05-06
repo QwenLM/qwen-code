@@ -44,7 +44,7 @@ const PROVIDER_BASE_URLS = Object.values(
   API_KEY_PROVIDERS as Record<string, ApiKeyProviderConfig>,
 ).flatMap((provider) => [
   ...(provider.endpoint ? [provider.endpoint] : []),
-  ...(provider.regions?.map((region) => region.endpoint) || []),
+  ...(provider.endpointOptions?.map((option) => option.endpoint) || []),
 ]);
 
 /**

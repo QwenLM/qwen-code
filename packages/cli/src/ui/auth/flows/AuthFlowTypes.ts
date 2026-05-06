@@ -7,7 +7,7 @@
 import type React from 'react';
 import type { AuthType } from '@qwen-code/qwen-code-core';
 import type { DescriptiveRadioSelectItem } from '../../components/shared/DescriptiveRadioButtonSelect.js';
-import type { ApiKeyProviderRegion } from '../../../auth/setupMethods/apiKey/index.js';
+import type { ApiKeyProviderEndpointOption } from '../../../auth/setupMethods/apiKey/index.js';
 
 export type MainOption =
   | 'ALIBABA_MODELSTUDIO'
@@ -25,7 +25,7 @@ export type ViewLevel =
   | 'base-url-select'
   | 'api-key-input'
   | 'api-key-type-select'
-  | 'preset-api-key-region-select'
+  | 'preset-api-key-endpoint-select'
   | 'preset-api-key-input'
   | 'preset-model-id-input'
   | 'custom-protocol-select'
@@ -39,9 +39,11 @@ export type ViewLevel =
 export interface PresetApiKeyState {
   providerTitle: string;
   providerDefaultModelIds: string;
-  region?: ApiKeyProviderRegion;
-  regionItems: Array<DescriptiveRadioSelectItem<ApiKeyProviderRegion>>;
-  regionIndex: number;
+  endpointOption?: ApiKeyProviderEndpointOption;
+  endpointOptionItems: Array<
+    DescriptiveRadioSelectItem<ApiKeyProviderEndpointOption>
+  >;
+  endpointOptionIndex: number;
   apiKey: string;
   apiKeyError: string | null;
   modelId: string;
@@ -103,8 +105,12 @@ export interface ThirdPartyProvidersFlowProps {
   preset: PresetApiKeyState;
   onSelect: (value: ApiKeyOption) => void;
   onHighlight: (value: ApiKeyOption) => void;
-  onRegionSelect: (region: ApiKeyProviderRegion) => void;
-  onRegionHighlight: (region: ApiKeyProviderRegion) => void;
+  onEndpointOptionSelect: (
+    endpointOption: ApiKeyProviderEndpointOption,
+  ) => void;
+  onEndpointOptionHighlight: (
+    endpointOption: ApiKeyProviderEndpointOption,
+  ) => void;
   onApiKeyChange: (value: string) => void;
   onApiKeySubmit: () => void;
   onModelIdChange: (value: string) => void;

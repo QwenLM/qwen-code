@@ -27,9 +27,9 @@ import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
 import {
   API_KEY_PROVIDERS,
-  type ApiKeyProviderId,
   type ApiKeyProviderConfig,
-  type ApiKeyProviderRegion,
+  type ApiKeyProviderEndpointOption,
+  type ApiKeyProviderId,
 } from '../../auth/setupMethods/apiKey/index.js';
 import {
   createOpenRouterOAuthSession,
@@ -118,7 +118,7 @@ export type AuthController = {
       providerId: ApiKeyProviderId,
       apiKey: string,
       modelIdsInput: string,
-      region?: ApiKeyProviderRegion,
+      endpointOption?: ApiKeyProviderEndpointOption,
     ) => Promise<void>;
     handleOpenRouterSubmit: () => Promise<void>;
     handleCustomApiKeySubmit: (
@@ -441,7 +441,7 @@ export const useAuthCommand = (
       provider: ApiKeyProviderConfig,
       apiKey: string,
       modelIdsInput: string,
-      region?: ApiKeyProviderRegion,
+      endpointOption?: ApiKeyProviderEndpointOption,
     ) => {
       try {
         setIsAuthenticating(true);
@@ -460,7 +460,7 @@ export const useAuthCommand = (
           provider,
           apiKey: trimmedApiKey,
           modelIds,
-          region,
+          endpointOption,
         });
         await applyProviderInstallPlan(installPlan, {
           settings,
@@ -514,13 +514,13 @@ export const useAuthCommand = (
       providerId: ApiKeyProviderId,
       apiKey: string,
       modelIdsInput: string,
-      region?: ApiKeyProviderRegion,
+      endpointOption?: ApiKeyProviderEndpointOption,
     ) =>
       submitApiKeyProvider(
         API_KEY_PROVIDERS[providerId],
         apiKey,
         modelIdsInput,
-        region,
+        endpointOption,
       ),
     [submitApiKeyProvider],
   );

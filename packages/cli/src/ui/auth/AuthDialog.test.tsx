@@ -992,6 +992,81 @@ describe('AuthDialog', () => {
     unmount();
   });
 
+  it('drives API key provider steps from endpoint options metadata', async () => {
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+    await wait();
+
+    await moveDownAndWaitForSelection(
+      stdin,
+      lastFrame,
+      'Third-party Providers',
+    );
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Third-party Providers · Step 1/3 · Provider',
+    );
+    await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Third-party Providers · Step 2/3 · API Key',
+    );
+    stdin.write('\u001b');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain(
+        'Third-party Providers · Step 1/3 · Provider',
+      );
+    });
+    await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Third-party Providers · Step 2/4 · Endpoint',
+    );
+
+    await vi.waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('International');
+      expect(frame).toContain('China');
+    });
+
+    unmount();
+  });
+
   it('should show Alibaba ModelStudio access methods after selecting Alibaba ModelStudio', async () => {
     const settings: LoadedSettings = new LoadedSettings(
       {

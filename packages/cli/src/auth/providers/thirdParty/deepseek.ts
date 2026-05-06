@@ -11,6 +11,7 @@ export const DEEPSEEK_API_KEY_PROVIDER = defineApiKeyProvider({
   option: 'DEEPSEEK_API_KEY',
   title: 'DeepSeek API Key',
   description: 'Quick setup for DeepSeek (deepseek-v4-flash, deepseek-v4-pro)',
+  category: 'third-party',
   envKey: 'DEEPSEEK_API_KEY',
   modelNamePrefix: 'DeepSeek',
   endpoint: 'https://api.deepseek.com',

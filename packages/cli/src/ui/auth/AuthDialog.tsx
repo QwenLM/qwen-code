@@ -40,9 +40,9 @@ import {
   API_KEY_PROVIDER_OPTIONS,
   API_KEY_PROVIDERS,
   type ApiKeyProviderConfig,
+  type ApiKeyProviderEndpointOption,
+  type ApiKeyProviderEndpointOptionConfig,
   type ApiKeyProviderId,
-  type ApiKeyProviderRegion,
-  type ApiKeyProviderRegionConfig,
 } from '../../auth/setupMethods/apiKey/index.js';
 import { generateCustomApiKeyEnvKey } from '../../auth/providers/custom/index.js';
 import { normalizeCustomModelIds, maskApiKey } from './useAuth.js';
@@ -69,25 +69,27 @@ function parseDefaultAuthType(
   return null;
 }
 
-function getDefaultRegion(
+function getDefaultEndpointOption(
   provider: ApiKeyProviderConfig,
-): ApiKeyProviderRegion | undefined {
-  return provider.regions?.[0]?.id;
+): ApiKeyProviderEndpointOption | undefined {
+  return provider.endpointOptions?.[0]?.id;
 }
 
-function getSelectedRegionConfig(
+function getSelectedEndpointOptionConfig(
   provider: ApiKeyProviderConfig,
-  region: ApiKeyProviderRegion | undefined,
-): ApiKeyProviderRegionConfig | undefined {
-  return provider.regions?.find((candidate) => candidate.id === region);
+  endpointOption: ApiKeyProviderEndpointOption | undefined,
+): ApiKeyProviderEndpointOptionConfig | undefined {
+  return provider.endpointOptions?.find(
+    (candidate) => candidate.id === endpointOption,
+  );
 }
 
 function getProviderEndpoint(
   provider: ApiKeyProviderConfig,
-  region: ApiKeyProviderRegion | undefined,
+  endpointOption: ApiKeyProviderEndpointOption | undefined,
 ): string {
   return (
-    getSelectedRegionConfig(provider, region)?.endpoint ||
+    getSelectedEndpointOptionConfig(provider, endpointOption)?.endpoint ||
     provider.endpoint ||
     ''
   );
@@ -95,12 +97,27 @@ function getProviderEndpoint(
 
 function getProviderDocumentationUrl(
   provider: ApiKeyProviderConfig,
-  region: ApiKeyProviderRegion | undefined,
+  endpointOption: ApiKeyProviderEndpointOption | undefined,
 ): string | undefined {
   return (
-    getSelectedRegionConfig(provider, region)?.documentationUrl ||
-    provider.documentationUrl
+    getSelectedEndpointOptionConfig(provider, endpointOption)
+      ?.documentationUrl || provider.documentationUrl
   );
+}
+
+function getProviderFlowTitle(
+  provider: ApiKeyProviderConfig,
+  fallback: string,
+): string {
+  return provider.ui?.flowTitle || fallback;
+}
+
+function getEndpointStepTitle(provider: ApiKeyProviderConfig): string {
+  return provider.ui?.endpointStepTitle || 'Endpoint';
+}
+
+function getApiKeyProviderStepCount(provider: ApiKeyProviderConfig): number {
+  return provider.endpointOptions ? 4 : 3;
 }
 
 export function AuthDialog(): React.JSX.Element {
@@ -128,7 +145,7 @@ export function AuthDialog(): React.JSX.Element {
   const [activeSubscriptionPlan, setActiveSubscriptionPlan] = useState<
     'coding' | 'token'
   >('coding');
-  const [presetApiKeyRegionIndex, setPresetApiKeyRegionIndex] =
+  const [presetEndpointOptionIndex, setPresetEndpointOptionIndex] =
     useState<number>(0);
   const [apiKeyTypeIndex, setApiKeyTypeIndex] = useState<number>(0);
   const [alibabaModelStudioIndex, setAlibabaModelStudioIndex] =
@@ -137,9 +154,9 @@ export function AuthDialog(): React.JSX.Element {
   const [oauthProviderIndex, setOAuthProviderIndex] = useState<number>(0);
   const [presetApiKeyProvider, setPresetApiKeyProvider] =
     useState<ApiKeyProviderConfig>(API_KEY_PROVIDERS.alibabaStandard);
-  const [presetApiKeyRegion, setPresetApiKeyRegion] = useState<
-    ApiKeyProviderRegion | undefined
-  >(getDefaultRegion(API_KEY_PROVIDERS.alibabaStandard));
+  const [presetEndpointOption, setPresetEndpointOption] = useState<
+    ApiKeyProviderEndpointOption | undefined
+  >(getDefaultEndpointOption(API_KEY_PROVIDERS.alibabaStandard));
   const [presetApiKey, setPresetApiKey] = useState('');
   const [presetApiKeyError, setPresetApiKeyError] = useState<string | null>(
     null,
@@ -232,17 +249,17 @@ export function AuthDialog(): React.JSX.Element {
     value: endpoint.baseUrl,
   }));
 
-  const presetApiKeyRegionItems =
-    presetApiKeyProvider.regions?.map((regionConfig) => ({
-      key: regionConfig.id,
-      title: t(regionConfig.title),
-      label: t(regionConfig.title),
+  const presetEndpointOptionItems =
+    presetApiKeyProvider.endpointOptions?.map((endpointOptionConfig) => ({
+      key: endpointOptionConfig.id,
+      title: t(endpointOptionConfig.title),
+      label: t(endpointOptionConfig.title),
       description: (
         <Text color={theme.text.secondary}>
-          Endpoint: {regionConfig.endpoint}
+          Endpoint: {endpointOptionConfig.endpoint}
         </Text>
       ),
-      value: regionConfig.id,
+      value: endpointOptionConfig.id,
     })) || [];
 
   const protocolItems = [
@@ -291,7 +308,7 @@ export function AuthDialog(): React.JSX.Element {
   ];
 
   const apiKeyTypeItems = API_KEY_PROVIDER_OPTIONS.filter(
-    (provider) => provider.id !== API_KEY_PROVIDERS.alibabaStandard.id,
+    (provider) => provider.category === 'third-party',
   ).map((provider) => ({
     key: provider.option,
     title: t(provider.title),
@@ -361,6 +378,7 @@ export function AuthDialog(): React.JSX.Element {
     }),
   );
   const initialAuthIndex = mainAuthIndex ?? defaultAuthIndex;
+  const activeMainOption = mainItems[initialAuthIndex]?.value;
 
   const handleMainSelect = async (value: MainOption) => {
     setErrorMessage(null);
@@ -440,15 +458,15 @@ export function AuthDialog(): React.JSX.Element {
     ) as ApiKeyProviderConfig | undefined;
     if (selectedProvider) {
       setPresetApiKeyProvider(selectedProvider);
-      setPresetApiKeyRegion(getDefaultRegion(selectedProvider));
-      setPresetApiKeyRegionIndex(0);
+      setPresetEndpointOption(getDefaultEndpointOption(selectedProvider));
+      setPresetEndpointOptionIndex(0);
       setPresetApiKey('');
       setPresetApiKeyError(null);
       setPresetModelId(selectedProvider.defaultModelIds);
       setPresetModelIdError(null);
       setViewLevel(
-        selectedProvider.regions
-          ? 'preset-api-key-region-select'
+        selectedProvider.endpointOptions
+          ? 'preset-api-key-endpoint-select'
           : 'preset-api-key-input',
       );
       return;
@@ -484,14 +502,14 @@ export function AuthDialog(): React.JSX.Element {
     setViewLevel('api-key-input');
   };
 
-  const handlePresetApiKeyRegionSelect = async (
-    selectedRegion: ApiKeyProviderRegion,
+  const handlePresetEndpointOptionSelect = async (
+    selectedEndpointOption: ApiKeyProviderEndpointOption,
   ) => {
     setErrorMessage(null);
     onAuthError(null);
     setPresetApiKeyError(null);
     setPresetModelIdError(null);
-    setPresetApiKeyRegion(selectedRegion);
+    setPresetEndpointOption(selectedEndpointOption);
     setViewLevel('preset-api-key-input');
   };
 
@@ -542,7 +560,7 @@ export function AuthDialog(): React.JSX.Element {
       presetApiKeyProvider.id as ApiKeyProviderId,
       trimmedApiKey,
       trimmedModelIds,
-      presetApiKeyRegion || getDefaultRegion(presetApiKeyProvider),
+      presetEndpointOption || getDefaultEndpointOption(presetApiKeyProvider),
     );
   };
 
@@ -657,17 +675,17 @@ export function AuthDialog(): React.JSX.Element {
       setViewLevel('custom-model-id-input');
     } else if (viewLevel === 'custom-review-json') {
       setViewLevel('custom-advanced-config');
-    } else if (viewLevel === 'preset-api-key-region-select') {
+    } else if (viewLevel === 'preset-api-key-endpoint-select') {
       setViewLevel(
-        presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
+        activeMainOption === 'ALIBABA_MODELSTUDIO'
           ? 'alibaba-modelstudio-select'
           : 'api-key-type-select',
       );
     } else if (viewLevel === 'preset-api-key-input') {
       setViewLevel(
-        presetApiKeyProvider.regions
-          ? 'preset-api-key-region-select'
-          : presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
+        presetApiKeyProvider.endpointOptions
+          ? 'preset-api-key-endpoint-select'
+          : activeMainOption === 'ALIBABA_MODELSTUDIO'
             ? 'alibaba-modelstudio-select'
             : 'api-key-type-select',
       );
@@ -709,7 +727,7 @@ export function AuthDialog(): React.JSX.Element {
         }
         if (
           viewLevel === 'api-key-type-select' ||
-          viewLevel === 'preset-api-key-region-select' ||
+          viewLevel === 'preset-api-key-endpoint-select' ||
           viewLevel === 'preset-api-key-input' ||
           viewLevel === 'preset-model-id-input' ||
           viewLevel === 'oauth-provider-select'
@@ -903,22 +921,49 @@ export function AuthDialog(): React.JSX.Element {
           : t('Alibaba ModelStudio \u00B7 Step 3/3 \u00B7 API Key');
       case 'api-key-type-select':
         return t('Third-party Providers \u00B7 Step 1/3 \u00B7 Provider');
-      case 'preset-api-key-region-select':
-        return presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
-          ? t('Alibaba ModelStudio \u00B7 Step 2/4 \u00B7 Region')
-          : t('Third-party Providers \u00B7 Step 2/4 \u00B7 Endpoint');
-      case 'preset-api-key-input':
-        return presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
-          ? t('Alibaba ModelStudio \u00B7 Step 3/4 \u00B7 API Key')
-          : presetApiKeyProvider.regions
-            ? t('Third-party Providers \u00B7 Step 3/4 \u00B7 API Key')
-            : t('Third-party Providers \u00B7 Step 2/3 \u00B7 API Key');
-      case 'preset-model-id-input':
-        return presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
-          ? t('Alibaba ModelStudio \u00B7 Step 4/4 \u00B7 Models')
-          : presetApiKeyProvider.regions
-            ? t('Third-party Providers \u00B7 Step 4/4 \u00B7 Models')
-            : t('Third-party Providers \u00B7 Step 3/3 \u00B7 Models');
+      case 'preset-api-key-endpoint-select': {
+        const flowTitle = getProviderFlowTitle(
+          presetApiKeyProvider,
+          'Third-party Providers',
+        );
+        const stepTitle = getEndpointStepTitle(presetApiKeyProvider);
+        return t('{{flowTitle}} \u00B7 Step 2/4 \u00B7 {{stepTitle}}', {
+          flowTitle,
+          stepTitle,
+        });
+      }
+      case 'preset-api-key-input': {
+        const flowTitle = getProviderFlowTitle(
+          presetApiKeyProvider,
+          'Third-party Providers',
+        );
+        const stepCount = getApiKeyProviderStepCount(presetApiKeyProvider);
+        const stepNumber = presetApiKeyProvider.endpointOptions ? 3 : 2;
+        return t(
+          '{{flowTitle}} \u00B7 Step {{stepNumber}}/{{stepCount}} \u00B7 API Key',
+          {
+            flowTitle,
+            stepNumber: String(stepNumber),
+            stepCount: String(stepCount),
+          },
+        );
+      }
+      case 'preset-model-id-input': {
+        const flowTitle = getProviderFlowTitle(
+          presetApiKeyProvider,
+          'Third-party Providers',
+        );
+        const stepCount = getApiKeyProviderStepCount(presetApiKeyProvider);
+        const stepNumber = presetApiKeyProvider.endpointOptions ? 4 : 3;
+        return t(
+          '{{flowTitle}} \u00B7 Step {{stepNumber}}/{{stepCount}} \u00B7 Models',
+          {
+            flowTitle,
+            stepNumber: String(stepNumber),
+            stepCount: String(stepCount),
+          },
+        );
+      }
       case 'custom-protocol-select':
         return t('Custom Provider \u00B7 Step 1/6 \u00B7 Protocol');
       case 'custom-base-url-input':
@@ -978,20 +1023,20 @@ export function AuthDialog(): React.JSX.Element {
         preset={{
           providerTitle: presetApiKeyProvider.title,
           providerDefaultModelIds: presetApiKeyProvider.defaultModelIds,
-          region: presetApiKeyRegion,
-          regionItems: presetApiKeyRegionItems,
-          regionIndex: presetApiKeyRegionIndex,
+          endpointOption: presetEndpointOption,
+          endpointOptionItems: presetEndpointOptionItems,
+          endpointOptionIndex: presetEndpointOptionIndex,
           apiKey: presetApiKey,
           apiKeyError: presetApiKeyError,
           modelId: presetModelId,
           modelIdError: presetModelIdError,
           endpoint: getProviderEndpoint(
             presetApiKeyProvider,
-            presetApiKeyRegion,
+            presetEndpointOption,
           ),
           documentationUrl: getProviderDocumentationUrl(
             presetApiKeyProvider,
-            presetApiKeyRegion,
+            presetEndpointOption,
           ),
         }}
         onSelect={handleApiKeyTypeSelect}
@@ -1001,12 +1046,12 @@ export function AuthDialog(): React.JSX.Element {
           );
           setApiKeyTypeIndex(index);
         }}
-        onRegionSelect={handlePresetApiKeyRegionSelect}
-        onRegionHighlight={(value) => {
-          const index = presetApiKeyRegionItems.findIndex(
+        onEndpointOptionSelect={handlePresetEndpointOptionSelect}
+        onEndpointOptionHighlight={(value) => {
+          const index = presetEndpointOptionItems.findIndex(
             (item) => item.value === value,
           );
-          setPresetApiKeyRegionIndex(index);
+          setPresetEndpointOptionIndex(index);
         }}
         onApiKeyChange={(value) => {
           setPresetApiKey(value);

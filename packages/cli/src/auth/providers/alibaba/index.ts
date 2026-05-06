@@ -6,7 +6,7 @@
 
 export {
   ALIBABA_STANDARD_API_KEY_PROVIDER,
-  type AlibabaStandardRegion,
+  type AlibabaStandardEndpointOption,
 } from './modelStudio.js';
 export * from './modelStudioModels.js';
 export * from './codingPlan.js';

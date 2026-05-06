@@ -80,7 +80,7 @@ describe('api key provider', () => {
       provider: API_KEY_PROVIDERS.zai,
       apiKey: 'sk-zai',
       modelIds: ['glm-4.6'],
-      region: 'coding-plan',
+      endpointOption: 'coding-plan',
     });
 
     expect(plan.modelProviders?.[0]?.models).toEqual([
@@ -98,7 +98,7 @@ describe('api key provider', () => {
       provider: API_KEY_PROVIDERS.minimax,
       apiKey: 'sk-minimax',
       modelIds: ['MiniMax-M2.5'],
-      region: 'china',
+      endpointOption: 'china',
     });
 
     expect(plan.modelProviders?.[0]?.models).toEqual([

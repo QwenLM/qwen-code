@@ -18,10 +18,11 @@ describe('ZAI_API_KEY_PROVIDER', () => {
       option: 'ZAI_API_KEY',
       title: 'Z.AI API Key',
       description: 'Quick setup for Z.AI models',
+      category: 'third-party',
       envKey: 'ZAI_API_KEY',
       modelNamePrefix: 'Z.AI',
       defaultModelIds: 'GLM-5.1,GLM-5,GLM-5-Turbo',
-      regions: [
+      endpointOptions: [
         {
           id: 'standard-api-key',
           title: 'Standard API Key',

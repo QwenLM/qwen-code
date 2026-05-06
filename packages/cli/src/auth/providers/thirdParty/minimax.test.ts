@@ -18,11 +18,12 @@ describe('MINIMAX_API_KEY_PROVIDER', () => {
       option: 'MINIMAX_API_KEY',
       title: 'MiniMax API Key',
       description: 'Quick setup for MiniMax models',
+      category: 'third-party',
       envKey: 'MINIMAX_API_KEY',
       modelNamePrefix: 'MiniMax',
       defaultModelIds:
         'MiniMax-M2.7,MiniMax-M2.7-highspeed,MiniMax-M2.5,MiniMax-M2.5-highspeed',
-      regions: [
+      endpointOptions: [
         {
           id: 'international',
           title: 'International',

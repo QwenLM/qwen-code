@@ -8,11 +8,11 @@ export {
   defineApiKeyProvider,
   type AnyApiKeyProviderConfig,
   type ApiKeyProviderConfig,
-  type ApiKeyProviderRegionConfig,
+  type ApiKeyProviderEndpointOptionConfig,
 } from './defineApiKeyProvider.js';
 export {
   ALIBABA_STANDARD_API_KEY_PROVIDER,
-  type AlibabaStandardRegion,
+  type AlibabaStandardEndpointOption,
 } from '../../providers/alibaba/modelStudio.js';
 export { DEEPSEEK_API_KEY_PROVIDER } from '../../providers/thirdParty/deepseek.js';
 export { MINIMAX_API_KEY_PROVIDER } from '../../providers/thirdParty/minimax.js';
@@ -27,7 +27,7 @@ import type {
   ApiKeyProviderConfig,
 } from './defineApiKeyProvider.js';
 
-export type ApiKeyProviderRegion = string;
+export type ApiKeyProviderEndpointOption = string;
 
 export const API_KEY_PROVIDERS = {
   alibabaStandard: ALIBABA_STANDARD_API_KEY_PROVIDER,
@@ -50,13 +50,14 @@ export function getApiKeyProviderByOption(
 
 export function getApiKeyProviderEndpoint(
   provider: ApiKeyProviderConfig,
-  region?: ApiKeyProviderRegion,
+  endpointOption?: ApiKeyProviderEndpointOption,
 ): string {
-  if (provider.regions) {
-    const selectedRegion =
-      provider.regions.find((candidate) => candidate.id === region) ||
-      provider.regions[0];
-    return selectedRegion.endpoint;
+  if (provider.endpointOptions) {
+    const selectedEndpointOption =
+      provider.endpointOptions.find(
+        (candidate) => candidate.id === endpointOption,
+      ) || provider.endpointOptions[0];
+    return selectedEndpointOption.endpoint;
   }
 
   return provider.endpoint || '';
@@ -77,8 +78,10 @@ export function isApiKeyProviderConfig(
     return false;
   }
 
-  if (provider.regions) {
-    return provider.regions.some((region) => region.endpoint === baseUrl);
+  if (provider.endpointOptions) {
+    return provider.endpointOptions.some(
+      (endpointOption) => endpointOption.endpoint === baseUrl,
+    );
   }
 
   return baseUrl === provider.endpoint;

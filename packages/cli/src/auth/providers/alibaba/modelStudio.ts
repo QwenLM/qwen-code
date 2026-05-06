@@ -6,22 +6,27 @@
 
 import { defineApiKeyProvider } from '../../setupMethods/apiKey/defineApiKeyProvider.js';
 
-export type AlibabaStandardRegion =
+export type AlibabaStandardEndpointOption =
   | 'cn-beijing'
   | 'sg-singapore'
   | 'us-virginia'
   | 'cn-hongkong';
 
 export const ALIBABA_STANDARD_API_KEY_PROVIDER =
-  defineApiKeyProvider<AlibabaStandardRegion>({
+  defineApiKeyProvider<AlibabaStandardEndpointOption>({
     id: 'alibabaStandard',
     option: 'ALIBABA_STANDARD_API_KEY',
     title: 'Standard API Key',
     description: 'Connect with an existing ModelStudio API key',
+    category: 'alibaba',
     envKey: 'DASHSCOPE_API_KEY',
     modelNamePrefix: 'ModelStudio Standard',
     defaultModelIds: 'qwen3.5-plus,glm-5,kimi-k2.5',
-    regions: [
+    ui: {
+      flowTitle: 'Alibaba ModelStudio',
+      endpointStepTitle: 'Region',
+    },
+    endpointOptions: [
       {
         id: 'cn-beijing',
         title: 'China (Beijing)',
