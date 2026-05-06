@@ -1266,6 +1266,7 @@ describe('crawler', () => {
 
     it('should re-crawl when git index mtime changes', async () => {
       tmpDir = await createTmpDir({ 'file1.js': '' });
+      await initGitRepo(tmpDir);
       const ignore = loadIgnoreRules({
         projectRoot: tmpDir,
         useGitignore: false,
@@ -1284,12 +1285,20 @@ describe('crawler', () => {
       expect(results1.length).toBeGreaterThan(0);
 
       await fs.writeFile(path.join(tmpDir, 'file2.js'), '');
+      const futureTime = new Date(Date.now() + 60_000);
+      await fs.utimes(
+        path.join(tmpDir, '.git', 'index'),
+        futureTime,
+        futureTime,
+      );
 
       const results2 = await crawl(options);
-      expect(results2.length).toBeGreaterThanOrEqual(results1.length);
+      expect(results2).toContain('file2.js');
+      expect(results2).not.toEqual(results1);
     });
 
     it('should re-crawl git worktrees when the gitdir index changes', async () => {
+      tmpDir = await createTmpDir({});
       const worktreeDir = path.join(tmpDir, 'worktree');
       const gitDir = path.join(tmpDir, 'gitdir');
 

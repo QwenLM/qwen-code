@@ -276,6 +276,7 @@ interface RunCommandOptions {
   maxLines?: number;
   collectLines?: boolean;
   onLine?: (line: string) => boolean;
+  silentOnFailure?: boolean;
 }
 
 function runCommand(
@@ -425,10 +426,12 @@ function runCommand(
       }
 
       if (timedOut) {
-        logCommandProblem('command timed out', command, args, {
-          code,
-          stderr: stderrBuf,
-        });
+        if (!options?.silentOnFailure) {
+          logCommandProblem('command timed out', command, args, {
+            code,
+            stderr: stderrBuf,
+          });
+        }
         finalize(false, []);
         return;
       }
@@ -441,7 +444,7 @@ function runCommand(
       flushRemainder();
 
       const ok = code === 0;
-      if (!ok) {
+      if (!ok && !options?.silentOnFailure) {
         logCommandProblem('command failed', command, args, {
           code,
           stderr: stderrBuf,
@@ -470,18 +473,8 @@ function normalizePath(p: string): string {
 }
 
 function getPosixRelative(from: string, to: string): string {
-  let fromAbs: string;
-  let toAbs: string;
-  try {
-    fromAbs = fs.realpathSync.native(from);
-  } catch {
-    fromAbs = path.resolve(from);
-  }
-  try {
-    toAbs = fs.realpathSync.native(to);
-  } catch {
-    toAbs = path.resolve(to);
-  }
+  const fromAbs = path.resolve(from);
+  const toAbs = path.resolve(to);
   const relative = path.relative(fromAbs, toAbs);
   const posixRel = toPosixPath(relative);
   return posixRel === '' ? '.' : posixRel;
@@ -604,6 +597,7 @@ function applyFilters(
   results: string[],
   options: CrawlOptions,
   relativeToCrawlDir?: string,
+  prevalidatedFiles?: Set<string>,
 ): string[] {
   const depthFiltered = applyMaxDepthLimit(
     results,
@@ -621,6 +615,10 @@ function applyFilters(
         return false;
       }
       return !dirFilter(p);
+    }
+
+    if (prevalidatedFiles?.has(p)) {
+      return true;
     }
 
     if (!isValidIgnorePath(p)) {
@@ -649,6 +647,7 @@ async function findGitRoot(dir: string): Promise<string | null> {
     ['rev-parse', '--show-toplevel'],
     dir,
     5_000,
+    { silentOnFailure: true },
   );
   if (!result.success || result.lines.length === 0) return null;
   return normalizePath(result.lines[0]);
@@ -674,11 +673,23 @@ function shouldIncludeFile(
   return true;
 }
 
-function hasReachedFileBudget(
-  fileSet: Set<string>,
-  maxFiles?: number,
+function hasReachedFileBudget(fileCount: number, maxFiles?: number): boolean {
+  return maxFiles !== undefined && fileCount >= maxFiles;
+}
+
+function shouldCountTowardBudget(
+  fullPath: string,
+  relativeToCrawlDir: string,
+  maxDepth?: number,
 ): boolean {
-  return maxFiles !== undefined && fileSet.size >= maxFiles;
+  if (maxDepth === undefined) {
+    return true;
+  }
+  const crawlRootRelativeEntry = stripCrawlDirectoryPrefix(
+    fullPath,
+    relativeToCrawlDir,
+  );
+  return getEntryDepth(crawlRootRelativeEntry) <= maxDepth;
 }
 
 async function listUntrackedFiles(
@@ -839,8 +850,9 @@ async function crawlWithGitLsFiles(
   const deletedSet = new Set(deletedFiles);
 
   const fileSet = new Set<string>();
+  let budgetedFileCount = 0;
   const processTrackedFile = (file: string): boolean => {
-    if (hasReachedFileBudget(fileSet, options.maxFiles)) {
+    if (hasReachedFileBudget(budgetedFileCount, options.maxFiles)) {
       return false;
     }
 
@@ -869,8 +881,15 @@ async function crawlWithGitLsFiles(
       return true;
     }
 
+    const before = fileSet.size;
     fileSet.add(fullPath);
-    return !hasReachedFileBudget(fileSet, options.maxFiles);
+    if (
+      fileSet.size > before &&
+      shouldCountTowardBudget(fullPath, relativeToCrawlDir, options.maxDepth)
+    ) {
+      budgetedFileCount++;
+    }
+    return !hasReachedFileBudget(budgetedFileCount, options.maxFiles);
   };
 
   const trackedResult = await commandRunner(
@@ -898,7 +917,7 @@ async function crawlWithGitLsFiles(
 
   if (untrackedFiles !== null) {
     for (const normalizedFile of untrackedFiles) {
-      if (hasReachedFileBudget(fileSet, options.maxFiles)) {
+      if (hasReachedFileBudget(budgetedFileCount, options.maxFiles)) {
         break;
       }
 
@@ -917,12 +936,26 @@ async function crawlWithGitLsFiles(
 
       if (!fileSet.has(fullPath)) {
         fileSet.add(fullPath);
+        if (
+          shouldCountTowardBudget(
+            fullPath,
+            relativeToCrawlDir,
+            options.maxDepth,
+          )
+        ) {
+          budgetedFileCount++;
+        }
       }
     }
   }
 
   const results = buildResultsFromFileSet(fileSet);
-  const filteredResults = applyFilters(results, options, relativeToCrawlDir);
+  const filteredResults = applyFilters(
+    results,
+    options,
+    relativeToCrawlDir,
+    fileSet,
+  );
   const limitedResults = applyMaxFilesLimit(filteredResults, options.maxFiles);
 
   updateChangeState(
@@ -966,8 +999,9 @@ async function crawlWithRipgrep(
   const fileFilter = options.ignore.getFileFilter();
 
   const fileSet = new Set<string>();
+  let budgetedFileCount = 0;
   const processRgFile = (file: string): boolean => {
-    if (hasReachedFileBudget(fileSet, options.maxFiles)) {
+    if (hasReachedFileBudget(budgetedFileCount, options.maxFiles)) {
       return false;
     }
 
@@ -977,8 +1011,15 @@ async function crawlWithRipgrep(
       return true;
     }
 
+    const before = fileSet.size;
     fileSet.add(fullPath);
-    return !hasReachedFileBudget(fileSet, options.maxFiles);
+    if (
+      fileSet.size > before &&
+      shouldCountTowardBudget(fullPath, relativeToCrawlDir, options.maxDepth)
+    ) {
+      budgetedFileCount++;
+    }
+    return !hasReachedFileBudget(budgetedFileCount, options.maxFiles);
   };
 
   const rgResult = await commandRunner('rg', rgArgs, crawlDirectory, 20_000, {
@@ -997,7 +1038,12 @@ async function crawlWithRipgrep(
   }
 
   const results = buildResultsFromFileSet(fileSet);
-  const filteredResults = applyFilters(results, options, relativeToCrawlDir);
+  const filteredResults = applyFilters(
+    results,
+    options,
+    relativeToCrawlDir,
+    fileSet,
+  );
   const limitedResults = applyMaxFilesLimit(filteredResults, options.maxFiles);
 
   updateChangeState(stateKey, crawlDirectory, limitedResults);
@@ -1057,18 +1103,18 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
 export async function crawl(options: CrawlOptions): Promise<string[]> {
   const stateKey = getStateKey(options);
 
-  const cacheKeyForCurrentOptions = (): string =>
-    cache.getCacheKey(
-      options.crawlDirectory,
-      options.ignore.getFingerprint(),
-      options.maxDepth,
-      options.maxFiles,
-      options.useGitignore !== false,
-    );
+  const cacheKey = options.cache
+    ? cache.getCacheKey(
+        options.crawlDirectory,
+        options.ignore.getFingerprint(),
+        options.maxDepth,
+        options.maxFiles,
+        options.useGitignore !== false,
+      )
+    : undefined;
 
   if (options.cache) {
-    const cacheKey = cacheKeyForCurrentOptions();
-    const cachedResults = cache.read(cacheKey);
+    const cachedResults = cache.read(cacheKey!);
     if (cachedResults) {
       return cachedResults;
     }
@@ -1106,11 +1152,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     const results = gitResult.files;
 
     if (options.cache) {
-      cache.write(
-        cacheKeyForCurrentOptions(),
-        results,
-        options.cacheTtl * 1000,
-      );
+      cache.write(cacheKey!, results, options.cacheTtl * 1000);
     }
 
     return results;
@@ -1126,11 +1168,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     const results = rgResult.files;
 
     if (options.cache) {
-      cache.write(
-        cacheKeyForCurrentOptions(),
-        results,
-        options.cacheTtl * 1000,
-      );
+      cache.write(cacheKey!, results, options.cacheTtl * 1000);
     }
 
     return results;
@@ -1142,11 +1180,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
   recordRebuild(stateKey);
 
   if (options.cache) {
-    cache.write(
-      cacheKeyForCurrentOptions(),
-      limitedResults,
-      options.cacheTtl * 1000,
-    );
+    cache.write(cacheKey!, limitedResults, options.cacheTtl * 1000);
   }
 
   return limitedResults;
