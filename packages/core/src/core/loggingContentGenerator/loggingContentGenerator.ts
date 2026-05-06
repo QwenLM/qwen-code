@@ -178,8 +178,8 @@ export class LoggingContentGenerator implements ContentGenerator {
         response.usageMetadata,
       );
       if (!isInternal) {
-        // Logging must not discard the successful API response if the
-        // synthetic-fallback build inside resolve() throws.
+        // Logging must not discard the successful API response if
+        // resolve() or logOpenAIInteraction throws.
         try {
           await this.logOpenAIInteraction(await session.resolve(req), response);
         } catch {
@@ -191,7 +191,8 @@ export class LoggingContentGenerator implements ContentGenerator {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
-        // Logging must not replace the original API error if resolve() throws.
+        // Logging must not replace the original API error if
+        // resolve() or logOpenAIInteraction throws.
         try {
           await this.logOpenAIInteraction(
             await session.resolve(req),
@@ -231,7 +232,8 @@ export class LoggingContentGenerator implements ContentGenerator {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
-        // Logging must not replace the original API error if resolve() throws.
+        // Logging must not replace the original API error if
+        // resolve() or logOpenAIInteraction throws.
         try {
           await this.logOpenAIInteraction(
             await session.resolve(req),
