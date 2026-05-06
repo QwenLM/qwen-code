@@ -128,8 +128,16 @@ function tokeniseSegment(segment: string): string[] | null {
     return null;
   }
   let i = 0;
-  // Skip env-var assignments (KEY=value).
-  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) {
+  // Skip env-var assignments (KEY=value). If the key is one of the
+  // git-repo-redirecting variables, refuse to tokenise the segment at
+  // all: `GIT_DIR=elsewhere/.git git commit ...` runs against another
+  // repository, so treating it as an in-cwd commit and stamping our
+  // attribution onto it would be wrong (and a `Co-authored-by` trailer
+  // would land on a commit in a repo the user didn't expect us to touch).
+  while (i < tokens.length) {
+    const key = leadingEnvAssignmentKey(tokens[i]!);
+    if (key === null) break;
+    if (GIT_ENV_SHIFTS_REPO.has(key)) return null;
     i++;
   }
   // Strip a single safe wrapper, then any leading flag tokens it
@@ -162,11 +170,14 @@ function tokeniseSegment(segment: string): string[] | null {
       }
     }
     // `env` puts KEY=VALUE pairs between its flags and the real
-    // program, so skip those too. Doing this only after the wrapper
-    // detection (rather than universally) avoids accidentally
-    // consuming what the user actually wrote.
+    // program, so skip those too. Same git-repo-redirect bail as
+    // above applies — a `env GIT_DIR=elsewhere git commit` segment
+    // is non-attributable.
     if (wrapper === 'env') {
-      while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) {
+      while (i < tokens.length) {
+        const key = leadingEnvAssignmentKey(tokens[i]!);
+        if (key === null) break;
+        if (GIT_ENV_SHIFTS_REPO.has(key)) return null;
         i++;
       }
     }
@@ -195,6 +206,39 @@ const SUDO_FLAGS_WITH_VALUE = new Set([
 // the value, `env -u FOO git commit ...` would leave `FOO` as the
 // next token and the parser would treat it as the program.
 const ENV_FLAGS_WITH_VALUE = new Set(['-u', '--unset', '-S', '--split-string']);
+
+/**
+ * Environment variables that redirect git's repository selection. A
+ * leading `GIT_DIR=...`, `GIT_WORK_TREE=...`, etc. on a command makes
+ * the inner `git commit` operate on a different repo than our cwd
+ * suggests; treating it as an in-cwd commit would attach our
+ * `Co-authored-by` trailer (and per-file note) to the wrong
+ * repository. tokeniseSegment refuses to parse such segments so the
+ * caller skips them.
+ *
+ * Identity / date variables (`GIT_AUTHOR_*`, `GIT_COMMITTER_*`) are
+ * deliberately NOT in this set — they tweak the commit's metadata
+ * but don't move it to another repo, so attribution is still
+ * meaningful.
+ */
+const GIT_ENV_SHIFTS_REPO = new Set([
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_NAMESPACE',
+]);
+
+/**
+ * Match the `KEY=` prefix of a `KEY=value` token and return KEY,
+ * or null if the token isn't a leading env-var assignment. Centralised
+ * so the leading-env-strip and the env-wrapper KEY=VALUE strip share
+ * the same parsing.
+ */
+function leadingEnvAssignmentKey(token: string): string | null {
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token);
+  return m ? m[1]! : null;
+}
 
 /**
  * Walk a `git ...` token sequence past git's global flags

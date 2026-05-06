@@ -399,6 +399,31 @@ export class CommitAttributionService {
 
   /** Restore state from a persisted snapshot. */
   restoreFromSnapshot(snapshot: AttributionSnapshot): void {
+    // The resume-time caller (client.ts) passes `snapshot` as a
+    // structural cast from `unknown`, so its TS-typed shape is only
+    // a hint — the actual runtime value can be anything (corrupted
+    // JSONL line, hand-edited session file, schema drift). Bail to
+    // a clean reset on any envelope-level shape mismatch:
+    //   - non-object / null / array
+    //   - wrong `type` discriminator
+    //   - non-numeric `version` (after the `version ?? 1` default)
+    //   - non-object `fileStates`
+    // Per-field coercion (sanitiseAttribution etc.) handles damage
+    // INSIDE a structurally valid snapshot; this gate stops a
+    // wholesale-wrong payload from polluting fileAttributions with
+    // garbage keys before per-field validation can run.
+    const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+      typeof v === 'object' && v !== null && !Array.isArray(v);
+    const looksLikeSnapshot =
+      isPlainObject(snapshot) &&
+      (snapshot as Record<string, unknown>)['type'] === 'attribution-snapshot';
+    if (!looksLikeSnapshot) {
+      this.fileAttributions.clear();
+      this.surface = getClientSurface();
+      this.promptCount = 0;
+      this.promptCountAtLastCommit = 0;
+      return;
+    }
     // Future schema bumps land here. Treat absent `version` as 1
     // (the schema in production at the time this field was added) so
     // existing on-disk snapshots restore cleanly.
@@ -441,7 +466,14 @@ export class CommitAttributionService {
     }
 
     this.fileAttributions.clear();
-    for (const [k, v] of Object.entries(snapshot.fileStates ?? {})) {
+    // Reject a corrupted `fileStates` (e.g. an array, a string, or
+    // null) before iterating: `Object.entries(<array>)` would happily
+    // produce `[index, value]` pairs and seed fileAttributions with
+    // numeric-string keys.
+    const fileStates = isPlainObject(snapshot.fileStates)
+      ? snapshot.fileStates
+      : {};
+    for (const [k, v] of Object.entries(fileStates)) {
       // Re-canonicalise on restore so old snapshots (written before
       // recordEdit started running keys through realpath) end up
       // with the same shape as newly-recorded entries. If both the

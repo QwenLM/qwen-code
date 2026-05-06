@@ -84,8 +84,17 @@ export interface SettingDefinition {
    * those older shapes don't trip the IDE validator while the runtime
    * migration is still pending. Has no runtime effect — it's purely a
    * compatibility hint for editors.
+   *
+   * Restricted to JSON-Schema primitive types: the schema generator emits
+   * `{ type: <legacyType> }` for each entry, and JSON Schema's `type`
+   * keyword does not accept `'enum'` or `'object'` as a literal value.
+   * Allowing the full SettingsType union here would let `legacyTypes:
+   * ['enum']` slip in and produce a syntactically invalid
+   * `settings.schema.json`. Future legacy shapes that need `enum` /
+   * complex object compatibility should land their own branch in
+   * `convertSettingToJsonSchema` instead of widening this set.
    */
-  legacyTypes?: readonly SettingsType[];
+  legacyTypes?: ReadonlyArray<'boolean' | 'string' | 'number' | 'array'>;
 }
 
 /**

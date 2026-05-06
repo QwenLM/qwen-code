@@ -1744,6 +1744,66 @@ describe('ShellTool', () => {
         );
       });
 
+      // `GIT_DIR=...` and friends redirect git's repo selection; a
+      // commit prefixed with one of these lands in a different repo
+      // than our cwd. Stamping the trailer onto it would corrupt a
+      // commit in a repo the user didn't expect us to touch.
+      it.each([
+        ['GIT_DIR', 'GIT_DIR=/tmp/other/.git git commit -m "msg"'],
+        ['GIT_WORK_TREE', 'GIT_WORK_TREE=/tmp/other git commit -m "msg"'],
+        ['GIT_COMMON_DIR', 'GIT_COMMON_DIR=/tmp/other git commit -m "msg"'],
+        [
+          'GIT_INDEX_FILE',
+          'GIT_INDEX_FILE=/tmp/other/index git commit -m "msg"',
+        ],
+        [
+          'env-wrapped GIT_DIR',
+          'env GIT_DIR=/tmp/other/.git git commit -m "msg"',
+        ],
+      ])(
+        'should NOT add co-author for repo-redirecting %s assignment',
+        async (_label, command) => {
+          const invocation = shellTool.build({ command, is_background: false });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+          await promise;
+          const observed = mockShellExecutionService.mock.calls[0][0];
+          expect(observed).not.toContain('Co-authored-by:');
+        },
+      );
+
+      // GIT_AUTHOR_DATE / GIT_COMMITTER_DATE / etc. tweak commit
+      // metadata but don't relocate the repo — attribution still
+      // applies as normal.
+      it('should still add co-author with benign GIT_COMMITTER_DATE assignment', async () => {
+        const command =
+          'GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        expect(observed).toContain('Co-authored-by:');
+      });
+
       it('should NOT add co-author for cd .. && git commit (could escape repo)', async () => {
         const command = 'cd .. && git commit -m "Test commit"';
         const invocation = shellTool.build({ command, is_background: false });

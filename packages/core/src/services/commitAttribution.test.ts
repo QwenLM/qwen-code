@@ -451,5 +451,67 @@ describe('CommitAttributionService', () => {
         expect(service.getSurface()).toBe('cli');
       },
     );
+
+    // Envelope-level corruption: a payload whose `type` discriminator
+    // is wrong (or whose top-level shape is non-object) must reset to
+    // a clean state instead of polluting fileAttributions. The
+    // resume-time caller passes `snapshot as AttributionSnapshot`
+    // from a structural cast off `unknown`, so the runtime value
+    // could be anything.
+    it.each([
+      ['null', null],
+      ['array', []],
+      ['string', 'snapshot'],
+      ['number', 42],
+      ['wrong type discriminator', { type: 'something-else' }],
+      ['missing type', { fileStates: {} }],
+    ])(
+      'resets to fresh state when snapshot envelope is malformed (%s)',
+      (_label, badPayload) => {
+        const service = CommitAttributionService.getInstance();
+        // Seed some pre-existing state to confirm the reset clears it.
+        service.recordEdit('/project/preexisting.ts', null, 'hello');
+        expect(
+          service.getFileAttribution('/project/preexisting.ts'),
+        ).toBeDefined();
+
+        service.restoreFromSnapshot(
+          badPayload as unknown as Parameters<
+            typeof service.restoreFromSnapshot
+          >[0],
+        );
+        expect(
+          service.getFileAttribution('/project/preexisting.ts'),
+        ).toBeUndefined();
+        expect(service.getSurface()).toBe('cli');
+        expect(service.getPromptsSinceLastCommit()).toBe(0);
+      },
+    );
+
+    // `fileStates` must be a plain object; otherwise Object.entries
+    // would happily iterate an array's [index, value] pairs and seed
+    // fileAttributions with numeric-string keys.
+    it.each([
+      ['array', []],
+      ['string', 'oops'],
+      ['number', 42],
+      ['null', null],
+    ])(
+      'ignores non-object fileStates (%s) without polluting attribution map',
+      (_label, badFileStates) => {
+        const service = CommitAttributionService.getInstance();
+        service.restoreFromSnapshot({
+          type: 'attribution-snapshot',
+          surface: 'cli',
+          fileStates: badFileStates as unknown as Record<
+            string,
+            { aiContribution: number; aiCreated: boolean }
+          >,
+          promptCount: 0,
+          promptCountAtLastCommit: 0,
+        });
+        expect(service.hasAttributions()).toBe(false);
+      },
+    );
   });
 });
