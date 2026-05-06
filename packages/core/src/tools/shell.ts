@@ -104,6 +104,60 @@ function lastMatchOf<T extends RegExpMatchArray>(
 }
 
 /**
+ * Helpers for the nested-match-rejection logic shared between
+ * addCoAuthorToGitCommit and addAttributionToPR. Both functions pick
+ * the LAST `-m` / `--body` occurrence across two quote styles, but
+ * have to reject a candidate that's nested INSIDE the other's range
+ * — e.g. `git commit -m "docs mention -m 'flag'"` where the inner
+ * `-m 'flag'` lives entirely inside the outer `-m "..."`. Without
+ * the nesting check the inner (later) match would win and the
+ * trailer would land in the body text.
+ *
+ * Extracted to module scope so future bug fixes can't apply to only
+ * one of the two call sites.
+ */
+function matchSpan(
+  m: RegExpMatchArray | null,
+): { start: number; end: number } | null {
+  return m ? { start: m.index ?? 0, end: (m.index ?? 0) + m[0].length } : null;
+}
+
+function isMatchInside(
+  inner: RegExpMatchArray | null,
+  outer: RegExpMatchArray | null,
+): boolean {
+  const i = matchSpan(inner);
+  const o = matchSpan(outer);
+  return !!(i && o && i.start >= o.start && i.end <= o.end);
+}
+
+/**
+ * Pick the LAST non-nested match across two quote styles. Mirrors the
+ * algorithm both rewriters use: prefer whichever appears later in the
+ * segment, but if either match lives inside the other's range, take
+ * the OUTER one. Returns the chosen match plus a marker telling the
+ * caller which style won (so they can pick the right escape function).
+ */
+function pickOuterLastMatch<T extends RegExpMatchArray | null>(
+  doubleMatch: T,
+  singleMatch: T,
+): { match: T; isDouble: boolean } {
+  if (doubleMatch && singleMatch) {
+    if (isMatchInside(singleMatch, doubleMatch)) {
+      return { match: doubleMatch, isDouble: true };
+    }
+    if (isMatchInside(doubleMatch, singleMatch)) {
+      return { match: singleMatch, isDouble: false };
+    }
+    return (doubleMatch.index ?? 0) > (singleMatch.index ?? 0)
+      ? { match: doubleMatch, isDouble: true }
+      : { match: singleMatch, isDouble: false };
+  }
+  if (doubleMatch) return { match: doubleMatch, isDouble: true };
+  return { match: singleMatch, isDouble: false };
+}
+
+/**
  * Tokenise a single shell-command segment via `shell-quote`. Returns
  * the parsed string tokens with leading env-var assignments and a
  * small allowlist of safe wrappers (`sudo`, `command`, with their
@@ -2599,41 +2653,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // quote style — but reject any candidate that's nested inside the
     // other's range. For `git commit -m "docs mention -m 'flag'"` the
     // single-quoted `-m 'flag'` lives INSIDE the double-quoted real
-    // message; without a nesting check the later (inner) `-m` would
+    // message; without the nesting check the later (inner) `-m` would
     // win and the trailer would be spliced into the body text.
-    const matchRange = (m: RegExpMatchArray | null) =>
-      m ? { start: m.index ?? 0, end: (m.index ?? 0) + m[0].length } : null;
-    const isInside = (
-      inner: RegExpMatchArray | null,
-      outer: RegExpMatchArray | null,
-    ): boolean => {
-      const i = matchRange(inner);
-      const o = matchRange(outer);
-      return !!(i && o && i.start >= o.start && i.end <= o.end);
-    };
-    let match: RegExpMatchArray | null;
-    if (doubleMatch && singleMatch) {
-      if (isInside(singleMatch, doubleMatch)) {
-        match = doubleMatch;
-      } else if (isInside(doubleMatch, singleMatch)) {
-        match = singleMatch;
-      } else {
-        match =
-          (doubleMatch.index ?? 0) > (singleMatch.index ?? 0)
-            ? doubleMatch
-            : singleMatch;
-      }
-    } else {
-      match = doubleMatch ?? singleMatch;
-    }
-    const quote = match === doubleMatch ? '"' : "'";
+    const picked = pickOuterLastMatch(doubleMatch, singleMatch);
+    const match = picked.match;
+    const quote = picked.isDouble ? '"' : "'";
 
     // Escape the configured name/email for the surrounding quote
     // style — has to follow the actually-selected match.
-    const escape =
-      match === doubleMatch
-        ? escapeForBashDoubleQuote
-        : escapeForBashSingleQuote;
+    const escape = picked.isDouble
+      ? escapeForBashDoubleQuote
+      : escapeForBashSingleQuote;
     const escapedName = escape(gitCoAuthorSettings.name ?? '');
     const escapedEmail = escape(gitCoAuthorSettings.email ?? '');
     const coAuthor = `\n\nCo-authored-by: ${escapedName} <${escapedEmail}>`;
@@ -2757,32 +2787,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // the inner `-b 'flag'` is INSIDE the outer `--body "..."`; without
     // a nesting check the inner (later) `-b` would win and the trailer
     // would be spliced into the body text rather than appended after it.
-    const bodyMatchRange = (m: RegExpMatchArray | null) =>
-      m ? { start: m.index ?? 0, end: (m.index ?? 0) + m[0].length } : null;
-    const bodyIsInside = (
-      inner: RegExpMatchArray | null,
-      outer: RegExpMatchArray | null,
-    ): boolean => {
-      const i = bodyMatchRange(inner);
-      const o = bodyMatchRange(outer);
-      return !!(i && o && i.start >= o.start && i.end <= o.end);
-    };
-    let bodyMatch: RegExpMatchArray | null;
-    if (bodyDoubleMatch && bodySingleMatch) {
-      if (bodyIsInside(bodySingleMatch, bodyDoubleMatch)) {
-        bodyMatch = bodyDoubleMatch;
-      } else if (bodyIsInside(bodyDoubleMatch, bodySingleMatch)) {
-        bodyMatch = bodySingleMatch;
-      } else {
-        bodyMatch =
-          (bodyDoubleMatch.index ?? 0) > (bodySingleMatch.index ?? 0)
-            ? bodyDoubleMatch
-            : bodySingleMatch;
-      }
-    } else {
-      bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
-    }
-    const bodyQuote = bodyMatch === bodyDoubleMatch ? '"' : "'";
+    // Shared with addCoAuthorToGitCommit via `pickOuterLastMatch`.
+    const pickedBody = pickOuterLastMatch(bodyDoubleMatch, bodySingleMatch);
+    const bodyMatch = pickedBody.match;
+    const bodyQuote = pickedBody.isDouble ? '"' : "'";
 
     if (bodyMatch) {
       const [fullMatch, prefix, existingBody] = bodyMatch;
@@ -2799,10 +2807,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Without this, a configured generator name containing `"`, `$`, a
       // backtick, or `'` would either break the user-approved `gh pr
       // create` command or, worse, be interpreted as command substitution.
-      const escapedAttribution =
-        bodyMatch === bodyDoubleMatch
-          ? escapeForBashDoubleQuote(attribution)
-          : escapeForBashSingleQuote(attribution);
+      const escapedAttribution = pickedBody.isDouble
+        ? escapeForBashDoubleQuote(attribution)
+        : escapeForBashSingleQuote(attribution);
       const newBody = existingBody + escapedAttribution;
       // Splice the modified segment back into the original command,
       // offsetting the in-segment match index by the segment start.

@@ -132,6 +132,8 @@ import { readAutoMemoryIndex } from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
+const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
+
 import {
   ModelsConfig,
   type ModelProvidersConfig,
@@ -269,7 +271,7 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   // `{ "commit": "false" }` silently activated attribution against
   // the user's clear intent. Safer-by-default: ambiguous values
   // disable rather than enable.
-  const pickBool = (v: unknown): boolean => {
+  const pickBool = (v: unknown, fieldName: string): boolean => {
     if (v === undefined) return true;
     if (typeof v === 'boolean') return v;
     if (typeof v === 'string') {
@@ -282,14 +284,24 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
       ) {
         return true;
       }
+      // Known disable-intent forms — silent (matches user intent).
+      const knownDisable = ['false', 'no', 'off', '0', 'disabled', ''];
+      if (!knownDisable.includes(lowered)) {
+        // Unrecognised string — disable (safer-by-default) but log
+        // so a user wondering "why is my setting being ignored?"
+        // can see the actual coercion in QWEN_DEBUG_LOG_FILE.
+        gitCoAuthorLogger.warn(
+          `Unrecognized string value for general.gitCoAuthor.${fieldName}: ${JSON.stringify(v)}; treating as false. Accepted forms: true/yes/on/1, false/no/off/0/empty.`,
+        );
+      }
       return false;
     }
     if (typeof v === 'number') return v === 1;
     return false;
   };
   return {
-    commit: pickBool(value?.commit),
-    pr: pickBool(value?.pr),
+    commit: pickBool(value?.commit, 'commit'),
+    pr: pickBool(value?.pr, 'pr'),
   };
 }
 
