@@ -26,6 +26,63 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.QWEN_OAUTH]: [],
 };
 
+const GENERATION_CONFIG_WARNING_FIELDS = [
+  'samplingParams',
+  'timeout',
+  'maxRetries',
+  'retryErrorCodes',
+  'enableCacheControl',
+  'schemaCompliance',
+  'reasoning',
+  'contextWindowSize',
+  'customHeaders',
+  'extra_body',
+  'modalities',
+  'splitToolMedia',
+] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
+
+function hasOwn(object: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function getIgnoredTopLevelGenerationConfigFields(
+  settingsGenerationConfig: Partial<ContentGeneratorConfig> | undefined,
+  modelProvider: ProviderModelConfig | undefined,
+): string[] {
+  if (!settingsGenerationConfig || !modelProvider) {
+    return [];
+  }
+
+  const providerGenerationConfig = modelProvider.generationConfig ?? {};
+  return GENERATION_CONFIG_WARNING_FIELDS.filter(
+    (field) =>
+      hasOwn(settingsGenerationConfig, field) &&
+      !hasOwn(providerGenerationConfig, field),
+  );
+}
+
+function buildIgnoredTopLevelGenerationConfigWarning(
+  authType: AuthType,
+  modelProvider: ProviderModelConfig,
+  ignoredFields: string[],
+): string | undefined {
+  if (ignoredFields.length === 0) {
+    return undefined;
+  }
+
+  const fieldList = ignoredFields
+    .map((field) => `model.generationConfig.${field}`)
+    .join(', ');
+
+  return `Warning: ${fieldList} ${
+    ignoredFields.length === 1 ? 'is' : 'are'
+  } ignored for provider model "${modelProvider.id}" from modelProviders.${authType}. Move ${
+    ignoredFields.length === 1 ? 'this field' : 'these fields'
+  } to modelProviders.${authType}[].generationConfig for that model if you want ${
+    ignoredFields.length === 1 ? 'it' : 'them'
+  } to apply.`;
+}
+
 export interface CliGenerationConfigInputs {
   argv: {
     model?: string | undefined;
@@ -188,6 +245,20 @@ export function resolveCliGenerationConfig(
 
   const resolved = resolveModelConfig(configSources);
 
+  const ignoredGenerationConfigWarning =
+    authType && modelProvider
+      ? buildIgnoredTopLevelGenerationConfigWarning(
+          authType,
+          modelProvider,
+          getIgnoredTopLevelGenerationConfigFields(
+            settings.model?.generationConfig as
+              | Partial<ContentGeneratorConfig>
+              | undefined,
+            modelProvider,
+          ),
+        )
+      : undefined;
+
   // Resolve OpenAI logging config (CLI-specific, not part of core resolver)
   const enableOpenAILogging =
     (typeof argv.openaiLogging === 'undefined'
@@ -211,6 +282,11 @@ export function resolveCliGenerationConfig(
     baseUrl: resolved.config.baseUrl || '',
     generationConfig,
     sources: resolved.sources,
-    warnings: resolved.warnings,
+    warnings: [
+      ...resolved.warnings,
+      ...(ignoredGenerationConfigWarning
+        ? [ignoredGenerationConfigWarning]
+        : []),
+    ],
   };
 }
