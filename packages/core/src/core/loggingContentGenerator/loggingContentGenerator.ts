@@ -234,11 +234,15 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       stream = await this.wrapped.generateContentStream(req, userPromptId);
     } catch (error) {
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      span.end();
+      try {
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } catch {}
+      try {
+        span.end();
+      } catch {}
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
@@ -333,13 +337,17 @@ export class LoggingContentGenerator implements ContentGenerator {
       if (!isInternal) {
         await this.logOpenAIInteraction(openaiRequest, undefined, error);
       }
-      span?.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: error instanceof Error ? error.message : String(error),
-      });
+      try {
+        span?.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } catch {}
       throw error;
     } finally {
-      span?.end();
+      try {
+        span?.end();
+      } catch {}
     }
   }
 

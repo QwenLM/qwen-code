@@ -7,6 +7,7 @@
 import {
   trace,
   context,
+  ROOT_CONTEXT,
   type Span,
   type Context,
   SpanStatusCode,
@@ -121,5 +122,5 @@ export function createSessionRootContext(sessionId: string): Context {
     traceFlags: TraceFlags.SAMPLED,
     isRemote: false,
   });
-  return trace.setSpan(context.active(), rootSpan);
+  return trace.setSpan(ROOT_CONTEXT, rootSpan);
 }

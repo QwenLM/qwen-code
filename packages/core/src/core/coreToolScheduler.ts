@@ -1895,6 +1895,7 @@ export class CoreToolScheduler {
                 'User cancelled tool execution.',
               );
             }
+            // Load-bearing: prevents withSpan from auto-setting OK on normal return
             span.setStatus({
               code: SpanStatusCode.UNSET,
             });
@@ -2127,6 +2128,7 @@ export class CoreToolScheduler {
                 'User cancelled tool execution.',
               );
             }
+            // Load-bearing: prevents withSpan from auto-setting OK on normal return
             span.setStatus({
               code: SpanStatusCode.UNSET,
             });

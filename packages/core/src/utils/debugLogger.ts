@@ -82,23 +82,27 @@ function formatArgs(args: unknown[]): string {
 const ZERO_TRACE_ID = '00000000000000000000000000000000';
 
 function getTraceContext(session: DebugLogSession | null): TraceContext | null {
-  const activeSpan = trace.getActiveSpan();
-  if (activeSpan) {
-    const ctx = activeSpan.spanContext();
-    if (ctx.traceId !== ZERO_TRACE_ID) {
-      return { traceId: ctx.traceId, spanId: ctx.spanId };
+  try {
+    const activeSpan = trace.getActiveSpan();
+    if (activeSpan) {
+      const ctx = activeSpan.spanContext();
+      if (ctx.traceId !== ZERO_TRACE_ID) {
+        return { traceId: ctx.traceId, spanId: ctx.spanId };
+      }
     }
-  }
-  if (session) {
-    const sessionId = session.getSessionId();
-    if (cachedSessionId !== sessionId) {
-      cachedSessionId = sessionId;
-      cachedTraceId = deriveTraceId(sessionId);
-      cachedSessionSpanId = randomSpanId();
+    if (session) {
+      const sessionId = session.getSessionId();
+      if (cachedSessionId !== sessionId) {
+        cachedSessionId = sessionId;
+        cachedTraceId = deriveTraceId(sessionId);
+        cachedSessionSpanId = randomSpanId();
+      }
+      return { traceId: cachedTraceId!, spanId: cachedSessionSpanId! };
     }
-    return { traceId: cachedTraceId!, spanId: cachedSessionSpanId! };
+    return null;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /**
