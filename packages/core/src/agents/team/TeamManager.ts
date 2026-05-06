@@ -113,8 +113,12 @@ export class TeamManager {
   /** Per-agent pending message queues. */
   private readonly pendingMessages = new Map<string, PendingMessage[]>();
 
-  /** Cleanup functions for event bridge listeners. */
-  private readonly eventBridgeCleanups: Array<() => void> = [];
+  /** Cleanup functions for event bridge listeners, keyed by
+   *  agentId so we can release each agent's listeners as soon as
+   *  it reaches a terminal status — not just at full team
+   *  cleanup. Otherwise long-running sessions accumulate dead
+   *  listeners (4 per spawn) on shared emitters. */
+  private readonly eventBridgeCleanups = new Map<string, () => void>();
 
   /** Unsubscribe from task update notifications. */
   private taskUpdateUnsubscribe?: () => void;
@@ -899,10 +903,10 @@ export class TeamManager {
     this.taskUpdateUnsubscribe?.();
     this.taskUpdateUnsubscribe = undefined;
 
-    for (const cleanup of this.eventBridgeCleanups) {
+    for (const cleanup of this.eventBridgeCleanups.values()) {
       cleanup();
     }
-    this.eventBridgeCleanups.length = 0;
+    this.eventBridgeCleanups.clear();
 
     this.pendingMessages.clear();
     this.lastActivityAt.clear();
@@ -968,6 +972,16 @@ export class TeamManager {
           status: event.newStatus,
           timestamp: Date.now(),
         });
+
+        // Detach this agent's listeners now that it can't emit
+        // anything actionable. Without this, every spawn leaks
+        // its listener closures (and the emitter's reference to
+        // them) until the team is fully torn down.
+        const cleanup = this.eventBridgeCleanups.get(agentId);
+        if (cleanup) {
+          cleanup();
+          this.eventBridgeCleanups.delete(agentId);
+        }
       }
     };
 
@@ -982,11 +996,6 @@ export class TeamManager {
     emitter.on(AgentEventType.STATUS_CHANGE, onStatusChange);
     emitter.on(AgentEventType.TOOL_CALL, onToolCall);
     emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
-    this.eventBridgeCleanups.push(() => {
-      emitter.off(AgentEventType.STATUS_CHANGE, onStatusChange);
-      emitter.off(AgentEventType.TOOL_CALL, onToolCall);
-      emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
-    });
 
     // Forward teammate tool approval requests to the leader's UI
     // via the permission bridge.
@@ -1008,7 +1017,13 @@ export class TeamManager {
     };
 
     emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
-    this.eventBridgeCleanups.push(() => {
+
+    // Single cleanup keyed by agentId so onStatusChange can
+    // release this agent's listeners on terminal status.
+    this.eventBridgeCleanups.set(agentId, () => {
+      emitter.off(AgentEventType.STATUS_CHANGE, onStatusChange);
+      emitter.off(AgentEventType.TOOL_CALL, onToolCall);
+      emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
     });
 
