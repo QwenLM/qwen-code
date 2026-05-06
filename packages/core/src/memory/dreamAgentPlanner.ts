@@ -227,6 +227,7 @@ export function buildConsolidationTaskPrompt(
 export async function planManagedAutoMemoryDreamByAgent(
   config: Config,
   projectRoot: string,
+  abortSignal?: AbortSignal,
 ): Promise<ForkedAgentResult> {
   const memoryRoot = getAutoMemoryRoot(projectRoot);
   const transcriptDir = getTranscriptDir(projectRoot);
@@ -247,10 +248,22 @@ export async function planManagedAutoMemoryDreamByAgent(
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
     ],
+    abortSignal,
   });
 
   if (result.status === 'failed') {
     throw new Error(result.terminateReason || 'Dream agent failed');
+  }
+
+  if (result.status === 'cancelled') {
+    // runForkedAgent maps AgentTerminateMode.CANCELLED → status 'cancelled'
+    // (resolves rather than rejects). Throw here so callers up the stack
+    // unwind via their catch paths instead of silently treating an
+    // aborted dream as a normal completion (which would overwrite the
+    // user-cancelled record with 'completed' + bump dream metadata).
+    throw new Error(
+      result.terminateReason || 'Dream agent cancelled before completion',
+    );
   }
 
   return result;

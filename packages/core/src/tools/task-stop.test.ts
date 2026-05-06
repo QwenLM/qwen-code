@@ -25,11 +25,19 @@ describe('TaskStopTool', () => {
     abandonBackgroundAgent = vi.fn();
     shellRegistry = new BackgroundShellRegistry();
     monitorRegistry = new MonitorRegistry();
+    // Default fake MemoryManager — every test that doesn't care about
+    // dream gets an empty stub so the 4th-route lookup falls through to
+    // the not-found branch instead of crashing on undefined.
+    const memoryManager = {
+      getTask: vi.fn(() => undefined),
+      cancelTask: vi.fn(() => false),
+    };
     config = {
       getBackgroundTaskRegistry: () => registry,
       abandonBackgroundAgent,
       getBackgroundShellRegistry: () => shellRegistry,
       getMonitorRegistry: () => monitorRegistry,
+      getMemoryManager: () => memoryManager,
     } as unknown as Config;
     tool = new TaskStopTool(config);
   });
@@ -266,6 +274,158 @@ describe('TaskStopTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_RUNNING);
       expect(result.llmContent).toContain('Background monitor "mon_done"');
       expect(result.llmContent).toContain('completed');
+    });
+  });
+
+  describe('dream task support', () => {
+    it('cancels a running dream by routing through MemoryManager.cancelTask', async () => {
+      const cancelTask = vi.fn(() => true);
+      const dreamRecord = {
+        id: 'dream-running-1',
+        taskType: 'dream' as const,
+        projectRoot: '/p',
+        status: 'running' as const,
+        createdAt: '2026-05-04T12:00:00.000Z',
+        updatedAt: '2026-05-04T12:00:00.000Z',
+      };
+      const memoryManager = {
+        getTask: vi.fn((id: string) =>
+          id === 'dream-running-1' ? dreamRecord : undefined,
+        ),
+        cancelTask,
+      };
+      const localConfig = {
+        getBackgroundTaskRegistry: () => registry,
+        abandonBackgroundAgent,
+        getBackgroundShellRegistry: () => shellRegistry,
+        getMonitorRegistry: () => monitorRegistry,
+        getMemoryManager: () => memoryManager,
+      } as unknown as Config;
+      const localTool = new TaskStopTool(localConfig);
+
+      const result = await localTool.validateBuildAndExecute(
+        { task_id: 'dream-running-1' },
+        new AbortController().signal,
+      );
+
+      expect(cancelTask).toHaveBeenCalledWith('dream-running-1');
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Cancellation requested');
+      expect(result.llmContent).toContain('dream task "dream-running-1"');
+    });
+
+    it('returns NOT_RUNNING when the dream is already terminal', async () => {
+      // Mirrors the agent / shell / monitor not-running guards so a
+      // model retry against an already-finished dream surfaces the
+      // distinct error type instead of "not found".
+      const dreamRecord = {
+        id: 'dream-done-1',
+        taskType: 'dream' as const,
+        projectRoot: '/p',
+        status: 'completed' as const,
+        createdAt: '2026-05-04T12:00:00.000Z',
+        updatedAt: '2026-05-04T12:01:00.000Z',
+      };
+      const cancelTask = vi.fn(() => false);
+      const memoryManager = {
+        getTask: vi.fn(() => dreamRecord),
+        cancelTask,
+      };
+      const localConfig = {
+        getBackgroundTaskRegistry: () => registry,
+        abandonBackgroundAgent,
+        getBackgroundShellRegistry: () => shellRegistry,
+        getMonitorRegistry: () => monitorRegistry,
+        getMemoryManager: () => memoryManager,
+      } as unknown as Config;
+      const localTool = new TaskStopTool(localConfig);
+
+      const result = await localTool.validateBuildAndExecute(
+        { task_id: 'dream-done-1' },
+        new AbortController().signal,
+      );
+
+      expect(cancelTask).not.toHaveBeenCalled();
+      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_RUNNING);
+      expect(result.llmContent).toContain('Background dream "dream-done-1"');
+      expect(result.llmContent).toContain('completed');
+    });
+
+    it('returns NOT_CANCELLABLE when the task id resolves to an extract record', async () => {
+      // Extract is short-lived and runs on the request path; cancelling
+      // it would interfere with the user's own turn. The dispatch must
+      // distinguish "task exists but isn't cancellable" from "task
+      // doesn't exist" — without the distinct error type, a model
+      // retrying against an extract id would incorrectly conclude the
+      // id was never valid.
+      const extractRecord = {
+        id: 'extract-running-1',
+        taskType: 'extract' as const,
+        projectRoot: '/p',
+        status: 'running' as const,
+        createdAt: '2026-05-04T12:00:00.000Z',
+        updatedAt: '2026-05-04T12:00:00.000Z',
+      };
+      const cancelTask = vi.fn();
+      const memoryManager = {
+        getTask: vi.fn(() => extractRecord),
+        cancelTask,
+      };
+      const localConfig = {
+        getBackgroundTaskRegistry: () => registry,
+        abandonBackgroundAgent,
+        getBackgroundShellRegistry: () => shellRegistry,
+        getMonitorRegistry: () => monitorRegistry,
+        getMemoryManager: () => memoryManager,
+      } as unknown as Config;
+      const localTool = new TaskStopTool(localConfig);
+
+      const result = await localTool.validateBuildAndExecute(
+        { task_id: 'extract-running-1' },
+        new AbortController().signal,
+      );
+
+      expect(cancelTask).not.toHaveBeenCalled();
+      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_CANCELLABLE);
+      expect(result.llmContent).toContain('extract');
+      expect(result.llmContent).toContain('not cancellable');
+    });
+
+    it('returns an error when cancelTask returns false (missing AbortController)', async () => {
+      // The MemoryManager.cancelTask contract returns false when the
+      // AbortController is missing for a running record — a logic-
+      // level invariant violation. task_stop must surface the failure
+      // rather than report a phantom success, otherwise the model
+      // believes the dream is being aborted while it actually keeps
+      // burning tokens.
+      const dreamRecord = {
+        id: 'dream-broken-1',
+        taskType: 'dream' as const,
+        projectRoot: '/p',
+        status: 'running' as const,
+        createdAt: '2026-05-04T12:00:00.000Z',
+        updatedAt: '2026-05-04T12:00:00.000Z',
+      };
+      const memoryManager = {
+        getTask: vi.fn(() => dreamRecord),
+        cancelTask: vi.fn(() => false),
+      };
+      const localConfig = {
+        getBackgroundTaskRegistry: () => registry,
+        abandonBackgroundAgent,
+        getBackgroundShellRegistry: () => shellRegistry,
+        getMonitorRegistry: () => monitorRegistry,
+        getMemoryManager: () => memoryManager,
+      } as unknown as Config;
+      const localTool = new TaskStopTool(localConfig);
+
+      const result = await localTool.validateBuildAndExecute(
+        { task_id: 'dream-broken-1' },
+        new AbortController().signal,
+      );
+
+      expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_INTERNAL_ERROR);
+      expect(result.llmContent).toContain('could not be cancelled');
     });
   });
 });

@@ -33,6 +33,7 @@ import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
+  type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
 
@@ -118,6 +119,13 @@ function rowLabel(entry: DialogEntry): string {
       return `[shell] ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
+    case 'dream': {
+      const sessionsHint =
+        entry.sessionCount !== undefined
+          ? ` reviewing ${entry.sessionCount} session${entry.sessionCount === 1 ? '' : 's'}`
+          : '';
+      return `[dream] memory consolidation${sessionsHint}`;
+    }
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -282,6 +290,14 @@ const DetailBody: React.FC<{
           maxWidth={maxWidth}
         />
       );
+    case 'dream':
+      return (
+        <DreamDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -289,6 +305,189 @@ const DetailBody: React.FC<{
       );
     }
   }
+};
+
+// ─── Dream detail body ─────────────────────────────────────
+//
+// Shows what the agent is reviewing (session count), what it has
+// touched (topic files, only populated on completion), and the latest
+// progress text from MemoryManager. Cancellation is wired through the
+// shared `x stop` keystroke (handled by `cancelSelected` in the
+// context, which routes dream entries to `MemoryManager.cancelTask`).
+// In-flight progress is still static — the dream's fork agent reports
+// only at schedule + completion via MemoryManager.update; live
+// per-turn phase reporting requires extending runForkedAgent's
+// AgentPathParams with an onAssistantMessage callback (separate PR).
+//
+// Layout follows the Shell/Monitor convention — flat children of
+// MaxSizedBox separated by empty `<Box />` spacers (nesting a
+// `flexDirection="column"` container inside MaxSizedBox eats the
+// children silently).
+const DreamDetailBody: React.FC<{
+  entry: DreamDialogEntry;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = 'Dream';
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.sessionCount !== undefined) {
+    dimSubtitleParts.push(
+      `${entry.sessionCount} session${entry.sessionCount === 1 ? '' : 's'}`,
+    );
+  }
+  if (entry.touchedTopics && entry.touchedTopics.length > 0) {
+    dimSubtitleParts.push(
+      `${entry.touchedTopics.length} topic${entry.touchedTopics.length === 1 ? '' : 's'}`,
+    );
+  }
+
+  // Topic file lists can grow for an active session sweep; cap the
+  // displayed slice and add a "+N more" tail rather than letting the
+  // dialog body push the hint footer off-screen.
+  const MAX_TOPICS = 8;
+  const topics = entry.touchedTopics ?? [];
+  const visibleTopics = topics.slice(0, MAX_TOPICS);
+  const hiddenTopicCount = Math.max(0, topics.length - visibleTopics.length);
+  const hasError = Boolean(entry.error);
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${STATUS_VERBS[entry.status]} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      {entry.sessionCount !== undefined && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              Sessions reviewing
+            </Text>
+          </Box>
+          <Box>
+            <Text>{String(entry.sessionCount)}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {entry.progressText && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              Progress
+            </Text>
+          </Box>
+          <Box>
+            <Text wrap="wrap">{entry.progressText}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {topics.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {`Topics touched (${topics.length})`}
+            </Text>
+          </Box>
+          {visibleTopics.map((topic) => (
+            <Box key={topic}>
+              <Text>{`  · ${topic}`}</Text>
+            </Box>
+          ))}
+          {hiddenTopicCount > 0 && (
+            <Box>
+              <Text
+                color={theme.text.secondary}
+              >{`  · +${hiddenTopicCount} more`}</Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              Error
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {/*
+        Lock-release / metadata-write warnings on a successfully-
+        completed dream. Rendered as warnings (not errors) so the
+        terminal status stays Completed; explains why subsequent
+        dreams may be silently skipped as 'locked' (lock release
+        failure) or why the scheduler gate isn't picking up the
+        latest run (metadata write failure).
+      */}
+      {entry.lockReleaseError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.warning}>
+              Lock release warning
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {entry.lockReleaseError}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="wrap">
+              {`Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+      {entry.metadataWriteError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.warning}>
+              Metadata write warning
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {entry.metadataWriteError}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="wrap">
+              {`The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
 };
 
 const AgentDetailBody: React.FC<{
