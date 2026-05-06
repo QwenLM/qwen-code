@@ -163,6 +163,13 @@ export interface StagedFileInfo {
   diffSizes: Map<string, number>;
   deletedFiles: Set<string>;
   /**
+   * Git rename map from old repo-relative path to new repo-relative path.
+   * Populated from `git diff --name-status --find-renames`. Used to move
+   * pending attribution from the pre-rename absolute key to the post-rename
+   * key before payload generation and cleanup.
+   */
+  renamedFiles: Map<string, string>;
+  /**
    * Absolute path of the repository root (`git rev-parse --show-toplevel`).
    * Optional for backward compatibility with synthetic test inputs;
    * production callers should set it so file paths in `files` (which are
@@ -519,6 +526,50 @@ export class CommitAttributionService {
       }
     }
     return matched;
+  }
+
+  /**
+   * Move pending attribution across git renames before matching committed files.
+   *
+   * `recordEdit` stores attribution by canonical absolute path at edit time.
+   * If the user later commits `git mv old.ts new.ts`, git reports the committed
+   * file as `new.ts` while our map is still keyed by `old.ts`. Without moving
+   * the key first, the note either misses the AI-authored rename entirely or
+   * treats the old path as a deletion depending on diff settings.
+   */
+  applyCommittedRenames(
+    renamedFiles: ReadonlyMap<string, string>,
+    canonicalRepoRoot: string,
+  ): void {
+    if (renamedFiles.size === 0) return;
+
+    for (const [key, attr] of [...this.fileAttributions.entries()]) {
+      const rel = path
+        .relative(canonicalRepoRoot, key)
+        .split(path.sep)
+        .join('/');
+      const renamedRel = renamedFiles.get(rel);
+      if (!renamedRel) continue;
+
+      const renamedAbs = realpathOrSelf(
+        path.join(canonicalRepoRoot, ...renamedRel.split('/')),
+      );
+      if (renamedAbs === key) continue;
+
+      const existing = this.fileAttributions.get(renamedAbs);
+      if (existing) {
+        this.fileAttributions.set(renamedAbs, {
+          aiContribution: existing.aiContribution + attr.aiContribution,
+          aiCreated: existing.aiCreated || attr.aiCreated,
+          // Prefer the destination hash: if AI edited after the rename,
+          // that entry reflects the freshest post-write content.
+          contentHash: existing.contentHash || attr.contentHash,
+        });
+      } else {
+        this.fileAttributions.set(renamedAbs, { ...attr });
+      }
+      this.fileAttributions.delete(key);
+    }
   }
 
   // -----------------------------------------------------------------------

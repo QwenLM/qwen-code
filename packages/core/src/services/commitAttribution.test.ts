@@ -28,11 +28,13 @@ function makeStagedInfo(
   files: string[],
   diffSizes?: Record<string, number>,
   deleted?: string[],
+  renamed?: Record<string, string>,
 ): StagedFileInfo {
   return {
     files,
     diffSizes: new Map(Object.entries(diffSizes ?? {})),
     deletedFiles: new Set(deleted ?? []),
+    renamedFiles: new Map(Object.entries(renamed ?? {})),
   };
 }
 
@@ -552,6 +554,47 @@ describe('CommitAttributionService', () => {
       );
       expect(
         service.getFileAttribution('/var/repo/src/deleted.ts'),
+      ).toBeUndefined();
+    });
+
+    it('moves attribution across committed renames before payload generation', () => {
+      const service = CommitAttributionService.getInstance();
+      service.recordEdit('/var/repo/src/old.ts', '', 'renamed content');
+
+      service.applyCommittedRenames(
+        new Map([['src/old.ts', 'src/new.ts']]),
+        '/private/var/repo',
+      );
+
+      expect(
+        service.getFileAttribution('/var/repo/src/old.ts'),
+      ).toBeUndefined();
+      expect(service.getFileAttribution('/var/repo/src/new.ts')).toBeDefined();
+
+      const staged = makeStagedInfo(['src/new.ts'], { 'src/new.ts': 80 }, [], {
+        'src/old.ts': 'src/new.ts',
+      });
+      const note = service.generateNotePayload(staged, '/var/repo');
+      expect(note.files['src/new.ts']!.aiChars).toBe(15);
+      expect(note.files['src/new.ts']!.percent).toBe(19);
+    });
+
+    it('merges old-path attribution into an existing destination entry', () => {
+      const service = CommitAttributionService.getInstance();
+      service.recordEdit('/var/repo/src/old.ts', '', 'old ai text');
+      service.recordEdit('/var/repo/src/new.ts', '', 'new ai text');
+
+      service.applyCommittedRenames(
+        new Map([['src/old.ts', 'src/new.ts']]),
+        '/private/var/repo',
+      );
+
+      const attr = service.getFileAttribution('/var/repo/src/new.ts')!;
+      expect(attr.aiContribution).toBe(
+        'old ai text'.length + 'new ai text'.length,
+      );
+      expect(
+        service.getFileAttribution('/var/repo/src/old.ts'),
       ).toBeUndefined();
     });
 

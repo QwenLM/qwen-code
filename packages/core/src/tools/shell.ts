@@ -2167,6 +2167,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         canonicalBase = baseDir;
       }
 
+      attributionService.applyCommittedRenames(
+        stagedInfo.renamedFiles,
+        canonicalBase,
+      );
+
       // First-pass match: which tracked entries are part of THIS
       // commit? Validation must run against this subset only — a
       // tracked file the user didn't stage isn't in HEAD's new tree
@@ -2409,6 +2414,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       files: [],
       diffSizes: new Map(),
       deletedFiles: new Set(),
+      renamedFiles: new Map(),
     };
 
     // Distinguish a successful git command with no output (e.g.
@@ -2513,21 +2519,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
           return null;
         }
         diffArgs = {
-          name: 'diff --name-only HEAD@{1} HEAD',
-          status: 'diff --name-status HEAD@{1} HEAD',
-          numstat: 'diff --numstat HEAD@{1} HEAD',
+          name: 'diff --find-renames --name-only HEAD@{1} HEAD',
+          status: 'diff --find-renames --name-status HEAD@{1} HEAD',
+          numstat: 'diff --find-renames --numstat HEAD@{1} HEAD',
         };
       } else if (hasParent) {
         diffArgs = {
-          name: 'diff --name-only HEAD~1 HEAD',
-          status: 'diff --name-status HEAD~1 HEAD',
-          numstat: 'diff --numstat HEAD~1 HEAD',
+          name: 'diff --find-renames --name-only HEAD~1 HEAD',
+          status: 'diff --find-renames --name-status HEAD~1 HEAD',
+          numstat: 'diff --find-renames --numstat HEAD~1 HEAD',
         };
       } else {
         diffArgs = {
-          name: 'diff-tree --root --no-commit-id -r --name-only HEAD',
-          status: 'diff-tree --root --no-commit-id -r --name-status HEAD',
-          numstat: 'diff-tree --root --no-commit-id -r --numstat HEAD',
+          name: 'diff-tree --root --find-renames --no-commit-id -r --name-only HEAD',
+          status:
+            'diff-tree --root --find-renames --no-commit-id -r --name-status HEAD',
+          numstat:
+            'diff-tree --root --find-renames --no-commit-id -r --numstat HEAD',
         };
       }
       const [nameOutput, statusOutput, numstatOutput] = await Promise.all([
@@ -2561,9 +2569,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       // Get deleted files
       const deletedFiles = new Set<string>();
+      const renamedFiles = new Map<string, string>();
       for (const line of statusOutput.split('\n')) {
         if (line.startsWith('D\t')) {
           deletedFiles.add(line.slice(2).trim());
+          continue;
+        }
+        const parts = line.split('\t');
+        const status = parts[0] ?? '';
+        if (status.startsWith('R') && parts.length >= 3) {
+          renamedFiles.set(parts[1]!.trim(), parts[2]!.trim());
         }
       }
 
@@ -2587,6 +2602,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         files,
         diffSizes,
         deletedFiles,
+        renamedFiles,
         repoRoot: repoRoot.length > 0 ? repoRoot : undefined,
       };
     } catch {
