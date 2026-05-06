@@ -13,22 +13,10 @@ import * as path from 'node:path';
 import {
   loadServerHierarchicalMemory,
   ConditionalRulesRegistry,
+  expandHomeDir,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
-
-export function expandHomeDir(p: string): string {
-  if (!p) {
-    return '';
-  }
-  let expandedPath = p;
-  if (p.toLowerCase().startsWith('%userprofile%')) {
-    expandedPath = os.homedir() + p.substring('%userprofile%'.length);
-  } else if (p === '~' || p.startsWith('~/')) {
-    expandedPath = os.homedir() + p.substring(1);
-  }
-  return path.normalize(expandedPath);
-}
 
 function findExistingWorkspaceDirectory(
   directory: string,
@@ -310,8 +298,9 @@ export const directoryCommand: SlashCommand = {
         const { services } = context;
         if (!services.config) return [];
         const dirs = services.config.getWorkspaceContext().getDirectories();
-        const initialDirs =
-          services.config.getWorkspaceContext().getInitialDirectories?.() ?? [];
+        const initialDirs = services.config
+          .getWorkspaceContext()
+          .getInitialDirectories();
         return dirs.filter((d) => !initialDirs.includes(d));
       },
       action: async (context: CommandContext, args: string) => {
@@ -344,23 +333,6 @@ export const directoryCommand: SlashCommand = {
 
         const workspaceContext = config.getWorkspaceContext();
 
-        if (
-          workspaceContext.isInitialDirectory?.(directory) ??
-          workspaceContext.getInitialDirectories().includes(directory)
-        ) {
-          addItem(
-            {
-              type: MessageType.ERROR,
-              text: t(
-                'Cannot remove initial workspace directory: {{directory}}',
-                { directory },
-              ),
-            },
-            Date.now(),
-          );
-          return;
-        }
-
         // Expand home directory and resolve to absolute path to match
         // what WorkspaceContext stores internally.
         const expandedDir = expandHomeDir(directory);
@@ -368,13 +340,37 @@ export const directoryCommand: SlashCommand = {
           ? expandedDir
           : path.resolve(expandedDir);
 
-        const removed = workspaceContext.removeDirectory(directory);
+        const canonicalDirectory = (() => {
+          try {
+            return fs.realpathSync(resolvedDirectory);
+          } catch {
+            return resolvedDirectory;
+          }
+        })();
+
+        if (
+          workspaceContext.getInitialDirectories().includes(canonicalDirectory)
+        ) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Cannot remove initial workspace directory: {{directory}}',
+                { directory: canonicalDirectory },
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const removed = workspaceContext.removeDirectory(canonicalDirectory);
         if (!removed) {
           addItem(
             {
               type: MessageType.ERROR,
               text: t('Directory not found in workspace: {{directory}}', {
-                directory,
+                directory: resolvedDirectory,
               }),
             },
             Date.now(),
@@ -383,8 +379,9 @@ export const directoryCommand: SlashCommand = {
         }
 
         try {
+          const workspaceSettings = settings.forScope(SettingScope.Workspace);
           const existingIncludeDirectories =
-            settings.workspace.originalSettings.context?.includeDirectories ??
+            workspaceSettings.originalSettings.context?.includeDirectories ??
             [];
           const includeDirectories = existingIncludeDirectories.filter(
             (d: string) => d !== resolvedDirectory,
@@ -408,10 +405,44 @@ export const directoryCommand: SlashCommand = {
           return;
         }
 
+        try {
+          if (config.shouldLoadMemoryFromIncludeDirectories()) {
+            const { memoryContent, fileCount, conditionalRules, projectRoot } =
+              await loadServerHierarchicalMemory(
+                config.getWorkingDir(),
+                config.getWorkspaceContext().getDirectories(),
+                config.getFileService(),
+                config.getExtensionContextFilePaths(),
+                config.getFolderTrust(),
+                context.services.settings.merged.context?.importFormat ||
+                  'tree',
+                config.getContextRuleExcludes(),
+              );
+            config.setUserMemory(memoryContent);
+            config.setGeminiMdFileCount(fileCount);
+            config.setConditionalRulesRegistry(
+              new ConditionalRulesRegistry(conditionalRules, projectRoot),
+            );
+            context.ui.setGeminiMdFileCount(fileCount);
+          }
+        } catch (error) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Error refreshing memory: {{error}}', {
+                error: (error as Error).message,
+              }),
+            },
+            Date.now(),
+          );
+        }
+
         addItem(
           {
             type: MessageType.INFO,
-            text: t('Removed directory: {{directory}}', { directory }),
+            text: t('Removed directory: {{directory}}', {
+              directory: resolvedDirectory,
+            }),
           },
           Date.now(),
         );

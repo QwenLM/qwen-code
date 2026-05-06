@@ -5,13 +5,35 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { directoryCommand, expandHomeDir } from './directoryCommand.js';
-import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
+import { directoryCommand } from './directoryCommand.js';
+import {
+  type Config,
+  type WorkspaceContext,
+  loadServerHierarchicalMemory,
+  expandHomeDir,
+} from '@qwen-code/qwen-code-core';
 import type { CommandContext } from './types.js';
 import { MessageType } from '../types.js';
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual('node:fs');
+  return {
+    ...actual,
+    realpathSync: vi.fn((p) => p),
+  };
+});
+
+vi.mock('@qwen-code/qwen-code-core', async () => {
+  const actual = await vi.importActual('@qwen-code/qwen-code-core');
+  return {
+    ...actual,
+    loadServerHierarchicalMemory: vi.fn(),
+  };
+});
 
 describe('directoryCommand', () => {
   let mockContext: CommandContext;
@@ -74,11 +96,25 @@ describe('directoryCommand', () => {
             settings: {},
             originalSettings: {},
           },
+          user: {
+            settings: {},
+            originalSettings: {},
+          },
           setValue: vi.fn(),
+          forScope: vi.fn((scope) => {
+            if (scope === SettingScope.Workspace) {
+              return mockContext.services.settings.workspace;
+            }
+            if (scope === SettingScope.User) {
+              return mockContext.services.settings.user;
+            }
+            return { settings: {}, originalSettings: {} };
+          }),
         },
       },
       ui: {
         addItem: vi.fn(),
+        setGeminiMdFileCount: vi.fn(),
       },
     } as unknown as CommandContext;
   });
@@ -367,7 +403,6 @@ describe('directoryCommand', () => {
       mockWorkspaceContext = {
         ...mockWorkspaceContext,
         removeDirectory: vi.fn().mockReturnValue(true),
-        isInitialDirectory: vi.fn().mockReturnValue(false),
         getInitialDirectories: vi
           .fn()
           .mockReturnValue([path.normalize('/home/user/project1')]),
@@ -378,31 +413,21 @@ describe('directoryCommand', () => {
         getWorkspaceContext: () => mockWorkspaceContext,
       } as unknown as Config;
 
-      mockContext = {
-        ...mockContext,
-        services: {
-          ...mockContext.services,
-          config: mockConfig,
-          settings: {
-            ...mockContext.services.settings,
-            workspace: {
-              settings: {},
-              originalSettings: {
-                context: {
-                  includeDirectories: [
-                    path.normalize('/home/user/project1'),
-                    removableDir,
-                  ],
-                },
-              },
-            },
-          },
+      mockContext.services.settings.workspace.originalSettings = {
+        context: {
+          includeDirectories: [
+            path.normalize('/home/user/project1'),
+            removableDir,
+          ],
         },
-      } as unknown as CommandContext;
+      };
 
       if (!removeCommand?.action) throw new Error('No action');
       await removeCommand.action(mockContext, removableDir);
 
+      expect(mockContext.services.settings.forScope).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+      );
       expect(mockWorkspaceContext.removeDirectory).toHaveBeenCalledWith(
         removableDir,
       );
@@ -420,12 +445,115 @@ describe('directoryCommand', () => {
       );
     });
 
+    it('should refresh memory when shouldLoadMemoryFromIncludeDirectories is true', async () => {
+      const removableDir = path.normalize('/home/user/project2');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        getInitialDirectories: vi.fn().mockReturnValue([]),
+      } as unknown as WorkspaceContext;
+
+      const updatedMockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+        shouldLoadMemoryFromIncludeDirectories: () => true,
+        getWorkingDir: () => '/test/dir',
+        getFileService: () => ({}),
+        getExtensionContextFilePaths: () => [],
+        getFolderTrust: () => ({ isTrusted: true }),
+        getContextRuleExcludes: () => [],
+        setUserMemory: vi.fn(),
+        setGeminiMdFileCount: vi.fn(),
+        setConditionalRulesRegistry: vi.fn(),
+      } as unknown as Config;
+
+      mockContext.services.config = updatedMockConfig;
+      mockContext.services.settings.workspace.originalSettings = {
+        context: { includeDirectories: [removableDir] },
+      };
+
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: 'new memory',
+        fileCount: 10,
+        conditionalRules: [],
+        projectRoot: '/test/dir',
+      });
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, removableDir);
+
+      expect(loadServerHierarchicalMemory).toHaveBeenCalled();
+      expect(updatedMockConfig.setUserMemory).toHaveBeenCalledWith(
+        'new memory',
+      );
+      expect(mockContext.ui.setGeminiMdFileCount).toHaveBeenCalledWith(10);
+    });
+
+    it('should correctly resolve relative paths and ~ before checking initial directories', async () => {
+      const initialDir = path.resolve(path.normalize('/home/user/project1'));
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        getInitialDirectories: vi.fn().mockReturnValue([initialDir]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+      } as unknown as Config;
+
+      // Test with a relative path that resolves to the initial directory
+      const relativePath = path.relative(process.cwd(), initialDir);
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, relativePath);
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: `Cannot remove initial workspace directory: ${initialDir}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should correctly handle symlinks when checking initial directories', async () => {
+      const initialDir = path.normalize('/home/user/project1');
+      const symlinkDir = path.normalize('/home/user/link-to-project1');
+
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        getInitialDirectories: vi.fn().mockReturnValue([initialDir]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+      } as unknown as Config;
+
+      // Mock fs.realpathSync to return the target directory for the symlink
+      vi.mocked(fs.realpathSync).mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('link-to-project1'))
+          return initialDir;
+        return p as string;
+      });
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, symlinkDir);
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: `Cannot remove initial workspace directory: ${initialDir}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('should show error when settings update fails after removal', async () => {
       const removableDir = path.normalize('/home/user/project2');
       mockWorkspaceContext = {
         ...mockWorkspaceContext,
         removeDirectory: vi.fn().mockReturnValue(true),
-        isInitialDirectory: vi.fn().mockReturnValue(false),
         getInitialDirectories: vi
           .fn()
           .mockReturnValue([path.normalize('/home/user/project1')]),
@@ -437,25 +565,14 @@ describe('directoryCommand', () => {
       } as unknown as Config;
 
       const settingsError = new Error('write failed');
-      mockContext = {
-        ...mockContext,
-        services: {
-          ...mockContext.services,
-          config: mockConfig,
-          settings: {
-            ...mockContext.services.settings,
-            workspace: {
-              settings: {},
-              originalSettings: {
-                context: { includeDirectories: [removableDir] },
-              },
-            },
-            setValue: vi.fn().mockImplementation(() => {
-              throw settingsError;
-            }),
-          },
+      mockContext.services.settings.workspace.originalSettings = {
+        context: { includeDirectories: [removableDir] },
+      };
+      vi.mocked(mockContext.services.settings.setValue).mockImplementation(
+        () => {
+          throw settingsError;
         },
-      } as unknown as CommandContext;
+      );
 
       if (!removeCommand?.action) throw new Error('No action');
       await removeCommand.action(mockContext, removableDir);
