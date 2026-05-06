@@ -41,6 +41,12 @@ interface HeaderProps {
    * default brand and is dropped when a custom title is set.
    */
   customBannerTitle?: string;
+  /**
+   * Sanitized subtitle string rendered between the title and the
+   * auth/model line. When undefined the existing blank spacer row is
+   * preserved so unset users see the same layout as before.
+   */
+  customBannerSubtitle?: string;
   version: string;
   authDisplayType?: AuthDisplayType;
   model: string;
@@ -50,6 +56,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   customAsciiArt,
   customBannerTitle,
+  customBannerSubtitle,
   version,
   authDisplayType,
   model,
@@ -181,8 +188,14 @@ export const Header: React.FC<HeaderProps> = ({
           </Text>
           <Text color={theme.text.secondary}> (v{version})</Text>
         </Text>
-        {/* Empty line for spacing */}
-        <Text> </Text>
+        {/* Subtitle (when set) replaces the blank spacer row. We always
+            emit a row here so the auth/model line stays at the same
+            vertical position regardless of whether the subtitle is set. */}
+        {customBannerSubtitle ? (
+          <Text color={theme.text.secondary}>{customBannerSubtitle}</Text>
+        ) : (
+          <Text> </Text>
+        )}
         {/* Auth and Model line */}
         <Text>
           <Text color={theme.text.secondary}>{authModelText}</Text>

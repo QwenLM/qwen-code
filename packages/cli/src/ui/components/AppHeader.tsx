@@ -80,6 +80,7 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
           workingDirectory={targetDir}
           customAsciiArt={resolvedBanner?.asciiArt}
           customBannerTitle={resolvedBanner?.title}
+          customBannerSubtitle={resolvedBanner?.subtitle}
         />
       )}
       {showTips && <Tips />}

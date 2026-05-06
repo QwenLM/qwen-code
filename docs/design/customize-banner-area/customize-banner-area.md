@@ -57,10 +57,15 @@ The two top-level boxes are:
 - **A. Logo column** — a single ASCII art block with a gradient. Sourced
   today from `shortAsciiLogo` in
   `packages/cli/src/ui/components/AsciiArt.ts`.
-- **B. Info panel** — a bordered box containing three lines:
+- **B. Info panel** — a bordered box containing four rows. The second
+  row is a blank visual spacer by default, optionally swapped for a
+  caller-supplied subtitle:
   - **B①** Title: `>_ Qwen Code (vX.Y.Z)` — brand text + version suffix.
-  - **B②** Status: `<auth display type> | <model> ( /model to change)`.
-  - **B③** Path: a tildeified, shortened working directory.
+  - **B②** Subtitle / spacer: blank single-space row by default. When
+    `ui.customBannerSubtitle` is set, that string takes this row (e.g.
+    a fork might use `Built-in DataWorks Official Skills`).
+  - **B③** Status: `<auth display type> | <model> ( /model to change)`.
+  - **B④** Path: a tildeified, shortened working directory.
 
 The whole thing is wrapped by `<AppHeader>`, which already gates the
 banner on `showBanner = !config.getScreenReader()` (screen-reader mode
@@ -73,17 +78,19 @@ falls back to plain output).
 | **A. Logo column**                          | `shortAsciiLogo` (`AsciiArt.ts`)    | **Replaceable + auto-hideable** | Pure brand surface. White-label needs full control over the visual. The existing "auto-hide on narrow terminals" fallback is preserved.                                                                      |
 | **B①. Title — brand text** (`>_ Qwen Code`) | Hard-coded in `Header.tsx`          | **Replaceable**                 | Brand surface. The leading `>_` glyph is part of the existing brand; if a user wants it gone, they simply omit it from `customBannerTitle`.                                                                  |
 | **B①. Title — version suffix** (`(vX.Y.Z)`) | `version` prop                      | **Locked**                      | Critical for bug reports. Hiding it makes "what version are you on?" answerable only via `--version`, which is a real cost in support workflows. We trade a small white-label loss for support tractability. |
-| **B②. Status line** (auth + model)          | `formattedAuthType`, `model` props  | **Locked**                      | Operational and security signal. Users must always see which credential is in use and which model will spend their tokens. Suppressing it is a footgun even for white-label scenarios.                       |
-| **B③. Path line** (working directory)       | `workingDirectory` prop             | **Locked**                      | Operational. "Which directory am I in?" is a constant question; the banner is its canonical answer.                                                                                                          |
+| **B②. Subtitle / spacer row**               | blank by default                    | **Replaceable**                 | Pure brand / context surface. Used by white-label forks to label the build (e.g. "Built-in DataWorks Official Skills"). Sanitized like the title; one line only — no layout-breaking newlines.               |
+| **B③. Status line** (auth + model)          | `formattedAuthType`, `model` props  | **Locked**                      | Operational and security signal. Users must always see which credential is in use and which model will spend their tokens. Suppressing it is a footgun even for white-label scenarios.                       |
+| **B④. Path line** (working directory)       | `workingDirectory` prop             | **Locked**                      | Operational. "Which directory am I in?" is a constant question; the banner is its canonical answer.                                                                                                          |
 | **Whole banner** (A + B)                    | `<Header>` mount in `AppHeader.tsx` | **Hideable**                    | A single `ui.hideBanner: true` skips both regions — same shape as the existing screen-reader gate. `<Tips>` continues to be governed independently by `ui.hideTips`.                                         |
 
-The matrix translates to three settings, no more:
+The matrix translates to four settings, no more:
 
-| Setting                | Default | Effect                                                                                                             | Region affected |
-| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------ | --------------- |
-| `ui.hideBanner`        | `false` | Hides the entire banner (regions A + B).                                                                           | A + B           |
-| `ui.customBannerTitle` | unset   | Replaces the brand text in B①. The version suffix is still appended. Trimmed; an empty string means "use default". | B① brand text   |
-| `ui.customAsciiArt`    | unset   | Replaces region A. Three accepted shapes (see below). Falls back to default on any error.                          | A               |
+| Setting                   | Default | Effect                                                                                                                               | Region affected |
+| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ | --------------- |
+| `ui.hideBanner`           | `false` | Hides the entire banner (regions A + B).                                                                                             | A + B           |
+| `ui.customBannerTitle`    | unset   | Replaces the brand text in B①. The version suffix is still appended. Trimmed; an empty string means "use default".                   | B① brand text   |
+| `ui.customBannerSubtitle` | unset   | Replaces the blank spacer row B② with a one-line subtitle. Sanitized; capped at 160 characters; empty means "keep the blank spacer". | B② spacer       |
+| `ui.customAsciiArt`       | unset   | Replaces region A. Three accepted shapes (see below). Falls back to default on any error.                                            | A               |
 
 What is **not** offered, by design:
 
@@ -101,12 +108,14 @@ fields above.
 
 ### Limits at a glance
 
-Three caps apply to every banner customization. Keep them in mind before
-hand-crafting art so the resolver doesn't truncate or reject your input.
+A handful of caps apply to every banner customization. Keep them in mind
+before hand-crafting art so the resolver doesn't truncate or reject
+your input.
 
 | What                             | Limit                                                                                                                                                                       |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Title character count**        | **80 characters max** (post-sanitize). Anything longer is truncated and a `[BANNER]` warn is logged. Newlines and control chars are stripped before this length is counted. |
+| **Subtitle character count**     | **160 characters max** (post-sanitize). Same cleanup pipeline as the title; same `[BANNER]` warn on truncation.                                                             |
 | **ASCII art block size**         | **200 lines × 200 columns max** per tier. Anything larger is truncated to fit and a `[BANNER]` warn is logged.                                                              |
 | **ASCII art file size on disk**  | **64 KB max**. Larger files are read up to the cap; the rest is ignored.                                                                                                    |
 | **ASCII art width that renders** | Driven by terminal columns at startup, **not** a fixed character count. See "How wide can the logo be?" below for the formula and per-terminal numbers.                     |
@@ -118,7 +127,7 @@ a denser font in another; the limiting factor is visual width, not letters.
 
 ### Where settings live
 
-All three settings live under `ui` in `settings.json`. Both user-level
+All four settings live under `ui` in `settings.json`. Both user-level
 (`~/.qwen/settings.json`) and workspace-level (`.qwen/settings.json` in
 the project root) are supported with the standard merge precedence
 (workspace overrides user, system overrides workspace).
@@ -166,6 +175,42 @@ still render unless `ui.hideTips` is also `true`.
 Renders as `Acme CLI (vX.Y.Z)` in the info panel. The `>_` glyph is
 removed when a custom title is set; if you want it back, include it
 yourself: `"customBannerTitle": ">_ Acme CLI"`.
+
+### Add a brand subtitle
+
+```jsonc
+{
+  "ui": {
+    "customBannerSubtitle": "Built-in DataWorks Official Skills",
+  },
+}
+```
+
+Renders the subtitle on its own row, in the secondary text color, in
+place of the blank spacer that normally sits between the title and the
+auth/model line:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ DataWorks DataAgent (vX.Y.Z)                            │  ← B① title
+│ Built-in DataWorks Official Skills                      │  ← B② subtitle
+│ Qwen OAuth | qwen-coder ( /model to change)             │  ← B③ status
+│ ~/projects/example                                      │  ← B④ path
+└─────────────────────────────────────────────────────────┘
+```
+
+Constraints:
+
+- Single line only. Newlines and other control bytes are stripped /
+  folded to spaces so a paste accident can't break the info-panel
+  layout.
+- Sanitized capped at 160 characters (looser than the title cap because
+  taglines / "powered by" lines often run a bit long).
+- Leave the field unset (or set it to an empty string / whitespace)
+  to keep the existing blank spacer row — back-compat is the default.
+- The subtitle does not change which lines are locked; auth, model,
+  and working directory are always visible regardless of subtitle
+  state.
 
 ### Replace the ASCII art — inline string
 

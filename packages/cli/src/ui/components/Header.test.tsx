@@ -101,6 +101,33 @@ describe('<Header />', () => {
     expect(lastFrame()).toContain('██╔═══██╗');
   });
 
+  it('renders the custom subtitle in place of the blank spacer row', () => {
+    const { lastFrame } = render(
+      <Header
+        {...defaultProps}
+        customBannerSubtitle="Built-in DataWorks Official Skills"
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Built-in DataWorks Official Skills');
+    // Subtitle sits between the title and the auth line.
+    const titleIdx = frame.indexOf('>_ Qwen Code');
+    const subtitleIdx = frame.indexOf('Built-in DataWorks Official Skills');
+    const authIdx = frame.indexOf('Qwen OAuth');
+    expect(titleIdx).toBeLessThan(subtitleIdx);
+    expect(subtitleIdx).toBeLessThan(authIdx);
+  });
+
+  it('keeps the blank spacer row when no subtitle is set (back-compat)', () => {
+    const { lastFrame } = render(<Header {...defaultProps} />);
+    const frame = lastFrame() ?? '';
+    // Title and auth still both render at their usual positions; the
+    // spacer between them is just whitespace-padding, so we assert the
+    // visible chrome the user sees.
+    expect(frame).toContain('>_ Qwen Code');
+    expect(frame).toContain('Qwen OAuth');
+  });
+
   it('renders the custom banner title in place of the default brand', () => {
     const { lastFrame } = render(
       <Header {...defaultProps} customBannerTitle="Acme CLI" />,

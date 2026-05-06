@@ -774,6 +774,16 @@ const SETTINGS_SCHEMA = {
           'Replace the default ">_ Qwen Code" title shown in the banner info panel. The version suffix is always appended.',
         showInDialog: false,
       },
+      customBannerSubtitle: {
+        type: 'string',
+        label: 'Custom Banner Subtitle',
+        category: 'UI',
+        requiresRestart: false,
+        default: '' as string,
+        description:
+          'Optional subtitle line rendered between the banner title and the auth/model line. When unset, the info panel keeps its blank spacer row.',
+        showInDialog: false,
+      },
       customAsciiArt: {
         type: 'object',
         label: 'Custom ASCII Art',

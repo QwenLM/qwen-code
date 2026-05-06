@@ -399,6 +399,55 @@ describe('resolveCustomBanner', () => {
     );
     expect(out.title).toBe('Line1 Line2');
   });
+
+  it('returns subtitle undefined when nothing is configured', () => {
+    const out = resolveCustomBanner(makeSettings({}));
+    expect(out.subtitle).toBeUndefined();
+  });
+
+  it('sanitizes the subtitle and trims whitespace', () => {
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: {
+          customBannerSubtitle: '  \x1b[31mPowered by something\x1b[0m  ',
+        },
+      }),
+    );
+    expect(out.subtitle).toBe('Powered by something');
+  });
+
+  it('caps the subtitle at 160 characters (looser than title for taglines)', () => {
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: { customBannerSubtitle: 'x'.repeat(400) },
+      }),
+    );
+    expect(out.subtitle?.length).toBe(160);
+  });
+
+  it('treats empty subtitle as undefined (header keeps the blank spacer row)', () => {
+    const out = resolveCustomBanner(
+      makeSettings({ userUi: { customBannerSubtitle: '   ' } }),
+    );
+    expect(out.subtitle).toBeUndefined();
+  });
+
+  it('strips newlines and C1 controls from the subtitle', () => {
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: { customBannerSubtitle: 'Line1\nLine2\x9b31m end' },
+      }),
+    );
+    // Newline folds to a single space; the 0x9b (single-byte CSI) is
+    // replaced with a space; the literal "31m" parameter chars survive
+    // as plain text (they were never going to be interpreted without the
+    // leading control byte) — exactly the same shape the title sanitizer
+    // produces for the equivalent input.
+    expect(out.subtitle).not.toMatch(/[\x80-\x9f]/);
+    expect(out.subtitle).not.toContain('\n');
+    expect(out.subtitle).toContain('Line1 Line2');
+    expect(out.subtitle).toContain('end');
+  });
 });
 
 describe('pickAsciiArtTier', () => {

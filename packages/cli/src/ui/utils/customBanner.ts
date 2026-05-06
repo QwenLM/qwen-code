@@ -23,10 +23,24 @@ const MAX_ART_LINES = 200;
 const MAX_ART_COLS = 200;
 /** Hard cap on title length after sanitization. */
 const MAX_TITLE_LENGTH = 80;
+/**
+ * Hard cap on subtitle length after sanitization. Larger than the title cap
+ * because the subtitle commonly carries a tagline / "powered by" line that
+ * runs longer than the brand name itself; still bounded so a single
+ * pasted paragraph can't blow out the info panel.
+ */
+const MAX_SUBTITLE_LENGTH = 160;
 
 export interface ResolvedBanner {
   asciiArt: { small?: string; large?: string };
   title?: string;
+  /**
+   * Optional subtitle rendered between the title and the auth/model line.
+   * Sanitized like the title (control sequences stripped, newlines folded
+   * to spaces). When undefined, `<Header />` keeps the existing blank
+   * spacer row for back-compat.
+   */
+  subtitle?: string;
 }
 
 /**
@@ -48,6 +62,7 @@ export function resolveCustomBanner(settings: LoadedSettings): ResolvedBanner {
   const cache = new Map<string, CacheEntry>();
 
   const title = sanitizeTitle(ui?.customBannerTitle);
+  const subtitle = sanitizeSubtitle(ui?.customBannerSubtitle);
 
   // Tiers are resolved per-scope so each `{path}` resolves against the file
   // it was declared in — not the merged view, which would hide which scope
@@ -64,6 +79,7 @@ export function resolveCustomBanner(settings: LoadedSettings): ResolvedBanner {
         resolveTier(scoped.large.source, scoped.large.dir, cache),
     },
     title,
+    subtitle,
   };
 }
 
@@ -315,24 +331,46 @@ function sanitizeArt(input: string): string {
 }
 
 function sanitizeTitle(raw: unknown): string | undefined {
+  return sanitizeSingleLine(raw, MAX_TITLE_LENGTH, 'ui.customBannerTitle');
+}
+
+function sanitizeSubtitle(raw: unknown): string | undefined {
+  return sanitizeSingleLine(
+    raw,
+    MAX_SUBTITLE_LENGTH,
+    'ui.customBannerSubtitle',
+  );
+}
+
+/**
+ * Shared cleaner for any single-line info-panel string (title, subtitle).
+ * Strips OSC / CSI / SS2 / SS3 leaders, replaces every other C0 / C1
+ * control byte (and DEL) with a space, then folds any internal whitespace
+ * (including the newlines we just dropped from controls) into a single
+ * space and trims the ends. Returns `undefined` for empty input so
+ * `<Header />` knows to fall back to its default rendering.
+ */
+function sanitizeSingleLine(
+  raw: unknown,
+  maxLength: number,
+  fieldLabel: string,
+): string | undefined {
   if (typeof raw !== 'string') return undefined;
   /* eslint-disable no-control-regex */
   let t = raw
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ' ')
     .replace(/\x1b\[[\d;?]*[a-zA-Z]/g, ' ')
     .replace(/\x1b[NOP]/g, ' ')
-    // C0 + DEL + C1 controls. Titles never need newlines or tabs (they live
-    // on a single line of the info panel) so the range is denser than the
-    // art sanitizer's.
+    // C0 + DEL + C1 controls. Single-line fields never need newlines or
+    // tabs (they live on a single line of the info panel) so the range is
+    // denser than the art sanitizer's.
     .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
   /* eslint-enable no-control-regex */
   t = t.replace(/\s+/g, ' ').trim();
   if (!t) return undefined;
-  if (t.length > MAX_TITLE_LENGTH) {
-    debugLogger.warn(
-      `Truncated ui.customBannerTitle to ${MAX_TITLE_LENGTH} characters.`,
-    );
-    t = t.slice(0, MAX_TITLE_LENGTH);
+  if (t.length > maxLength) {
+    debugLogger.warn(`Truncated ${fieldLabel} to ${maxLength} characters.`);
+    t = t.slice(0, maxLength);
   }
   return t;
 }
