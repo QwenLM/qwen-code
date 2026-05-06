@@ -706,6 +706,14 @@ export class SubagentManager {
       // distinct instance triggers the lazy-init in
       // `Config.getFileReadCache()` so the subagent gets its own
       // cache rather than inheriting the parent's.
+      //
+      // Same caveat as in `agent.ts:createApprovalModeOverride`: the
+      // tool registry was bound on the parent at initialise time, so
+      // tool invocations still resolve `this.config` to the parent
+      // and reach the parent's cache. `InProcessBackend.createPerAgentConfig`
+      // already rebuilds the registry via `override.createToolRegistry()`
+      // + `copyDiscoveredToolsFrom(base.getToolRegistry())`; doing
+      // that here is the follow-up that closes the bound-tool path.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const isolated = Object.create(base) as any;
       return isolated as Config;
