@@ -7,26 +7,8 @@
 import type { Part } from '@google/genai';
 import { ToolNames } from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Config, Kind } from '@qwen-code/qwen-code-core';
+import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 import type { ExportMessage, ExportSessionData } from './types.js';
-
-function buildTruncatedDiffExportText(
-  display: Record<string, unknown>,
-): string {
-  const fileName =
-    typeof display['fileName'] === 'string'
-      ? display['fileName']
-      : 'the edited file';
-  const fileDiffLength =
-    typeof display['fileDiffLength'] === 'number'
-      ? ` Original fileDiff length: ${display['fileDiffLength']} chars.`
-      : '';
-
-  if (display['fileDiffTruncated'] === true) {
-    return `Full diff omitted from saved session history for ${fileName}.${fileDiffLength}`;
-  }
-
-  return `Saved session preview only for ${fileName}; full original and new file contents are unavailable.`;
-}
 
 /**
  * Normalizes export session data by merging tool call information from tool_result records.
@@ -308,7 +290,7 @@ function extractDiffContent(
           type: 'content',
           content: {
             type: 'text',
-            text: buildTruncatedDiffExportText(display),
+            text: buildTruncatedDiffPreviewText(display),
           },
         },
       ];
