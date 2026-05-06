@@ -15,12 +15,13 @@ import type { Config } from '../config/config.js';
 import {
   sanitizeName,
   formatAgentId,
-  writeTeamFile,
+  createTeamFile,
 } from '../agents/team/teamHelpers.js';
 import { resetTaskList } from '../agents/team/tasks.js';
 import { clearAllInboxes } from '../agents/team/mailbox.js';
 import { TeamManager } from '../agents/team/TeamManager.js';
 import { InProcessBackend } from '../agents/backends/InProcessBackend.js';
+import { isNodeError } from '../utils/errors.js';
 import type { TeamFile, TeamContext } from '../agents/team/types.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 
@@ -88,8 +89,30 @@ class TeamCreateInvocation extends BaseToolInvocation<
       members: [],
     };
 
-    // Persist team file, reset tasks, and clear stale inboxes.
-    await writeTeamFile(teamName, teamFile);
+    // Atomically create the team file. EEXIST means a different
+    // qwen-code session already owns this team name — the
+    // in-process guard above only checks the current Config, so
+    // without `wx` two simultaneous sessions opening the same
+    // team would silently clobber each other's tasks and inboxes.
+    try {
+      await createTeamFile(teamName, teamFile);
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'EEXIST') {
+        const msg =
+          `Team "${teamName}" already exists (likely owned by ` +
+          `another qwen-code session). Choose a different name, ` +
+          `or run team_delete first if you're sure no other ` +
+          `session is using it.`;
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+      throw err;
+    }
+
+    // Reset tasks and inboxes only after the team file is ours.
     await resetTaskList(teamName);
     await clearAllInboxes(teamName);
 

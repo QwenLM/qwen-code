@@ -236,6 +236,10 @@ export async function readTeamFile(
 
 /**
  * Write a team file to disk. Creates parent directories if needed.
+ *
+ * Used for updates after the team exists. For initial creation,
+ * prefer `createTeamFile` which refuses to clobber an existing
+ * file (cross-session safety).
  */
 export async function writeTeamFile(
   teamName: string,
@@ -248,6 +252,25 @@ export async function writeTeamFile(
     JSON.stringify(teamFile, null, 2) + '\n',
     'utf-8',
   );
+}
+
+/**
+ * Atomically create a team file. Throws ENOENT-equivalent
+ * `EEXIST` if a different qwen-code session already owns the
+ * team name — `team_create`'s in-process guard only checks the
+ * current Config, so without this two sessions opening the same
+ * team name would silently clobber each other's state.
+ */
+export async function createTeamFile(
+  teamName: string,
+  teamFile: TeamFile,
+): Promise<void> {
+  const filePath = getTeamFilePath(teamName);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(teamFile, null, 2) + '\n', {
+    encoding: 'utf-8',
+    flag: 'wx',
+  });
 }
 
 /**
