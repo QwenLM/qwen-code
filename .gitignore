@@ -28,6 +28,7 @@ package-lock.json
 CLAUDE.md
 
 # Qwen Code Configs
+
 .qwen/*
 !.qwen/commands/
 !.qwen/commands/**
@@ -35,10 +36,15 @@ CLAUDE.md
 !.qwen/skills/**
 !.qwen/agents/
 !.qwen/agents/**
+!.qwen/chat-src/
+!.qwen/chat-src/**
 
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Log files
+logs/
 
 # TypeScript build info files
 *.tsbuildinfo
@@ -64,16 +70,6 @@ packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
 
-.qwen/*
-!.qwen/commands/
-!.qwen/commands/**
-!.qwen/skills/
-!.qwen/skills/**
-!.qwen/agents/
-!.qwen/agents/**
-!.qwen/chat-src/
-!.qwen/chat-src/**
-logs/
 # GHA credentials
 gha-creds-*.json
 

@@ -177,11 +177,11 @@ assert(prodAll.includes('yes/no') || prodAll.includes('yes') || prodAll.includes
 console.log('\n[8.5] New feature keyword presence');
 assert(prodAll.includes('malformed') || prodAll.includes('corrupt'), 'Production has malformed JSON handling');
 assert(prodAll.includes('WSL') || prodAll.includes('/proc/version'), 'Production has WSL detection');
-assert(prodAll.includes('cwd') && prodAll.includes('project'), 'Production has cwd-based project verification');
-assert(prodAll.includes('Unexpected token') || prodAll.includes('token'), 'Production has argument validation');
+assert(prodAll.includes('belongs to another project'), 'Production has cwd-based project verification');
+assert(prodAll.includes('Unexpected token'), 'Production has argument validation');
 assert(prodAll.includes('runtimeBase') || prodAll.includes('QWEN_RUNTIME_DIR'), 'Production has runtimeBase resolution');
-assert(prodAll.includes('wslpath') || prodAll.includes('-w'), 'Production has WSL path conversion');
-assert(prodAll.includes('unsafe') || prodAll.includes('metacharacter'), 'Production has path safety validation');
+assert(prodAll.includes('wslpath'), 'Production has WSL path conversion');
+assert(prodAll.includes('unsafe characters') && prodAll.includes('Aborted'), 'Production has path safety validation');
 
 // ── [9] Design doc completeness ─────────────────────────────────────
 console.log('\n[9] Design document (CHAT-DESIGN.md)');
