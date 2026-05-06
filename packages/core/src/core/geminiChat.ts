@@ -398,6 +398,10 @@ export class GeminiChat {
         info,
         compressedHistory: newHistory,
       });
+      // Auto-compaction replaces history in place — no env-context refresh
+      // here. Manual /compress goes through GeminiClient.tryCompressChat,
+      // which calls startChat() to re-prepend a fresh env snapshot. See
+      // GeminiClient.sendMessageStream for the rationale behind the split.
       this.setHistory(newHistory);
       // Compaction summarises away prior full-Read tool results, but the
       // FileReadCache still treats those reads as "in this conversation".
@@ -508,7 +512,7 @@ export class GeminiChat {
           yield {
             type: StreamEventType.COMPRESSED,
             info: compressionInfo,
-          } as StreamEvent;
+          };
         }
 
         let lastError: unknown = new Error('Request failed after all retries.');
