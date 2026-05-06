@@ -703,6 +703,51 @@ describe('ShellExecutionService', () => {
       expect(exitDisposableStub.dispose).toHaveBeenCalled();
     });
 
+    it('post-exit race: PTY background-promote refuses if process.kill(pid, 0) reports the pid is gone', async () => {
+      // Mirror of the child_process post-exit race test. The PTY may
+      // have already exited but our `exitDisposable` (onExit) handler
+      // hasn't run yet — node-pty delivers the exit event async after
+      // the native SIGCHLD. Promoting in that window would detach our
+      // exit listener, miss the real exit status, and report
+      // `promoted: true` for a dead PTY. Production guard:
+      // process.kill(pid, 0); if it throws ESRCH, fall through.
+      mockProcessKill.mockImplementationOnce((pid, signal) => {
+        // Only fail the very first liveness probe with signal 0 — let
+        // any subsequent kill calls (e.g. cleanup() at process exit)
+        // succeed so the test teardown stays clean.
+        if (signal === 0) {
+          throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+        }
+        return true;
+      });
+      const { result } = await simulateExecution(
+        'fast-and-cancelled',
+        (pty, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+          // Drain the pending onExit (production code falls through;
+          // normal exit path resolves with the real exit info).
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: undefined });
+        },
+      );
+
+      // Result is the normal exit shape, not the promoted shape.
+      expect(result.promoted).toBeUndefined();
+      expect(result.exitCode).toBe(0);
+      // Our PTY listeners stayed registered — the disposables are
+      // disposed by the natural onExit, not the abort handler.
+      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      // dataDisposable is NOT disposed by our abort handler in the
+      // race-fallthrough path (the normal onExit handler doesn't
+      // dispose it either — it relies on the PTY tearing down its own
+      // event source). What matters is that we did NOT pre-dispose it
+      // and lose the exit info.
+      void dataDisposableStub; // referenced for the future expansion
+    });
+
     it("post-promotion: ptyProcess error listener is removed via 'removeListener', NOT 'off' (regression guard for @lydell/node-pty)", async () => {
       // node EventEmitter exposes both `off` (Node 10+) and the legacy
       // `removeListener`, but @lydell/node-pty's IPty interface only

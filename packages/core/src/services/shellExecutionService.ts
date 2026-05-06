@@ -1121,6 +1121,24 @@ export class ShellExecutionService {
 
         const performBackgroundPromote = async (): Promise<void> => {
           if (!ptyProcess.pid || exited) return;
+          // Race guard mirroring the child_process path: the PTY may
+          // have already exited but `exitDisposable` (our onExit
+          // handler) has not yet run — node-pty delivers the exit
+          // event asynchronously after the PTY's native SIGCHLD. The
+          // IPty interface doesn't expose an `exitCode` field we can
+          // read directly, so use `process.kill(pid, 0)` as a
+          // best-effort liveness check (it throws ESRCH if the pid
+          // is gone, EPERM if it's not ours / not reusable). If the
+          // PTY is gone, fall through and let the pending onExit
+          // callback resolve normally with the real exit status.
+          if (!ShellExecutionService.isPtyActive(ptyProcess.pid)) {
+            debugLogger.debug(
+              `Background-promote requested for PTY pid ${ptyProcess.pid} ` +
+                `but the process is no longer alive (process.kill(pid, 0) ` +
+                `failed); falling through to normal exit-handled resolution.`,
+            );
+            return;
+          }
           // Skip kill, dispose all our listeners on the live PTY (so
           // post-promote data/exit/error don't leak into our foreground
           // onOutputEvent or crash via the error handler's `throw err`),
