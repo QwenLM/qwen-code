@@ -256,6 +256,10 @@ Options:
   --out-dir PATH         Output directory. Defaults to dist/standalone.
   --runtime-dir PATH     Temporary Node.js runtime download directory.
   --node-version VERSION Node.js version to download. Defaults to current Node.
+
+Host requirements:
+  Linux Node.js runtimes are downloaded as tar.xz archives, so the host
+  needs xz support (Ubuntu/Debian: xz-utils; Alpine: xz; macOS/Windows: built-in).
 `);
 }
 

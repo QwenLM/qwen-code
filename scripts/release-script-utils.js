@@ -28,22 +28,44 @@ function parseCliArgs(argv, options, defaults = {}) {
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    const option = options[arg];
+
+    let key = arg;
+    let inlineValue;
+    if (arg.startsWith('--')) {
+      const equalsIndex = arg.indexOf('=');
+      if (equalsIndex > -1) {
+        key = arg.slice(0, equalsIndex);
+        inlineValue = arg.slice(equalsIndex + 1);
+      }
+    }
+
+    const option = options[key];
     if (!option) {
       fail(`Unknown option: ${arg}`);
     }
 
     if (option.type === 'boolean') {
+      if (inlineValue !== undefined) {
+        fail(`${key} does not accept a value`);
+      }
       args[option.name] = true;
       continue;
     }
 
-    const value = readOptionValue(argv, index, arg);
+    let value;
+    if (inlineValue !== undefined) {
+      if (inlineValue === '') {
+        fail(`${key} requires a value`);
+      }
+      value = inlineValue;
+    } else {
+      value = readOptionValue(argv, index, key);
+      index += 1;
+    }
     if (option.validate) {
       option.validate(value);
     }
     args[option.name] = value;
-    index += 1;
   }
 
   return args;

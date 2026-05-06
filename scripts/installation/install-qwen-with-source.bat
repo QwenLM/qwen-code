@@ -359,7 +359,8 @@ exit /b 0
 
 :UrlExists
 set "QWEN_CHECK_URL=%~1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+rem Prefer Tls12+Tls13; fall back to Tls12 alone on older .NET Framework where the Tls13 enum is missing.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_CHECK_URL="
 exit /b %PS_STATUS%
@@ -367,7 +368,8 @@ exit /b %PS_STATUS%
 :DownloadFile
 set "QWEN_DOWNLOAD_URL=%~1"
 set "QWEN_DOWNLOAD_DEST=%~2"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $client = New-Object Net.WebClient; $client.DownloadFile($env:QWEN_DOWNLOAD_URL, $env:QWEN_DOWNLOAD_DEST); exit 0 } catch { exit 1 }"
+rem Prefer Tls12+Tls13; fall back to Tls12 alone on older .NET Framework where the Tls13 enum is missing.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $client = New-Object Net.WebClient; $client.DownloadFile($env:QWEN_DOWNLOAD_URL, $env:QWEN_DOWNLOAD_DEST); exit 0 } catch { exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="
@@ -608,6 +610,10 @@ if !ERRORLEVEL! NEQ 0 (
     exit /b 1
 )
 
+rem SAFETY: this writer expands !INSTALL_DIR! / !INSTALL_BIN_DIR! into a generated
+rem .cmd file. :ValidateOptions must continue to reject delayed-expansion sentinels
+rem (`!`) and other shell-metacharacters in those values; if that validator is ever
+rem loosened, the wrapper write below becomes a command injection sink.
 (
 echo @echo off
 echo call "!INSTALL_DIR!\bin\qwen.cmd" %%*

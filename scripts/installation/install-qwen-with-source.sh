@@ -616,6 +616,15 @@ validate_archive_entry_path() {
         entry="${entry#./}"
     done
 
+    # Reject entries containing CR/LF so a `..\r` or `..\n` entry cannot
+    # bypass the literal `..` glob below.
+    case "${entry}" in
+        *$'\r'*|*$'\n'*)
+            log_error "Archive contains unsafe path with control character: ${entry}"
+            return 1
+            ;;
+    esac
+
     case "${entry}" in
         ""|/*|..|../*|*/..|*/../*|*\\*)
             log_error "Archive contains unsafe path: ${entry:-<empty>}"

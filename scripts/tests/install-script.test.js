@@ -93,6 +93,9 @@ describe('installation scripts', () => {
     );
     expect(script).toContain('validate_archive_contents()');
     expect(script).toContain('Archive contains unsafe path');
+    expect(script).toContain(
+      'Archive contains unsafe path with control character',
+    );
     expect(script).toContain('qwen-code-${target}');
     expect(script).toContain('*.tar.xz)');
     expect(script).toContain('METHOD="${METHOD:-detect}"');
@@ -200,7 +203,10 @@ describe('installation scripts', () => {
     );
     expect(script).toContain("$ErrorActionPreference = 'Stop'; try");
     expect(script).toContain(
-      '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL)',
+      '[Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13',
+    );
+    expect(script).toContain(
+      '$request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL)',
     );
     expect(script).toContain('must start with https://');
     expect(script).toContain('Falling back to npm installation');
@@ -346,6 +352,28 @@ describe('standalone release packaging', () => {
     );
     expect(() =>
       parseCliArgs(['--name'], { '--name': { name: 'name' } }, {}),
+    ).toThrow(/--name requires a value/);
+
+    const equalsArgs = parseCliArgs(
+      ['--name=qwen', '--flag'],
+      {
+        '--name': { name: 'name' },
+        '--flag': { name: 'flag', type: 'boolean' },
+      },
+      { flag: false, name: undefined },
+    );
+    expect(equalsArgs).toEqual({ flag: true, name: 'qwen' });
+
+    expect(() =>
+      parseCliArgs(
+        ['--flag=true'],
+        { '--flag': { name: 'flag', type: 'boolean' } },
+        {},
+      ),
+    ).toThrow(/--flag does not accept a value/);
+
+    expect(() =>
+      parseCliArgs(['--name='], { '--name': { name: 'name' } }, {}),
     ).toThrow(/--name requires a value/);
   });
 
@@ -1208,7 +1236,41 @@ describe('Windows installer end-to-end', () => {
   });
 });
 
+// Tracks pending dist/ backups so a crashed test cannot leave the working tree
+// without dist/. process.on('exit') runs synchronous handlers, which is enough
+// for renameSync; SIGINT/SIGTERM force re-entry through 'exit'.
+const pendingDistBackups = new Set();
+let distBackupHandlersRegistered = false;
+
+function registerDistBackupSafetyNet() {
+  if (distBackupHandlersRegistered) {
+    return;
+  }
+  distBackupHandlersRegistered = true;
+
+  const drain = () => {
+    for (const restore of pendingDistBackups) {
+      try {
+        restore();
+      } catch {
+        // best-effort restore; nothing we can do at exit
+      }
+    }
+    pendingDistBackups.clear();
+  };
+
+  process.on('exit', drain);
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(signal, () => {
+      drain();
+      process.exit(1);
+    });
+  }
+}
+
 function ensureMinimalDist() {
+  registerDistBackupSafetyNet();
+
   const distPath = path.resolve('dist');
   const backupRoot = mkdtempSync(path.join(tmpdir(), 'qwen-dist-backup-'));
   const backupDist = path.join(backupRoot, 'dist');
@@ -1226,13 +1288,22 @@ function ensureMinimalDist() {
     JSON.stringify({ name: '@qwen-code/qwen-code', version: '0.0.0' }),
   );
 
-  return () => {
+  let restored = false;
+  const restore = () => {
+    if (restored) {
+      return;
+    }
+    restored = true;
+    pendingDistBackups.delete(restore);
     rmSync(distPath, { recursive: true, force: true });
     if (hadExistingDist) {
       renameSync(backupDist, distPath);
     }
     rmSync(backupRoot, { recursive: true, force: true });
   };
+
+  pendingDistBackups.add(restore);
+  return restore;
 }
 
 function createFakeNodeArchive(tmpDir, options = {}) {
