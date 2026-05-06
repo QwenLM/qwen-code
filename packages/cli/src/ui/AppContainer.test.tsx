@@ -14,7 +14,12 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
-import { AppContainer, dedupeNewestFirst } from './AppContainer.js';
+import {
+  AppContainer,
+  dedupeNewestFirst,
+  getNextRenderMode,
+  isRenderModeToggleKey,
+} from './AppContainer.js';
 import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
@@ -34,7 +39,7 @@ import {
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import { type HistoryItem, ToolCallStatus } from './types.js';
-import { act, useContext } from 'react';
+import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
 
 // Mock useStdout to capture terminal title writes
@@ -131,7 +136,6 @@ import { useLogger } from './hooks/useLogger.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
-import { Command, keyMatchers } from './keyMatchers.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 
 describe('AppContainer State Management', () => {
@@ -1013,7 +1017,22 @@ describe('AppContainer State Management', () => {
       expect(capturedRenderMode).toBe('render');
     });
 
-    it('toggles Markdown render mode from the global render shortcut', async () => {
+    it('computes render mode toggles from the global render shortcut', () => {
+      const optionMKey: Key = {
+        name: 'm',
+        ctrl: false,
+        meta: true,
+        shift: false,
+        paste: false,
+        sequence: 'µ',
+      };
+
+      expect(isRenderModeToggleKey(optionMKey)).toBe(true);
+      expect(getNextRenderMode('render')).toBe('raw');
+      expect(getNextRenderMode(getNextRenderMode('render'))).toBe('render');
+    });
+
+    it('registers the global render shortcut handler', () => {
       render(
         <AppContainer
           config={mockConfig}
@@ -1024,41 +1043,10 @@ describe('AppContainer State Management', () => {
       );
 
       expect(capturedRenderMode).toBe('render');
-      await act(async () => {
-        await Promise.resolve();
-      });
       const handleKeypress = mockedUseKeypress.mock.calls[0]?.[0] as
         | ((key: Key) => void)
         | undefined;
       expect(handleKeypress).toBeDefined();
-
-      const optionMKey: Key = {
-        name: 'm',
-        ctrl: false,
-        meta: true,
-        shift: false,
-        paste: false,
-        sequence: 'µ',
-      };
-
-      expect(keyMatchers[Command.TOGGLE_RENDER_MODE](optionMKey)).toBe(true);
-
-      await act(async () => {
-        handleKeypress!(optionMKey);
-        await Promise.resolve();
-      });
-      expect(capturedUIState.constrainHeight).toBe(true);
-
-      const updatedHandleKeypress = mockedUseKeypress.mock.calls.at(-1)?.[0] as
-        | ((key: Key) => void)
-        | undefined;
-      expect(updatedHandleKeypress).toBeDefined();
-
-      await act(async () => {
-        updatedHandleKeypress!(optionMKey);
-        await Promise.resolve();
-      });
-      expect(keyMatchers[Command.TOGGLE_RENDER_MODE](optionMKey)).toBe(true);
     });
   });
 

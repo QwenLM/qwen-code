@@ -166,6 +166,18 @@ import {
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
 
+export function isRenderModeToggleKey(key: Key): boolean {
+  return (
+    keyMatchers[Command.TOGGLE_RENDER_MODE](key) ||
+    (key.name === 'm' && key.meta && !key.ctrl && !key.paste) ||
+    (key.sequence === 'µ' && !key.ctrl && !key.paste)
+  );
+}
+
+export function getNextRenderMode(current: RenderMode): RenderMode {
+  return current === 'render' ? 'raw' : 'render';
+}
+
 function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   return pendingHistoryItems.some((item) => {
     if (item && item.type === 'tool_group') {
@@ -2184,13 +2196,8 @@ export const AppContainer = (props: AppContainerProps) => {
         setConstrainHeight(true);
       }
 
-      const isRenderModeToggle =
-        keyMatchers[Command.TOGGLE_RENDER_MODE](key) ||
-        (key.name === 'm' && key.meta && !key.ctrl && !key.paste) ||
-        (key.sequence === 'µ' && !key.ctrl && !key.paste);
-
-      if (isRenderModeToggle) {
-        setRenderMode((current) => (current === 'render' ? 'raw' : 'render'));
+      if (isRenderModeToggleKey(key)) {
+        setRenderMode(getNextRenderMode);
       } else if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
         const newValue = !showToolDescriptions;
         setShowToolDescriptions(newValue);
