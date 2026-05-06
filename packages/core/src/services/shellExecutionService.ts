@@ -37,6 +37,30 @@ const SIGKILL_TIMEOUT_MS = 200;
 const PROMOTE_DRAIN_TIMEOUT_MS = 200;
 
 /**
+ * Read the `kind` discriminator off `abortSignal.reason` defensively:
+ *   - Reject non-object reasons (DOMException, strings, numbers).
+ *   - Read the `kind` property as an OWN property only — without
+ *     `hasOwnProperty`, a polluted `Object.prototype.kind = 'background'`
+ *     would force the kill path through the promote branch on any plain
+ *     `abortController.abort({})`. Lifecycle/safety branches deserve the
+ *     extra check.
+ *   - Whitelist the value against the known union — anything else (typos,
+ *     future-untyped variants) defaults to `'cancel'` so the historical
+ *     kill behavior is preserved as the safe fallback.
+ */
+function getShellAbortReasonKind(reason: unknown): ShellAbortReason['kind'] {
+  if (
+    reason !== null &&
+    typeof reason === 'object' &&
+    Object.prototype.hasOwnProperty.call(reason, 'kind')
+  ) {
+    const kind = (reason as { kind?: unknown }).kind;
+    if (kind === 'background' || kind === 'cancel') return kind;
+  }
+  return 'cancel';
+}
+
+/**
  * On Windows with PowerShell, prefix the command with a statement that forces
  * UTF-8 output encoding so that CJK and other non-ASCII characters are emitted
  * as UTF-8 regardless of the system codepage.
@@ -587,6 +611,26 @@ export class ShellExecutionService {
           // and resolve immediately with `promoted: true` so the awaiting
           // caller unblocks. The caller has attached its own listeners
           // by this point and now owns the child.
+          //
+          // INVARIANT: this snapshot path reads from `stdout` / `stderr`
+          // string accumulators (populated by handleOutput's buffered-text
+          // branch). Under `streamStdout: true`, output is forwarded
+          // through `onOutputEvent` and NOT accumulated into stdout/stderr,
+          // so the promoted snapshot would be silently empty. PR-1's only
+          // caller (foreground shell.ts) uses streamStdout: false, so
+          // there's no live combination today; if a future caller pairs
+          // `streamStdout: true` with `{ kind: 'background' }`, log so the
+          // empty-snapshot is observable rather than mysterious. The
+          // caller still has rawOutput as a fallback.
+          if (streamStdout) {
+            debugLogger.warn(
+              'Background-promote on a streamStdout=true child_process: ' +
+                'snapshot accumulators were never populated (output went ' +
+                'through onOutputEvent), so result.output will be empty. ' +
+                'Caller should fall back to rawOutput, or assemble its ' +
+                'own snapshot from the data events it received.',
+            );
+          }
           this.activeChildProcesses.delete(child.pid);
           detachServiceListeners();
           const {
@@ -635,8 +679,7 @@ export class ShellExecutionService {
           // than silently falling through to the kill path. (Earlier
           // if-else form would have silently killed the process for
           // e.g. a future `{ kind: 'suspend' }` — review feedback.)
-          const reason = abortSignal.reason as ShellAbortReason | undefined;
-          const kind: ShellAbortReason['kind'] = reason?.kind ?? 'cancel';
+          const kind = getShellAbortReasonKind(abortSignal.reason);
           switch (kind) {
             case 'background':
               performBackgroundPromote();
@@ -1071,10 +1114,16 @@ export class ShellExecutionService {
             );
           }
           try {
-            ptyProcess.off('error', ptyErrorHandler);
+            // @lydell/node-pty's IPty exposes `removeListener` (Node's
+            // EventEmitter API), not the modern `off` alias. Calling
+            // `off` here used to throw TypeError at runtime — caught
+            // and logged but the handler stayed registered, so a
+            // post-promote PTY error would still run our foreground
+            // handler's `throw err` and break the handoff contract.
+            ptyProcess.removeListener('error', ptyErrorHandler);
           } catch (e) {
             debugLogger.warn(
-              `ptyProcess.off('error') threw during background-promote: ${e instanceof Error ? e.message : String(e)}`,
+              `ptyProcess.removeListener('error') threw during background-promote: ${e instanceof Error ? e.message : String(e)}`,
             );
           }
           if (renderTimeout) {
@@ -1176,8 +1225,7 @@ export class ShellExecutionService {
           // `never` default rather than silently falling through to the
           // kill path (review feedback — earlier if-else form would have
           // silently killed for e.g. a future `{ kind: 'suspend' }`).
-          const reason = abortSignal.reason as ShellAbortReason | undefined;
-          const kind: ShellAbortReason['kind'] = reason?.kind ?? 'cancel';
+          const kind = getShellAbortReasonKind(abortSignal.reason);
           switch (kind) {
             case 'background':
               await performBackgroundPromote();
