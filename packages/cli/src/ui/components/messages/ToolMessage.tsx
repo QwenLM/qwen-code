@@ -22,6 +22,7 @@ import type {
   AnsiOutputDisplay,
   Config,
   McpToolProgressData,
+  FileDiff,
 } from '@qwen-code/qwen-code-core';
 import { AgentExecutionDisplay } from '../subagents/index.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
@@ -49,6 +50,14 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
 export type TextEmphasis = 'high' | 'medium' | 'low';
+type DiffResultDisplay = Pick<
+  FileDiff,
+  | 'fileDiff'
+  | 'fileName'
+  | 'truncatedForSession'
+  | 'fileDiffLength'
+  | 'fileDiffTruncated'
+>;
 
 function sliceTextForMaxHeight(
   text: string,
@@ -175,7 +184,7 @@ const useResultDisplayRenderer = (
     ) {
       return {
         type: 'diff',
-        data: resultDisplay as { fileDiff: string; fileName: string },
+        data: resultDisplay as DiffResultDisplay,
       };
     }
 
@@ -378,19 +387,38 @@ const StringResultRenderer: React.FC<{
  * Component to render diff results
  */
 const DiffResultRenderer: React.FC<{
-  data: { fileDiff: string; fileName: string };
+  data: DiffResultDisplay;
   availableHeight?: number;
   childWidth: number;
   settings?: LoadedSettings;
-}> = ({ data, availableHeight, childWidth, settings }) => (
-  <DiffRenderer
-    diffContent={data.fileDiff}
-    filename={data.fileName}
-    availableTerminalHeight={availableHeight}
-    contentWidth={childWidth}
-    settings={settings}
-  />
-);
+}> = ({ data, availableHeight, childWidth, settings }) => {
+  const diffHeight =
+    data.truncatedForSession && availableHeight !== undefined
+      ? Math.max(1, availableHeight - 1)
+      : availableHeight;
+
+  return (
+    <Box flexDirection="column">
+      {data.truncatedForSession && (
+        <Text color={theme.status.warning} wrap="wrap">
+          {data.fileDiffTruncated
+            ? 'Saved session preview only; full diff omitted from JSONL'
+            : 'Saved session preview only; full file contents truncated in JSONL'}
+          {data.fileDiffTruncated && typeof data.fileDiffLength === 'number'
+            ? ` (${data.fileDiffLength} chars).`
+            : '.'}
+        </Text>
+      )}
+      <DiffRenderer
+        diffContent={data.fileDiff}
+        filename={data.fileName}
+        availableTerminalHeight={diffHeight}
+        contentWidth={childWidth}
+        settings={settings}
+      />
+    </Box>
+  );
+};
 
 export interface ToolMessageProps extends IndividualToolCallDisplay {
   availableTerminalHeight?: number;
