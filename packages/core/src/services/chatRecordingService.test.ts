@@ -17,6 +17,7 @@ import {
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
+import type { FileDiff } from '../tools/tools.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -288,6 +289,170 @@ describe('ChatRecordingService', () => {
       expect(record.message).toEqual({ role: 'user', parts: toolResultParts });
       expect(record.toolCallResult).toBeDefined();
       expect(record.toolCallResult?.callId).toBe('call-1');
+    });
+
+    it('should keep small file diff resultDisplay unchanged', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'edit',
+            response: { output: 'ok' },
+          },
+        },
+      ];
+      const resultDisplay: FileDiff = {
+        fileName: 'file.txt',
+        fileDiff: '--- file.txt\n+++ file.txt\n@@ -1 +1 @@\n-old\n+new',
+        originalContent: 'old',
+        newContent: 'new',
+        diffStat: {
+          model_added_lines: 1,
+          model_removed_lines: 1,
+          model_added_chars: 3,
+          model_removed_chars: 3,
+          user_added_lines: 0,
+          user_removed_lines: 0,
+          user_added_chars: 0,
+          user_removed_chars: 0,
+        },
+      };
+      const metadata = {
+        callId: 'call-1',
+        status: 'success' as const,
+        responseParts: toolResultParts,
+        resultDisplay,
+        error: undefined,
+        errorType: undefined,
+      };
+
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+
+      expect(record.toolCallResult?.resultDisplay).toBe(resultDisplay);
+      expect(
+        (record.toolCallResult?.resultDisplay as FileDiff).truncatedForSession,
+      ).toBeUndefined();
+    });
+
+    it('should shrink large file diff resultDisplay without mutating input', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'write_file',
+            response: { output: 'ok' },
+          },
+        },
+      ];
+      const largeDiff = 'd'.repeat(70_000);
+      const largeOriginal = 'a'.repeat(20_000);
+      const largeNew = 'b'.repeat(20_000);
+      const resultDisplay: FileDiff = {
+        fileName: 'large.txt',
+        fileDiff: largeDiff,
+        originalContent: largeOriginal,
+        newContent: largeNew,
+        diffStat: {
+          model_added_lines: 1,
+          model_removed_lines: 1,
+          model_added_chars: largeNew.length,
+          model_removed_chars: largeOriginal.length,
+          user_added_lines: 0,
+          user_removed_lines: 0,
+          user_added_chars: 0,
+          user_removed_chars: 0,
+        },
+      };
+      const metadata = {
+        callId: 'call-1',
+        status: 'success' as const,
+        responseParts: toolResultParts,
+        resultDisplay,
+        error: undefined,
+        errorType: undefined,
+      };
+
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const savedDisplay = record.toolCallResult?.resultDisplay as FileDiff;
+
+      expect(savedDisplay).not.toBe(resultDisplay);
+      expect(savedDisplay.truncatedForSession).toBe(true);
+      expect(savedDisplay.fileDiffLength).toBe(largeDiff.length);
+      expect(savedDisplay.originalContentLength).toBe(largeOriginal.length);
+      expect(savedDisplay.newContentLength).toBe(largeNew.length);
+      expect(savedDisplay.fileDiffTruncated).toBe(true);
+      expect(savedDisplay.originalContentTruncated).toBe(true);
+      expect(savedDisplay.newContentTruncated).toBe(true);
+      expect(savedDisplay.fileDiff).toContain(
+        'Full diff omitted from saved session history',
+      );
+      expect(savedDisplay.fileDiff).not.toBe(largeDiff);
+      expect(savedDisplay.originalContent?.length).toBeLessThanOrEqual(16_000);
+      expect(savedDisplay.originalContent).toContain(
+        'truncated for saved session preview',
+      );
+      expect(savedDisplay.newContent.length).toBeLessThanOrEqual(16_000);
+      expect(savedDisplay.newContent).toContain(
+        'truncated for saved session preview',
+      );
+      expect(savedDisplay.diffStat).toEqual(resultDisplay.diffStat);
+
+      expect(resultDisplay.fileDiff).toBe(largeDiff);
+      expect(resultDisplay.originalContent).toBe(largeOriginal);
+      expect(resultDisplay.newContent).toBe(largeNew);
+      expect(resultDisplay.truncatedForSession).toBeUndefined();
+    });
+
+    it('should continue stripping nested tool calls from task execution results', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'task',
+            response: { output: 'ok' },
+          },
+        },
+      ];
+      const metadata = {
+        callId: 'call-1',
+        status: 'success' as const,
+        responseParts: toolResultParts,
+        resultDisplay: {
+          type: 'task_execution' as const,
+          subagentName: 'Task',
+          taskDescription: 'Run task',
+          taskPrompt: 'Run task',
+          status: 'completed' as const,
+          result: 'done',
+          toolCalls: [
+            {
+              callId: 'nested-call',
+              name: 'read_file',
+              status: 'success' as const,
+              args: {},
+              result: 'nested result',
+            },
+          ],
+        },
+        error: undefined,
+        errorType: undefined,
+      };
+
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+
+      expect(record.toolCallResult?.resultDisplay).toMatchObject({
+        type: 'task_execution',
+        toolCalls: [],
+      });
     });
 
     it('should chain tool result correctly with parentUuid', async () => {
