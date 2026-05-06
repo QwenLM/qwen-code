@@ -36,23 +36,21 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { t } from '../../i18n/index.js';
-import {
-  API_KEY_PROVIDER_OPTIONS,
-  API_KEY_PROVIDERS,
-  type ApiKeyProviderConfig,
-  type ApiKeyProviderEndpointOption,
-  type ApiKeyProviderEndpointOptionConfig,
-  type ApiKeyProviderId,
-} from '../../auth/setupMethods/apiKey/index.js';
-import { generateCustomApiKeyEnvKey } from '../../auth/providers/custom/index.js';
-import { normalizeCustomModelIds, maskApiKey } from './useAuth.js';
+import { API_KEY_PROVIDERS } from '../../auth/setupMethods/apiKey/index.js';
 import type {
   ApiKeyOption,
   MainOption,
   OAuthOption,
   SubscribeOption,
-  ViewLevel,
 } from './flows/AuthFlowTypes.js';
+import { useAuthDialogNavigation } from './flows/useAuthDialogNavigation.js';
+import {
+  getApiKeyProviderStepCount,
+  getEndpointStepTitle,
+  getProviderFlowTitle,
+  usePresetApiKeyFlow,
+} from './flows/usePresetApiKeyFlow.js';
+import { useCustomProviderFlow } from './flows/useCustomProviderFlow.js';
 
 const MODEL_PROVIDERS_DOCUMENTATION_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/';
@@ -67,57 +65,6 @@ function parseDefaultAuthType(
     return defaultAuthType as AuthType;
   }
   return null;
-}
-
-function getDefaultEndpointOption(
-  provider: ApiKeyProviderConfig,
-): ApiKeyProviderEndpointOption | undefined {
-  return provider.endpointOptions?.[0]?.id;
-}
-
-function getSelectedEndpointOptionConfig(
-  provider: ApiKeyProviderConfig,
-  endpointOption: ApiKeyProviderEndpointOption | undefined,
-): ApiKeyProviderEndpointOptionConfig | undefined {
-  return provider.endpointOptions?.find(
-    (candidate) => candidate.id === endpointOption,
-  );
-}
-
-function getProviderEndpoint(
-  provider: ApiKeyProviderConfig,
-  endpointOption: ApiKeyProviderEndpointOption | undefined,
-): string {
-  return (
-    getSelectedEndpointOptionConfig(provider, endpointOption)?.endpoint ||
-    provider.endpoint ||
-    ''
-  );
-}
-
-function getProviderDocumentationUrl(
-  provider: ApiKeyProviderConfig,
-  endpointOption: ApiKeyProviderEndpointOption | undefined,
-): string | undefined {
-  return (
-    getSelectedEndpointOptionConfig(provider, endpointOption)
-      ?.documentationUrl || provider.documentationUrl
-  );
-}
-
-function getProviderFlowTitle(
-  provider: ApiKeyProviderConfig,
-  fallback: string,
-): string {
-  return provider.ui?.flowTitle || fallback;
-}
-
-function getEndpointStepTitle(provider: ApiKeyProviderConfig): string {
-  return provider.ui?.endpointStepTitle || 'Endpoint';
-}
-
-function getApiKeyProviderStepCount(provider: ApiKeyProviderConfig): number {
-  return provider.endpointOptions ? 4 : 3;
 }
 
 export function AuthDialog(): React.JSX.Element {
@@ -137,7 +84,8 @@ export function AuthDialog(): React.JSX.Element {
   const config = useConfig();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
+  const navigation = useAuthDialogNavigation('main');
+  const viewLevel = navigation.currentView;
   const [baseUrlIndex, setBaseUrlIndex] = useState<number>(0);
   const [baseUrl, setBaseUrl] = useState<string>(
     CODING_PLAN_ENDPOINTS[0].baseUrl,
@@ -145,50 +93,14 @@ export function AuthDialog(): React.JSX.Element {
   const [activeSubscriptionPlan, setActiveSubscriptionPlan] = useState<
     'coding' | 'token'
   >('coding');
-  const [presetEndpointOptionIndex, setPresetEndpointOptionIndex] =
-    useState<number>(0);
-  const [apiKeyTypeIndex, setApiKeyTypeIndex] = useState<number>(0);
   const [alibabaModelStudioIndex, setAlibabaModelStudioIndex] =
     useState<number>(0);
   const [mainAuthIndex, setMainAuthIndex] = useState<number | null>(null);
   const [oauthProviderIndex, setOAuthProviderIndex] = useState<number>(0);
-  const [presetApiKeyProvider, setPresetApiKeyProvider] =
-    useState<ApiKeyProviderConfig>(API_KEY_PROVIDERS.alibabaStandard);
-  const [presetEndpointOption, setPresetEndpointOption] = useState<
-    ApiKeyProviderEndpointOption | undefined
-  >(getDefaultEndpointOption(API_KEY_PROVIDERS.alibabaStandard));
-  const [presetApiKey, setPresetApiKey] = useState('');
-  const [presetApiKeyError, setPresetApiKeyError] = useState<string | null>(
-    null,
-  );
-  const [presetModelId, setPresetModelId] = useState('');
-  const [presetModelIdError, setPresetModelIdError] = useState<string | null>(
-    null,
-  );
-
-  // Custom API Key wizard state
-  const [customProtocolIndex, setCustomProtocolIndex] = useState<number>(0);
-  const [customProtocol, setCustomProtocol] = useState<AuthType>(
-    AuthType.USE_OPENAI,
-  );
-  const [customBaseUrl, setCustomBaseUrl] = useState('');
-  const [customBaseUrlError, setCustomBaseUrlError] = useState<string | null>(
-    null,
-  );
-  const [customApiKey, setCustomApiKey] = useState('');
-  const [customApiKeyError, setCustomApiKeyError] = useState<string | null>(
-    null,
-  );
-  const [customModelIds, setCustomModelIds] = useState('');
-  const [customModelIdsError, setCustomModelIdsError] = useState<string | null>(
-    null,
-  );
-
-  // Advanced generation config state
-  const [advancedThinkingEnabled, setAdvancedThinkingEnabled] = useState(false);
-  const [advancedModalityEnabled, setAdvancedModalityEnabled] = useState(false);
-  const [focusedConfigIndex, setFocusedConfigIndex] = useState(0);
-  // 0 = thinking, 1 = modality
+  const presetApiKeyFlow = usePresetApiKeyFlow({
+    onSubmit: handleApiKeyProviderSubmit,
+  });
+  const customProviderFlow = useCustomProviderFlow();
 
   // Main authentication entries mirror the four user-facing flows from the design doc.
   const mainItems = [
@@ -249,51 +161,6 @@ export function AuthDialog(): React.JSX.Element {
     value: endpoint.baseUrl,
   }));
 
-  const presetEndpointOptionItems =
-    presetApiKeyProvider.endpointOptions?.map((endpointOptionConfig) => ({
-      key: endpointOptionConfig.id,
-      title: t(endpointOptionConfig.title),
-      label: t(endpointOptionConfig.title),
-      description: (
-        <Text color={theme.text.secondary}>
-          Endpoint: {endpointOptionConfig.endpoint}
-        </Text>
-      ),
-      value: endpointOptionConfig.id,
-    })) || [];
-
-  const protocolItems = [
-    {
-      key: AuthType.USE_OPENAI,
-      title: t('OpenAI-compatible'),
-      label: t('OpenAI-compatible'),
-      description: t(
-        'OpenAI Chat Completions API (OpenRouter, vLLM, Ollama, LM Studio, Fireworks, etc.)',
-      ),
-      value: AuthType.USE_OPENAI as AuthType,
-    },
-    {
-      key: AuthType.USE_ANTHROPIC,
-      title: t('Anthropic-compatible'),
-      label: t('Anthropic-compatible'),
-      description: t('Anthropic Messages API'),
-      value: AuthType.USE_ANTHROPIC as AuthType,
-    },
-    {
-      key: AuthType.USE_GEMINI,
-      title: t('Gemini-compatible'),
-      label: t('Gemini-compatible'),
-      description: t('Google Gemini API'),
-      value: AuthType.USE_GEMINI as AuthType,
-    },
-  ];
-
-  const DEFAULT_CUSTOM_BASE_URLS: Partial<Record<AuthType, string>> = {
-    [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
-    [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
-    [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
-  };
-
   const alibabaModelStudioItems = [
     ...subscriptionPlanItems,
     {
@@ -306,16 +173,6 @@ export function AuthDialog(): React.JSX.Element {
         | ApiKeyOption,
     },
   ];
-
-  const apiKeyTypeItems = API_KEY_PROVIDER_OPTIONS.filter(
-    (provider) => provider.category === 'third-party',
-  ).map((provider) => ({
-    key: provider.option,
-    title: t(provider.title),
-    label: t(provider.title),
-    description: t(provider.description),
-    value: provider.option as ApiKeyOption,
-  }));
 
   const oauthProviderItems = [
     {
@@ -378,39 +235,28 @@ export function AuthDialog(): React.JSX.Element {
     }),
   );
   const initialAuthIndex = mainAuthIndex ?? defaultAuthIndex;
-  const activeMainOption = mainItems[initialAuthIndex]?.value;
 
   const handleMainSelect = async (value: MainOption) => {
     setErrorMessage(null);
     onAuthError(null);
 
     if (value === 'ALIBABA_MODELSTUDIO') {
-      setViewLevel('alibaba-modelstudio-select');
+      navigation.pushView('alibaba-modelstudio-select');
       return;
     }
 
     if (value === 'THIRD_PARTY_PROVIDERS') {
-      setViewLevel('api-key-type-select');
+      navigation.pushView('api-key-type-select');
       return;
     }
 
     if (value === 'OAUTH') {
-      setViewLevel('oauth-provider-select');
+      navigation.pushView('oauth-provider-select');
       return;
     }
 
-    setCustomProtocolIndex(0);
-    setCustomProtocol(AuthType.USE_OPENAI);
-    setCustomBaseUrl('');
-    setCustomBaseUrlError(null);
-    setCustomApiKey('');
-    setCustomApiKeyError(null);
-    setCustomModelIds('');
-    setCustomModelIdsError(null);
-    setAdvancedThinkingEnabled(false);
-    setAdvancedModalityEnabled(false);
-    setFocusedConfigIndex(0);
-    setViewLevel('custom-protocol-select');
+    customProviderFlow.reset();
+    navigation.pushView('custom-protocol-select');
   };
 
   const handleAlibabaModelStudioSelect = async (
@@ -442,34 +288,24 @@ export function AuthDialog(): React.JSX.Element {
     if (selectedPlan.id === 'coding') {
       setBaseUrl(CODING_PLAN_ENDPOINTS[0].baseUrl);
       setBaseUrlIndex(0);
-      setViewLevel('base-url-select');
+      navigation.pushView('base-url-select');
       return;
     }
 
-    setViewLevel('api-key-input');
+    navigation.pushView('api-key-input');
   };
 
   const handleApiKeyTypeSelect = async (value: ApiKeyOption) => {
     setErrorMessage(null);
     onAuthError(null);
 
-    const selectedProvider = API_KEY_PROVIDER_OPTIONS.find(
-      (provider) => provider.option === value,
-    ) as ApiKeyProviderConfig | undefined;
+    const selectedProvider = presetApiKeyFlow.selectProvider(value);
     if (selectedProvider) {
-      setPresetApiKeyProvider(selectedProvider);
-      setPresetEndpointOption(getDefaultEndpointOption(selectedProvider));
-      setPresetEndpointOptionIndex(0);
-      setPresetApiKey('');
-      setPresetApiKeyError(null);
-      setPresetModelId(selectedProvider.defaultModelIds);
-      setPresetModelIdError(null);
-      setViewLevel(
+      navigation.pushView(
         selectedProvider.endpointOptions
           ? 'preset-api-key-endpoint-select'
           : 'preset-api-key-input',
       );
-      return;
     }
   };
 
@@ -499,18 +335,16 @@ export function AuthDialog(): React.JSX.Element {
     setErrorMessage(null);
     onAuthError(null);
     setBaseUrl(selectedBaseUrl);
-    setViewLevel('api-key-input');
+    navigation.pushView('api-key-input');
   };
 
   const handlePresetEndpointOptionSelect = async (
-    selectedEndpointOption: ApiKeyProviderEndpointOption,
+    selectedEndpointOption: string,
   ) => {
     setErrorMessage(null);
     onAuthError(null);
-    setPresetApiKeyError(null);
-    setPresetModelIdError(null);
-    setPresetEndpointOption(selectedEndpointOption);
-    setViewLevel('preset-api-key-input');
+    presetApiKeyFlow.selectEndpointOption(selectedEndpointOption);
+    navigation.pushView('preset-api-key-input');
   };
 
   const handleApiKeyInputSubmit = async (apiKey: string) => {
@@ -529,214 +363,77 @@ export function AuthDialog(): React.JSX.Element {
   };
 
   const handlePresetApiKeySubmit = () => {
-    const trimmedKey = presetApiKey.trim();
-    if (!trimmedKey) {
-      setPresetApiKeyError(t('API key cannot be empty.'));
-      return;
+    if (presetApiKeyFlow.submitApiKey()) {
+      navigation.pushView('preset-model-id-input');
     }
-
-    setPresetApiKeyError(null);
-    if (!presetModelId.trim()) {
-      setPresetModelId(presetApiKeyProvider.defaultModelIds);
-    }
-    setViewLevel('preset-model-id-input');
   };
 
   const handlePresetModelSubmit = () => {
-    const trimmedApiKey = presetApiKey.trim();
-    const trimmedModelIds = presetModelId.trim();
-    if (!trimmedApiKey) {
-      setPresetApiKeyError(t('API key cannot be empty.'));
-      setViewLevel('preset-api-key-input');
-      return;
+    const result = presetApiKeyFlow.submitModel();
+    if (result === 'api-key-error') {
+      navigation.replaceView('preset-api-key-input');
     }
-    if (!trimmedModelIds) {
-      setPresetModelIdError(t('Model IDs cannot be empty.'));
-      return;
-    }
-
-    setPresetModelIdError(null);
-    void handleApiKeyProviderSubmit(
-      presetApiKeyProvider.id as ApiKeyProviderId,
-      trimmedApiKey,
-      trimmedModelIds,
-      presetEndpointOption || getDefaultEndpointOption(presetApiKeyProvider),
-    );
   };
 
   const handleCustomProtocolSelect = (protocol: AuthType) => {
     setErrorMessage(null);
     onAuthError(null);
-    setCustomProtocol(protocol);
-    const defaultUrl = DEFAULT_CUSTOM_BASE_URLS[protocol] ?? '';
-    setCustomBaseUrl(defaultUrl);
-    setCustomBaseUrlError(null);
-    setViewLevel('custom-base-url-input');
+    customProviderFlow.selectProtocol(protocol);
+    navigation.pushView('custom-base-url-input');
   };
 
   const handleCustomBaseUrlSubmit = () => {
-    const trimmedUrl = customBaseUrl.trim();
-    if (!trimmedUrl) {
-      setCustomBaseUrlError(t('Base URL cannot be empty.'));
-      return;
+    if (customProviderFlow.submitBaseUrl()) {
+      navigation.pushView('custom-api-key-input');
     }
-    if (!/^https?:\/\//i.test(trimmedUrl)) {
-      setCustomBaseUrlError(t('Base URL must start with http:// or https://.'));
-      return;
-    }
-    setCustomBaseUrlError(null);
-    setCustomApiKey('');
-    setCustomApiKeyError(null);
-    setViewLevel('custom-api-key-input');
   };
 
   const handleCustomApiKeySubmitLocal = () => {
-    const trimmedKey = customApiKey.trim();
-    if (!trimmedKey) {
-      setCustomApiKeyError(t('API key cannot be empty.'));
-      return;
+    if (customProviderFlow.submitApiKey()) {
+      navigation.pushView('custom-model-id-input');
     }
-    setCustomApiKeyError(null);
-    setCustomModelIds('');
-    setCustomModelIdsError(null);
-    setViewLevel('custom-model-id-input');
   };
 
   const handleCustomModelIdSubmit = () => {
-    const normalized = normalizeCustomModelIds(customModelIds);
-    if (normalized.length === 0) {
-      setCustomModelIdsError(t('Model IDs cannot be empty.'));
-      return;
+    if (customProviderFlow.submitModelIds()) {
+      navigation.pushView('custom-advanced-config');
     }
-    setCustomModelIdsError(null);
-    setViewLevel('custom-advanced-config');
   };
 
   const handleAdvancedConfigSubmit = () => {
-    setViewLevel('custom-review-json');
+    navigation.pushView('custom-review-json');
   };
 
   const handleCustomReviewSubmit = () => {
-    const trimmedBaseUrl = customBaseUrl.trim();
-    const trimmedApiKey = customApiKey.trim();
-    const trimmedModelIds = customModelIds;
-
-    // Build generationConfig only if any advanced option is set
-    const hasThinking = advancedThinkingEnabled;
-    const hasModality = advancedModalityEnabled;
-
-    const generationConfig =
-      hasThinking || hasModality
-        ? {
-            enableThinking: hasThinking ? true : undefined,
-            multimodal: hasModality
-              ? { image: true, video: true, audio: true }
-              : undefined,
-          }
-        : undefined;
-
-    void handleCustomApiKeySubmit(
-      customProtocol as
-        | AuthType.USE_OPENAI
-        | AuthType.USE_ANTHROPIC
-        | AuthType.USE_GEMINI,
-      trimmedBaseUrl,
-      trimmedApiKey,
-      trimmedModelIds,
-      generationConfig,
-    );
+    customProviderFlow.submit((...args) => {
+      void handleCustomApiKeySubmit(...args);
+    });
   };
 
   const handleGoBack = () => {
     setErrorMessage(null);
     onAuthError(null);
+    navigation.goBack();
+  };
 
-    if (viewLevel === 'alibaba-modelstudio-select') {
-      setViewLevel('main');
-    } else if (viewLevel === 'base-url-select') {
-      setViewLevel('alibaba-modelstudio-select');
-    } else if (viewLevel === 'api-key-input') {
-      setViewLevel(
-        activeSubscriptionPlan === 'coding'
-          ? 'base-url-select'
-          : 'alibaba-modelstudio-select',
-      );
-    } else if (viewLevel === 'api-key-type-select') {
-      setViewLevel('main');
-    } else if (viewLevel === 'custom-protocol-select') {
-      setViewLevel('main');
-    } else if (viewLevel === 'custom-base-url-input') {
-      setViewLevel('custom-protocol-select');
-    } else if (viewLevel === 'custom-api-key-input') {
-      setViewLevel('custom-base-url-input');
-    } else if (viewLevel === 'custom-model-id-input') {
-      setViewLevel('custom-api-key-input');
-    } else if (viewLevel === 'custom-advanced-config') {
-      setViewLevel('custom-model-id-input');
-    } else if (viewLevel === 'custom-review-json') {
-      setViewLevel('custom-advanced-config');
-    } else if (viewLevel === 'preset-api-key-endpoint-select') {
-      setViewLevel(
-        activeMainOption === 'ALIBABA_MODELSTUDIO'
-          ? 'alibaba-modelstudio-select'
-          : 'api-key-type-select',
-      );
-    } else if (viewLevel === 'preset-api-key-input') {
-      setViewLevel(
-        presetApiKeyProvider.endpointOptions
-          ? 'preset-api-key-endpoint-select'
-          : activeMainOption === 'ALIBABA_MODELSTUDIO'
-            ? 'alibaba-modelstudio-select'
-            : 'api-key-type-select',
-      );
-    } else if (viewLevel === 'preset-model-id-input') {
-      setViewLevel('preset-api-key-input');
-    } else if (viewLevel === 'oauth-provider-select') {
-      setViewLevel('main');
+  const handleSubscriptionApiKeyCancel = () => {
+    if (viewLevel === 'api-key-input' && activeSubscriptionPlan === 'token') {
+      setActiveSubscriptionPlan('coding');
+      navigation.replaceView('alibaba-modelstudio-select');
+      return;
     }
+
+    handleGoBack();
   };
 
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
-        // Handle Escape based on current view level
-        if (viewLevel === 'alibaba-modelstudio-select') {
+        if (viewLevel !== 'main') {
           handleGoBack();
           return;
         }
 
-        if (viewLevel === 'base-url-select') {
-          handleGoBack();
-          return;
-        }
-
-        if (viewLevel === 'api-key-input') {
-          handleGoBack();
-          return;
-        }
-        if (
-          viewLevel === 'custom-protocol-select' ||
-          viewLevel === 'custom-base-url-input' ||
-          viewLevel === 'custom-api-key-input' ||
-          viewLevel === 'custom-model-id-input' ||
-          viewLevel === 'custom-advanced-config' ||
-          viewLevel === 'custom-review-json'
-        ) {
-          handleGoBack();
-          return;
-        }
-        if (
-          viewLevel === 'api-key-type-select' ||
-          viewLevel === 'preset-api-key-endpoint-select' ||
-          viewLevel === 'preset-api-key-input' ||
-          viewLevel === 'preset-model-id-input' ||
-          viewLevel === 'oauth-provider-select'
-        ) {
-          handleGoBack();
-          return;
-        }
-
-        // For main view, use existing logic
         if (errorMessage) {
           return;
         }
@@ -772,21 +469,17 @@ export function AuthDialog(): React.JSX.Element {
       const { name } = key;
 
       if (name === 'up') {
-        setFocusedConfigIndex((v) => (v <= 0 ? 1 : v - 1));
+        customProviderFlow.moveAdvancedFocusUp();
         return;
       }
 
       if (name === 'down') {
-        setFocusedConfigIndex((v) => (v >= 1 ? 0 : v + 1));
+        customProviderFlow.moveAdvancedFocusDown();
         return;
       }
 
       if (name === 'space') {
-        if (focusedConfigIndex === 0) {
-          setAdvancedThinkingEnabled((v) => !v);
-        } else {
-          setAdvancedModalityEnabled((v) => !v);
-        }
+        customProviderFlow.toggleFocusedAdvancedOption();
         return;
       }
 
@@ -846,67 +539,6 @@ export function AuthDialog(): React.JSX.Element {
     };
   };
 
-  const getCustomProviderPreviewJson = () => {
-    const generatedEnvKey = generateCustomApiKeyEnvKey(
-      customProtocol,
-      customBaseUrl.trim(),
-    );
-    const normalizedIds = normalizeCustomModelIds(customModelIds);
-    const maskedKey = maskApiKey(customApiKey);
-    const hasThinking = advancedThinkingEnabled;
-    const hasModality = advancedModalityEnabled;
-    const hasGenConfig = hasThinking || hasModality;
-
-    let genConfig: Record<string, unknown> | undefined;
-    if (hasGenConfig) {
-      genConfig = {};
-      if (hasModality) {
-        genConfig['modalities'] = {
-          image: true,
-          video: true,
-          audio: true,
-        };
-      }
-      if (hasThinking) {
-        genConfig['extra_body'] = {
-          enable_thinking: true,
-        };
-      }
-    }
-
-    const modelEntries = normalizedIds.map((id) => {
-      const entry: Record<string, unknown> = {
-        id,
-        name: id,
-        baseUrl: customBaseUrl.trim(),
-        envKey: generatedEnvKey,
-      };
-      if (genConfig) {
-        entry['generationConfig'] = genConfig;
-      }
-      return entry;
-    });
-
-    return JSON.stringify(
-      {
-        env: { [generatedEnvKey]: maskedKey },
-        modelProviders: {
-          [customProtocol]: modelEntries,
-        },
-        security: {
-          auth: {
-            selectedType: customProtocol,
-          },
-        },
-        model: {
-          name: normalizedIds[0],
-        },
-      },
-      null,
-      2,
-    );
-  };
-
   const getViewTitle = () => {
     switch (viewLevel) {
       case 'main':
@@ -923,10 +555,10 @@ export function AuthDialog(): React.JSX.Element {
         return t('Third-party Providers \u00B7 Step 1/3 \u00B7 Provider');
       case 'preset-api-key-endpoint-select': {
         const flowTitle = getProviderFlowTitle(
-          presetApiKeyProvider,
+          presetApiKeyFlow.provider,
           'Third-party Providers',
         );
-        const stepTitle = getEndpointStepTitle(presetApiKeyProvider);
+        const stepTitle = getEndpointStepTitle(presetApiKeyFlow.provider);
         return t('{{flowTitle}} \u00B7 Step 2/4 \u00B7 {{stepTitle}}', {
           flowTitle,
           stepTitle,
@@ -934,11 +566,11 @@ export function AuthDialog(): React.JSX.Element {
       }
       case 'preset-api-key-input': {
         const flowTitle = getProviderFlowTitle(
-          presetApiKeyProvider,
+          presetApiKeyFlow.provider,
           'Third-party Providers',
         );
-        const stepCount = getApiKeyProviderStepCount(presetApiKeyProvider);
-        const stepNumber = presetApiKeyProvider.endpointOptions ? 3 : 2;
+        const stepCount = getApiKeyProviderStepCount(presetApiKeyFlow.provider);
+        const stepNumber = presetApiKeyFlow.provider.endpointOptions ? 3 : 2;
         return t(
           '{{flowTitle}} \u00B7 Step {{stepNumber}}/{{stepCount}} \u00B7 API Key',
           {
@@ -950,11 +582,11 @@ export function AuthDialog(): React.JSX.Element {
       }
       case 'preset-model-id-input': {
         const flowTitle = getProviderFlowTitle(
-          presetApiKeyProvider,
+          presetApiKeyFlow.provider,
           'Third-party Providers',
         );
-        const stepCount = getApiKeyProviderStepCount(presetApiKeyProvider);
-        const stepNumber = presetApiKeyProvider.endpointOptions ? 4 : 3;
+        const stepCount = getApiKeyProviderStepCount(presetApiKeyFlow.provider);
+        const stepNumber = presetApiKeyFlow.provider.endpointOptions ? 4 : 3;
         return t(
           '{{flowTitle}} \u00B7 Step {{stepNumber}}/{{stepCount}} \u00B7 Models',
           {
@@ -1014,58 +646,30 @@ export function AuthDialog(): React.JSX.Element {
           setBaseUrlIndex(index);
         }}
         onApiKeySubmit={handleApiKeyInputSubmit}
-        onBack={handleGoBack}
+        onBack={handleSubscriptionApiKeyCancel}
       />
       <ThirdPartyProvidersFlow
         viewLevel={viewLevel}
-        items={apiKeyTypeItems}
-        initialIndex={apiKeyTypeIndex}
-        preset={{
-          providerTitle: presetApiKeyProvider.title,
-          providerDefaultModelIds: presetApiKeyProvider.defaultModelIds,
-          endpointOption: presetEndpointOption,
-          endpointOptionItems: presetEndpointOptionItems,
-          endpointOptionIndex: presetEndpointOptionIndex,
-          apiKey: presetApiKey,
-          apiKeyError: presetApiKeyError,
-          modelId: presetModelId,
-          modelIdError: presetModelIdError,
-          endpoint: getProviderEndpoint(
-            presetApiKeyProvider,
-            presetEndpointOption,
-          ),
-          documentationUrl: getProviderDocumentationUrl(
-            presetApiKeyProvider,
-            presetEndpointOption,
-          ),
-        }}
+        items={presetApiKeyFlow.providerItems}
+        initialIndex={presetApiKeyFlow.providerIndex}
+        preset={presetApiKeyFlow.state}
         onSelect={handleApiKeyTypeSelect}
         onHighlight={(value) => {
-          const index = apiKeyTypeItems.findIndex(
+          const index = presetApiKeyFlow.providerItems.findIndex(
             (item) => item.value === value,
           );
-          setApiKeyTypeIndex(index);
+          presetApiKeyFlow.setProviderIndex(index);
         }}
         onEndpointOptionSelect={handlePresetEndpointOptionSelect}
         onEndpointOptionHighlight={(value) => {
-          const index = presetEndpointOptionItems.findIndex(
+          const index = presetApiKeyFlow.state.endpointOptionItems.findIndex(
             (item) => item.value === value,
           );
-          setPresetEndpointOptionIndex(index);
+          presetApiKeyFlow.setEndpointOptionIndex(index);
         }}
-        onApiKeyChange={(value) => {
-          setPresetApiKey(value);
-          if (presetApiKeyError) {
-            setPresetApiKeyError(null);
-          }
-        }}
+        onApiKeyChange={presetApiKeyFlow.changeApiKey}
         onApiKeySubmit={handlePresetApiKeySubmit}
-        onModelIdChange={(value) => {
-          setPresetModelId(value);
-          if (presetModelIdError) {
-            setPresetModelIdError(null);
-          }
-        }}
+        onModelIdChange={presetApiKeyFlow.changeModelId}
         onModelSubmit={handlePresetModelSubmit}
       />
       {viewLevel === 'oauth-provider-select' && (
@@ -1083,47 +687,20 @@ export function AuthDialog(): React.JSX.Element {
       )}
       <CustomProviderFlow
         viewLevel={viewLevel}
-        state={{
-          protocolItems,
-          protocolIndex: customProtocolIndex,
-          protocol: customProtocol,
-          baseUrl: customBaseUrl,
-          baseUrlError: customBaseUrlError,
-          apiKey: customApiKey,
-          apiKeyError: customApiKeyError,
-          modelIds: customModelIds,
-          modelIdsError: customModelIdsError,
-          focusedConfigIndex,
-          thinkingEnabled: advancedThinkingEnabled,
-          modalityEnabled: advancedModalityEnabled,
-          previewJson: getCustomProviderPreviewJson(),
-        }}
+        state={customProviderFlow.state}
         documentationUrl={MODEL_PROVIDERS_DOCUMENTATION_URL}
         onProtocolSelect={handleCustomProtocolSelect}
         onProtocolHighlight={(value) => {
-          const index = protocolItems.findIndex((item) => item.value === value);
-          setCustomProtocolIndex(index);
+          const index = customProviderFlow.state.protocolItems.findIndex(
+            (item) => item.value === value,
+          );
+          customProviderFlow.setProtocolIndex(index);
         }}
-        onBaseUrlChange={(value) => {
-          setCustomBaseUrl(value);
-          if (customBaseUrlError) {
-            setCustomBaseUrlError(null);
-          }
-        }}
+        onBaseUrlChange={customProviderFlow.changeBaseUrl}
         onBaseUrlSubmit={handleCustomBaseUrlSubmit}
-        onApiKeyChange={(value) => {
-          setCustomApiKey(value);
-          if (customApiKeyError) {
-            setCustomApiKeyError(null);
-          }
-        }}
+        onApiKeyChange={customProviderFlow.changeApiKey}
         onApiKeySubmit={handleCustomApiKeySubmitLocal}
-        onModelIdsChange={(value) => {
-          setCustomModelIds(value);
-          if (customModelIdsError) {
-            setCustomModelIdsError(null);
-          }
-        }}
+        onModelIdsChange={customProviderFlow.changeModelIds}
         onModelIdsSubmit={handleCustomModelIdSubmit}
       />
 
