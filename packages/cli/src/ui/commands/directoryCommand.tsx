@@ -300,6 +300,124 @@ export const directoryCommand: SlashCommand = {
       },
     },
     {
+      name: 'remove',
+      get description() {
+        return t('Remove a directory from the workspace');
+      },
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive'] as const,
+      completion: async (context: CommandContext) => {
+        const { services } = context;
+        if (!services.config) return [];
+        const dirs = services.config.getWorkspaceContext().getDirectories();
+        const initialDirs =
+          services.config.getWorkspaceContext().getInitialDirectories?.() ?? [];
+        return dirs.filter((d) => !initialDirs.includes(d));
+      },
+      action: async (context: CommandContext, args: string) => {
+        const {
+          ui: { addItem },
+          services: { config, settings },
+        } = context;
+        if (!config) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Configuration is not available.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const directory = args.trim();
+        if (!directory) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Please provide a directory path to remove.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const workspaceContext = config.getWorkspaceContext();
+
+        if (
+          workspaceContext.isInitialDirectory?.(directory) ??
+          workspaceContext.getInitialDirectories().includes(directory)
+        ) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Cannot remove initial workspace directory: {{directory}}',
+                { directory },
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // Expand home directory and resolve to absolute path to match
+        // what WorkspaceContext stores internally.
+        const expandedDir = expandHomeDir(directory);
+        const resolvedDirectory = path.isAbsolute(expandedDir)
+          ? expandedDir
+          : path.resolve(expandedDir);
+
+        const removed = workspaceContext.removeDirectory(directory);
+        if (!removed) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Directory not found in workspace: {{directory}}', {
+                directory,
+              }),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        try {
+          const existingIncludeDirectories =
+            settings.workspace.originalSettings.context?.includeDirectories ??
+            [];
+          const includeDirectories = existingIncludeDirectories.filter(
+            (d: string) => d !== resolvedDirectory,
+          );
+          settings.setValue(
+            SettingScope.Workspace,
+            'context.includeDirectories',
+            includeDirectories,
+          );
+        } catch (error) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Directory removed from workspace but error updating settings: {{error}}',
+                { error: (error as Error).message },
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t('Removed directory: {{directory}}', { directory }),
+          },
+          Date.now(),
+        );
+      },
+    },
+    {
       name: 'show',
       get description() {
         return t('Show all directories in the workspace');

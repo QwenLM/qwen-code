@@ -455,6 +455,17 @@ export default {
   'Manage workspace directories': 'Manage workspace directories',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'Add directories to the workspace. Use comma to separate multiple paths',
+  'Remove a directory from the workspace':
+    'Remove a directory from the workspace',
+  'Please provide a directory path to remove.':
+    'Please provide a directory path to remove.',
+  'Cannot remove initial workspace directory: {{directory}}':
+    'Cannot remove initial workspace directory: {{directory}}',
+  'Directory not found in workspace: {{directory}}':
+    'Directory not found in workspace: {{directory}}',
+  'Directory removed from workspace but error updating settings: {{error}}':
+    'Directory removed from workspace but error updating settings: {{error}}',
+  'Removed directory: {{directory}}': 'Removed directory: {{directory}}',
   'Show all directories in the workspace':
     'Show all directories in the workspace',
   'set external editor preference': 'set external editor preference',
