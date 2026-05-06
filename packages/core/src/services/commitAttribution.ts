@@ -414,7 +414,16 @@ export class CommitAttributionService {
       return;
     }
 
-    this.surface = snapshot.surface ?? getClientSurface();
+    // `surface` is embedded verbatim in the git-notes payload and used
+    // as a Map/Record key downstream. A corrupted snapshot with a
+    // non-string value (e.g. `{}`, `42`, `null`) would coerce into
+    // strings like `[object Object]` and break the payload shape.
+    // Fall back to the current client surface when the stored value
+    // isn't a string.
+    this.surface =
+      typeof snapshot.surface === 'string' && snapshot.surface.length > 0
+        ? snapshot.surface
+        : getClientSurface();
     // A corrupted or partially-written snapshot can leave numeric
     // counters as `undefined`; without coercion, downstream
     // `Math.min(undefined, n)` produces NaN that flows into the
@@ -423,16 +432,36 @@ export class CommitAttributionService {
     this.promptCountAtLastCommit = sanitiseCount(
       snapshot.promptCountAtLastCommit,
     );
+    // Enforce the invariant `atLastCommit <= total`: a corrupted /
+    // partially-written snapshot with the inverse would surface a
+    // negative `getPromptsSinceLastCommit()` and propagate as a
+    // "(-3)-shotted" trailer into PR descriptions.
+    if (this.promptCountAtLastCommit > this.promptCount) {
+      this.promptCountAtLastCommit = this.promptCount;
+    }
 
     this.fileAttributions.clear();
     for (const [k, v] of Object.entries(snapshot.fileStates ?? {})) {
       // Re-canonicalise on restore so old snapshots (written before
       // recordEdit started running keys through realpath) end up
-      // with the same shape as newly-recorded entries — otherwise a
-      // session resumed from a pre-fix snapshot could have two
-      // parallel records for the same file under symlink/canonical
-      // forms.
-      this.fileAttributions.set(realpathOrSelf(k), sanitiseAttribution(v));
+      // with the same shape as newly-recorded entries. If both the
+      // symlinked and canonical forms were stored under separate
+      // keys (e.g. a session straddling the canonicalisation fix),
+      // collapsing them onto the same canonical key MUST merge their
+      // attribution rather than overwrite — otherwise the second
+      // entry to land wins and the AI's accumulated contribution from
+      // the first form is silently dropped.
+      const canonicalKey = realpathOrSelf(k);
+      const incoming = sanitiseAttribution(v);
+      const existing = this.fileAttributions.get(canonicalKey);
+      if (existing) {
+        this.fileAttributions.set(canonicalKey, {
+          aiContribution: existing.aiContribution + incoming.aiContribution,
+          aiCreated: existing.aiCreated || incoming.aiCreated,
+        });
+      } else {
+        this.fileAttributions.set(canonicalKey, incoming);
+      }
     }
   }
 

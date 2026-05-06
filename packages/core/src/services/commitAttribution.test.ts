@@ -380,5 +380,76 @@ describe('CommitAttributionService', () => {
           .aiContribution,
       ).toBe(99);
     });
+
+    // A snapshot straddling the canonicalisation fix can carry both
+    // the symlinked and canonical paths for the same file. After
+    // realpathOrSelf normalises them, the second entry to land
+    // would overwrite the first if we just `set()` — losing the
+    // first form's accumulated aiContribution. Merge instead.
+    it('merges duplicate entries collapsed by canonicalisation', () => {
+      const service = CommitAttributionService.getInstance();
+      service.restoreFromSnapshot({
+        type: 'attribution-snapshot',
+        surface: 'cli',
+        fileStates: {
+          '/var/repo/src/dup.ts': {
+            aiContribution: 30,
+            aiCreated: false,
+          },
+          '/private/var/repo/src/dup.ts': {
+            aiContribution: 70,
+            aiCreated: true,
+          },
+        },
+        promptCount: 0,
+        promptCountAtLastCommit: 0,
+      });
+
+      const restored = service.getFileAttribution(
+        '/private/var/repo/src/dup.ts',
+      )!;
+      expect(restored.aiContribution).toBe(100);
+      // aiCreated is OR'd: any form carrying true wins.
+      expect(restored.aiCreated).toBe(true);
+    });
+
+    // A corrupted snapshot with promptCountAtLastCommit > promptCount
+    // would surface a negative `getPromptsSinceLastCommit()` and
+    // propagate as a "(-3)-shotted" trailer into PR text.
+    it('clamps promptCountAtLastCommit to promptCount on restore', () => {
+      const service = CommitAttributionService.getInstance();
+      service.restoreFromSnapshot({
+        type: 'attribution-snapshot',
+        surface: 'cli',
+        fileStates: {},
+        promptCount: 5,
+        promptCountAtLastCommit: 99,
+      });
+      expect(service.getPromptsSinceLastCommit()).toBe(0);
+    });
+
+    // `surface` lands verbatim in the git-notes payload and is used
+    // as a Map key. Non-string values would coerce into
+    // `[object Object]` etc. Fall back to the current client surface.
+    it.each([
+      ['object', { foo: 'bar' }],
+      ['number', 42],
+      ['null', null],
+      ['empty string', ''],
+    ])(
+      'falls back to client surface when snapshot.surface is non-string (%s)',
+      (_label, badValue) => {
+        const service = CommitAttributionService.getInstance();
+        service.restoreFromSnapshot({
+          type: 'attribution-snapshot',
+          surface: badValue as unknown as string,
+          fileStates: {},
+          promptCount: 0,
+          promptCountAtLastCommit: 0,
+        });
+        // getClientSurface() returns 'cli' in tests (no env var set).
+        expect(service.getSurface()).toBe('cli');
+      },
+    );
   });
 });
