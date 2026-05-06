@@ -771,6 +771,15 @@ export class GeminiChat {
   }
 
   /**
+   * Returns the number of entries in the raw chat history. O(1) and
+   * does not clone — use this when you only need the count and would
+   * otherwise pay the {@link getHistory} `structuredClone` cost.
+   */
+  getHistoryLength(): number {
+    return this.history.length;
+  }
+
+  /**
    * Clears the chat history.
    */
   clearHistory(): void {

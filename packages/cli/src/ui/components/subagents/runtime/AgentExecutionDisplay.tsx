@@ -29,7 +29,10 @@ export interface AgentExecutionDisplayProps {
   availableHeight?: number;
   childWidth: number;
   config: Config;
-  /** Whether this display's confirmation prompt should respond to keyboard input. */
+  /**
+   * Whether this subagent owns keyboard input for confirmations and
+   * Ctrl+E/Ctrl+F display shortcuts.
+   */
   isFocused?: boolean;
   /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
   isWaitingForOtherApproval?: boolean;

@@ -791,11 +791,44 @@ describe('loadCliConfig', () => {
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
 
+    it('should set proxy from settings when present', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'http://localhost:7890' };
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
+    it('should normalize proxy from settings when scheme is omitted', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'localhost:7890' };
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
+    it('should prioritize settings proxy over environment variable', async () => {
+      vi.stubEnv('HTTPS_PROXY', 'http://localhost:7891');
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'http://localhost:7890' };
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
     it('should prioritize CLI flag over environment variable for proxy (CLI http://localhost:7890, environment variable http://localhost:7891)', async () => {
       vi.stubEnv('http_proxy', 'http://localhost:7891');
       process.argv = ['node', 'script.js', '--proxy', 'http://localhost:7890'];
       const argv = await parseArguments();
       const settings: Settings = {};
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
+    it('should prioritize CLI flag over settings proxy', async () => {
+      process.argv = ['node', 'script.js', '--proxy', 'http://localhost:7890'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'http://localhost:7891' };
       const config = await loadCliConfig(settings, argv);
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
@@ -1026,6 +1059,7 @@ describe('loadCliConfig telemetry', () => {
 describe('mergeExcludeTools', () => {
   const defaultExcludes = [
     ToolNames.SHELL,
+    ToolNames.MONITOR,
     ToolNames.EDIT,
     ToolNames.WRITE_FILE,
   ];
@@ -1092,6 +1126,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1111,6 +1146,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1131,6 +1167,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1147,6 +1184,43 @@ describe('Approval mode tool exclusion logic', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should not exclude monitor when explicitly allowed in tools.allowed', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: [ToolNames.MONITOR],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should honor monitor aliases in tools.allowed for non-interactive exclusions', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: ['Monitor', 'Shell(git status)'],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.SHELL);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
@@ -1165,6 +1239,25 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should not exclude monitor when explicitly allowed in tools.core', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [ToolNames.MONITOR],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1185,6 +1278,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1205,6 +1299,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1218,6 +1313,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1243,6 +1339,7 @@ describe('Approval mode tool exclusion logic', () => {
 
       const excludedTools = config.getPermissionsDeny();
       expect(excludedTools).not.toContain(ToolNames.SHELL);
+      expect(excludedTools).not.toContain(ToolNames.MONITOR);
       expect(excludedTools).not.toContain(ToolNames.EDIT);
       expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
     }
@@ -1255,6 +1352,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1275,6 +1373,7 @@ describe('Approval mode tool exclusion logic', () => {
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain('custom_tool'); // From settings
     expect(excludedTools).toContain(ToolNames.SHELL); // From approval mode
+    expect(excludedTools).toContain(ToolNames.MONITOR); // From approval mode
     expect(excludedTools).not.toContain(ToolNames.EDIT); // Should be allowed in auto-edit
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE); // Should be allowed in auto-edit
   });

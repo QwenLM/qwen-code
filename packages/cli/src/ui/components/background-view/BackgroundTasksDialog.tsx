@@ -27,16 +27,17 @@ import {
   ToolDisplayNames,
   ToolNames,
   type BackgroundTaskEntry,
+  type MonitorEntry,
 } from '@qwen-code/qwen-code-core';
+import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
+  type AgentDialogEntry,
   type DialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
 
-// `DialogEntry['status']` widens BackgroundTaskEntry['status'] with the
-// shell status union, but they share the same four values
-// (running / completed / failed / cancelled), so handlers keyed on the
-// agent enum still cover every shell case.
+// `DialogEntry['status']` widens the shell status union with the agent-only
+// `paused` state, so dialog handlers can switch on a single combined enum.
 type EntryStatus = DialogEntry['status'];
 
 // Tool-name → display-name lookup (`run_shell_command` → `Shell`).
@@ -54,10 +55,10 @@ function formatActivityLabel(name: string, description: string | undefined) {
     : '';
   return singleLineDesc ? `${display}(${singleLineDesc})` : display;
 }
-import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 
 const STATUS_VERBS: Record<EntryStatus, string> = {
   running: 'Running',
+  paused: 'Paused',
   completed: 'Completed',
   failed: 'Failed',
   cancelled: 'Stopped',
@@ -73,6 +74,12 @@ function terminalStatusPresentation(
   status: EntryStatus,
 ): StatusPresentation | null {
   switch (status) {
+    case 'paused':
+      return {
+        icon: '\u23F8',
+        color: theme.status.warning,
+        labelColor: theme.status.warningDim,
+      };
     case 'completed':
       return {
         icon: '\u2714',
@@ -103,17 +110,31 @@ const FOREGROUND_ROW_PREFIX = '[in turn]';
 const SHELL_ROW_PREFIX = '[shell]';
 
 function rowLabel(entry: DialogEntry): string {
-  if (entry.kind === 'agent') {
-    const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-    return entry.flavor === 'foreground'
-      ? `${FOREGROUND_ROW_PREFIX} ${label}`
-      : label;
+  switch (entry.kind) {
+    case 'agent': {
+      const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
+      return entry.flavor === 'foreground'
+        ? `${FOREGROUND_ROW_PREFIX} ${label}`
+        : label;
+    }
+    case 'shell':
+      // Shell / monitor prefixes mirror the dialog's "section" visual hint
+      // without needing per-kind section headers (which would complicate
+      // the windowing math). Long commands / descriptions wrap (ListBody
+      // renders rows with plain `<Text>`, no truncation helper), which
+      // is acceptable for the dialog's information-density profile —
+      // adding `wrap="truncate-end"` here would hide context the user
+      // explicitly opened the dialog to see.
+      return `${SHELL_ROW_PREFIX} ${entry.command}`;
+    case 'monitor':
+      return `[monitor] ${entry.description}`;
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(
+        `rowLabel: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+      );
+    }
   }
-  // Shell prefix mirrors the dialog's "section" visual hint without needing
-  // per-kind section headers (which would complicate the windowing math).
-  // The command itself is plain text and already truncated by the row
-  // renderer's MaxSizedBox.
-  return `${SHELL_ROW_PREFIX} ${entry.command}`;
 }
 
 function elapsedFor(entry: { startTime: number; endTime?: number }): string {
@@ -245,15 +266,43 @@ const DetailBody: React.FC<{
   entry: DialogEntry;
   maxHeight: number;
   maxWidth: number;
-}> = ({ entry, maxHeight, maxWidth }) =>
-  entry.kind === 'agent' ? (
-    <AgentDetailBody entry={entry} maxHeight={maxHeight} maxWidth={maxWidth} />
-  ) : (
-    <ShellDetailBody entry={entry} maxHeight={maxHeight} maxWidth={maxWidth} />
-  );
+}> = ({ entry, maxHeight, maxWidth }) => {
+  switch (entry.kind) {
+    case 'agent':
+      return (
+        <AgentDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'shell':
+      return (
+        <ShellDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'monitor':
+      return (
+        <MonitorDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(
+        `DetailBody: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
+      );
+    }
+  }
+};
 
 const AgentDetailBody: React.FC<{
-  entry: BackgroundTaskEntry;
+  entry: AgentDialogEntry;
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
@@ -276,7 +325,9 @@ const AgentDetailBody: React.FC<{
   // row sits at the bottom of the Progress block. Cap at 5 in case the
   // registry ever raises its buffer.
   const activities = (entry.recentActivities ?? []).slice(-5);
-  const hasError = entry.status === 'failed' && Boolean(entry.error);
+  const blockedReason = entry.resumeBlockedReason;
+  const hasError = Boolean(entry.error);
+  const hasBlockedReason = Boolean(blockedReason);
 
   // Prompt: show at most 5 newline-delimited segments, each row truncated
   // to one visual line. Append an ellipsis if the source had more.
@@ -357,6 +408,22 @@ const AgentDetailBody: React.FC<{
               <Text wrap="truncate-end">{line || ' '}</Text>
             </Box>
           ))}
+        </Fragment>
+      )}
+
+      {hasBlockedReason && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              Resume blocked
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {blockedReason}
+            </Text>
+          </Box>
         </Fragment>
       )}
 
@@ -458,6 +525,84 @@ const ShellDetailBody: React.FC<{
   );
 };
 
+const MonitorDetailBody: React.FC<{
+  entry: MonitorEntry;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = `Monitor › ${entry.description}`;
+
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.pid !== undefined) {
+    dimSubtitleParts.push(`pid ${entry.pid}`);
+  }
+  dimSubtitleParts.push(
+    `${entry.eventCount} event${entry.eventCount === 1 ? '' : 's'}`,
+  );
+  if (entry.droppedLines > 0) {
+    dimSubtitleParts.push(`${entry.droppedLines} dropped`);
+  }
+  if (entry.exitCode !== undefined) {
+    dimSubtitleParts.push(`exit ${entry.exitCode}`);
+  }
+
+  // `entry.error` is set on `failed` (spawn error) and on `completed`
+  // when the monitor was auto-stopped (max events / idle timeout). Worth
+  // surfacing whenever it exists, regardless of terminal status.
+  const hasError = Boolean(entry.error);
+  const errorIsFailure = entry.status === 'failed';
+  const errorColor = errorIsFailure ? theme.status.error : theme.status.warning;
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${STATUS_VERBS[entry.status]} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      <Box />
+      <Box>
+        <Text bold dimColor>
+          Command
+        </Text>
+      </Box>
+      <Box>
+        <Text wrap="truncate-end">{entry.command}</Text>
+      </Box>
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={errorColor}>
+              {errorIsFailure ? 'Error' : 'Stopped because'}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={errorColor} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
+};
+
 // ─── Dialog shell ──────────────────────────────────────────
 
 interface BackgroundTasksDialogProps {
@@ -478,6 +623,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     enterDetail,
     exitDetail,
     cancelSelected,
+    resumeSelected,
   } = useBackgroundTaskViewActions();
   const config = useConfig();
 
@@ -515,15 +661,30 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
-    if (!fromSnapshot || fromSnapshot.kind !== 'agent') return fromSnapshot;
-    // Re-read the agent from the registry so detail-body fields the
-    // registry mutates between status transitions (recentActivities,
-    // stats) are fresh. The shallow spread inside useBackgroundTaskView
-    // captures `recentActivities` at refresh time, and `appendActivity`
-    // reassigns `entry.recentActivities = next` on the registry object —
-    // so the snapshot's reference is detached after the first activity.
-    const live = config.getBackgroundTaskRegistry().get(fromSnapshot.agentId);
-    return live ? { ...live, kind: 'agent' as const } : fromSnapshot;
+    if (!fromSnapshot) return fromSnapshot;
+    // Re-read the entry from the registry on each activityTick so
+    // detail-body fields the registry mutates between status transitions
+    // are fresh. The snapshot in useBackgroundTaskView only refreshes on
+    // statusChange (so the pill / AppContainer don't churn under heavy
+    // tool / event traffic), so for the detail view we have to re-resolve
+    // explicitly:
+    //   - agent: `recentActivities` is reassigned by `appendActivity`,
+    //     which fires `activityChange` (subscribed below).
+    //   - monitor: `eventCount` / `droppedLines` are mutated by
+    //     `emitEvent`, which intentionally does NOT fire `statusChange`
+    //     to avoid per-event refresh churn. The 1s wall-clock tick below
+    //     drives the recompute instead.
+    // Shells don't mutate detail-visible fields between statusChange
+    // events, so the snapshot stays correct for them.
+    if (fromSnapshot.kind === 'agent') {
+      const live = config.getBackgroundTaskRegistry().get(fromSnapshot.agentId);
+      return live ? { ...live, kind: 'agent' as const } : fromSnapshot;
+    }
+    if (fromSnapshot.kind === 'monitor') {
+      const live = config.getMonitorRegistry().get(fromSnapshot.monitorId);
+      return live ? { ...live, kind: 'monitor' as const } : fromSnapshot;
+    }
+    return fromSnapshot;
     // activityTick is a dep on purpose: the registry mutation is invisible
     // to useMemo otherwise and we need to recompute on each activity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -650,6 +811,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           closeDialog();
           return;
         }
+        if (key.sequence === 'r' && !key.ctrl && !key.meta) {
+          void resumeSelected();
+          return;
+        }
         if (key.sequence === 'x' && !key.ctrl && !key.meta) {
           handleCancelKey();
           return;
@@ -679,6 +844,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         closeDialog();
         return;
       }
+      if (key.sequence === 'r' && !key.ctrl && !key.meta) {
+        void resumeSelected();
+        return;
+      }
       if (key.sequence === 'x' && !key.ctrl && !key.meta) {
         handleCancelKey();
         return;
@@ -688,6 +857,11 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   );
 
   if (!dialogOpen) return null;
+
+  const selectedEntryAllowsResume =
+    selectedEntry?.kind === 'agent' &&
+    selectedEntry.status === 'paused' &&
+    !selectedEntry.resumeBlockedReason;
 
   // Hint footer — context-sensitive.
   const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
@@ -704,10 +878,18 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   } else if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
     if (selectedEntry?.status === 'running') hints.push('x stop');
+    if (selectedEntryAllowsResume) hints.push('r resume');
+    if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
+      hints.push('x abandon');
+    }
     hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 go back', 'Esc/Enter/Space close');
     if (selectedEntry?.status === 'running') hints.push('x stop');
+    if (selectedEntryAllowsResume) hints.push('r resume');
+    if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
+      hints.push('x abandon');
+    }
   }
 
   return (

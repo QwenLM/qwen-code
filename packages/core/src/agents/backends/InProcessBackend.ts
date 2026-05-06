@@ -52,7 +52,16 @@ export class InProcessBackend implements Backend {
   private readonly runtimeContext: Config;
   private readonly agents = new Map<string, AgentInteractive>();
   private readonly agentContentGenerators = new Map<string, ContentGenerator>();
-  private readonly agentRegistries: ToolRegistry[] = [];
+  // Per-agent tool registries keyed by agentId so `stopAgent` can
+  // dispose just that agent's registry (releasing tool listeners on
+  // shared managers like SkillManager / SubagentManager) without
+  // waiting for backend shutdown. The previous flat-array form leaked
+  // listeners — every spawn-then-stop cycle accumulated another stale
+  // SkillTool listener on the parent SkillManager, and
+  // `notifyChangeListeners` (now parallel via Promise.allSettled)
+  // still pays a per-listener round trip even when the underlying
+  // subagent no longer exists.
+  private readonly agentRegistries: Map<string, ToolRegistry> = new Map();
   private readonly agentOrder: string[] = [];
   private activeAgentId: string | null = null;
   private exitCallback: AgentExitCallback | null = null;
@@ -103,7 +112,7 @@ export class InProcessBackend implements Backend {
       );
     }
 
-    this.agentRegistries.push(agentContext.getToolRegistry());
+    this.agentRegistries.set(config.agentId, agentContext.getToolRegistry());
 
     const core = new AgentCore(
       inProcessConfig.agentName,
@@ -172,6 +181,21 @@ export class InProcessBackend implements Backend {
       agent.abort();
       debugLogger.info(`Stopped agent: ${agentId}`);
     }
+    // Release this agent's per-agent tool registry — including its
+    // SkillTool's listener registration on the shared SkillManager —
+    // immediately, instead of accumulating until backend cleanup() at
+    // process exit. Fire-and-forget the async stop(); errors are
+    // already logged inside.
+    const registry = this.agentRegistries.get(agentId);
+    if (registry) {
+      this.agentRegistries.delete(agentId);
+      void registry.stop().catch((error) => {
+        debugLogger.error(
+          `Failed to stop tool registry for agent "${agentId}":`,
+          error,
+        );
+      });
+    }
   }
 
   stopAll(): void {
@@ -200,12 +224,15 @@ export class InProcessBackend implements Backend {
     await Promise.race([Promise.allSettled(promises), timeout]);
     clearTimeout(timerId!);
 
-    // Stop per-agent tool registries so tools like AgentTool can release
-    // listeners registered on shared managers (e.g. SubagentManager).
-    for (const registry of this.agentRegistries) {
+    // Stop any still-attached per-agent tool registries so tools like
+    // AgentTool / SkillTool release listeners registered on shared
+    // managers (SubagentManager / SkillManager). `stopAgent` already
+    // releases registries for cleanly stopped agents; this loop covers
+    // the fast-path shutdown case where agents are still in flight.
+    for (const registry of this.agentRegistries.values()) {
       await registry.stop().catch(() => {});
     }
-    this.agentRegistries.length = 0;
+    this.agentRegistries.clear();
 
     this.agents.clear();
     this.agentContentGenerators.clear();

@@ -48,22 +48,378 @@ import {
 
 const debugLogger = createDebugLogger('SHELL');
 
-/**
- * Strip a single bare trailing `&` (bash background operator) from a
- * command string. Returns the input unchanged if the trailing form is
- * `&&` (logical AND), `\&` (escaped literal `&`), or there is no `&`
- * at the end at all. Linear time, no regex backtracking risk.
- */
-function stripTrailingBackgroundAmp(command: string): string {
-  const trimmed = command.trimEnd();
-  if (!trimmed.endsWith('&')) return command;
-  if (trimmed.endsWith('&&')) return command;
-  if (trimmed.endsWith('\\&')) return command;
-  return trimmed.slice(0, -1).trimEnd();
-}
-
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
+
+// Long-run advisory threshold: half the EFFECTIVE foreground timeout
+// (not the default), computed per-invocation by `longRunThresholdFor`.
+// Couples to whichever timeout actually governs THIS command — so a
+// user who sets `timeout: 600_000` (10 min) gets the advisory at 5 min,
+// not at 60s. The 1/2 ratio is chosen so the hint surfaces well before
+// the timeout would hard-kill, but late enough that normal foreground
+// commands (under the 120s default) don't trigger it before ~60s.
+//
+// Floor of 1000ms guards the pathological tiny-positive-timeout edge.
+// `timeout <= 0` is already rejected by `validateToolParamValues` so
+// only positive values reach here, but `timeout: 1` (or any value < 2)
+// would otherwise produce `Math.floor(timeout / 2) = 0` and make
+// `elapsedMs >= 0` fire on every invocation showing "ran for 0s",
+// surfacing the hint before the command had a chance to fail by
+// timing out.
+const MIN_LONG_RUN_THRESHOLD_MS = 1000;
+function longRunThresholdFor(effectiveTimeoutMs: number): number {
+  return Math.max(
+    MIN_LONG_RUN_THRESHOLD_MS,
+    Math.floor(effectiveTimeoutMs / 2),
+  );
+}
+
+/**
+ * Format the long-run advisory appended to long foreground commands.
+ * Exported so tests and any future consumer (e.g. an alternative
+ * renderer) can render the same text without duplicating the threshold
+ * logic.
+ *
+ * Wording deliberately keeps the dialog mention conditional ("when
+ * running interactively") so the LLM doesn't relay misleading guidance
+ * to non-TTY users (`-p` headless / ACP / SDK consumers, where no
+ * dialog or footer pill exists). `/tasks` and the on-disk output file
+ * work in every mode.
+ */
+export function buildLongRunningForegroundHint(elapsedMs: number): string {
+  const seconds = Math.round(elapsedMs / 1000);
+  return (
+    `Note: this foreground command ran for ${seconds}s. ` +
+    `Next time you run a similar long-running process (build watchers, ` +
+    `dev servers, soak tests, polling loops), pass \`is_background: true\` ` +
+    `so the agent isn't blocked while the command runs. ` +
+    `(This is forward-looking guidance for FUTURE invocations — do NOT ` +
+    `re-run the command that just completed; for stateful operations ` +
+    `like deploys, migrations, or git push, that would cause double ` +
+    `side effects.) The output of background runs stays inspectable ` +
+    `via /tasks (text, any mode) or the on-disk output file; in ` +
+    `interactive mode the Background tasks dialog also has a per-entry ` +
+    `detail view + live updates.`
+  );
+}
+
+/**
+ * Detect standalone or leading `sleep N` patterns that should use Monitor
+ * instead. Catches `sleep 5`, `sleep 2.5`, `sleep 2s`,
+ * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` — but not sleep
+ * inside pipelines, subshells, backgrounded commands, or scripts (those are
+ * fine).
+ */
+export function detectBlockedSleepPattern(command: string): string | null {
+  // Strip trailing shell comments first; otherwise `sleep 5 # wait` would
+  // present `# wait` as the suffix, which `getSleepSequentialSeparator`
+  // rejects (only &&/||/;/\n are recognized), letting the foreground sleep
+  // bypass the guard. Shell ignores top-level trailing comments, so for the
+  // purposes of detection they are equivalent to end-of-command.
+  const trimmed = trimTrailingShellComment(command).trim();
+  if (!trimmed.startsWith('sleep')) return null;
+  const afterSleep = trimmed.slice('sleep'.length);
+  if (!afterSleep || !/\s/.test(afterSleep[0]!)) return null;
+
+  let index = 0;
+  while (index < afterSleep.length && /\s/.test(afterSleep[index]!)) {
+    index++;
+  }
+  const durationStart = index;
+  while (
+    index < afterSleep.length &&
+    !/\s/.test(afterSleep[index]!) &&
+    ![';', '&', '|', '\n'].includes(afterSleep[index]!)
+  ) {
+    index++;
+  }
+
+  const durationToken = afterSleep.slice(durationStart, index);
+  const secs = parseSleepDurationToSeconds(durationToken);
+  if (secs === null || secs < 2) return null;
+
+  const suffix = afterSleep.slice(index);
+  const separator = getSleepSequentialSeparator(suffix);
+  if (separator === null) return null;
+
+  const rest = separator.rest.trim();
+  return rest
+    ? `sleep ${durationToken} followed by: ${rest}`
+    : `standalone sleep ${durationToken}`;
+}
+
+function parseSleepDurationToSeconds(token: string): number | null {
+  if (!token) return null;
+
+  let index = 0;
+  let seenDigit = false;
+  let seenDot = false;
+  while (index < token.length) {
+    const char = token[index]!;
+    if (char >= '0' && char <= '9') {
+      seenDigit = true;
+      index++;
+      continue;
+    }
+    if (char === '.' && !seenDot) {
+      seenDot = true;
+      index++;
+      continue;
+    }
+    break;
+  }
+
+  if (!seenDigit) return null;
+  const value = Number.parseFloat(token.slice(0, index));
+  if (!Number.isFinite(value)) return null;
+
+  const unit = token.slice(index).toLowerCase();
+  switch (unit || 's') {
+    case 'ms':
+      return value / 1000;
+    case 's':
+      return value;
+    case 'm':
+      return value * 60;
+    case 'h':
+      return value * 60 * 60;
+    case 'd':
+      return value * 60 * 60 * 24;
+    default:
+      return null;
+  }
+}
+
+function getSleepSequentialSeparator(suffix: string): { rest: string } | null {
+  let index = 0;
+  while (
+    index < suffix.length &&
+    suffix[index] !== '\n' &&
+    /\s/.test(suffix[index]!)
+  ) {
+    index++;
+  }
+
+  const restWithSeparator = suffix.slice(index);
+  if (!restWithSeparator) return { rest: '' };
+  if (
+    restWithSeparator.startsWith('&&') ||
+    restWithSeparator.startsWith('||')
+  ) {
+    return { rest: restWithSeparator.slice(2) };
+  }
+  if (restWithSeparator[0] === ';' || restWithSeparator[0] === '\n') {
+    return { rest: restWithSeparator.slice(1) };
+  }
+  return null;
+}
+
+function trimTrailingShellComment(command: string): string {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let escapeNext = false;
+  let commandSubstitutionDepth = 0;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+
+    if (inSingleQuote) {
+      if (ch === "'") inSingleQuote = false;
+      continue;
+    }
+
+    if (inBacktick) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '"') {
+        inDoubleQuote = false;
+        continue;
+      }
+      if (ch === '$' && command[i + 1] === '(') {
+        commandSubstitutionDepth++;
+        i++;
+        continue;
+      }
+      if (ch === ')' && commandSubstitutionDepth > 0) {
+        commandSubstitutionDepth--;
+      }
+      continue;
+    }
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$' && command[i + 1] === '(') {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+    if (
+      ch === '#' &&
+      commandSubstitutionDepth === 0 &&
+      (i === 0 || /\s/.test(command[i - 1]!))
+    ) {
+      return command.slice(0, i);
+    }
+  }
+
+  return command;
+}
+
+function hasTopLevelTrailingBackgroundOperator(command: string): boolean {
+  const commentTrimmed = trimTrailingShellComment(command);
+  const trimmed = commentTrimmed.trimEnd();
+  if (!trimmed.endsWith('&')) return false;
+
+  const trailingAmpIndex = trimmed.length - 1;
+  const previousNonWhitespaceIndex = (() => {
+    for (let i = trailingAmpIndex - 1; i >= 0; i--) {
+      if (!/\s/.test(trimmed[i]!)) return i;
+    }
+    return -1;
+  })();
+
+  if (previousNonWhitespaceIndex >= 0) {
+    const previous = trimmed[previousNonWhitespaceIndex]!;
+    if (previous === '&' || previous === '|' || previous === '\\') {
+      return false;
+    }
+  }
+
+  let backslashCount = 0;
+  for (let i = trailingAmpIndex - 1; i >= 0 && trimmed[i] === '\\'; i--) {
+    backslashCount++;
+  }
+  if (backslashCount % 2 === 1) return false;
+
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let escapeNext = false;
+  let commandSubstitutionDepth = 0;
+
+  for (let i = 0; i <= trailingAmpIndex; i++) {
+    const ch = trimmed[i]!;
+
+    if (inSingleQuote) {
+      if (ch === "'") inSingleQuote = false;
+      continue;
+    }
+
+    if (inBacktick) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (ch === '"') {
+        inDoubleQuote = false;
+        continue;
+      }
+      if (ch === '$' && trimmed[i + 1] === '(') {
+        commandSubstitutionDepth++;
+        i++;
+        continue;
+      }
+      if (ch === ')' && commandSubstitutionDepth > 0) {
+        commandSubstitutionDepth--;
+      }
+      continue;
+    }
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$' && trimmed[i + 1] === '(') {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+    if (i === trailingAmpIndex) {
+      return commandSubstitutionDepth === 0;
+    }
+  }
+
+  return false;
+}
 
 export interface ShellToolParams {
   command: string;
@@ -137,6 +493,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
   ): Promise<ToolCallConfirmationDetails> {
     const command = stripShellWrapper(this.params.command);
     const pm = this.config.getPermissionManager?.();
+    const cwd = this.params.directory || this.config.getTargetDir();
 
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
@@ -155,7 +512,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       if (pm) {
         try {
-          if ((await pm.isCommandAllowed(sub)) === 'allow') {
+          if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
             continue;
           }
         } catch (e) {
@@ -215,8 +572,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
   ): Promise<ToolResult> {
-    const strippedCommand = stripShellWrapper(this.params.command);
-
     if (signal.aborted) {
       return {
         llmContent: 'Command was cancelled by user before it could start.',
@@ -239,7 +594,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     // Add co-author to git commit commands
-    const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+    const processedCommand = this.addCoAuthorToGitCommit(
+      this.params.command.trim(),
+    );
     const commandToExecute = processedCommand;
     const cwd = this.params.directory || this.config.getTargetDir();
 
@@ -320,6 +677,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
       setPidCallback(pid);
     }
 
+    // Bracket the spawn → settle wall-clock so the result builder below
+    // can decide whether to append the long-run advisory. Captured AFTER
+    // `await ShellExecutionService.execute(...)` returns its handle so
+    // pre-spawn setup (PTY dynamic import via `getPty()`, ~50–200ms on
+    // first call) is excluded — the elapsed should reflect the
+    // command's actual runtime, not the tool call's total wall time.
+    // The `pid` set above confirms the process has been spawned by this
+    // point, so subtraction below is true post-spawn-to-settle.
+    //
+    // `performance.now()` (monotonic high-res, ms-precision) instead of
+    // `Date.now()` so NTP corrections / VM clock drift between capture
+    // and read can't make `elapsedMs` go negative (which would silently
+    // skip the hint with no observable failure). Returned origin is
+    // arbitrary but consistent across the two reads — only the
+    // difference matters here.
+    const executionStartTime = performance.now();
+
     const result = await resultPromise;
 
     let llmContent = '';
@@ -359,8 +733,65 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Signal: ${result.signal ?? '(none)'}`,
         `Process Group PGID: ${result.pid ?? '(none)'}`,
       ].join('\n');
-    }
 
+      // (Long-run advisory append happens AFTER `truncateToolOutput`
+      // below — see the explanation there for why post-truncation.)
+    }
+    // Decide whether to emit the long-run advisory. Conditions:
+    //   - Process completed under its own steam (no AbortSignal
+    //     trigger, no external signal). Specifically:
+    //       * Suppressed on aborted (`result.aborted: true`) — covers
+    //         the `if (result.aborted)` arm above (timeout / user-
+    //         cancel). Their own messaging is enough; a "should have
+    //         been background" reminder when the agent already knows
+    //         the command didn't complete is noise.
+    //       * Suppressed on external signal kills (`result.signal !=
+    //         null` with `aborted: false`, e.g. SIGTERM from container
+    //         shutdown, k8s eviction, OOM killer, sibling reaping the
+    //         process group). `shellExecutionService` only sets
+    //         `aborted` when the AbortSignal we passed was triggered,
+    //         so external signals fall through to the non-aborted
+    //         branch — same rationale as timeout.
+    //   - Wall-clock duration ≥ threshold. Measured spawn → resultPromise
+    //     settle, intentionally BEFORE the post-processing block below
+    //     (truncation I/O, output-file write). The hint reports how long
+    //     the COMMAND blocked the agent, not how long the tool call
+    //     spent including post-processing — that's the number the agent
+    //     should be reasoning about when deciding whether to background
+    //     next time. Truncation time is bounded by the temp-dir backend
+    //     and isn't representative of the command's actual wait.
+    // Fires on both successful and naturally-failed completions since
+    // the advice ("next time, background it") is the same in both.
+    const elapsedMs = performance.now() - executionStartTime;
+    const longRunThreshold = longRunThresholdFor(effectiveTimeout);
+    const shouldAppendLongRunHint =
+      !result.aborted &&
+      result.signal === null &&
+      elapsedMs >= longRunThreshold;
+    // Observability: the hint decision is otherwise invisible. If a
+    // user reports "my 65s command didn't get the hint" or "5s command
+    // got the hint", the debug log shows which suppression branch fired
+    // (aborted / signal / under-threshold) plus the actual elapsed and
+    // computed threshold. No PII — just timing + result flags.
+    debugLogger.debug(
+      `long-run hint: elapsed=${Math.round(elapsedMs)}ms threshold=${longRunThreshold}ms ` +
+        `aborted=${result.aborted} signal=${result.signal} → ${shouldAppendLongRunHint ? 'fire' : 'suppress'}`,
+    );
+
+    // returnDisplayMessage build order — chronologically:
+    //   1. Initial value: in debug mode, snapshot of pre-truncation
+    //      `llmContent`; in non-debug mode, terse output-or-status.
+    //   2. Truncation block (below) appends `Output too long and was
+    //      saved to: <path>` if truncation fired (BOTH modes).
+    //   3. Long-run hint append (further below) appends the hint
+    //      itself with append-style re-sync (BOTH modes), so the user
+    //      sees the same advisory the agent does — otherwise the
+    //      agent would suddenly suggest `is_background: true` with no
+    //      visible trigger in the TUI.
+    // The pre-existing debug snapshot is captured here (pre-truncation,
+    // pre-hint); both subsequent steps APPEND to it rather than
+    // replacing, so all information accumulates rather than being lost
+    // when later steps fire.
     let returnDisplayMessage = '';
     if (this.config.getDebugMode()) {
       returnDisplayMessage = llmContent;
@@ -406,10 +837,67 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
+    // Append the long-run advisory AFTER truncation so the hint isn't
+    // wrapped in `truncateToolOutput`'s "Truncated part of the output"
+    // header (which the LLM might misread as part of the command's own
+    // output). The hint is process metadata about the command, not
+    // command output, so it belongs outside the truncation envelope.
+    const longRunHint = shouldAppendLongRunHint
+      ? buildLongRunningForegroundHint(elapsedMs)
+      : null;
+    if (longRunHint) {
+      if (typeof llmContent === 'string') {
+        llmContent += `\n\n${longRunHint}`;
+        // Surface the hint in the user-facing TUI too — the user is
+        // the one waiting for long commands and benefits from the
+        // same "consider backgrounding next time" cue the agent sees.
+        // Append (not replace) in BOTH modes so the truncation marker
+        // line ("Output too long and was saved to: ...") and any
+        // pre-existing returnDisplayMessage content (debug snapshot,
+        // status line, command output) are preserved.
+        returnDisplayMessage +=
+          (returnDisplayMessage ? '\n\n' : '') + longRunHint;
+      }
+      // else: llmContent is a structured `Part[]` / `Part` rather than
+      // a plain string. Today shell.ts only emits string llmContent,
+      // but the type union allows structured content. If a future
+      // refactor changes that, the hint silently disappears here. We
+      // accept that risk for now — the alternative (encoding the hint
+      // as a Part) would require deciding on a rendering convention,
+      // and structured llmContent isn't on the roadmap. Revisit if
+      // someone adds a non-string return path.
+    }
+
+    // When `result.error` is set, `coreToolScheduler` builds the
+    // model-facing functionResponse from `error.message`, NOT from
+    // `llmContent` (see `convertToFunctionResponse` and the error
+    // branch in scheduler's success/error split). So if a long
+    // command hits this path the hint we appended to llmContent above
+    // would be silently dropped before reaching the agent. Append the
+    // hint to error.message too so the advisory survives whichever
+    // branch the scheduler takes.
+    //
+    // Note on reach: `ShellExecutionResult.error` is reserved for
+    // SPAWN / setup failures (per the field's doc comment in
+    // shellExecutionService.ts); non-zero exits leave it null. Real
+    // spawn failures (ENOENT, permission denied) typically resolve in
+    // <1s, so the elapsed >= threshold + spawn-error combination is
+    // rare. The preservation is here for the slow-spawn edge cases
+    // (PTY init dragging, remote-fs exec syscalls, security scanners
+    // interposing) where the rare path could still trigger and the
+    // hint would otherwise vanish.
+    //
+    // Use a `---` divider line so downstream consumers of
+    // `error.message` (firePostToolUseFailureHook, telemetry grouping,
+    // SIEM alerting, hook-side error parsers) have an unambiguous
+    // boundary they can split on rather than getting ~400 chars of
+    // advisory text mixed inline with the original error body.
     const executionError = result.error
       ? {
           error: {
-            message: result.error.message,
+            message:
+              result.error.message +
+              (longRunHint ? `\n\n---\n${longRunHint}` : ''),
             type: ToolErrorType.SHELL_EXECUTE_ERROR,
           },
         }
@@ -433,26 +921,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
-    const strippedCommand = stripShellWrapper(this.params.command);
-    // Strip a single bare trailing `&` (the bash background operator) before
-    // spawn: bash treats it as background-detach, exits the wrapper
-    // immediately, and the real child outlives the wrapper — the registry
-    // would settle as `completed` while the shell is still running, and
-    // chunked output would land on a closed stream. The managed path is
-    // itself the backgrounding mechanism, so the trailing `&` is redundant.
-    //
-    // Deliberately precise: do not touch `&&` (logical AND), `\&` (escaped
-    // literal `&`), or commands without a trailing `&`. Earlier `\s*&+\s*$`
-    // was both too greedy (it ate `&&` and `\&`) and a ReDoS hazard on
-    // long all-`&` inputs. Plain string checks here are linear and clearer
-    // than a lookbehind regex.
-    const noTrailingAmp = stripTrailingBackgroundAmp(strippedCommand);
-    if (noTrailingAmp !== strippedCommand) {
-      debugLogger.warn(
-        'Stripped trailing & from background shell command — managed path handles backgrounding',
-      );
-    }
-    const processedCommand = this.addCoAuthorToGitCommit(noTrailingAmp);
+    const processedCommand = this.addCoAuthorToGitCommit(
+      this.params.command.trim(),
+    );
     const cwd = this.params.directory || this.config.getTargetDir();
 
     // Output goes under the project temp dir (which `ReadFileTool`
@@ -574,7 +1045,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `id: ${shellId}\n` +
         pidLine +
         `output file: ${outputPath}\n` +
-        `Use the /tasks command to list and inspect background shells, or Read the output file directly.`,
+        `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates). Read the output file directly to view the captured output.`,
       returnDisplay: `Background shell ${shellId} started${pid !== undefined ? ` (pid ${pid})` : ''}.`,
     };
   }
@@ -760,6 +1231,13 @@ export class ShellTool extends BaseDeclarativeTool<
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
     }
+    const strippedCommand = stripShellWrapper(params.command);
+    if (
+      params.is_background &&
+      hasTopLevelTrailingBackgroundOperator(strippedCommand)
+    ) {
+      return 'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.';
+    }
     if (getCommandRoots(params.command).length === 0) {
       return 'Could not identify command root to obtain permission from user.';
     }
@@ -799,6 +1277,24 @@ export class ShellTool extends BaseDeclarativeTool<
 
       if (!isWithinWorkspace) {
         return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
+      }
+    }
+    // Sleep interception: block sleep >= 2s in foreground, suggest Monitor.
+    // Strip shell wrappers first so `bash -c 'sleep 5'` / `sh -c '...'` etc.
+    // cannot route around the check by hiding the foreground sleep inside a
+    // `-c` script. This matches every other sensitive check in this file
+    // (directory, read-only, command-root extraction, etc.).
+    if (!params.is_background) {
+      const sleepPattern = detectBlockedSleepPattern(
+        stripShellWrapper(params.command),
+      );
+      if (sleepPattern !== null) {
+        return (
+          `Blocked: ${sleepPattern}. ` +
+          'Run blocking commands in the background with is_background: true. ' +
+          'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
+          'If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds.'
+        );
       }
     }
     return null;

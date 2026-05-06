@@ -19,18 +19,27 @@ import { GeminiClient, SendMessageType } from './client.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
 import {
   AuthType,
+  createContentGenerator,
   type ContentGenerator,
   type ContentGeneratorConfig,
 } from './contentGenerator.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { type GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import type { ModelsConfig } from '../models/modelsConfig.js';
+import { retryWithBackoff } from '../utils/retry.js';
 import {
   CompressionStatus,
   GeminiEventType,
   Turn,
   type ChatCompressionInfo,
 } from './turn.js';
+
+vi.mock('../utils/retry.js', () => ({
+  retryWithBackoff: vi.fn(async (fn) => await fn()),
+  isUnattendedMode: vi.fn(() => false),
+}));
 import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -90,6 +99,25 @@ vi.mock('./turn', async (importOriginal) => {
 
 vi.mock('../config/config.js');
 vi.mock('./prompts');
+vi.mock('../models/content-generator-config.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../models/content-generator-config.js')
+    >();
+  return {
+    ...actual,
+    buildAgentContentGeneratorConfig: vi
+      .fn()
+      .mockImplementation(actual.buildAgentContentGeneratorConfig),
+  };
+});
+vi.mock('./contentGenerator.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./contentGenerator.js')>();
+  return {
+    ...actual,
+    createContentGenerator: vi.fn(),
+  };
+});
 vi.mock('../utils/getFolderStructure', () => ({
   getFolderStructure: vi.fn().mockResolvedValue('Mock Folder Structure'),
 }));
@@ -151,6 +179,7 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
 vi.mock('../telemetry/loggers.js', () => ({
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
+  logApiRequest: vi.fn(),
 }));
 
 // Mock RequestTokenizer to use simple character-based estimation
@@ -277,6 +306,12 @@ describe('Gemini Client (client.ts)', () => {
     vi.resetAllMocks();
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
 
+    // Default: createContentGenerator rejects (simulates test env without auth).
+    // Individual tests can override with mockResolvedValue for success path.
+    vi.mocked(createContentGenerator).mockRejectedValue(
+      new Error('no auth in test env'),
+    );
+
     mockMemoryManager = {
       scheduleExtract: vi.fn().mockResolvedValue({
         touchedTopics: [],
@@ -389,6 +424,9 @@ describe('Gemini Client (client.ts)', () => {
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getResolvedModel: vi.fn().mockReturnValue(undefined),
+      }),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -399,6 +437,9 @@ describe('Gemini Client (client.ts)', () => {
         info: vi.fn(),
         warn: vi.fn(),
         error: vi.fn(),
+      }),
+      getFileReadCache: vi.fn().mockReturnValue({
+        clear: vi.fn(),
       }),
     } as unknown as Config;
 
@@ -454,7 +495,137 @@ describe('Gemini Client (client.ts)', () => {
       expect(newHistory.length).toBe(initialHistory.length);
       expect(JSON.stringify(newHistory)).not.toContain('some old message');
     });
+
+    it('clears the FileReadCache so post-reset Reads re-emit content', async () => {
+      const cacheClear = mockFileReadCacheClear();
+
+      await client.resetChat();
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
   });
+
+  describe('history mutation invalidates FileReadCache', () => {
+    it('setHistory clears the cache', () => {
+      const cacheClear = mockFileReadCacheClear();
+      client['chat'] = {
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+
+      client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    /**
+     * Test helper: mock a GeminiChat whose history length goes from
+     * `before` to `after` across truncateHistory(). The first
+     * getHistoryLength() call (pre-truncate) returns `before`; the
+     * second (post-truncate) returns `after`.
+     */
+    function mockChatWithLengths(before: number, after: number): GeminiChat {
+      return {
+        getHistoryLength: vi
+          .fn()
+          .mockReturnValueOnce(before)
+          .mockReturnValueOnce(after),
+        truncateHistory: vi.fn(),
+      } as unknown as GeminiChat;
+    }
+
+    it('truncateHistory clears the cache when entries are actually removed', () => {
+      const cacheClear = mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(3, 2);
+
+      client.truncateHistory(2);
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('truncateHistory does NOT clear the cache when nothing was removed (keepCount >= history length)', () => {
+      const cacheClear = mockFileReadCacheClear();
+
+      // keepCount equals history length — nothing dropped.
+      client['chat'] = mockChatWithLengths(2, 2);
+      client.truncateHistory(2);
+      expect(cacheClear).not.toHaveBeenCalled();
+
+      // keepCount exceeds history length — also a no-op.
+      client['chat'] = mockChatWithLengths(2, 2);
+      client.truncateHistory(99);
+      expect(cacheClear).not.toHaveBeenCalled();
+    });
+
+    it('truncateHistory clears the cache when a non-finite keepCount empties history (NaN regression)', () => {
+      // slice(0, NaN) returns [], but `NaN < prevLen` evaluates to
+      // false. Comparing the actual post-truncate length closes that
+      // hole — without this guard the cache would survive a history
+      // wipe and the file_unchanged placeholder bug returns.
+      const cacheClear = mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(3, 0);
+
+      client.truncateHistory(NaN);
+
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('truncateHistory uses O(1) getHistoryLength, not getHistory (avoids structuredClone)', () => {
+      mockFileReadCacheClear();
+      const getHistoryLength = vi.fn().mockReturnValue(5);
+      const getHistory = vi.fn();
+      client['chat'] = {
+        getHistoryLength,
+        getHistory,
+        truncateHistory: vi.fn(),
+      } as unknown as GeminiChat;
+
+      client.truncateHistory(3);
+
+      expect(getHistoryLength).toHaveBeenCalled();
+      expect(getHistory).not.toHaveBeenCalled();
+    });
+
+    it('retry strips orphaned trailing user entries and clears the cache', async () => {
+      const cacheClear = mockFileReadCacheClear();
+      const stripOrphanedUserEntriesFromHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripOrphanedUserEntriesFromHistory,
+      } as unknown as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'retry' }],
+        new AbortController().signal,
+        'prompt-retry-1',
+        { type: SendMessageType.Retry },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(cacheClear).toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Test helper: replace mockConfig.getFileReadCache to return a stub
+   * whose clear() is a fresh spy. Returned spy lets tests assert on
+   * whether a code path invalidated the cache.
+   */
+  function mockFileReadCacheClear(): ReturnType<typeof vi.fn> {
+    const clearMock = vi.fn();
+    vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+      clear: clearMock,
+    } as unknown as ReturnType<Config['getFileReadCache']>);
+    return clearMock;
+  }
 
   describe('thinking block idle cleanup and latch', () => {
     let mockChat: Partial<GeminiChat>;
@@ -500,6 +671,100 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(client['lastApiCompletionTimestamp']).toBeNull();
+    });
+  });
+
+  describe('microcompaction FileReadCache invalidation', () => {
+    function makeReadFileResponses(count: number): Content[] {
+      const out: Content[] = [];
+      for (let i = 0; i < count; i++) {
+        out.push({
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: `/x/${i}.ts` },
+              },
+            },
+          ],
+        });
+        out.push({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: `content of ${i}` },
+              },
+            },
+          ],
+        });
+      }
+      return out;
+    }
+
+    beforeEach(() => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+    });
+
+    it('clears the cache after microcompaction strips old read_file results', async () => {
+      // Default test fixture: toolResultsThresholdMinutes = 60,
+      // toolResultsNumToKeep = 5. Six read_file results + a 90-minute
+      // idle gap means the oldest one gets cleared, so the if-meta
+      // branch in sendMessageStream fires and must invalidate the cache.
+      const cacheClear = mockFileReadCacheClear();
+
+      const history = makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-1',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('does not clear the cache when the idle gap is below the threshold', async () => {
+      const cacheClear = mockFileReadCacheClear();
+
+      const history = makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      // Recent activity — microcompaction must not fire.
+      client['lastApiCompletionTimestamp'] = Date.now() - 30 * 1000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-2',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(cacheClear).not.toHaveBeenCalled();
     });
   });
 
@@ -1484,6 +1749,170 @@ hello
       );
     });
 
+    it('should not block the main request when auto-memory recall is slow', async () => {
+      // Simulate a recall that takes longer than the 2.5s deadline
+      mockMemoryManager.recall.mockReturnValue(
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                prompt: '## Relevant memory\n\nSlow memory result.',
+                selectedDocs: [],
+                strategy: 'model',
+              }),
+            10_000,
+          ),
+        ),
+      );
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      vi.useFakeTimers();
+      try {
+        const streamPromise = (async () => {
+          const stream = client.sendMessageStream(
+            [{ text: 'Quick question' }],
+            new AbortController().signal,
+            'prompt-id-slow-memory',
+          );
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })();
+
+        // Advance past the 2.5s deadline — the main request should proceed
+        await vi.advanceTimersByTimeAsync(3_000);
+        await streamPromise;
+
+        // The main request should have been called without the slow memory
+        expect(mockTurnRunFn).toHaveBeenCalledWith(
+          'test-model',
+          expect.not.arrayContaining([
+            expect.stringContaining('Slow memory result'),
+          ]),
+          expect.any(AbortSignal),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should include auto-memory prompt when recall completes within deadline', async () => {
+      // Simulate a fast recall that completes well within the deadline
+      mockMemoryManager.recall.mockResolvedValue({
+        prompt: '## Relevant memory\n\nFast memory result.',
+        selectedDocs: [],
+        strategy: 'heuristic',
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-fast-memory',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining(['## Relevant memory\n\nFast memory result.']),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should proceed without auto-memory when managed auto-memory is disabled', async () => {
+      // When getManagedAutoMemoryEnabled returns false, no recall is initiated
+      // and sendMessageStream completes without memory content
+      vi.mocked(mockConfig.getManagedAutoMemoryEnabled).mockReturnValue(false);
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-no-memory',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      // recall should never have been called
+      expect(mockMemoryManager.recall).not.toHaveBeenCalled();
+
+      // The main request should have been called without any memory content
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        ['Quick question'],
+        expect.any(AbortSignal),
+      );
+
+      // Restore default
+      vi.mocked(mockConfig.getManagedAutoMemoryEnabled).mockReturnValue(true);
+    });
+
+    it('should proceed normally when recall rejects', async () => {
+      // Simulate a recall that throws — the .catch() handler should swallow
+      // the error and the main request should complete without memory content
+      mockMemoryManager.recall.mockRejectedValue(new Error('recall failed'));
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-recall-fail',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      // The main request should have been called without any memory content
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        ['Quick question'],
+        expect.any(AbortSignal),
+      );
+    });
+
     it('should run managed auto-memory extraction after a completed user query', async () => {
       mockMemoryManager.scheduleExtract.mockResolvedValue({
         touchedTopics: ['user'],
@@ -1769,6 +2198,89 @@ Other open files:
 
       expect(events).toEqual([{ type: GeminiEventType.MaxSessionTurns }]);
       expect(mockTurnRunFn).toHaveBeenCalledTimes(MAX_SESSION_TURNS);
+    });
+
+    it('should abort the pending recall when MaxSessionTurns is hit', async () => {
+      vi.spyOn(client['config'], 'getMaxSessionTurns').mockReturnValue(1);
+      client['sessionTurnCount'] = 1; // already at limit; next call exceeds it
+
+      const abortHandler = vi.fn();
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', abortHandler);
+        return new Promise(() => {}); // never resolves
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'over the limit' }],
+        new AbortController().signal,
+        'prompt-id-over-limit',
+      );
+      const events = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([{ type: GeminiEventType.MaxSessionTurns }]);
+      expect(abortHandler).toHaveBeenCalledTimes(1);
+    });
+
+    it('should abort the pending recall when SessionTokenLimitExceeded', async () => {
+      // Use a very low token limit so the (uncompressed) history exceeds it
+      vi.spyOn(client['config'], 'getSessionTokenLimit').mockReturnValue(1);
+
+      // Force token count to be above the limit
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        9999,
+      );
+
+      const abortHandler = vi.fn();
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', abortHandler);
+        return new Promise(() => {}); // never resolves
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'token limit test' }],
+        new AbortController().signal,
+        'prompt-id-token-limit',
+      );
+      const events = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.SessionTokenLimitExceeded,
+          value: expect.objectContaining({
+            currentTokens: 9999,
+            limit: 1,
+          }),
+        },
+      ]);
+      expect(abortHandler).toHaveBeenCalledTimes(1);
     });
 
     it('should respect MAX_TURNS limit even when turns parameter is set to a large value', async () => {
@@ -2922,5 +3434,369 @@ Other open files:
 
     // Note: there is currently no "fallback mode" model routing; the model used
     // is always the one explicitly requested by the caller.
+  });
+
+  describe('generateContent with fast model', () => {
+    it('should resolve per-model config and fall back when createContentGenerator fails', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      // Set up a resolved model for the fast model, but createContentGenerator
+      // will fail in the test env (no auth), so it falls back to the main
+      // content generator. Verify the resolution was attempted.
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {
+          extra_body: { enable_thinking: false },
+          samplingParams: { temperature: 0.1 },
+        },
+        capabilities: {},
+      };
+
+      const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      await client.generateContent(
+        contents,
+        { temperature: 0.5 },
+        abortSignal,
+        'fast-model',
+      );
+
+      // Verify that getResolvedModel was called with the fast model ID
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        expect.any(String),
+        'fast-model',
+      );
+
+      // The main content generator is used as fallback (since creating a new
+      // one fails in test env without auth). In production, a dedicated
+      // content generator with the fast model's settings would be created.
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'fast-model',
+        }),
+        expect.any(String),
+      );
+    });
+
+    it('should use a dedicated content generator for the fast model on success', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      // Create a mock dedicated content generator
+      const mockFastContentGenerator = {
+        generateContent: vi.fn().mockResolvedValue({
+          text: 'fast response',
+        }),
+      } as unknown as ContentGenerator;
+
+      // Set up a resolved model for the fast model
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        envKey: 'FAST_API_KEY',
+        generationConfig: {
+          extra_body: { enable_thinking: false },
+          samplingParams: { temperature: 0.1 },
+        },
+        capabilities: {},
+      };
+
+      const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      // Override createContentGenerator to return our test double (success path)
+      vi.mocked(createContentGenerator).mockResolvedValue(
+        mockFastContentGenerator,
+      );
+
+      await client.generateContent(
+        contents,
+        { temperature: 0.5 },
+        abortSignal,
+        'fast-model',
+      );
+
+      // Verify buildAgentContentGeneratorConfig was called with correct args
+      expect(buildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        mockConfig,
+        'fast-model',
+        expect.objectContaining({
+          baseUrl: 'https://fast-api.example.com',
+        }),
+      );
+
+      // The dedicated fast content generator should be used
+      expect(mockFastContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'fast-model',
+        }),
+        expect.any(String),
+      );
+
+      // The original main content generator should NOT have been called
+      expect(mockContentGenerator.generateContent).not.toHaveBeenCalled();
+    });
+
+    it('should use the main content generator when the requested model matches the main model', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      const getResolvedModel = vi.fn();
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        'test-model', // same as getModel() return value
+      );
+
+      // getResolvedModel should NOT be called when model matches main
+      expect(getResolvedModel).not.toHaveBeenCalled();
+
+      // The main content generator should be used directly
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'test-model',
+        }),
+        expect.any(String),
+      );
+    });
+
+    it('should fall back to main generator when model is not in registry', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      // getResolvedModel returns undefined — model not found in registry
+      const getResolvedModel = vi.fn().mockReturnValue(undefined);
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      // Should not throw — falls back to main generator
+      await expect(
+        client.generateContent(
+          contents,
+          { temperature: 0.5 },
+          abortSignal,
+          'unknown-model',
+        ),
+      ).resolves.toBeDefined();
+
+      // getResolvedModel was called to look up the model
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        expect.any(String),
+        'unknown-model',
+      );
+
+      // The main content generator is used as fallback
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'unknown-model',
+        }),
+        expect.any(String),
+      );
+
+      // buildAgentContentGeneratorConfig must NOT be called when the model is
+      // not in the registry — the fallback path skips config construction.
+      expect(buildAgentContentGeneratorConfig).not.toHaveBeenCalled();
+    });
+
+    it('should use fast model authType for retry, not main model authType', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+      };
+
+      const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      // Main config uses a different authType
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.QWEN_OAUTH,
+        apiKey: 'test-key',
+        apiModel: 'test-model',
+      } as unknown as ContentGeneratorConfig);
+
+      // Success path for createContentGenerator
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      await client.generateContent(
+        contents,
+        { temperature: 0.5 },
+        abortSignal,
+        'fast-model',
+      );
+
+      // VERIFY: retryWithBackoff was called with the fast model's authType ('openai'),
+      // not the main model's authType ('QWEN_OAUTH').
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({
+          authType: 'openai',
+        }),
+      );
+    });
+
+    it('should cache per-model content generators', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortController = new AbortController();
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+      };
+
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
+      } as unknown as ModelsConfig);
+
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      // First call
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(1);
+
+      // Second call - should use cache
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('should resolve model across authTypes when main authType misses', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+        envKey: undefined,
+      };
+
+      // resolveModelAcrossAuthTypes calls getResolvedModel multiple times:
+      // 1. main authType (QWEN_OAUTH) → undefined (miss)
+      // 2. secondary authType (USE_OPENAI) → mockResolvedModel (hit)
+      // 3. buildAgentContentGeneratorConfig calls getResolvedModel again
+      //    with the resolved authType → mockResolvedModel (hit)
+      const getResolvedModel = vi
+        .fn()
+        .mockReturnValueOnce(undefined)
+        .mockReturnValue(mockResolvedModel);
+
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel,
+      } as unknown as ModelsConfig);
+
+      // Main config uses QWEN_OAUTH — fast model registered under USE_OPENAI
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.QWEN_OAUTH,
+        apiKey: 'test-key',
+        apiModel: 'test-model',
+      } as unknown as ContentGeneratorConfig);
+
+      // Mock createContentGenerator to succeed so the cross-authType
+      // resolution path completes without falling back
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      await client.generateContent(
+        contents,
+        { temperature: 0.5 },
+        abortSignal,
+        'fast-model',
+      );
+
+      // First call uses main authType (QWEN_OAUTH) — misses
+      expect(getResolvedModel).toHaveBeenNthCalledWith(
+        1,
+        AuthType.QWEN_OAUTH,
+        'fast-model',
+      );
+      // Second call falls through to secondary authType — hits
+      expect(getResolvedModel).toHaveBeenNthCalledWith(
+        2,
+        AuthType.USE_OPENAI,
+        'fast-model',
+      );
+      // Generator was created using the resolved model's config
+      expect(createContentGenerator).toHaveBeenCalled();
+    });
+
+    it('should clear per-model generator cache on resetChat', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortController = new AbortController();
+      const mockResolvedModel = {
+        id: 'fast-model',
+        authType: 'openai' as const,
+        name: 'Fast Model',
+        baseUrl: 'https://fast-api.example.com',
+        generationConfig: {},
+        capabilities: {},
+      };
+
+      vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
+      } as unknown as ModelsConfig);
+
+      vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
+
+      // First call — populates cache
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(1);
+
+      // Reset chat should clear the cache
+      await client.resetChat();
+
+      // Second call after reset — cache should be cleared, generator recreated
+      await client.generateContent(
+        contents,
+        {},
+        abortController.signal,
+        'fast-model',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(2);
+    });
   });
 });

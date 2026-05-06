@@ -178,9 +178,7 @@ describe('<AgentExecutionDisplay />', () => {
     );
 
     const completedFrame = lastFrame() ?? '';
-    expect(visualRowCount(completedFrame)).toBeLessThanOrEqual(
-      availableHeight,
-    );
+    expect(visualRowCount(completedFrame)).toBeLessThanOrEqual(availableHeight);
 
     // useKeypress is now `{ isActive: false }`; ctrl+e on the completed
     // instance must not toggle anything. The mock unsets keypressHandler

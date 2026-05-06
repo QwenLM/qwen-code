@@ -29,15 +29,19 @@ const RESTART_DELAY_MS = 3000;
  *
  * The normal CLI path applies proxy via loadCliConfig → Config constructor →
  * setGlobalDispatcher, but `channel start` never calls loadCliConfig. This
- * replicates the same resolution logic (--proxy flag → HTTPS_PROXY →
- * HTTP_PROXY) and applies the global dispatcher for native fetch() calls.
- * The resolved URL is also passed to channels via ChannelBaseOptions so
- * adapters can configure their own HTTP clients (e.g. grammy uses node-fetch
- * which needs a separate agent).
+ * replicates the same resolution logic (--proxy flag → settings.proxy →
+ * HTTPS_PROXY → HTTP_PROXY) and applies the global dispatcher for native
+ * fetch() calls. The resolved URL is also passed to channels via
+ * ChannelBaseOptions so adapters can configure their own HTTP clients (e.g.
+ * grammy uses node-fetch which needs a separate agent).
  */
-function resolveProxy(cliProxy?: string): string | undefined {
+export function resolveProxy(
+  cliProxy?: string,
+  settingsProxy?: string,
+): string | undefined {
   const proxyUrl = normalizeProxyUrl(
     cliProxy ||
+      settingsProxy ||
       process.env['HTTPS_PROXY'] ||
       process.env['https_proxy'] ||
       process.env['HTTP_PROXY'] ||
@@ -471,8 +475,10 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       describe: 'Channel name (omit to start all configured channels)',
     }),
   handler: async (argv) => {
+    const settings = loadSettings(process.cwd());
     const proxy = resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
+      settings.merged.proxy as string | undefined,
     );
     if (argv.name) {
       await startSingle(argv.name, proxy);

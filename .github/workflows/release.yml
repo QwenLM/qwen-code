@@ -312,6 +312,8 @@ jobs:
       contents: 'write'
       packages: 'write'
       id-token: 'write'
+      pull-requests: 'write'
+      issues: 'write'
 
     steps:
       - name: 'Checkout'
@@ -416,6 +418,38 @@ jobs:
             --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
             --generate-notes \
             ${PRERELEASE_FLAG}
+
+      - name: 'Create PR to merge release branch into main'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        id: 'pr'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: |-
+          set -euo pipefail
+
+          pr_url="$(gh pr list --head "${RELEASE_BRANCH}" --base main --json url --jq '.[0].url')"
+          if [[ -z "${pr_url}" ]]; then
+            pr_url="$(gh pr create \
+              --base main \
+              --head "${RELEASE_BRANCH}" \
+              --title "chore(release): ${RELEASE_TAG}" \
+              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions on main.")"
+          fi
+
+          echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Enable auto-merge for release PR'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
+        run: |-
+          set -euo pipefail
+          gh pr merge "${PR_URL}" --squash --auto --delete-branch
 
   notify_failure:
     name: 'Notify Release Failure'
