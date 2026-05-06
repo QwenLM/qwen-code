@@ -28,8 +28,40 @@ import { isGeneratedFile } from './generatedFiles.js';
 
 const debugLogger = createDebugLogger('COMMIT_ATTRIBUTION');
 
+/**
+ * Strip the per-platform / per-encoding noise (leading UTF-8 BOM,
+ * CRLF line endings) so two byte-different but semantically-identical
+ * versions of the same content hash to the same value.
+ *
+ * Edit and WriteFile preserve the user's BOM/lineEnding choice when
+ * writing back, so the on-disk bytes can include CRLF or a leading
+ * U+FEFF even when AI's `recordEdit` was given LF-normalised content
+ * with no BOM. Without this normalisation, a `git show <sha>:<rel>`
+ * read of a BOM/CRLF file would always mismatch AI's recorded hash
+ * and drop the entry on every commit. The hash is metadata (used for
+ * divergence detection only); collapsing these visual differences is
+ * the right comparison semantics.
+ */
+function canonicaliseForHash(content: string): string {
+  // Strip a single leading UTF-8 BOM (U+FEFF). writeTextFile's
+  // BOM mode prepends BOM bytes to the on-disk file independently of
+  // whether AI's input included the BOM character in its string.
+  let normalised =
+    content.length > 0 && content.charCodeAt(0) === 0xfeff
+      ? content.slice(1)
+      : content;
+  // Normalise CRLF → LF. writeTextFile writes CRLF when the file's
+  // detected line-ending is CRLF; AI's recordEdit input is typically
+  // LF-normalised (Edit's `currentContent.replace(/\r\n/g, '\n')`
+  // happens before recordEdit fires).
+  normalised = normalised.replace(/\r\n/g, '\n');
+  return normalised;
+}
+
 function computeContentHash(content: string): string {
-  return createHash('sha256').update(content).digest('hex');
+  return createHash('sha256')
+    .update(canonicaliseForHash(content))
+    .digest('hex');
 }
 
 /**

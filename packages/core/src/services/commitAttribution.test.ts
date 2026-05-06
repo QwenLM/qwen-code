@@ -194,6 +194,54 @@ describe('CommitAttributionService', () => {
       expect(service.getFileAttribution(filePath)).toBeDefined();
     });
 
+    // BOM/CRLF normalisation: writeTextFile preserves the file's BOM
+    // and CRLF line-ending choice independently of whether AI's
+    // recordEdit input string contained the BOM char or used LF. The
+    // on-disk bytes returned by `git show` can therefore include a
+    // leading U+FEFF and CRLFs that AI never wrote — the hash MUST
+    // canonicalise both sides so a BOM/CRLF file isn't dropped on
+    // every commit.
+    it('keeps entries when on-disk content has BOM but AI input did not', () => {
+      const service = CommitAttributionService.getInstance();
+      const filePath = path.join(tmpDir, 'bom.ts');
+      // Simulate the on-disk file having a BOM (writeTextFile wrote
+      // it because the previous file version had one).
+      const aiContent = 'export const foo = 42;';
+      const onDiskWithBom = '﻿' + aiContent;
+      fs.writeFileSync(filePath, onDiskWithBom, 'utf-8');
+      service.recordEdit(filePath, null, aiContent);
+
+      // Reader returns the on-disk content (with BOM). After
+      // canonicalisation, both sides hash to the same value.
+      service.validateAgainst(() => onDiskWithBom);
+      expect(service.getFileAttribution(filePath)).toBeDefined();
+    });
+
+    it('keeps entries when on-disk uses CRLF but AI input used LF', () => {
+      const service = CommitAttributionService.getInstance();
+      const filePath = path.join(tmpDir, 'crlf.ts');
+      const aiContent = 'line one\nline two\n';
+      const onDiskCrlf = 'line one\r\nline two\r\n';
+      fs.writeFileSync(filePath, onDiskCrlf, 'utf-8');
+      service.recordEdit(filePath, null, aiContent);
+      service.validateAgainst(() => onDiskCrlf);
+      expect(service.getFileAttribution(filePath)).toBeDefined();
+    });
+
+    // Combined: BOM + CRLF on disk, plain LF + no BOM in AI input.
+    // The most common case for a Windows-edited file the model
+    // returned in unix form.
+    it('keeps entries when on-disk has BOM AND CRLF, AI input had neither', () => {
+      const service = CommitAttributionService.getInstance();
+      const filePath = path.join(tmpDir, 'bom-crlf.ts');
+      const aiContent = 'foo\nbar\n';
+      const onDisk = '﻿foo\r\nbar\r\n';
+      fs.writeFileSync(filePath, onDisk, 'utf-8');
+      service.recordEdit(filePath, null, aiContent);
+      service.validateAgainst(() => onDisk);
+      expect(service.getFileAttribution(filePath)).toBeDefined();
+    });
+
     // Legacy snapshot from before contentHash existed: the entry has
     // an empty contentHash. We can't tell stale from fresh, so leave
     // it alone (don't reset).
