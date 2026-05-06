@@ -32,6 +32,7 @@ const TEAM = 'test-team';
 function makeConfig() {
   return {
     getTeamContext: () => ({ teamName: TEAM }),
+    getTeamManager: () => null,
   } as unknown as import('../config/config.js').Config;
 }
 
