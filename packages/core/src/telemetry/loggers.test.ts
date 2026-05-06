@@ -304,7 +304,6 @@ describe('loggers', () => {
         candidatesTokenCount: 50,
         cachedContentTokenCount: 10,
         thoughtsTokenCount: 5,
-        toolUsePromptTokenCount: 2,
       };
       const event = new ApiResponseEvent(
         'test-response-id',
@@ -333,7 +332,6 @@ describe('loggers', () => {
           output_token_count: 50,
           cached_content_token_count: 10,
           thoughts_token_count: 5,
-          tool_token_count: 2,
           total_token_count: 0,
           response_text: 'test-response',
           prompt_id: 'prompt-id-1',

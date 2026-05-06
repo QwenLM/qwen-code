@@ -5,7 +5,6 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import type { ScannedAutoMemoryDocument } from './scan.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
@@ -38,7 +37,9 @@ const docs: ScannedAutoMemoryDocument[] = [
 ];
 
 describe('selectRelevantAutoMemoryDocumentsByModel', () => {
-  const mockConfig = {} as Config;
+  const mockConfig = {} as Parameters<
+    typeof selectRelevantAutoMemoryDocumentsByModel
+  >[0];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -74,6 +75,55 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       selectRelevantAutoMemoryDocumentsByModel(mockConfig, 'hello', [], 2),
     ).resolves.toEqual([]);
     expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('forwards caller abort signal to runSideQuery combined with timeout', async () => {
+    const callerController = new AbortController();
+    let capturedSignal: AbortSignal | undefined;
+
+    vi.mocked(runSideQuery).mockImplementation(async (_config, opts) => {
+      capturedSignal = opts.abortSignal;
+      return { selected_memories: [] };
+    });
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'check preferences',
+      docs,
+      2,
+      [],
+      callerController.signal,
+    );
+
+    expect(runSideQuery).toHaveBeenCalledTimes(1);
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(false);
+
+    callerController.abort();
+
+    await vi.waitFor(() => {
+      expect(capturedSignal!.aborted).toBe(true);
+    });
+  });
+
+  it('uses timeout-only abort signal when no caller signal provided', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: [],
+    });
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'check preferences',
+      docs,
+      2,
+    );
+
+    expect(runSideQuery).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({
+        abortSignal: expect.any(AbortSignal),
+      }),
+    );
   });
 
   it('throws when selector returns unknown relative paths', async () => {

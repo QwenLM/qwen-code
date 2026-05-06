@@ -63,11 +63,16 @@ import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { MonitorRegistry } from '../services/monitorRegistry.js';
+import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
+  isTelemetrySdkInitialized,
   initializeTelemetry,
+  shutdownTelemetry,
   logStartSession,
   logRipgrepFallback,
   RipgrepFallbackEvent,
@@ -217,6 +222,12 @@ export interface TelemetrySettings {
   target?: TelemetryTarget;
   otlpEndpoint?: string;
   otlpProtocol?: 'grpc' | 'http';
+  /** Per-signal endpoint override for traces (HTTP only). Used as-is without path appending. */
+  otlpTracesEndpoint?: string;
+  /** Per-signal endpoint override for logs (HTTP only). Used as-is without path appending. */
+  otlpLogsEndpoint?: string;
+  /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
+  otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
   outfile?: string;
   useCollector?: boolean;
@@ -372,6 +383,14 @@ export interface ConfigParameters {
   telemetry?: TelemetrySettings;
   gitCoAuthor?: boolean;
   usageStatisticsEnabled?: boolean;
+  /**
+   * If true, disables the per-session FileReadCache short-circuit
+   * (file_unchanged placeholder). Useful for sessions that may undergo
+   * context compaction or transcript transformation, where the model
+   * cannot reliably retrieve a previously-emitted full file content
+   * from prior tool results. Defaults to false (cache active).
+   */
+  fileReadCacheDisabled?: boolean;
   fileFiltering?: {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
@@ -554,7 +573,14 @@ export class Config {
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private readonly monitorRegistry = new MonitorRegistry();
+  private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  // Field initializer runs once on the parent Config; child Configs
+  // built via Object.create(parent) intentionally do NOT pick this up
+  // — see getFileReadCache() for the per-instance lazy initialization
+  // that keeps subagent caches isolated from the parent's.
+  private fileReadCache: FileReadCache = new FileReadCache();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -609,6 +635,7 @@ export class Config {
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
+  private readonly fileReadCacheDisabled: boolean;
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -755,8 +782,11 @@ export class Config {
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
-      otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
+      otlpEndpoint: params.telemetry?.otlpEndpoint,
       otlpProtocol: params.telemetry?.otlpProtocol,
+      otlpTracesEndpoint: params.telemetry?.otlpTracesEndpoint,
+      otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
+      otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
       outfile: params.telemetry?.outfile,
       useCollector: params.telemetry?.useCollector,
@@ -767,6 +797,7 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
+    this.fileReadCacheDisabled = params.fileReadCacheDisabled ?? false;
     this.outputLanguageFilePath = params.outputLanguageFilePath;
 
     this.fileFiltering = {
@@ -1350,6 +1381,16 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? new ChatRecordingService(this)
       : undefined;
+    // The file-read cache is session-scoped: its `file_unchanged`
+    // placeholder relies on the model having seen the prior full read
+    // earlier in the *current* conversation. Carrying entries across
+    // /clear or session resume would let a follow-up Read return the
+    // placeholder despite the new session never having received the
+    // file contents. Use the getter so the lazy own-property
+    // initialization in getFileReadCache() applies even for Configs
+    // constructed via Object.create — those should clear their own
+    // cache, not the parent's.
+    this.getFileReadCache().clear();
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }
@@ -1623,11 +1664,12 @@ export class Config {
    * It handles the case where initialization was not completed.
    */
   async shutdown(): Promise<void> {
-    if (!this.initialized) {
-      // Nothing to clean up if not initialized
-      return;
-    }
     try {
+      if (!this.initialized) {
+        // Nothing else to clean up if not initialized.
+        return;
+      }
+
       // Finalize the current session's metadata before cleanup, then drain
       // the async write queue so no records are lost on exit.
       try {
@@ -1644,6 +1686,7 @@ export class Config {
       }
 
       this.backgroundTaskRegistry.abortAll();
+      this.monitorRegistry.abortAll({ notify: false });
       this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
@@ -1651,6 +1694,10 @@ export class Config {
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
+    } finally {
+      if (isTelemetrySdkInitialized()) {
+        await shutdownTelemetry();
+      }
     }
   }
 
@@ -2042,12 +2089,24 @@ export class Config {
     return this.telemetrySettings.logPrompts ?? true;
   }
 
-  getTelemetryOtlpEndpoint(): string {
+  getTelemetryOtlpEndpoint(): string | undefined {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
 
   getTelemetryOtlpProtocol(): 'grpc' | 'http' {
     return this.telemetrySettings.otlpProtocol ?? 'grpc';
+  }
+
+  getTelemetryOtlpTracesEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpTracesEndpoint;
+  }
+
+  getTelemetryOtlpLogsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpLogsEndpoint;
+  }
+
+  getTelemetryOtlpMetricsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpMetricsEndpoint;
   }
 
   getTelemetryTarget(): TelemetryTarget {
@@ -2582,8 +2641,90 @@ export class Config {
     return this.backgroundTaskRegistry;
   }
 
+  getMonitorRegistry(): MonitorRegistry {
+    return this.monitorRegistry;
+  }
+
+  getBackgroundAgentResumeService(): BackgroundAgentResumeService {
+    if (!this.backgroundAgentResumeService) {
+      this.backgroundAgentResumeService = new BackgroundAgentResumeService(
+        this,
+      );
+    }
+    return this.backgroundAgentResumeService;
+  }
+
+  async loadPausedBackgroundAgents(
+    sessionId: string = this.getSessionId(),
+  ): Promise<
+    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
+  > {
+    return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
+      sessionId,
+    );
+  }
+
+  async resumeBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<
+    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
+  > {
+    return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
+      agentId,
+      initialMessage,
+    );
+  }
+
+  abandonBackgroundAgent(agentId: string): boolean {
+    return this.getBackgroundAgentResumeService().abandonBackgroundAgent(
+      agentId,
+    );
+  }
+
   getBackgroundShellRegistry(): BackgroundShellRegistry {
     return this.backgroundShellRegistry;
+  }
+
+  /**
+   * Session-scoped cache that tracks Read / Edit / WriteFile operations
+   * on files. The cache must be **per-Config-instance** so that each
+   * subagent (which gets its own Config) does not inherit the parent's
+   * recorded reads via the prototype chain.
+   *
+   * The wrinkle: every subagent / scoped-agent / fork path in this
+   * codebase constructs its Config via `Object.create(parent)`. That
+   * does **not** run instance field initializers, so the parent's
+   * `fileReadCache` field is reachable on the child only by prototype
+   * lookup — i.e. child and parent end up sharing the same cache. The
+   * own-property check below detects "this instance was made by
+   * Object.create" and lazily attaches a fresh cache, ensuring
+   * isolation without requiring every Object.create site to remember
+   * to override the field.
+   */
+  getFileReadCache(): FileReadCache {
+    if (!Object.prototype.hasOwnProperty.call(this, 'fileReadCache')) {
+      // The own-property write needs to bypass `private`'s structural
+      // check — the field is conceptually still private to the class,
+      // we just need TS to let us install an own copy on a child
+      // instance produced by `Object.create(parent)`.
+      (this as unknown as { fileReadCache: FileReadCache }).fileReadCache =
+        new FileReadCache();
+    }
+    return this.fileReadCache;
+  }
+
+  /**
+   * When true, ReadFile / Edit / WriteFile must bypass the session
+   * FileReadCache entirely and behave as if it did not exist (no
+   * `file_unchanged` placeholder, no future prior-read enforcement).
+   * Intended as an escape hatch for sessions where the cache's "model
+   * has already seen this content earlier in the conversation"
+   * assumption is unreliable — e.g. after context compaction or
+   * transcript transformation.
+   */
+  getFileReadCacheDisabled(): boolean {
+    return this.fileReadCacheDisabled;
   }
 
   /**
@@ -2861,6 +3002,12 @@ export class Config {
         return new TaskListTool(this);
       });
     }
+
+    // Register monitor tool
+    await registerLazy(ToolNames.MONITOR, async () => {
+      const { MonitorTool } = await import('../tools/monitor.js');
+      return new MonitorTool(this);
+    });
 
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();

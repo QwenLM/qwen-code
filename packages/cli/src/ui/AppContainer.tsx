@@ -379,6 +379,21 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         historyManager.loadHistory(historyItems);
 
+        const recovered = await config.loadPausedBackgroundAgents(
+          config.getSessionId(),
+        );
+        if (recovered.length > 0) {
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: config
+                .getBackgroundAgentResumeService()
+                .buildRecoveredBackgroundAgentsNotice(recovered.length),
+            },
+            Date.now(),
+          );
+        }
+
         // Restore session name tag from custom title
         const title = config
           .getSessionService()

@@ -5,15 +5,16 @@
  */
 
 /**
- * send_message tool — send a message to a teammate or a background task.
+ * send_message tool - send a message to a teammate or a background task.
  *
  * Two routing modes:
  * - Team mode: `to` matches a teammate name (or "*" for broadcast). Messages
  *   route through TeamManager. Supports structured messages like
  *   `shutdown_request`.
  * - Background-task mode: `task_id` matches an entry in the background task
- *   registry. The message is queued and delivered at the next tool-round
- *   boundary.
+ *   registry. Running tasks receive the message at the next tool-round
+ *   boundary; paused recovered tasks are resumed first and take the message as
+ *   their first continuation instruction.
  */
 
 import type { Config } from '../config/config.js';
@@ -61,7 +62,7 @@ class SendMessageInvocation extends BaseToolInvocation<
     return `Send to ${this.params.to}: ${preview}`;
   }
 
-  async execute(): Promise<ToolResult> {
+  async execute(_signal: AbortSignal): Promise<ToolResult> {
     // Route 1: background task by task_id.
     if (this.params.task_id) {
       const registry = this.config.getBackgroundTaskRegistry();
@@ -75,6 +76,28 @@ class SendMessageInvocation extends BaseToolInvocation<
             message: `Task not found: ${this.params.task_id}`,
             type: ToolErrorType.SEND_MESSAGE_NOT_FOUND,
           },
+        };
+      }
+
+      if (entry.status === 'paused') {
+        const resumed = await this.config.resumeBackgroundAgent(
+          this.params.task_id,
+          this.params.message,
+        );
+        if (!resumed) {
+          return {
+            llmContent: `Error: Background task "${this.params.task_id}" could not be resumed.`,
+            returnDisplay: 'Task could not be resumed.',
+            error: {
+              message: `Task could not be resumed: ${this.params.task_id}`,
+              type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+            },
+          };
+        }
+
+        return {
+          llmContent: `Background task "${this.params.task_id}" resumed with your message as the first continuation instruction.`,
+          returnDisplay: `Resumed ${entry.description}`,
         };
       }
 
@@ -165,7 +188,8 @@ export class SendMessageTool extends BaseDeclarativeTool<
       ToolDisplayNames.SEND_MESSAGE,
       'Send a message to a teammate (use "to") or to a running background task (use "task_id"). ' +
         'For teams, set "to" to a bare teammate name (no @) or "*" to broadcast. ' +
-        'For background tasks, set "task_id" to the id from the launch response. ' +
+        'For background tasks, set "task_id" to the id from the launch response or a recovered paused task. ' +
+        'Running tasks receive it at the next tool-round boundary; paused recovered tasks are resumed with the message as their first continuation instruction. ' +
         'Your text output is NOT visible to other agents — use this tool to communicate.',
       Kind.Other,
       {
@@ -178,7 +202,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
           task_id: {
             type: 'string',
             description:
-              'The ID of the running background task (from the launch response).',
+              'The ID of the background task (from the launch response or a recovered paused task).',
           },
           message: {
             type: 'string',

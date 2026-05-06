@@ -38,9 +38,18 @@ export const isAtCommand = (query: string): boolean =>
   // Check if starts with @ OR has a space, then @
   query.startsWith('@') || /\s@/.test(query);
 
+const SLASH_PATH_SEPARATOR_RE = /[/\\]/;
+
+const getSlashCommandFirstToken = (query: string): string =>
+  query.slice(1).trimStart().split(/\s+/)[0] ?? '';
+
+export const hasSlashCommandPathSeparator = (query: string): boolean =>
+  SLASH_PATH_SEPARATOR_RE.test(getSlashCommandFirstToken(query));
+
 /**
  * Checks if a query string potentially represents an '/' command.
- * It triggers if the query starts with '/' but excludes code comments like '//' and '/*'.
+ * It triggers if the query starts with '/' but excludes code comments like '//'
+ * and '/*', and file paths where the first token contains a path separator.
  *
  * @param query The input query string.
  * @returns True if the query looks like an '/' command, false otherwise.
@@ -57,6 +66,10 @@ export const isSlashCommand = (query: string): boolean => {
 
   // Exclude block comments that start with '/*'
   if (query.startsWith('/*')) {
+    return false;
+  }
+
+  if (hasSlashCommandPathSeparator(query)) {
     return false;
   }
 

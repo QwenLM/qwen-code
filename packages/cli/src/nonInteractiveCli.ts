@@ -37,6 +37,7 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
+  AlreadyReportedError,
   handleError,
   handleToolError,
   handleCancellationError,
@@ -140,6 +141,10 @@ export interface RunNonInteractiveOptions {
   adapter?: JsonOutputAdapterInterface;
   userMessage?: CLIUserMessage;
   controlService?: ControlService;
+  sendMessageType?: SendMessageType;
+  notificationDisplayText?: string;
+  captureMonitorNotifications?: boolean;
+  captureMonitorRegistrations?: boolean;
 }
 
 /**
@@ -178,6 +183,49 @@ export async function runNonInteractive(
 
     const geminiClient = config.getGeminiClient();
     const abortController = options.abortController ?? new AbortController();
+
+    interface LocalQueueItem {
+      displayText: string;
+      modelText: string;
+      sendMessageType: SendMessageType;
+      sdkNotification?: {
+        task_id: string;
+        tool_use_id?: string;
+        status: BackgroundTaskStatus;
+        usage?: {
+          total_tokens: number;
+          tool_uses: number;
+          duration_ms: number;
+        };
+      };
+    }
+    const localQueue: LocalQueueItem[] = [];
+    const sdkOnlyMonitorQueue: LocalQueueItem[] = [];
+    const emitNotificationToSdk = (item: LocalQueueItem) => {
+      if (item.sendMessageType !== SendMessageType.Notification) return;
+      adapter.emitUserMessage([{ text: item.displayText }]);
+      if (item.sdkNotification) {
+        adapter.emitSystemMessage('task_notification', item.sdkNotification);
+      }
+    };
+    const flushQueuedNotificationsToSdk = (queue: LocalQueueItem[]) => {
+      while (queue.length > 0) {
+        emitNotificationToSdk(queue.shift()!);
+      }
+    };
+    let captureMonitorTurnsInLocalQueue = true;
+    let oneShotMonitorsFinalized = false;
+    const finalizeOneShotMonitors = () => {
+      if (
+        options.captureMonitorNotifications === false ||
+        oneShotMonitorsFinalized
+      )
+        return;
+      oneShotMonitorsFinalized = true;
+      captureMonitorTurnsInLocalQueue = false;
+      config.getMonitorRegistry().abortAll();
+      flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
+    };
 
     // EPIPE: don't process.exit here — that bypasses the caller's
     // runExitCleanup → flush() and drops queued JSONL writes. Destroy
@@ -363,22 +411,6 @@ export async function runNonInteractive(
 
       // Register the callback early so background agents launched during the main
       // tool-call chain can push completions onto the queue.
-      interface LocalQueueItem {
-        displayText: string;
-        modelText: string;
-        sendMessageType: SendMessageType;
-        sdkNotification?: {
-          task_id: string;
-          tool_use_id?: string;
-          status: BackgroundTaskStatus;
-          usage?: {
-            total_tokens: number;
-            tool_uses: number;
-            duration_ms: number;
-          };
-        };
-      }
-      const localQueue: LocalQueueItem[] = [];
       const registry = config.getBackgroundTaskRegistry();
       registry.setNotificationCallback((displayText, modelText, meta) => {
         localQueue.push({
@@ -408,6 +440,46 @@ export async function runNonInteractive(
           subagent_type: entry.subagentType,
         });
       });
+
+      const monitorRegistry = config.getMonitorRegistry();
+      if (options.captureMonitorNotifications !== false) {
+        // One-shot headless runs capture monitor notifications locally so any
+        // events already emitted before exit can be surfaced to the SDK/model.
+        // Persistent stream-json sessions own this callback at the Session
+        // layer instead, so future monitor events can continue after the
+        // originating turn has already completed.
+        monitorRegistry.setNotificationCallback(
+          (displayText, modelText, meta) => {
+            const queueItem = {
+              displayText,
+              modelText,
+              sendMessageType: SendMessageType.Notification,
+              sdkNotification: {
+                task_id: meta.monitorId,
+                tool_use_id: meta.toolUseId,
+                status: meta.status,
+              },
+            };
+
+            if (captureMonitorTurnsInLocalQueue) {
+              localQueue.push(queueItem);
+            } else {
+              sdkOnlyMonitorQueue.push(queueItem);
+              flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
+            }
+          },
+        );
+      }
+
+      if (options.captureMonitorRegistrations !== false) {
+        monitorRegistry.setRegisterCallback((entry) => {
+          adapter.emitSystemMessage('task_started', {
+            task_id: entry.monitorId,
+            tool_use_id: entry.toolUseId,
+            description: entry.description,
+          });
+        });
+      }
 
       let isFirstTurn = true;
       let hasUnsentToolResponse = false;
@@ -446,7 +518,7 @@ export async function runNonInteractive(
 
         let sendType: SendMessageType;
         if (isFirstTurn) {
-          sendType = SendMessageType.UserQuery;
+          sendType = options.sendMessageType ?? SendMessageType.UserQuery;
         } else if (isTeammateTurn) {
           sendType = SendMessageType.Teammate;
         } else {
@@ -459,7 +531,14 @@ export async function runNonInteractive(
           currentMessages[0]?.parts || [],
           abortController.signal,
           prompt_id,
-          { type: sendType, modelOverride },
+          {
+            type: sendType,
+            modelOverride,
+            ...(isFirstTurn &&
+              options.notificationDisplayText && {
+                notificationDisplayText: options.notificationDisplayText,
+              }),
+          },
         );
         isFirstTurn = false;
 
@@ -487,8 +566,11 @@ export async function runNonInteractive(
               config.getContentGeneratorConfig()?.authType,
             );
             process.stderr.write(`${errorText}\n`);
-            // Throw error to exit with non-zero code
-            throw new Error(errorText);
+            // We have already formatted and written the message; mark the
+            // throw so the top-level handleError doesn't reformat (which
+            // would yield "[API Error: [API Error: ...]]") or print it a
+            // second time. Exit code stays 1 — same as before.
+            throw new AlreadyReportedError(errorText);
           }
         }
 
@@ -631,19 +713,6 @@ export async function runNonInteractive(
             continue;
           }
 
-          // Shared between the normal drain and the cancellation flush so stream-json
-          // consumers always see a terminal task_notification paired with task_started.
-          const emitNotificationToSdk = (item: LocalQueueItem) => {
-            if (item.sendMessageType !== SendMessageType.Notification) return;
-            adapter.emitUserMessage([{ text: item.displayText }]);
-            if (item.sdkNotification) {
-              adapter.emitSystemMessage(
-                'task_notification',
-                item.sdkNotification,
-              );
-            }
-          };
-
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
@@ -720,7 +789,10 @@ export async function runNonInteractive(
                     config.getContentGeneratorConfig()?.authType,
                   );
                   process.stderr.write(`${errorText}\n`);
-                  throw new Error(errorText);
+                  // See the matching note in the first stream loop above —
+                  // we mark the throw so handleError doesn't reformat or
+                  // reprint downstream.
+                  throw new AlreadyReportedError(errorText);
                 }
               }
 
@@ -868,20 +940,28 @@ export async function runNonInteractive(
               // Flush queued terminal notifications before handleCancellationError
               // exits so stream-json consumers always see a task_notification paired
               // with every task_started.
-              while (localQueue.length > 0) {
-                emitNotificationToSdk(localQueue.shift()!);
-              }
+              flushQueuedNotificationsToSdk(localQueue);
+              finalizeOneShotMonitors();
               await handleCancellationError(config);
             }
+            // Once we enter the final holdback loop, monitor events should no
+            // longer extend one-shot runtime. Already-queued events still drain
+            // through the model, but later monitor output is SDK-only.
+            captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
-            // Wait for every task's terminal notification, not just the
-            // running ones: cancel() marks status 'cancelled' synchronously
-            // but the notification is emitted later by the natural handler,
-            // and SDK consumers need every task_started paired with one.
+            // Wait for every background task's terminal notification, not
+            // just the running ones: cancel() marks status 'cancelled'
+            // synchronously but the notification is emitted later by the
+            // natural handler, and SDK consumers need every task_started
+            // paired with one. Monitors are different: they intentionally
+            // continue in the background, so final result emission is not
+            // gated on monitor lifetime.
             if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
               break;
             await new Promise((r) => setTimeout(r, 100));
           }
+
+          finalizeOneShotMonitors();
 
           const metrics = uiTelemetryService.getMetrics();
           const usage = computeUsageFromMetrics(metrics);
@@ -912,6 +992,9 @@ export async function runNonInteractive(
         // Expected when no message was started or already finalized
       }
 
+      flushQueuedNotificationsToSdk(localQueue);
+      finalizeOneShotMonitors();
+
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = error instanceof Error ? error.message : String(error);
       const metrics = uiTelemetryService.getMetrics();
@@ -921,15 +1004,29 @@ export async function runNonInteractive(
         outputFormat === OutputFormat.JSON
           ? uiTelemetryService.getMetrics()
           : undefined;
-      adapter.emitResult({
-        isError: true,
-        durationMs: Date.now() - startTime,
-        apiDurationMs: totalApiDurationMs,
-        numTurns: turnCount,
-        errorMessage: message,
-        usage,
-        stats,
-      });
+
+      // In TEXT mode the adapter's emitResult writes errorMessage straight
+      // to stderr, which would duplicate the line the stream-error handler
+      // has already printed. AlreadyReportedError marks the case where the
+      // user-facing line is already on the wire — skip the adapter call
+      // entirely in that case so we don't emit a phantom blank line.
+      // JSON / STREAM_JSON modes still emit normally; the adapter is the
+      // primary output channel there, not a duplicate of stderr.
+      const isAlreadyReportedError = error instanceof AlreadyReportedError;
+      const skipAdapterEmit =
+        outputFormat === OutputFormat.TEXT && isAlreadyReportedError;
+
+      if (!skipAdapterEmit) {
+        adapter.emitResult({
+          isError: true,
+          durationMs: Date.now() - startTime,
+          apiDurationMs: totalApiDurationMs,
+          numTurns: turnCount,
+          errorMessage: message,
+          usage,
+          stats,
+        });
+      }
       await handleError(error, config);
     } finally {
       // Unsubscribe the leader message callback and approval
@@ -947,6 +1044,19 @@ export async function runNonInteractive(
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);
+      const monReg = config.getMonitorRegistry();
+      // In one-shot (non-Session) runs, abort all running monitors so their
+      // piped stdio refs don't keep the Node event loop alive after the result
+      // is emitted. Session runs manage monitor lifecycle independently.
+      if (options.captureMonitorNotifications !== false) {
+        if (!oneShotMonitorsFinalized) {
+          monReg.abortAll({ notify: false });
+        }
+        monReg.setNotificationCallback(undefined);
+      }
+      if (options.captureMonitorRegistrations !== false) {
+        monReg.setRegisterCallback(undefined);
+      }
 
       process.stdout.removeListener('error', stdoutErrorHandler);
       // Cleanup signal handlers

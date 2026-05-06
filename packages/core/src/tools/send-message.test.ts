@@ -118,12 +118,15 @@ describe('SendMessageTool — background-task mode', () => {
   let registry: BackgroundTaskRegistry;
   let config: Config;
   let tool: SendMessageTool;
+  let resumeBackgroundAgent: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     registry = new BackgroundTaskRegistry();
+    resumeBackgroundAgent = vi.fn();
     config = {
       getBackgroundTaskRegistry: () => registry,
       getTeamManager: () => null,
+      resumeBackgroundAgent,
     } as unknown as Config;
     tool = new SendMessageTool(config);
   });
@@ -221,6 +224,29 @@ describe('SendMessageTool — background-task mode', () => {
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
     expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
+  });
+
+  it('resumes a paused task and injects the message as continuation input', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    resumeBackgroundAgent.mockResolvedValue(registry.get('agent-1'));
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'pick up from the TODO list' },
+      new AbortController().signal,
+    );
+
+    expect(resumeBackgroundAgent).toHaveBeenCalledWith(
+      'agent-1',
+      'pick up from the TODO list',
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('resumed');
   });
 
   it('includes task description in success display', async () => {
