@@ -69,6 +69,16 @@ export function getShellAbortReasonKind(
   ) {
     try {
       const kind = (reason as { kind?: unknown }).kind;
+      // INVARIANT — three points must be kept in sync when extending
+      // `ShellAbortReason`:
+      //   (1) the discriminated union below (`type ShellAbortReason`),
+      //   (2) the value-equality whitelist on this line, and
+      //   (3) the `case` arms in both abort-handler switches (the
+      //       `default: { const _exhaustive: never = kind; ... }`
+      //       statically forces #3 when #1 grows, but #2 has no
+      //       compile-time tie to the union; if you forget to extend
+      //       it the new variant silently degrades to 'cancel' here
+      //       and the `case` you added in #3 is never reached).
       if (kind === 'background' || kind === 'cancel') return kind;
     } catch {
       // Throwing accessor / Proxy trap — fall back to safe kill below.
