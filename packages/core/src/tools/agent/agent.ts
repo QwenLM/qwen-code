@@ -987,10 +987,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.config.isTrustedFolder(),
       );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
-      const agentConfig =
-        resolvedApprovalMode !== this.config.getApprovalMode()
-          ? createApprovalModeOverride(this.config, resolvedApprovalMode)
-          : this.config;
+      // ALWAYS produce a child Config via Object.create, even when the
+      // approval mode is identical to the parent. Subagents must run
+      // against an isolated FileReadCache so a parent's prior_read
+      // entries cannot satisfy enforcement on a path the subagent's
+      // transcript never contained — see the per-Config own-property
+      // machinery in `Config.getFileReadCache()`. Reusing
+      // `this.config` directly here would short-circuit that
+      // isolation for the same-mode path, which is the common case.
+      //
+      // Known partial fix: `Config.createToolRegistry` (called once at
+      // initialise time on the parent) bound `EditTool` / `WriteFileTool`
+      // instances against the parent. The subagent's
+      // `runtimeContext.getToolRegistry()` walks the prototype chain
+      // back to that parent registry, so tool invocations resolve
+      // `this.config` to the parent and reach the parent's
+      // FileReadCache rather than the wrapper's lazy-init one.
+      // `InProcessBackend.createPerAgentConfig` already does the right
+      // thing (`override.createToolRegistry()` + `copyDiscoveredToolsFrom`);
+      // bringing that here is a follow-up. Pre-PR there was no
+      // enforcement on subagent mutations at all, so the wrapper here
+      // is still strictly an improvement (the cache lazy-init does
+      // shield code that *consumes the Config directly* rather than
+      // through a parent-bound tool).
+      const agentConfig = createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode,
+      );
 
       // Create the subagent. Fork bypasses SubagentManager because its
       // runtime configs are synthesized from the parent's cache-safe params.
