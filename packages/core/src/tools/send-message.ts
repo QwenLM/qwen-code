@@ -20,7 +20,7 @@
 import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { getAgentName } from '../agents/team/identity.js';
+import { getAgentName, isTeammate } from '../agents/team/identity.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import {
   BaseDeclarativeTool,
@@ -146,6 +146,19 @@ class SendMessageInvocation extends BaseToolInvocation<
     try {
       // Structured control messages route through mailbox.
       if (this.params.type === 'shutdown_request') {
+        // Only the leader can request shutdowns. A teammate
+        // calling this would be impersonating the leader, since
+        // requestShutdown writes the mailbox entry with
+        // `from: LEADER_NAME` and arms shutdown_approved tracking
+        // for the target.
+        if (isTeammate()) {
+          const msg = 'Only the team leader can request shutdowns.';
+          return {
+            llmContent: msg,
+            returnDisplay: msg,
+            error: { message: msg },
+          };
+        }
         await teamManager.requestShutdown(to);
         const msg = `Shutdown requested for "${to}".`;
         return { llmContent: msg, returnDisplay: msg };

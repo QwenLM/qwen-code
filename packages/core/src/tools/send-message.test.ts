@@ -9,6 +9,7 @@ import { SendMessageTool } from './send-message.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 function makeTeamConfig(opts?: {
   teamManager?: {
@@ -104,6 +105,40 @@ describe('SendMessageTool — team mode', () => {
     expect(result.llmContent).toContain('Shutdown');
     expect(result.llmContent).toContain('bob');
     expect(requestShutdown).toHaveBeenCalledWith('bob');
+  });
+
+  it('rejects shutdown_request from a teammate (leader-only)', async () => {
+    // A teammate calling shutdown_request would impersonate the
+    // leader, since requestShutdown writes the mailbox entry with
+    // `from: LEADER_NAME` and arms shutdown_approved tracking.
+    const requestShutdown = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage: vi.fn(),
+          broadcast: vi.fn(),
+          requestShutdown,
+        },
+      }),
+    );
+
+    const invocation = tool.build({
+      to: 'bob',
+      message: 'Please shut down.',
+      type: 'shutdown_request',
+    });
+    const result = await runWithTeammateIdentity(
+      {
+        agentName: 'attacker',
+        teamName: 'team',
+        agentId: 'attacker@team',
+        isTeamLead: false,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('Only the team leader');
+    expect(requestShutdown).not.toHaveBeenCalled();
   });
 
   it('validates required params', () => {

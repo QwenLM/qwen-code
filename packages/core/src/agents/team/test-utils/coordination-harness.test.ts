@@ -176,7 +176,7 @@ describe('TeamCoordinationHarness', () => {
         type: 'shutdown_request',
         text: 'Please shut down now.',
       });
-      h.teamManager.markShutdownRequested();
+      h.teamManager.markShutdownRequested('worker');
 
       // Go idle → shutdown should be delivered first.
       worker.goIdle();
@@ -222,6 +222,44 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('worker');
       await h.waitForStatus('worker', AgentStatus.COMPLETED);
+    });
+
+    it('shutdown_approved from the requested teammate aborts them', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      target.goIdle();
+
+      await h.teamManager.requestShutdown('target');
+      await h.teamManager.sendMessage('leader', 'shutdown_approved', 'target');
+
+      expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+    });
+
+    it('shutdown_approved from a non-requested teammate is ignored', async () => {
+      // Regression: the prior implementation set a sticky
+      // `_shutdownRequested` flag and then aborted any teammate
+      // whose leader-bound message contained "shutdown_approved".
+      // That let an attacker trigger an abort of an unrelated
+      // peer just by mentioning the phrase. Now the abort only
+      // fires for senders the leader actually asked to shut down.
+      const h = await createHarness();
+      const innocent = await h.spawnTeammate('innocent');
+      await h.spawnTeammate('target');
+
+      // Request shutdown of `target` only.
+      await h.teamManager.requestShutdown('target');
+
+      // `innocent` happens to mention the phrase in a leader DM.
+      await h.teamManager.sendMessage(
+        'leader',
+        'I have not sent shutdown_approved yet.',
+        'innocent',
+      );
+
+      // `innocent` must not be aborted.
+      expect(innocent.getStatus()).not.toBe(AgentStatus.CANCELLED);
     });
   });
 

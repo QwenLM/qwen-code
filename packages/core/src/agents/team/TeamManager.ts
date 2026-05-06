@@ -127,9 +127,14 @@ export class TeamManager {
   /** Tracks how far we've read in the leader inbox. */
   private lastInboxOffset = 0;
 
-  /** Set when a shutdown has been requested for any agent.
-   *  Gates the per-idle mailbox read in flushNextMessage. */
-  private _shutdownRequested = false;
+  /** Names of teammates with a pending leader-requested shutdown.
+   *  Gates both the per-idle mailbox read in flushNextMessage and
+   *  the shutdown_approved abort path in sendMessage. Tracked
+   *  per-agent (rather than as a sticky boolean) so a free-text
+   *  match in an unrelated teammate's reply cannot abort them, and
+   *  so an impersonation-forged shutdown can't widen the blast
+   *  radius across the rest of the session. */
+  private readonly _shutdownPending = new Set<string>();
 
   /** Per-agent last activity timestamp (updated on events). */
   private readonly lastActivityAt = new Map<string, number>();
@@ -349,15 +354,17 @@ export class TeamManager {
         timestamp: Date.now(),
       });
 
-      // Handle shutdown responses: if the teammate approved
-      // the shutdown, abort the agent so it actually retires.
-      if (
-        this._shutdownRequested &&
-        from &&
-        /\bshutdown_approved\b/i.test(message)
-      ) {
+      // Handle shutdown responses: if the teammate the leader
+      // asked to shut down approved, abort that agent so it
+      // actually retires. Only abort senders that the leader
+      // explicitly requested — otherwise a free-text mention of
+      // "shutdown_approved" by an unrelated teammate would kill
+      // them, and a forged shutdown_request couldn't be used to
+      // make the leader abort arbitrary peers.
+      if (from && /\bshutdown_approved\b/i.test(message)) {
         const member = findMemberByName(this.teamFile.members, from);
-        if (member) {
+        if (member && this._shutdownPending.has(member.name)) {
+          this._shutdownPending.delete(member.name);
           const agent = this.getAgentFromBackend(member.agentId);
           if (agent) {
             agent.abort();
@@ -421,7 +428,7 @@ export class TeamManager {
       throw new Error(`Teammate "${name}" not found.`);
     }
 
-    this._shutdownRequested = true;
+    this._shutdownPending.add(member.name);
 
     await sendStructuredMessage(this.teamFile.name, member.name, {
       from: LEADER_NAME,
@@ -792,10 +799,12 @@ export class TeamManager {
     return this.teamEventEmitter;
   }
 
-  /** Mark that a shutdown has been requested so the mailbox is
-   *  checked on the next idle transition. */
-  markShutdownRequested(): void {
-    this._shutdownRequested = true;
+  /** Mark that a shutdown has been requested for `name` so the
+   *  mailbox is checked on its next idle transition. Used by tests
+   *  that inject the structured shutdown message directly without
+   *  going through `requestShutdown`. */
+  markShutdownRequested(name: string): void {
+    this._shutdownPending.add(name);
   }
 
   /**
@@ -984,8 +993,10 @@ export class TeamManager {
     if (agent.getStatus() !== AgentStatus.IDLE) return;
 
     // 1. Check mailbox for shutdown requests (highest priority).
-    //    Only read the mailbox if a shutdown has actually been requested.
-    if (this._shutdownRequested) {
+    //    Only read the mailbox if this specific teammate has had
+    //    a shutdown queued — avoids a per-idle inbox round-trip
+    //    for everyone whenever any shutdown is in flight.
+    if (this._shutdownPending.has(agentName)) {
       const shutdowns = await consumeUnread(
         this.teamFile.name,
         agentName,
