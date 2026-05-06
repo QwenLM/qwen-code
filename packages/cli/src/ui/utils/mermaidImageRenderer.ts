@@ -1134,8 +1134,8 @@ function runCommand(
       child.kill();
       resolve({
         status: null,
-        stdout,
-        stderr,
+        stdout: finalizeBoundedRendererOutput(stdout),
+        stderr: finalizeBoundedRendererOutput(stderr),
         error: `Command timed out after ${options.timeout}ms.`,
       });
     }, options.timeout);
@@ -1152,13 +1152,22 @@ function runCommand(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ status: null, stdout, stderr, error: error.message });
+      resolve({
+        status: null,
+        stdout: finalizeBoundedRendererOutput(stdout),
+        stderr: finalizeBoundedRendererOutput(stderr),
+        error: error.message,
+      });
     });
     child.on('close', (status) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ status, stdout, stderr });
+      resolve({
+        status,
+        stdout: finalizeBoundedRendererOutput(stdout),
+        stderr: finalizeBoundedRendererOutput(stderr),
+      });
     });
   });
 }
@@ -1176,6 +1185,22 @@ function appendBoundedRendererOutput(current: string, chunk: string): string {
   return (
     next.slice(0, MAX_RENDERER_OUTPUT_CHARS - OUTPUT_TRUNCATION_MARKER.length) +
     OUTPUT_TRUNCATION_MARKER
+  );
+}
+
+function finalizeBoundedRendererOutput(output: string): string {
+  if (
+    output.length < MAX_RENDERER_OUTPUT_CHARS ||
+    output.endsWith(OUTPUT_TRUNCATION_MARKER)
+  ) {
+    return output;
+  }
+
+  return (
+    output.slice(
+      0,
+      MAX_RENDERER_OUTPUT_CHARS - OUTPUT_TRUNCATION_MARKER.length,
+    ) + OUTPUT_TRUNCATION_MARKER
   );
 }
 
