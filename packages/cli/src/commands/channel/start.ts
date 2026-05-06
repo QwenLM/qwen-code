@@ -217,7 +217,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
 
   // Restore sessions from previous run
   const restoreResult = await router.restoreSessions();
-  if (restoreResult.restored > 0) {
+  if (restoreResult.restored > 0 || restoreResult.failed > 0) {
     writeStdoutLine(
       `[Channel] Sessions restored: ${restoreResult.restored}` +
         (restoreResult.failed > 0 ? `, failed: ${restoreResult.failed}` : ''),
@@ -376,7 +376,7 @@ async function startAll(proxy?: string): Promise<void> {
 
   // Restore sessions from previous run
   const restoreResult = await router.restoreSessions();
-  if (restoreResult.restored > 0) {
+  if (restoreResult.restored > 0 || restoreResult.failed > 0) {
     writeStdoutLine(
       `[Channel] Sessions restored: ${restoreResult.restored}` +
         (restoreResult.failed > 0 ? `, failed: ${restoreResult.failed}` : ''),

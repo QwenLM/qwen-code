@@ -196,8 +196,8 @@ export class SessionRouter {
     return { restored, failed };
   }
 
-  /** Clear in-memory state on shutdown. Persist file is kept so sessions
-   *  can be restored on next start via {@link restoreSessions}. */
+  /** Clear in-memory state. Persist file is left intact for the next start
+   *  via {@link restoreSessions}. */
   clearAll(): void {
     this.toSession.clear();
     this.toTarget.clear();

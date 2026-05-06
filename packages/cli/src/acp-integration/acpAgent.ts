@@ -293,6 +293,12 @@ class QwenAgent implements Agent {
       },
     );
 
+    if (!exists) {
+      throw new Error(
+        `Session ${params.sessionId} does not exist at ${params.cwd}`,
+      );
+    }
+
     const config = await this.newSessionConfig(
       params.cwd,
       params.mcpServers,
