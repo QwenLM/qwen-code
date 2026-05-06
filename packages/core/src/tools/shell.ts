@@ -2122,7 +2122,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
       deletedFiles: new Set(),
     };
 
-    const runGit = async (args: string): Promise<string> => {
+    // Distinguish a successful git command with no output (e.g.
+    // `--allow-empty` -> empty `--name-only` listing) from a failed
+    // git command (silenced by ShellExecutionService) so the caller
+    // can choose between the empty-commit sentinel and the analysis-
+    // failure sentinel. Returning the same `''` for both used to
+    // alias `--allow-empty` to a `--name-only` failure, which left
+    // pending attributions tracked across the just-committed file
+    // and re-attributed it on the next commit.
+    const runGit = async (args: string): Promise<string | null> => {
       const handle = await ShellExecutionService.execute(
         `git ${args}`,
         cwd,
@@ -2132,7 +2140,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         {},
       );
       const r = await handle.result;
-      return r.exitCode === 0 ? r.output : '';
+      return r.exitCode === 0 ? r.output : null;
     };
 
     try {
@@ -2161,7 +2169,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
           runGit('log -1 --pretty=%P HEAD'),
           runGit('rev-parse --show-toplevel'),
         ]);
-      const hasParent = hasParentOutput.length > 0;
+      // `rev-parse --verify HEAD~1` is allowed to fail (shallow
+      // clone, true root commit) — treat null and '' uniformly.
+      const hasParent = hasParentOutput !== null && hasParentOutput.length > 0;
+      // `log -1 --pretty=%P HEAD` MUST succeed; if git can't read the
+      // current HEAD's metadata we have no way to tell shallow apart
+      // from a real root commit. Bail.
+      if (parentShaOutput === null) {
+        debugLogger.warn(
+          'getCommittedFileInfo: log -1 --pretty=%P HEAD failed; ' +
+            'cannot distinguish shallow clone from true root commit.',
+        );
+        return null;
+      }
       const isTrueRootCommit = parentShaOutput.trim().length === 0;
       // Shallow clone: HEAD has a parent recorded but the object
       // isn't local. Bail rather than over-attribute via --root.
@@ -2177,8 +2197,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // reconcile paths from `git diff` (relative to the toplevel)
       // against absolute paths recorded by the edit/write tools.
       // Using the configured target directory as base would zero out
-      // attribution for any file outside it.
-      const repoRoot = repoRootOutput.trim();
+      // attribution for any file outside it. Tolerate failure (null
+      // -> empty string -> caller falls back to targetDir).
+      const repoRoot = (repoRootOutput ?? '').trim();
 
       // Choose the diff range:
       // - amend: `HEAD@{1}..HEAD` — the actual amend delta. The
@@ -2191,8 +2212,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       let diffArgs: { name: string; status: string; numstat: string };
       if (isAmend) {
         // Verify HEAD@{1} actually exists; reflogs can be GC'd.
-        const hasReflog =
-          (await runGit('rev-parse --verify HEAD@{1}')).length > 0;
+        const reflogProbe = await runGit('rev-parse --verify HEAD@{1}');
+        const hasReflog = reflogProbe !== null && reflogProbe.length > 0;
         if (!hasReflog) {
           // Without a pre-amend snapshot we can't compute the amend
           // delta; emitting `HEAD~1..HEAD` would over-attribute.
@@ -2225,6 +2246,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
         runGit(diffArgs.status),
         runGit(diffArgs.numstat),
       ]);
+
+      // ANY of the three diffs failing (null) is an analysis failure,
+      // NOT an empty commit. Without this check, a `--name-only` that
+      // failed silently used to alias to `--allow-empty`, leaving the
+      // just-committed file's tracked AI edit in the singleton and
+      // re-attributing it to the next commit.
+      if (
+        nameOutput === null ||
+        statusOutput === null ||
+        numstatOutput === null
+      ) {
+        debugLogger.warn(
+          'getCommittedFileInfo: one or more diff calls failed; ' +
+            'cannot distinguish empty commit from analysis failure.',
+        );
+        return null;
+      }
 
       const files = nameOutput
         .split('\n')

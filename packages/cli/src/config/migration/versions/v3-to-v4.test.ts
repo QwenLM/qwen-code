@@ -39,6 +39,35 @@ describe('V3ToV4Migration', () => {
       expect(migration.shouldMigrate('x')).toBe(false);
       expect(migration.shouldMigrate(42)).toBe(false);
     });
+
+    // `gitCoAuthor` post-dates the V1 indicator-key list, so a settings
+    // file that has ONLY this legacy boolean shape (no `$version`,
+    // no other migration-triggering keys) wouldn't fire any earlier
+    // migration. The v3→v4 step must catch it directly so the dialog
+    // doesn't silently overwrite the user's stored opt-out with the
+    // schema defaults on next save.
+    it('returns true for versionless settings with legacy boolean gitCoAuthor', () => {
+      expect(
+        migration.shouldMigrate({
+          general: { gitCoAuthor: false },
+        }),
+      ).toBe(true);
+    });
+
+    it('returns false for versionless settings without gitCoAuthor', () => {
+      expect(migration.shouldMigrate({ general: {} })).toBe(false);
+      expect(migration.shouldMigrate({})).toBe(false);
+    });
+
+    it('returns false for versionless settings with already-object gitCoAuthor', () => {
+      // User who hand-edited to the v4 shape — let the loader's
+      // version normalization handle it without rewriting.
+      expect(
+        migration.shouldMigrate({
+          general: { gitCoAuthor: { commit: false, pr: true } },
+        }),
+      ).toBe(false);
+    });
   });
 
   describe('migrate', () => {
