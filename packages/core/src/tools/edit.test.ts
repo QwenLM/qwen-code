@@ -20,7 +20,7 @@ import type { Mock } from 'vitest';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { EditToolParams } from './edit.js';
 import { applyReplacement, EditTool } from './edit.js';
-import type { FileDiff } from './tools.js';
+import type { FileDiff, ToolInvocation, ToolResult } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -28,6 +28,7 @@ import os from 'node:os';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 
 describe('EditTool', () => {
@@ -37,12 +38,14 @@ describe('EditTool', () => {
   let mockConfig: Config;
   let geminiClient: any;
   let baseLlmClient: any;
+  let fileReadCache: FileReadCache;
 
   beforeEach(() => {
     vi.restoreAllMocks();
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'edit-tool-test-'));
     rootDir = path.join(tempDir, 'root');
     fs.mkdirSync(rootDir);
+    fileReadCache = new FileReadCache();
 
     geminiClient = {
       generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
@@ -78,6 +81,7 @@ describe('EditTool', () => {
       setGeminiMdFileCount: vi.fn(),
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
+      getFileReadCache: () => fileReadCache,
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -229,6 +233,60 @@ describe('EditTool', () => {
       const error = tool.validateToolParams(params);
       expect(error).toBeNull();
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped spaces in file_path',
+      () => {
+        const escapedPath = path.join(rootDir, 'my\\ file.txt');
+        const params: EditToolParams = {
+          file_path: escapedPath,
+          old_string: 'old',
+          new_string: 'new',
+        };
+        expect(tool.validateToolParams(params)).toBeNull();
+        expect(params.file_path).toBe(path.join(rootDir, 'my file.txt'));
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'should unescape multiple shell-escaped characters in file_path',
+      () => {
+        const escapedPath = path.join(
+          rootDir,
+          'project\\ \\(v2\\)\\ \\&\\ more.txt',
+        );
+        const params: EditToolParams = {
+          file_path: escapedPath,
+          old_string: 'old',
+          new_string: 'new',
+        };
+        expect(tool.validateToolParams(params)).toBeNull();
+        expect(params.file_path).toBe(
+          path.join(rootDir, 'project (v2) & more.txt'),
+        );
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'should preserve literal backslashes in file_path',
+      () => {
+        // On Windows, backslashes are path separators, and unescapePath is a
+        // no-op. This test only validates literal-backslash preservation on
+        // platforms where backslashes are not path separators.
+        const pathWithBackslash = path.join(
+          rootDir,
+          'path\\\\with\\\\slashes.txt',
+        );
+        const params: EditToolParams = {
+          file_path: pathWithBackslash,
+          old_string: 'old',
+          new_string: 'new',
+        };
+        expect(tool.validateToolParams(params)).toBeNull();
+        // Double backslashes (literal) should be preserved
+        expect(params.file_path).toBe(pathWithBackslash);
+      },
+    );
   });
 
   describe('getConfirmationDetails', () => {
@@ -849,6 +907,103 @@ describe('EditTool', () => {
       );
     });
   });
+
+  describe('FileReadCache integration', () => {
+    it('records a write into the cache so a follow-up Read sees lastWriteAt', async () => {
+      // Without this hook, ReadFile's `(lastWriteAt === undefined ||
+      // lastReadAt > lastWriteAt)` guard would let a post-edit Read
+      // return the pre-edit placeholder when the filesystem's mtime
+      // resolution is too coarse to detect the edit.
+      const filePath = path.join(rootDir, 'cached.txt');
+      fs.writeFileSync(filePath, 'old content');
+
+      // Simulate the model having Read the file before Edit fires.
+      const preEditStats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, preEditStats, {
+        full: true,
+        cacheable: true,
+      });
+      const beforeRead = fileReadCache.check(preEditStats);
+      expect(beforeRead.state).toBe('fresh');
+      if (beforeRead.state === 'fresh') {
+        expect(beforeRead.entry.lastWriteAt).toBeUndefined();
+      }
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params) as ToolInvocation<
+        EditToolParams,
+        ToolResult
+      >;
+      const abortSignal = new AbortController().signal;
+      const result = await invocation.execute(abortSignal);
+      expect(result.error).toBeUndefined();
+
+      const postEditStats = fs.statSync(filePath);
+      const after = fileReadCache.check(postEditStats);
+      // After the edit, the cache entry's mtime+size match the new
+      // file state and lastWriteAt has been stamped.
+      expect(after.state).toBe('fresh');
+      if (after.state === 'fresh') {
+        expect(after.entry.lastWriteAt).toBeDefined();
+        // lastReadAt was set by the simulated pre-edit Read; the
+        // post-write timestamp must dominate it so subsequent Reads
+        // do not return the placeholder.
+        expect(after.entry.lastWriteAt!).toBeGreaterThanOrEqual(
+          after.entry.lastReadAt!,
+        );
+      }
+    });
+  });
+
+  describe.skipIf(process.platform === 'win32')(
+    'escaped paths with spaces (end-to-end)',
+    () => {
+      it('should read and edit a file whose name contains spaces when given an escaped path', async () => {
+        // Create a file with spaces in its name on disk
+        const realFileName = 'my spaced file.txt';
+        const realPath = path.join(rootDir, realFileName);
+        fs.writeFileSync(realPath, 'Hello old world!', 'utf8');
+
+        // Pass an ESCAPED path (as the LLM might from at-completion)
+        const escapedPath = path.join(rootDir, 'my\\ spaced\\ file.txt');
+        const params: EditToolParams = {
+          file_path: escapedPath,
+          old_string: 'old',
+          new_string: 'new',
+        };
+
+        (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+          ApprovalMode.AUTO_EDIT,
+        );
+
+        const invocation = tool.build(params);
+        const result = await invocation.execute(new AbortController().signal);
+
+        // Should succeed — not fail with file-not-found
+        expect(result.llmContent).toMatch(/Showing lines \d+-\d+ of \d+/);
+        expect(fs.readFileSync(realPath, 'utf8')).toBe('Hello new world!');
+      });
+
+      it('should fail gracefully when escaped path points to nonexistent file', async () => {
+        const escapedPath = path.join(rootDir, 'nonexistent\\ file.txt');
+        const params: EditToolParams = {
+          file_path: escapedPath,
+          old_string: 'old',
+          new_string: 'new',
+        };
+
+        const invocation = tool.build(params);
+        const result = await invocation.execute(new AbortController().signal);
+
+        // Should report file-not-found (unescaped path used, file truly doesn't exist)
+        expect(result.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
+      });
+    },
+  );
 
   describe('workspace boundary validation', () => {
     it('should validate paths are within workspace root', () => {

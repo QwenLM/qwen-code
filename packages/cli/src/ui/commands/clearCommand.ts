@@ -14,6 +14,10 @@ import {
   ToolNames,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
+import {
+  hasBlockingBackgroundWork,
+  resetBackgroundStateForSessionSwitch,
+} from '../utils/backgroundWorkUtils.js';
 
 export const clearCommand: SlashCommand = {
   name: 'clear',
@@ -27,6 +31,20 @@ export const clearCommand: SlashCommand = {
     const { config } = context.services;
 
     if (config) {
+      if (hasBlockingBackgroundWork(config)) {
+        const content =
+          "Stop the current session's running background tasks before starting a new session.";
+        context.ui.setDebugMessage(content);
+        if (context.executionMode !== 'interactive') {
+          return {
+            type: 'message' as const,
+            messageType: 'error' as const,
+            content,
+          };
+        }
+        return;
+      }
+
       // Fire SessionEnd event (non-blocking to avoid UI lag)
       config
         .getHookSystem()
@@ -34,6 +52,13 @@ export const clearCommand: SlashCommand = {
         .catch((err) => {
           config.getDebugLogger().warn(`SessionEnd hook failed: ${err}`);
         });
+
+      // Abort old-session async work before creating the new session so
+      // cancellation notifications cannot leak across the reset boundary.
+      config.getBackgroundTaskRegistry().abortAll({ notify: false });
+      config.getMonitorRegistry().abortAll({ notify: false });
+      config.getBackgroundShellRegistry().abortAll();
+      resetBackgroundStateForSessionSwitch(config);
 
       const newSessionId = config.startNewSession();
 
