@@ -24,6 +24,7 @@ interface MermaidDiagramProps {
 }
 
 const MERMAID_PADDING = 1;
+const ESC = '\u001b';
 
 interface MermaidImageState {
   key: string;
@@ -32,6 +33,17 @@ interface MermaidImageState {
 
 function getRenderErrorReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function positionITerm2ImageAtReservedRows(
+  sequence: string,
+  rows: number,
+): string {
+  if (rows <= 0) {
+    return sequence;
+  }
+
+  return `${ESC}7${ESC}[${rows}A${sequence}${ESC}8`;
 }
 
 const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
@@ -123,7 +135,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
       return;
     }
     preparedTerminalImageSequence.current = image.sequence;
-    writeRaw(image.sequence);
+    writeRaw(positionITerm2ImageAtReservedRows(image.sequence, image.rows));
   }, [image, writeRaw]);
 
   const titleWithSourceHint = (title: string) =>

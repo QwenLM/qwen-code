@@ -380,6 +380,37 @@ describe('mermaid image renderer', () => {
     );
   });
 
+  it('bounds retained renderer output across many async stderr chunks', async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-chafa-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir);
+    createFakeChafa(binDir, [
+      'for (let i = 0; i < 80; i++) {',
+      '  process.stderr.write("x".repeat(1024));',
+      '}',
+      'process.exit(1);',
+    ]);
+
+    const result = await renderMermaidImageAsync({
+      source: 'flowchart TD\n  A[Start] --> B[Chunked stderr]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'off',
+      },
+    });
+
+    expect(result.kind).toBe('unavailable');
+    expect(result.kind === 'unavailable' && result.reason.length).toBeLessThan(
+      17 * 1024,
+    );
+    expect(result.kind === 'unavailable' && result.reason).toContain(
+      'renderer output truncated',
+    );
+  });
+
   it('renders Kitty terminal images as virtual placements', () => {
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
     tempDirs.push(binDir);

@@ -6,7 +6,10 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
-import { MermaidDiagram } from './MermaidDiagram.js';
+import {
+  MermaidDiagram,
+  positionITerm2ImageAtReservedRows,
+} from './MermaidDiagram.js';
 import { TerminalOutputProvider } from '../contexts/TerminalOutputContext.js';
 import { renderMermaidImageAsync } from './mermaidImageRenderer.js';
 
@@ -58,6 +61,39 @@ describe('MermaidDiagram', () => {
     await vi.waitFor(() => {
       expect(writeRaw).toHaveBeenCalledWith('\x1b_Gpayload\x1b\\');
     });
+  });
+
+  it('positions iTerm2 images at the reserved spacer rows', async () => {
+    const writeRaw = vi.fn();
+    mockedRenderMermaidImageAsync.mockResolvedValueOnce({
+      kind: 'terminal-image',
+      title: 'Mermaid diagram image (iterm2)',
+      sequence: '\x1b]1337;File=inline=1:payload\x07',
+      rows: 3,
+      protocol: 'iterm2',
+    });
+
+    render(
+      <TerminalOutputProvider value={writeRaw}>
+        <MermaidDiagram
+          source={'flowchart TD\nA[Start] --> B[End]'}
+          sourceCopyCommand="/copy mermaid 1"
+          contentWidth={80}
+          isPending={false}
+          availableTerminalHeight={20}
+        />
+      </TerminalOutputProvider>,
+    );
+
+    await vi.waitFor(() => {
+      expect(writeRaw).toHaveBeenCalledWith(
+        '\x1b7\x1b[3A\x1b]1337;File=inline=1:payload\x07\x1b8',
+      );
+    });
+  });
+
+  it('does not reposition zero-height iTerm2 images', () => {
+    expect(positionITerm2ImageAtReservedRows('payload', 0)).toBe('payload');
   });
 
   it('does not start image rendering while the Mermaid block is pending', () => {
