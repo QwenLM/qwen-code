@@ -45,7 +45,6 @@ import { buildAgentContentGeneratorConfig } from '../models/content-generator-co
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { parseSubagentModelSelection } from './model-selection.js';
-
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
@@ -633,10 +632,28 @@ export class SubagentManager {
     options?: {
       eventEmitter?: AgentEventEmitter;
       hooks?: AgentHooks;
+      promptConfigOverrides?: Partial<PromptConfig>;
+      modelConfigOverrides?: Partial<ModelConfig>;
+      runConfigOverrides?: Partial<RunConfig>;
+      toolConfigOverride?: ToolConfig;
     },
   ): Promise<AgentHeadless> {
     try {
       const runtimeConfig = await this.convertToRuntimeConfig(config);
+      const promptConfig: PromptConfig = {
+        ...runtimeConfig.promptConfig,
+        ...options?.promptConfigOverrides,
+      };
+      const modelConfig: ModelConfig = {
+        ...runtimeConfig.modelConfig,
+        ...options?.modelConfigOverrides,
+      };
+      const runConfig: RunConfig = {
+        ...runtimeConfig.runConfig,
+        ...options?.runConfigOverrides,
+      };
+      const toolConfig =
+        options?.toolConfigOverride ?? runtimeConfig.toolConfig;
 
       // When the model selector specifies a different provider, build a
       // per-agent Config with a dedicated ContentGenerator so the subagent
@@ -649,10 +666,10 @@ export class SubagentManager {
       return await AgentHeadless.create(
         config.name,
         agentContext,
-        runtimeConfig.promptConfig,
-        runtimeConfig.modelConfig,
-        runtimeConfig.runConfig,
-        runtimeConfig.toolConfig,
+        promptConfig,
+        modelConfig,
+        runConfig,
+        toolConfig,
         options?.eventEmitter,
         options?.hooks,
       );

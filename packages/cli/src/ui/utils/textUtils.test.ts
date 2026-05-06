@@ -9,9 +9,65 @@ import type {
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
-import { escapeAnsiCtrlCodes, sanitizeSensitiveText } from './textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeSensitiveText,
+  sliceTextByVisualHeight,
+} from './textUtils.js';
 
 describe('textUtils', () => {
+  describe('sliceTextByVisualHeight', () => {
+    it('returns the original text when maxHeight is undefined', () => {
+      const sliced = sliceTextByVisualHeight('a\nb\nc', undefined, 10);
+      expect(sliced).toEqual({ text: 'a\nb\nc', hiddenLinesCount: 0 });
+    });
+
+    it('keeps the tail when overflowing from the top (default)', () => {
+      const sliced = sliceTextByVisualHeight('abcdefghijklmnop', 3, 4, {
+        minHeight: 2,
+        reservedRows: 1,
+        overflowDirection: 'top',
+      });
+
+      expect(sliced).toEqual({
+        text: 'ijkl\nmnop',
+        hiddenLinesCount: 2,
+      });
+    });
+
+    it('keeps the head when overflowing from the bottom', () => {
+      const sliced = sliceTextByVisualHeight('a\nb\nc\nd', 3, 80, {
+        overflowDirection: 'bottom',
+      });
+
+      expect(sliced).toEqual({
+        text: 'a\nb\nc',
+        hiddenLinesCount: 1,
+      });
+    });
+
+    it('counts soft wraps in narrow widths as visual rows', () => {
+      const sliced = sliceTextByVisualHeight('aaaa\nbbbbbbbb\ncc', 3, 4, {
+        overflowDirection: 'bottom',
+      });
+
+      expect(sliced.hiddenLinesCount).toBeGreaterThan(0);
+      expect(sliced.text.split('\n').length).toBeLessThanOrEqual(3);
+    });
+
+    it('subtracts reservedRows before deciding whether to truncate', () => {
+      // With reservedRows=1 and maxHeight=3 the visible content budget is 2.
+      // A 3-line input must therefore truncate to 2 rows (not return
+      // unchanged just because it fits inside the unreserved 3-row budget).
+      const sliced = sliceTextByVisualHeight('a\nb\nc', 3, 80, {
+        reservedRows: 1,
+        overflowDirection: 'bottom',
+      });
+
+      expect(sliced).toEqual({ text: 'a\nb', hiddenLinesCount: 1 });
+    });
+  });
+
   describe('escapeAnsiCtrlCodes', () => {
     describe('escapeAnsiCtrlCodes string case study', () => {
       it('should replace ANSI escape codes with a visible representation', () => {

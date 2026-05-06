@@ -70,6 +70,8 @@ export enum ToolErrorType {
   // TaskStop-specific Errors
   TASK_STOP_NOT_FOUND = 'task_stop_not_found',
   TASK_STOP_NOT_RUNNING = 'task_stop_not_running',
+  TASK_STOP_NOT_CANCELLABLE = 'task_stop_not_cancellable',
+  TASK_STOP_INTERNAL_ERROR = 'task_stop_internal_error',
 
   // SendMessage-specific Errors
   SEND_MESSAGE_NOT_FOUND = 'send_message_not_found',

@@ -277,6 +277,21 @@ describe('LspTool', () => {
         } as LspToolParams);
         expect(result).toBe('query is required for workspaceSymbol.');
       });
+
+      it.skipIf(process.platform === 'win32')(
+        'should unescape shell-escaped filePath',
+        () => {
+          const params: LspToolParams = {
+            operation: 'goToDefinition',
+            filePath: 'src/app\\ file.ts',
+            line: 10,
+            character: 5,
+          };
+          const result = tool.validateToolParams(params);
+          expect(result).toBeNull();
+          expect(params.filePath).toBe('src/app file.ts');
+        },
+      );
     });
   });
 

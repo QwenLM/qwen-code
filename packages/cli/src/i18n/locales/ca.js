@@ -1208,7 +1208,7 @@ export default {
   // ============================================================================
   // Ordres - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Canviar el model per a aquesta sessió (--fast per al model de suggeriments)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Establir un model més lleuger per a suggeriments de missatges i execució especulativa',
@@ -1217,6 +1217,8 @@ export default {
   'Authentication type not available.': "Tipus d'autenticació no disponible.",
   'No models available for the current authentication type ({{authType}}).':
     "No hi ha models disponibles per al tipus d'autenticació actual ({{authType}}).",
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Ordres - Netejar
@@ -1708,6 +1710,7 @@ export default {
     "S'ha trobat {{count}} fitxer d'ordres TOML:",
   'Found {{count}} TOML command files:':
     "S'han trobat {{count}} fitxers d'ordres TOML:",
+  'Current tasks': 'Tasques actuals',
   '... and {{count}} more': '... i {{count}} més',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'El format TOML és obsolet. Voleu migrar-los al format Markdown?',
