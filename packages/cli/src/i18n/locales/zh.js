@@ -540,7 +540,6 @@ export default {
     '扩展 "{{name}}" 已是最新版本。',
   'Updates all extensions or a named extension to the latest version.':
     '将所有扩展或指定扩展更新到最新版本。',
-  'The name of the extension to update.': '要更新的扩展名称。',
   'Update all extensions.': '更新所有扩展。',
   'Either an extension name or --all must be provided':
     '必须提供扩展名称或 --all',
@@ -613,6 +612,7 @@ export default {
   'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
     '解析 {{terminalName}} keybindings.json 失败。文件包含无效的 JSON。请手动修复文件或删除它以允许自动配置。',
   'Error: {{error}}': '错误：{{error}}',
+  'Value:': '值：',
   'Shift+Enter binding already exists': 'Shift+Enter 绑定已存在',
   'Ctrl+Enter binding already exists': 'Ctrl+Enter 绑定已存在',
   'Existing keybindings detected. Will not modify to avoid conflicts.':
@@ -687,7 +687,6 @@ export default {
   'User Settings': '用户设置',
   'System Settings': '系统设置',
   Extensions: '扩展',
-  'Session (temporary)': '会话（临时）',
   // Hooks - Status
   '✓ Enabled': '✓ 已启用',
   '✗ Disabled': '✗ 已禁用',
@@ -1018,7 +1017,9 @@ export default {
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
+  required: '必填',
   Type: '类型',
+  Enum: '枚举',
   Parameters: '参数',
   'No tool selected': '未选择工具',
   Annotations: '注解',
@@ -1028,6 +1029,8 @@ export default {
   Idempotent: '幂等',
   'Open World': '开放世界',
   Server: '服务器',
+  'No server selected': '未选择服务器',
+  prompts: '提示词',
 
   // Invalid tool related translations
   '{{count}} invalid tools': '{{count}} 个无效工具',
@@ -1677,8 +1680,6 @@ export default {
   // Coding Plan Authentication
   // ============================================================================
   'API key cannot be empty.': 'API Key 不能为空。',
-  'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
-    '无效的 API Key，Coding Plan API Key 均以 "sk-sp-" 开头，请检查',
   'You can get your Coding Plan API key here':
     '您可以在这里获取 Coding Plan API Key',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
@@ -1749,8 +1750,6 @@ export default {
   'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
   'Run /context detail for per-item breakdown.':
     '运行 /context detail 查看详细分解。',
-  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
-    '显示上下文窗口使用情况分解。输入 "/context detail" 查看详细分解。',
   'body loaded': '内容已加载',
   memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
