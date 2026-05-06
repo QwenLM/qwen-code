@@ -76,10 +76,6 @@ export const codingPlanProviderConfig: ProviderConfig = {
     baseUrl === CODING_PLAN_CHINA_BASE_URL && !key.startsWith('sk-sp-')
       ? 'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.'
       : null,
-  apiKeyHelpUrl: (baseUrl) =>
-    baseUrl === CODING_PLAN_GLOBAL_BASE_URL
-      ? 'https://bailian.console.alibabacloud.com/#/api'
-      : 'https://bailian.console.aliyun.com/#/api',
   getProviderState: (baseUrl, models) => ({
     codingPlan: { version: computeModelListVersion(models), baseUrl },
   }),

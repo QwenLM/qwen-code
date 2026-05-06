@@ -39,8 +39,6 @@ export const tokenPlanProviderConfig: ProviderConfig = {
   authMethod: 'input',
   models: TOKEN_PLAN_MODELS,
   modelNamePrefix: 'ModelStudio Token Plan',
-  apiKeyHelpUrl:
-    'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
   getProviderState: (baseUrl, models) => ({
     tokenPlan: { version: computeModelListVersion(models), baseUrl },
   }),

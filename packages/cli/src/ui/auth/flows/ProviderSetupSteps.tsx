@@ -9,10 +9,6 @@ import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { DescriptiveRadioButtonSelect } from '../../components/shared/DescriptiveRadioButtonSelect.js';
 import { TextInput } from '../../components/shared/TextInput.js';
-import {
-  ApiKeyInput,
-  type ApiKeyInputPlan,
-} from '../../components/ApiKeyInput.js';
 import { theme } from '../../semantic-colors.js';
 import { t } from '../../../i18n/index.js';
 import type { ProviderSetupState } from './useProviderSetupFlow.js';
@@ -41,16 +37,6 @@ const NAV_HINT_INPUT = () => (
     </Text>
   </Box>
 );
-
-function resolveApiKeyHelpUrl(
-  config: ProviderConfig,
-  baseUrl: string,
-): string | undefined {
-  if (!config.apiKeyHelpUrl) return undefined;
-  return typeof config.apiKeyHelpUrl === 'function'
-    ? config.apiKeyHelpUrl(baseUrl)
-    : config.apiKeyHelpUrl;
-}
 
 function resolveDocumentationUrl(
   config: ProviderConfig,
@@ -159,39 +145,12 @@ function ApiKeyStep({
   state,
   onChange,
   onSubmit,
-  onBack,
 }: {
   config: ProviderConfig;
   state: ProviderSetupState;
   onChange: (v: string) => void;
   onSubmit: (key?: string) => void;
-  onBack: () => void;
 }): React.JSX.Element {
-  const helpUrl = resolveApiKeyHelpUrl(config, state.baseUrl);
-
-  if (helpUrl) {
-    const plan: ApiKeyInputPlan = {
-      apiKeyUrl: helpUrl,
-      helpText: t('Get your API key'),
-      placeholder: config.apiKeyPlaceholder ?? 'sk-...',
-      validate: config.validateApiKey
-        ? (key: string) => config.validateApiKey!(key, state.baseUrl)
-        : undefined,
-    };
-    return (
-      <Box marginTop={1}>
-        <ApiKeyInput
-          onSubmit={(key: string) => {
-            onChange(key);
-            onSubmit(key);
-          }}
-          onCancel={onBack}
-          plan={plan}
-        />
-      </Box>
-    );
-  }
-
   const docUrl = resolveDocumentationUrl(config, state.baseUrl);
 
   return (
@@ -406,7 +365,6 @@ export interface ProviderSetupStepsProps {
   onBaseUrlSubmit: () => void;
   onApiKeyChange: (v: string) => void;
   onApiKeySubmit: (key?: string) => void;
-  onApiKeyBack: () => void;
   onModelIdsChange: (v: string) => void;
   onModelIdsSubmit: () => void;
 }
@@ -421,7 +379,6 @@ export function ProviderSetupSteps({
   onBaseUrlSubmit,
   onApiKeyChange,
   onApiKeySubmit,
-  onApiKeyBack,
   onModelIdsChange,
   onModelIdsSubmit,
 }: ProviderSetupStepsProps): React.JSX.Element | null {
@@ -477,7 +434,6 @@ export function ProviderSetupSteps({
           state={state}
           onChange={onApiKeyChange}
           onSubmit={onApiKeySubmit}
-          onBack={onApiKeyBack}
         />
       );
 

@@ -264,13 +264,6 @@ export function AuthDialog(): React.JSX.Element {
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
-        // ApiKeyInput has its own Escape → onCancel handler; skip here to avoid double goBack
-        if (
-          viewLevel === 'provider-setup' &&
-          setupFlow.state.step === 'apiKey'
-        ) {
-          if (setupFlow.state.provider?.apiKeyHelpUrl) return;
-        }
         if (viewLevel !== 'main') {
           goBack();
           return;
@@ -324,7 +317,8 @@ export function AuthDialog(): React.JSX.Element {
 
   // -- View title -----------------------------------------------------------
 
-  const getGroupStepLabel = (groupLabel: string): string => groupLabel === 'Alibaba ModelStudio' ? 'Access Method' : 'Provider';
+  const getGroupStepLabel = (groupLabel: string): string =>
+    groupLabel === 'Alibaba ModelStudio' ? 'Access Method' : 'Provider';
 
   const getStepLabel = (step: string | null, p: ProviderConfig): string => {
     if (step === 'protocol') return 'Protocol';
@@ -359,17 +353,10 @@ export function AuthDialog(): React.JSX.Element {
         const flowTitle = p.uiLabels?.flowTitle ?? p.label;
         const { stepIndex, totalSteps, step } = setupFlow.state;
 
-        // Determine if this flow was entered from a group (adds 1 to step count)
-        const fromGroup =
-          p.uiGroup === 'alibaba' || p.uiGroup === 'third-party';
-        const offset = fromGroup ? 1 : 0;
-        const totalWithOffset = totalSteps + offset;
-        const stepWithOffset = stepIndex + offset;
-
         return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
           flowTitle,
-          step: String(stepWithOffset),
-          total: String(totalWithOffset),
+          step: String(stepIndex),
+          total: String(totalSteps),
           stepLabel: getStepLabel(step, p),
         });
       }
@@ -491,7 +478,6 @@ export function AuthDialog(): React.JSX.Element {
           onBaseUrlSubmit={setupFlow.submitBaseUrl}
           onApiKeyChange={setupFlow.changeApiKey}
           onApiKeySubmit={setupFlow.submitApiKey}
-          onApiKeyBack={goBack}
           onModelIdsChange={setupFlow.changeModelIds}
           onModelIdsSubmit={setupFlow.submitModelIds}
         />

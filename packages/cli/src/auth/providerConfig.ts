@@ -81,9 +81,6 @@ export interface ProviderConfig {
   /** Validate the API key before submission. */
   validateApiKey?: (key: string, baseUrl: string) => string | null;
 
-  /** API key help URL or a function of baseUrl. */
-  apiKeyHelpUrl?: string | ((baseUrl: string) => string);
-
   /** API key input placeholder. */
   apiKeyPlaceholder?: string;
 
