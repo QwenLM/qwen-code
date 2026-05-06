@@ -505,6 +505,30 @@ describe('ChatRecordingService', () => {
       );
     });
 
+    // appendRecord is fire-and-forget for non-snapshot callers
+    // (recordUserMessage / recordAssistantTurn / recordAtCommand /
+    // ...). When jsonl.writeLine rejects, the rejection MUST be
+    // swallowed inside the service — otherwise it surfaces as an
+    // unhandled-promise-rejection in production (and as a flaky
+    // failure under vitest's --reporter=default).
+    it('should swallow async writeLine rejection for fire-and-forget callers', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      // Track unhandled rejections during this test.
+      const unhandled: unknown[] = [];
+      const handler = (err: unknown) => unhandled.push(err);
+      process.on('unhandledRejection', handler);
+      try {
+        chatRecordingService.recordUserMessage([{ text: 'hi' }]);
+        await chatRecordingService.flush();
+        // Microtask drain to give any unhandled rejections a chance
+        // to surface before we assert.
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', handler);
+      }
+    });
+
     // appendRecord can throw SYNCHRONOUSLY before returning a promise
     // (e.g. ensureConversationFile fails because the conversation
     // file can't be created). Without rollback in the outer catch,

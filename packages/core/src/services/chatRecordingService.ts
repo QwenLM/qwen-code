@@ -508,13 +508,24 @@ export class ChatRecordingService {
    * simplification.
    */
   /**
-   * Returns a promise that resolves after the queued write succeeds and
-   * rejects (without logging) if it fails. The internal `writeChain` is
-   * advanced with a swallowing catch so the chain stays alive across
-   * failures; callers that need to react to per-record success can await
-   * the returned promise.
+   * Fire-and-forget: queues a JSONL write on the internal writeChain
+   * and swallows async failures (logs them via debugLogger). All
+   * existing call sites — recordUserMessage, recordAssistantTurn,
+   * etc. — invoke this synchronously without awaiting, so the
+   * internal swallow keeps an unhandled-promise-rejection from
+   * surfacing on a single transient writeLine failure.
+   *
+   * Callers that need to react to per-record write FAILURE (e.g. the
+   * snapshot dedup-key rollback in `recordAttributionSnapshot`) pass
+   * an `onError` callback, which fires after the write rejects (and
+   * after the rejection has been logged + the chain re-armed). Sync
+   * throws still propagate so the caller's outer try/catch can roll
+   * back optimistic state — see the synchronous-failure test.
    */
-  private appendRecord(record: ChatRecord): Promise<void> {
+  private appendRecord(
+    record: ChatRecord,
+    onError?: (err: unknown) => void,
+  ): void {
     let conversationFile: string;
     try {
       conversationFile = this.ensureConversationFile();
@@ -523,13 +534,19 @@ export class ChatRecordingService {
       throw error;
     }
     this.lastRecordUuid = record.uuid;
-    const writePromise = this.writeChain
+    this.writeChain = this.writeChain
       .catch(() => {})
-      .then(() => jsonl.writeLine(conversationFile, record));
-    this.writeChain = writePromise.catch((err) => {
-      debugLogger.error('Error appending record (async):', err);
-    });
-    return writePromise;
+      .then(() => jsonl.writeLine(conversationFile, record))
+      .catch((err) => {
+        debugLogger.error('Error appending record (async):', err);
+        if (onError) {
+          try {
+            onError(err);
+          } catch (cbErr) {
+            debugLogger.error('appendRecord onError callback threw:', cbErr);
+          }
+        }
+      });
   }
 
   /**
@@ -1021,7 +1038,7 @@ export class ChatRecordingService {
       };
 
       this.lastAttributionSnapshotJson = json;
-      this.appendRecord(record).catch(() => {
+      this.appendRecord(record, () => {
         // Async write failed — only roll back if the key still
         // belongs to our snapshot (a later distinct write may have
         // overwritten it).
