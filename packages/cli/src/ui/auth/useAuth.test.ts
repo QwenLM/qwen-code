@@ -12,7 +12,7 @@ import {
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
-import { generateCustomApiKeyEnvKey } from '../../auth/providers/custom/index.js';
+import { generateCustomEnvKey as generateCustomApiKeyEnvKey } from '../../auth/allProviders.js';
 import {
   OPENROUTER_OAUTH_CALLBACK_URL,
   createOpenRouterOAuthSession,
@@ -258,16 +258,8 @@ describe('useAuthCommand', () => {
     expect(result.current.authError).toBe(null);
     expect(result.current.isAuthDialogOpen).toBe(false);
     expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({ text: 'Successfully configured OpenRouter.' }),
-      expect.any(Number),
-    );
-    expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({ text: 'Use /model to switch models.' }),
-      expect.any(Number),
-    );
-    expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: 'Want more OpenRouter models? Use /manage-models to browse and enable them.',
+        text: 'Successfully configured OpenRouter. Use /model to switch models.',
       }),
       expect.any(Number),
     );
@@ -304,12 +296,14 @@ describe('useAuthCommand', () => {
           name: '[DeepSeek] deepseek-v4-flash',
           baseUrl: 'https://api.deepseek.com',
           envKey: 'DEEPSEEK_API_KEY',
+          generationConfig: { contextWindowSize: 65536 },
         },
         {
           id: 'deepseek-v4-pro',
           name: '[DeepSeek] deepseek-v4-pro',
           baseUrl: 'https://api.deepseek.com',
           envKey: 'DEEPSEEK_API_KEY',
+          generationConfig: { contextWindowSize: 65536 },
         },
       ],
     );
@@ -528,6 +522,10 @@ describe('useAuthCommand', () => {
           name: '[ModelStudio Standard] qwen3.5-plus',
           baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
           envKey: 'DASHSCOPE_API_KEY',
+          generationConfig: {
+            contextWindowSize: 1000000,
+            extra_body: { enable_thinking: true },
+          },
         },
         {
           id: 'deepseek-v4-flash',
@@ -549,7 +547,7 @@ describe('useAuthCommand', () => {
 describe('generateCustomApiKeyEnvKey', () => {
   it('generates env key from openai protocol and base URL', () => {
     const key = generateCustomApiKeyEnvKey(
-      'openai',
+      AuthType.USE_OPENAI,
       'https://api.openai.com/v1',
     );
     expect(key).toBe('QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_OPENAI_COM_V1');
@@ -557,7 +555,7 @@ describe('generateCustomApiKeyEnvKey', () => {
 
   it('generates env key from anthropic protocol and base URL', () => {
     const key = generateCustomApiKeyEnvKey(
-      'anthropic',
+      AuthType.USE_ANTHROPIC,
       'https://api.anthropic.com/v1',
     );
     expect(key).toBe(
@@ -567,7 +565,7 @@ describe('generateCustomApiKeyEnvKey', () => {
 
   it('generates env key from gemini protocol and base URL', () => {
     const key = generateCustomApiKeyEnvKey(
-      'gemini',
+      AuthType.USE_GEMINI,
       'https://generativelanguage.googleapis.com',
     );
     expect(key).toBe(
@@ -577,7 +575,7 @@ describe('generateCustomApiKeyEnvKey', () => {
 
   it('handles localhost URLs', () => {
     const key = generateCustomApiKeyEnvKey(
-      'openai',
+      AuthType.USE_OPENAI,
       'http://localhost:11434/v1',
     );
     expect(key).toBe('QWEN_CUSTOM_API_KEY_OPENAI_HTTP_LOCALHOST_11434_V1');
@@ -585,7 +583,7 @@ describe('generateCustomApiKeyEnvKey', () => {
 
   it('normalizes trailing slashes and special chars', () => {
     const key = generateCustomApiKeyEnvKey(
-      'openai',
+      AuthType.USE_OPENAI,
       'https://openrouter.ai/api/v1/',
     );
     expect(key).toBe('QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_OPENROUTER_AI_API_V1');
@@ -593,8 +591,11 @@ describe('generateCustomApiKeyEnvKey', () => {
 
   it('different protocols with same base URL produce different keys', () => {
     const baseUrl = 'https://api.example.com/v1';
-    const openaiKey = generateCustomApiKeyEnvKey('openai', baseUrl);
-    const anthropicKey = generateCustomApiKeyEnvKey('anthropic', baseUrl);
+    const openaiKey = generateCustomApiKeyEnvKey(AuthType.USE_OPENAI, baseUrl);
+    const anthropicKey = generateCustomApiKeyEnvKey(
+      AuthType.USE_ANTHROPIC,
+      baseUrl,
+    );
     expect(openaiKey).not.toBe(anthropicKey);
     expect(openaiKey).toContain('OPENAI');
     expect(anthropicKey).toContain('ANTHROPIC');

@@ -11,14 +11,22 @@ import { useCodingPlanUpdates } from './useCodingPlanUpdates.js';
 import {
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
-  getCodingPlanConfig,
+  codingPlanProviderConfig,
 } from '../../auth/providers/alibaba/codingPlan.js';
+import {
+  buildProviderTemplate,
+  computeModelListVersion,
+} from '../../auth/providerConfig.js';
 
 vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),
 }));
 
-const chinaConfig = getCodingPlanConfig(CODING_PLAN_CHINA_BASE_URL);
+const chinaTemplate = buildProviderTemplate(
+  codingPlanProviderConfig,
+  CODING_PLAN_CHINA_BASE_URL,
+);
+const chinaVersion = computeModelListVersion(chinaTemplate);
 
 describe('useCodingPlanUpdates', () => {
   const mockSettings = {
@@ -70,10 +78,10 @@ describe('useCodingPlanUpdates', () => {
   it('does not show update prompt when versions match', () => {
     mockSettings.merged.codingPlan = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
-      version: chinaConfig.version,
+      version: chinaVersion,
     };
     mockSettings.merged.modelProviders = {
-      [AuthType.USE_OPENAI]: chinaConfig.template,
+      [AuthType.USE_OPENAI]: chinaTemplate,
     };
 
     const { result } = renderHook(() =>
@@ -93,7 +101,7 @@ describe('useCodingPlanUpdates', () => {
       version: 'old-version-hash',
     };
     mockSettings.merged.modelProviders = {
-      [AuthType.USE_OPENAI]: chinaConfig.template,
+      [AuthType.USE_OPENAI]: chinaTemplate,
     };
 
     const { result } = renderHook(() =>
@@ -120,7 +128,7 @@ describe('useCodingPlanUpdates', () => {
     };
     mockSettings.merged.modelProviders = {
       [AuthType.USE_OPENAI]: [
-        ...chinaConfig.template,
+        ...chinaTemplate,
         {
           id: 'custom-model',
           baseUrl: 'https://custom.example.com',
@@ -151,7 +159,7 @@ describe('useCodingPlanUpdates', () => {
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
       'codingPlan.version',
-      chinaConfig.version,
+      chinaVersion,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
@@ -172,7 +180,7 @@ describe('useCodingPlanUpdates', () => {
       version: 'old-version-hash',
     };
     mockSettings.merged.modelProviders = {
-      [AuthType.USE_OPENAI]: chinaConfig.template,
+      [AuthType.USE_OPENAI]: chinaTemplate,
     };
 
     const { result } = renderHook(() =>

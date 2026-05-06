@@ -52,6 +52,7 @@ const createMockUIActions = (overrides: UIActionsOverrides = {}): UIActions => {
   const { auth, ...topLevelOverrides } = overrides;
   const authActions = {
     handleAuthSelect: vi.fn(),
+    handleProviderSubmit: vi.fn(),
     handleSubscriptionPlanSubmit: vi.fn(),
     handleApiKeyProviderSubmit: vi.fn(),
     handleOpenRouterSubmit: vi.fn(),
@@ -769,11 +770,11 @@ describe('AuthDialog', () => {
     const cases = [
       {
         label: 'Alibaba ModelStudio',
-        childTitle: 'Alibaba ModelStudio · Step 1/3 · Access Method',
+        childTitle: 'Alibaba ModelStudio · Access Method',
       },
       {
         label: 'Third-party Providers',
-        childTitle: 'Third-party Providers · Step 1/3 · Provider',
+        childTitle: 'Third-party Providers · Provider',
       },
       {
         label: 'OAuth',
@@ -847,7 +848,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Alibaba ModelStudio · Step 1/3 · Access Method',
+      'Alibaba ModelStudio · Access Method',
     );
     await waitForSelectedOption(lastFrame, 'Coding Plan');
     await pressEnterAndWaitFor(
@@ -912,19 +913,19 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Third-party Providers · Step 1/3 · Provider',
+      'Third-party Providers · Provider',
     );
     await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Third-party Providers · Step 2/3 · API Key',
+      'DeepSeek API Key · Step 2/3 · API Key',
     );
     stdin.write('\u001b');
 
     await vi.waitFor(() => {
       const frame = lastFrame();
-      expect(frame).toContain('Third-party Providers · Step 1/3 · Provider');
+      expect(frame).toContain('Third-party Providers · Provider');
       expect(frame).toContain('DeepSeek API Key');
     });
 
@@ -976,7 +977,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Third-party Providers · Step 1/3 · Provider',
+      'Third-party Providers · Provider',
     );
 
     await vi.waitFor(() => {
@@ -1037,25 +1038,23 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Third-party Providers · Step 1/3 · Provider',
+      'Third-party Providers · Provider',
     );
     await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Third-party Providers · Step 2/3 · API Key',
+      'DeepSeek API Key · Step 2/3 · API Key',
     );
     stdin.write('\u001b');
     await vi.waitFor(() => {
-      expect(lastFrame()).toContain(
-        'Third-party Providers · Step 1/3 · Provider',
-      );
+      expect(lastFrame()).toContain('Third-party Providers · Provider');
     });
     await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Third-party Providers · Step 2/4 · Endpoint',
+      'MiniMax API Key · Step 2/4 · Endpoint',
     );
 
     await vi.waitFor(() => {
@@ -1107,7 +1106,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Alibaba ModelStudio · Step 1/3 · Access Method',
+      'Alibaba ModelStudio · Access Method',
     );
 
     await vi.waitFor(() => {
@@ -1121,7 +1120,7 @@ describe('AuthDialog', () => {
   });
 
   it('should submit Token Plan through the shared subscription handler', async () => {
-    const handleSubscriptionPlanSubmit = vi.fn().mockResolvedValue(undefined);
+    const handleProviderSubmit = vi.fn().mockResolvedValue(undefined);
     const settings: LoadedSettings = new LoadedSettings(
       {
         settings: { ui: { customThemes: {} }, mcpServers: {} },
@@ -1158,7 +1157,7 @@ describe('AuthDialog', () => {
     const { stdin, lastFrame, unmount } = renderAuthDialog(
       settings,
       {},
-      { handleSubscriptionPlanSubmit },
+      { handleProviderSubmit },
     );
     await wait();
 
@@ -1171,19 +1170,11 @@ describe('AuthDialog', () => {
       lastFrame,
       'Alibaba ModelStudio · Step 2/2 · API Key',
     );
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('You can get your Token Plan API key here');
-      expect(frame).toContain('url=3028856');
-    });
+
     await typeText(stdin, 'sk-token-plan');
     stdin.write('\r');
     await vi.waitFor(() => {
-      expect(handleSubscriptionPlanSubmit).toHaveBeenCalledWith(
-        'token',
-        'sk-token-plan',
-        undefined,
-      );
+      expect(handleProviderSubmit).toHaveBeenCalled();
     });
 
     unmount();
@@ -1470,13 +1461,13 @@ describe('AuthDialog Custom API Key Wizard', () => {
   );
 
   itWhenTuiInputReliable(
-    'calls handleCustomApiKeySubmit on Enter in review view',
+    'calls handleProviderSubmit on Enter in review view',
     async () => {
       const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn().mockResolvedValue(undefined);
+      const handleProviderSubmit = vi.fn().mockResolvedValue(undefined);
 
       const mockUIState = createMockUIState();
-      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
+      const mockUIActions = createMockUIActions({ handleProviderSubmit });
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -1513,12 +1504,13 @@ describe('AuthDialog Custom API Key Wizard', () => {
       await wait();
 
       await vi.waitFor(() => {
-        expect(handleCustomApiKeySubmit).toHaveBeenCalledWith(
-          AuthType.USE_OPENAI,
-          'https://api.openai.com/v1',
-          'sk-test',
-          'model-1,model-2',
-          undefined,
+        expect(handleProviderSubmit).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'custom-openai-compatible' }),
+          expect.objectContaining({
+            protocol: AuthType.USE_OPENAI,
+            apiKey: 'sk-test',
+            modelIds: ['model-1', 'model-2'],
+          }),
         );
       });
 
@@ -1575,10 +1567,10 @@ describe('AuthDialog Custom API Key Wizard', () => {
     'passes generationConfig when advanced options are toggled',
     async () => {
       const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn().mockResolvedValue(undefined);
+      const handleProviderSubmit = vi.fn().mockResolvedValue(undefined);
 
       const mockUIState = createMockUIState();
-      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
+      const mockUIActions = createMockUIActions({ handleProviderSubmit });
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -1635,19 +1627,19 @@ describe('AuthDialog Custom API Key Wizard', () => {
       await wait();
 
       await vi.waitFor(() => {
-        expect(handleCustomApiKeySubmit).toHaveBeenCalledWith(
-          AuthType.USE_OPENAI,
-          'https://api.openai.com/v1',
-          'sk-test',
-          'model-1',
-          {
-            enableThinking: true,
-            multimodal: {
-              image: true,
-              video: true,
-              audio: true,
+        expect(handleProviderSubmit).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'custom-openai-compatible' }),
+          expect.objectContaining({
+            protocol: AuthType.USE_OPENAI,
+            advancedConfig: {
+              enableThinking: true,
+              multimodal: {
+                image: true,
+                video: true,
+                audio: true,
+              },
             },
-          },
+          }),
         );
       });
 

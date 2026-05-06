@@ -5,38 +5,39 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  MINIMAX_API_KEY_PROVIDER,
-  MINIMAX_CHINA_BASE_URL,
-  MINIMAX_INTERNATIONAL_BASE_URL,
-} from './minimax.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import { minimaxProvider, buildInstallPlan } from '../../allProviders.js';
 
-describe('MINIMAX_API_KEY_PROVIDER', () => {
-  it('offers international and China standard API endpoints', () => {
-    expect(MINIMAX_API_KEY_PROVIDER).toEqual({
+describe('minimaxProvider', () => {
+  it('offers international and China endpoints', () => {
+    expect(minimaxProvider).toMatchObject({
       id: 'minimax',
-      option: 'MINIMAX_API_KEY',
-      title: 'MiniMax API Key',
-      description: 'Quick setup for MiniMax models',
-      category: 'third-party',
+      label: 'MiniMax API Key',
+      protocol: AuthType.USE_OPENAI,
       envKey: 'MINIMAX_API_KEY',
-      modelNamePrefix: 'MiniMax',
-      defaultModelIds:
-        'MiniMax-M2.7,MiniMax-M2.7-highspeed,MiniMax-M2.5,MiniMax-M2.5-highspeed',
-      endpointOptions: [
-        {
-          id: 'international',
-          title: 'International',
-          endpoint: MINIMAX_INTERNATIONAL_BASE_URL,
-          documentationUrl: 'https://www.minimax.io/platform',
-        },
-        {
-          id: 'china',
-          title: 'China',
-          endpoint: MINIMAX_CHINA_BASE_URL,
-          documentationUrl: 'https://platform.minimaxi.com',
-        },
-      ],
+    });
+
+    expect(Array.isArray(minimaxProvider.baseUrl)).toBe(true);
+    const urls = (minimaxProvider.baseUrl as Array<{ url: string }>).map(
+      (o) => o.url,
+    );
+    expect(urls).toContain('https://api.minimax.io/v1');
+    expect(urls).toContain('https://api.minimaxi.com/v1');
+  });
+
+  it('creates an install plan with per-model metadata for known IDs', () => {
+    const plan = buildInstallPlan(minimaxProvider, {
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'sk-minimax',
+      modelIds: ['MiniMax-M2.5'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models).toHaveLength(1);
+    expect(models?.[0]).toMatchObject({
+      id: 'MiniMax-M2.5',
+      name: '[MiniMax] MiniMax-M2.5',
+      generationConfig: { contextWindowSize: 1048576 },
     });
   });
 });

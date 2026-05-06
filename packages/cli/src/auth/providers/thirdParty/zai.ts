@@ -4,35 +4,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { defineApiKeyProvider } from '../../setupMethods/apiKey/defineApiKeyProvider.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import type { ProviderConfig } from '../../providerConfig.js';
 
-export type ZaiApiKeyEndpointOption = 'standard-api-key' | 'coding-plan';
-
-export const ZAI_STANDARD_API_KEY_BASE_URL = 'https://api.z.ai/api/paas/v4';
-export const ZAI_CODING_PLAN_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
-
-export const ZAI_API_KEY_PROVIDER =
-  defineApiKeyProvider<ZaiApiKeyEndpointOption>({
-    id: 'zai',
-    option: 'ZAI_API_KEY',
-    title: 'Z.AI API Key',
-    description: 'Quick setup for Z.AI models',
-    category: 'third-party',
-    envKey: 'ZAI_API_KEY',
-    modelNamePrefix: 'Z.AI',
-    defaultModelIds: 'GLM-5.1,GLM-5,GLM-5-Turbo',
-    endpointOptions: [
-      {
-        id: 'standard-api-key',
-        title: 'Standard API Key',
-        endpoint: ZAI_STANDARD_API_KEY_BASE_URL,
-        documentationUrl: 'https://docs.z.ai/',
-      },
-      {
-        id: 'coding-plan',
-        title: 'Coding Plan',
-        endpoint: ZAI_CODING_PLAN_BASE_URL,
-        documentationUrl: 'https://docs.z.ai/',
-      },
-    ],
-  });
+export const zaiProvider: ProviderConfig = {
+  id: 'zai',
+  label: 'Z.AI API Key',
+  description: 'Quick setup for Z.AI models',
+  protocol: AuthType.USE_OPENAI,
+  baseUrl: [
+    {
+      id: 'standard-api-key',
+      label: 'Standard API Key',
+      url: 'https://api.z.ai/api/paas/v4',
+      documentationUrl: 'https://docs.z.ai/',
+    },
+    {
+      id: 'coding-plan',
+      label: 'Coding Plan',
+      url: 'https://api.z.ai/api/coding/paas/v4',
+      documentationUrl: 'https://docs.z.ai/',
+    },
+  ],
+  envKey: 'ZAI_API_KEY',
+  authMethod: 'input',
+  models: [
+    { id: 'GLM-5.1', contextWindowSize: 128000, enableThinking: true },
+    { id: 'GLM-5', contextWindowSize: 32768 },
+    { id: 'GLM-5-Turbo', contextWindowSize: 128000 },
+  ],
+  modelsEditable: true,
+  modelNamePrefix: 'Z.AI',
+  uiGroup: 'third-party',
+};

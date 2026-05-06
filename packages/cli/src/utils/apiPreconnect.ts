@@ -21,10 +21,7 @@ import {
   getOrCreateSharedDispatcher,
 } from '@qwen-code/qwen-code-core';
 
-import {
-  API_KEY_PROVIDERS,
-  type ApiKeyProviderConfig,
-} from '../auth/setupMethods/apiKey/index.js';
+import { getAllProviderBaseUrls } from '../auth/allProviders.js';
 
 const debugLogger = createDebugLogger('PRECONNECT');
 
@@ -40,20 +37,13 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   dashscope: 'https://dashscope.aliyuncs.com',
 };
 
-const PROVIDER_BASE_URLS = Object.values(
-  API_KEY_PROVIDERS as Record<string, ApiKeyProviderConfig>,
-).flatMap((provider) => [
-  ...(provider.endpoint ? [provider.endpoint] : []),
-  ...(provider.endpointOptions?.map((option) => option.endpoint) || []),
-]);
-
 /**
- * All known default base URLs, including preset API key provider endpoints.
+ * All known default base URLs, including all registered provider endpoints.
  * Used by isDefaultBaseUrl() to accept any supported default endpoint.
  */
 const ALL_DEFAULT_URLS: string[] = [
   ...Object.values(DEFAULT_BASE_URLS),
-  ...PROVIDER_BASE_URLS,
+  ...getAllProviderBaseUrls(),
 ];
 
 /**

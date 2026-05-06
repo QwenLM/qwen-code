@@ -10,19 +10,15 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
 import {
-  codingPlanProvider,
-  createCodingPlanInstallPlan,
-  findCodingPlanConfig,
-  getCodingPlanConfig,
-  type CodingPlanConfig,
-} from '../../auth/providers/alibaba/codingPlan.js';
-import {
-  createTokenPlanInstallPlan,
-  findTokenPlanConfig,
-  getTokenPlanConfig,
-  tokenPlanProvider,
-  type TokenPlanConfig,
-} from '../../auth/providers/alibaba/tokenPlan.js';
+  buildInstallPlan,
+  buildProviderTemplate,
+  computeModelListVersion,
+  getDefaultModelIds,
+  resolveBaseUrl,
+  toLlmProvider,
+  type ProviderConfig,
+} from '../../auth/providerConfig.js';
+import { findProviderByCredentials } from '../../auth/allProviders.js';
 
 export interface CodingPlanUpdateRequest {
   prompt: string;
@@ -33,8 +29,6 @@ interface PlanMetadata {
   version?: string;
   baseUrl?: string;
 }
-
-type ManagedPlan = CodingPlanConfig | TokenPlanConfig;
 
 function getPlanMetadata(
   settings: LoadedSettings,
@@ -47,22 +41,19 @@ function getPlanMetadata(
     : {};
 }
 
-function findManagedPlanInConfigs(
+function findManagedProviderInConfigs(
   configs: ReadonlyArray<Record<string, unknown>>,
-): ManagedPlan | undefined {
-  for (const config of configs) {
+): ProviderConfig | undefined {
+  for (const cfg of configs) {
     const baseUrl =
-      typeof config['baseUrl'] === 'string' ? config['baseUrl'] : undefined;
+      typeof cfg['baseUrl'] === 'string' ? cfg['baseUrl'] : undefined;
     const envKey =
-      typeof config['envKey'] === 'string' ? config['envKey'] : undefined;
-    const match =
-      findCodingPlanConfig(baseUrl, envKey) ||
-      findTokenPlanConfig(baseUrl, envKey);
-    if (match) {
+      typeof cfg['envKey'] === 'string' ? cfg['envKey'] : undefined;
+    const match = findProviderByCredentials(baseUrl, envKey);
+    if (match?.metadataKey) {
       return match;
     }
   }
-
   return undefined;
 }
 
@@ -83,14 +74,14 @@ export function useCodingPlanUpdates(
   >();
 
   const executeUpdate = useCallback(
-    async (plan: ManagedPlan) => {
+    async (providerCfg: ProviderConfig, baseUrl?: string) => {
       try {
-        const provider =
-          plan.id === 'token' ? tokenPlanProvider : codingPlanProvider;
-        const installPlan =
-          plan.id === 'token'
-            ? createTokenPlanInstallPlan({})
-            : createCodingPlanInstallPlan({ baseUrl: plan.baseUrl });
+        const resolved = resolveBaseUrl(providerCfg, baseUrl);
+        const installPlan = buildInstallPlan(providerCfg, {
+          baseUrl: resolved,
+          apiKey: '',
+          modelIds: getDefaultModelIds(providerCfg),
+        });
         const previousModel = config.getModel();
         const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
         const previousModelStillAvailable = newConfigs.some(
@@ -100,17 +91,18 @@ export function useCodingPlanUpdates(
         await applyProviderInstallPlan(installPlan, {
           settings,
           config,
-          provider,
+          provider: toLlmProvider(providerCfg),
         });
 
         const activeModel = config.getModel();
+        const displayName = t(providerCfg.label);
 
         if (previousModelStillAvailable && activeModel === previousModel) {
           addItem(
             {
               type: 'info',
               text: t('{{plan}} configuration updated successfully.', {
-                plan: t(plan.displayName),
+                plan: displayName,
               }),
             },
             Date.now(),
@@ -121,7 +113,7 @@ export function useCodingPlanUpdates(
               type: 'info',
               text: t(
                 '{{plan}} configuration updated successfully. Model switched to "{{model}}".',
-                { plan: t(plan.displayName), model: activeModel },
+                { plan: displayName, model: activeModel },
               ),
             },
             Date.now(),
@@ -133,9 +125,7 @@ export function useCodingPlanUpdates(
             type: 'info',
             text: t(
               'Tip: Use /model to switch between available {{plan}} models.',
-              {
-                plan: t(plan.displayName),
-              },
+              { plan: displayName },
             ),
           },
           Date.now(),
@@ -167,39 +157,34 @@ export function useCodingPlanUpdates(
           | Record<string, Array<Record<string, unknown>>>
           | undefined
       )?.[AuthType.USE_OPENAI] || [];
-    const legacyCodingPlanMetadata = getPlanMetadata(settings, 'codingPlan');
-    const matchedPlan =
-      findManagedPlanInConfigs(currentConfigs) ||
-      (legacyCodingPlanMetadata.version
-        ? getCodingPlanConfig(legacyCodingPlanMetadata.baseUrl)
-        : undefined);
+    const matchedProvider = findManagedProviderInConfigs(currentConfigs);
 
-    if (!matchedPlan) {
+    if (!matchedProvider?.metadataKey) {
       return;
     }
 
-    const metadata = getPlanMetadata(settings, matchedPlan.metadataKey);
+    const metadata = getPlanMetadata(settings, matchedProvider.metadataKey);
     const savedVersion = metadata.version;
 
     if (!savedVersion) {
       return;
     }
 
-    const currentPlan =
-      matchedPlan.id === 'token'
-        ? getTokenPlanConfig()
-        : getCodingPlanConfig(metadata.baseUrl || matchedPlan.baseUrl);
+    const baseUrl = metadata.baseUrl || resolveBaseUrl(matchedProvider);
+    const currentTemplate = buildProviderTemplate(matchedProvider, baseUrl);
+    const currentVersion = computeModelListVersion(currentTemplate);
 
-    if (savedVersion !== currentPlan.version) {
+    if (savedVersion !== currentVersion) {
+      const displayName = t(matchedProvider.label);
       setUpdateRequest({
         prompt: t(
           'New model configurations are available for {{plan}}. Update now?',
-          { plan: t(currentPlan.displayName) },
+          { plan: displayName },
         ),
         onConfirm: async (confirmed: boolean) => {
           setUpdateRequest(undefined);
           if (confirmed) {
-            await executeUpdate(currentPlan);
+            await executeUpdate(matchedProvider, baseUrl);
           }
         },
       });

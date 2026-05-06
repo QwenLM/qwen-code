@@ -8,15 +8,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import {
   createOpenRouterProviderInstallPlan,
-  openRouterProvider,
+  openRouterProviderConfig,
 } from './openrouter.js';
+import { toLlmProvider } from '../../providerConfig.js';
 
 vi.mock('./openrouterOAuth.js', () => ({
   getOpenRouterModelsWithFallback: vi.fn(),
   getPreferredOpenRouterModelId: vi.fn((models) => models[0]?.id),
-  isOpenRouterConfig: vi.fn((model) =>
-    Boolean(model.baseUrl?.includes('openrouter.ai')),
-  ),
   OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
   selectRecommendedOpenRouterModels: vi.fn((models) => models.slice(0, 1)),
 }));
@@ -62,20 +60,23 @@ describe('openRouterProvider', () => {
             },
           ],
           mergeStrategy: 'prepend-and-remove-owned',
+          ownsModel: expect.any(Function),
         },
       ],
     });
   });
 
   it('owns models by OpenRouter base URL', () => {
+    const provider = toLlmProvider(openRouterProviderConfig);
+
     expect(
-      openRouterProvider.ownsModel?.({
+      provider.ownsModel?.({
         id: 'openrouter-model',
         baseUrl: 'https://openrouter.ai/api/v1',
       }),
     ).toBe(true);
     expect(
-      openRouterProvider.ownsModel?.({
+      provider.ownsModel?.({
         id: 'other-model',
         baseUrl: 'https://api.example.com/v1',
       }),

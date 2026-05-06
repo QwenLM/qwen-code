@@ -5,21 +5,50 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { DEEPSEEK_API_KEY_PROVIDER } from './deepseek.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import { deepseekProvider, buildInstallPlan } from '../../allProviders.js';
 
-describe('DEEPSEEK_API_KEY_PROVIDER', () => {
-  it('is a declarative API-key provider descriptor', () => {
-    expect(DEEPSEEK_API_KEY_PROVIDER).toEqual({
+describe('deepseekProvider', () => {
+  it('has correct provider config', () => {
+    expect(deepseekProvider).toMatchObject({
       id: 'deepseek',
-      option: 'DEEPSEEK_API_KEY',
-      title: 'DeepSeek API Key',
-      description:
-        'Quick setup for DeepSeek (deepseek-v4-flash, deepseek-v4-pro)',
+      label: 'DeepSeek API Key',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.deepseek.com',
       envKey: 'DEEPSEEK_API_KEY',
-      modelNamePrefix: 'DeepSeek',
-      endpoint: 'https://api.deepseek.com',
-      defaultModelIds: 'deepseek-v4-flash,deepseek-v4-pro',
-      documentationUrl: 'https://api-docs.deepseek.com/zh-cn/',
     });
+  });
+
+  it('creates an install plan with per-model metadata for known IDs', () => {
+    const plan = buildInstallPlan(deepseekProvider, {
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'sk-deepseek',
+      modelIds: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models).toHaveLength(2);
+    expect(models?.[0]).toMatchObject({
+      id: 'deepseek-v4-flash',
+      name: '[DeepSeek] deepseek-v4-flash',
+      generationConfig: { contextWindowSize: 65536 },
+    });
+  });
+
+  it('falls back gracefully for unknown model IDs', () => {
+    const plan = buildInstallPlan(deepseekProvider, {
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'sk-deepseek',
+      modelIds: ['deepseek-v4-flash', 'some-new-model'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models).toHaveLength(2);
+    expect(models?.[0]?.generationConfig).toEqual({ contextWindowSize: 65536 });
+    expect(models?.[1]).toMatchObject({
+      id: 'some-new-model',
+      name: '[DeepSeek] some-new-model',
+    });
+    expect(models?.[1]?.generationConfig).toBeUndefined();
   });
 });

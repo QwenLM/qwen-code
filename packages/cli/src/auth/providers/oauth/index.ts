@@ -5,7 +5,6 @@
  */
 
 export {
+  openRouterProviderConfig,
   createOpenRouterProviderInstallPlan,
-  openRouterProvider,
-  type OpenRouterProviderInstallInput,
 } from './openrouter.js';

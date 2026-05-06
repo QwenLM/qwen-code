@@ -14,17 +14,18 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
+import { codingPlanProviderConfig } from '../../auth/providers/alibaba/codingPlan.js';
 import {
-  CODING_PLAN_ENDPOINTS,
-  codingPlanProvider,
-  createCodingPlanInstallPlan,
-  findCodingPlanConfig,
-} from '../../auth/providers/alibaba/codingPlan.js';
-import { findTokenPlanConfig } from '../../auth/providers/alibaba/tokenPlan.js';
-import {
+  openRouterProviderConfig,
   createOpenRouterProviderInstallPlan,
-  openRouterProvider,
 } from '../../auth/providers/oauth/openrouter.js';
+import {
+  buildInstallPlan,
+  toLlmProvider,
+  resolveBaseUrl,
+  getDefaultModelIds,
+} from '../../auth/providerConfig.js';
+import { findProviderByCredentials } from '../../auth/allProviders.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
 import { loadCliConfig } from '../../config/config.js';
 import type { CliArgs } from '../../config/config.js';
@@ -210,14 +211,16 @@ async function handleCodePlanAuth(
   writeStdoutLine(t('Processing Alibaba Cloud Coding Plan authentication...'));
 
   try {
-    const installPlan = createCodingPlanInstallPlan({
+    const resolved = resolveBaseUrl(codingPlanProviderConfig, selectedBaseUrl);
+    const installPlan = buildInstallPlan(codingPlanProviderConfig, {
+      baseUrl: resolved,
       apiKey: selectedKey,
-      baseUrl: selectedBaseUrl,
+      modelIds: getDefaultModelIds(codingPlanProviderConfig),
     });
     await applyProviderInstallPlan(installPlan, {
       settings,
       config,
-      provider: codingPlanProvider,
+      provider: toLlmProvider(codingPlanProviderConfig),
     });
 
     writeStdoutLine(
@@ -298,7 +301,7 @@ async function handleOpenRouterAuth(
     await applyProviderInstallPlan(installPlan, {
       settings,
       config,
-      provider: openRouterProvider,
+      provider: toLlmProvider(openRouterProviderConfig),
     });
     writeStdoutLine(
       t('Fetched OpenRouter models in {{elapsed}}.', {
@@ -324,11 +327,14 @@ async function handleOpenRouterAuth(
 }
 
 async function promptForCodingPlanBaseUrl(): Promise<string> {
+  const baseUrlOptions = Array.isArray(codingPlanProviderConfig.baseUrl)
+    ? codingPlanProviderConfig.baseUrl
+    : [];
   const selector = new InteractiveSelector(
-    CODING_PLAN_ENDPOINTS.map((endpoint) => ({
-      value: endpoint.baseUrl,
-      label: t(endpoint.title),
-      description: endpoint.baseUrl,
+    baseUrlOptions.map((opt) => ({
+      value: opt.url,
+      label: t(opt.label),
+      description: opt.url,
     })),
     t('Select Base URL for Coding Plan:'),
   );
@@ -519,38 +525,38 @@ export async function showAuthStatus(): Promise<void> {
           writeStdoutLine(t('  Run `qwen auth openrouter` to re-configure.\n'));
         }
       } else {
-        const managedPlan = openAiProviders
-          .map(
-            (providerConfig) =>
-              findCodingPlanConfig(
-                providerConfig.baseUrl,
-                providerConfig.envKey,
-              ) ||
-              findTokenPlanConfig(
-                providerConfig.baseUrl,
-                providerConfig.envKey,
-              ),
+        const managedProvider = openAiProviders
+          .map((providerConfig) =>
+            findProviderByCredentials(
+              providerConfig.baseUrl,
+              providerConfig.envKey,
+            ),
           )
-          .find((plan) => plan !== undefined);
+          .find((p) => p?.metadataKey);
 
-        if (managedPlan) {
+        if (managedProvider) {
+          const envKey =
+            typeof managedProvider.envKey === 'string'
+              ? managedProvider.envKey
+              : '';
           const metadata = (mergedSettings as Record<string, unknown>)[
-            managedPlan.metadataKey
+            managedProvider.metadataKey!
           ] as { version?: string; baseUrl?: string } | undefined;
           const hasApiKey =
-            !!process.env[managedPlan.envKey] ||
-            !!mergedSettings.env?.[managedPlan.envKey];
+            !!process.env[envKey] || !!mergedSettings.env?.[envKey];
 
           if (hasApiKey) {
             writeStdoutLine(
               t('✓ Authentication Method: {{plan}}', {
-                plan: t(managedPlan.displayName),
+                plan: t(managedProvider.label),
               }),
             );
 
-            writeStdoutLine(
-              t('  Base URL: {{baseUrl}}', { baseUrl: managedPlan.baseUrl }),
-            );
+            if (metadata?.baseUrl) {
+              writeStdoutLine(
+                t('  Base URL: {{baseUrl}}', { baseUrl: metadata.baseUrl }),
+              );
+            }
 
             if (modelName) {
               writeStdoutLine(
@@ -570,7 +576,7 @@ export async function showAuthStatus(): Promise<void> {
           } else {
             writeStdoutLine(
               t('⚠️  Authentication Method: {{plan}} (Incomplete)', {
-                plan: t(managedPlan.displayName),
+                plan: t(managedProvider.label),
               }),
             );
             writeStdoutLine(

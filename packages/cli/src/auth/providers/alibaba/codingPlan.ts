@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
-import { AuthType, type ProviderModelConfig } from '@qwen-code/qwen-code-core';
-import type { LlmProvider, ProviderInstallPlan } from '../../types.js';
-import { ALIBABA_MODELSTUDIO_MODELS } from './modelStudioModels.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import type { ProviderConfig, ModelSpec } from '../../providerConfig.js';
+import { computeModelListVersion } from '../../providerConfig.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 export const CODING_PLAN_ENV_KEY = 'BAILIAN_CODING_PLAN_API_KEY';
 export const CODING_PLAN_CHINA_BASE_URL =
@@ -15,193 +18,76 @@ export const CODING_PLAN_CHINA_BASE_URL =
 export const CODING_PLAN_GLOBAL_BASE_URL =
   'https://coding-intl.dashscope.aliyuncs.com/v1';
 
-export interface CodingPlanEndpoint {
-  id: string;
-  title: string;
-  baseUrl: string;
-  documentationUrl: string;
-  apiKeyUrl?: string;
-  modelNamePrefix?: string;
-}
-
-export interface CodingPlanConfig {
-  id: 'coding';
-  option: 'CODING_PLAN';
-  displayName: string;
-  title: string;
-  description: string;
-  authEventType: 'coding-plan';
-  envKey: typeof CODING_PLAN_ENV_KEY;
-  metadataKey: 'codingPlan';
-  template: ProviderModelConfig[];
-  version: string;
-  baseUrl: string;
-  documentationUrl: string;
-  apiKeyUrl?: string;
-}
-
-export interface CodingPlanInstallInput {
-  apiKey?: string;
-  baseUrl?: string;
-}
-
-export const CODING_PLAN_ENDPOINTS: readonly CodingPlanEndpoint[] = [
+const MODELSTUDIO_MODELS: ModelSpec[] = [
+  { id: 'qwen3.5-plus', contextWindowSize: 1000000, enableThinking: true },
   {
-    id: 'aliyun',
-    title: 'China (Beijing)',
-    baseUrl: CODING_PLAN_CHINA_BASE_URL,
-    documentationUrl: 'https://help.aliyun.com/zh/model-studio/coding-plan',
+    id: 'qwen3.6-plus',
+    description: 'Currently available to Pro subscribers only.',
+    contextWindowSize: 1000000,
+    enableThinking: true,
   },
+  { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
+  { id: 'kimi-k2.5', contextWindowSize: 262144, enableThinking: true },
+  { id: 'MiniMax-M2.5', contextWindowSize: 196608, enableThinking: true },
+  { id: 'qwen3-coder-plus', contextWindowSize: 1000000 },
+  { id: 'qwen3-coder-next', contextWindowSize: 262144 },
   {
-    id: 'alibabacloud',
-    title: 'Singapore (International)',
-    baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
-    documentationUrl:
-      'https://www.alibabacloud.com/help/en/model-studio/coding-plan',
-    modelNamePrefix: 'ModelStudio Coding Plan for Global/Intl',
+    id: 'qwen3-max-2026-01-23',
+    contextWindowSize: 262144,
+    enableThinking: true,
   },
+  { id: 'glm-4.7', contextWindowSize: 202752, enableThinking: true },
 ];
 
-export const CODING_PLAN_OPTION = {
-  id: 'coding',
-  option: 'CODING_PLAN',
-  title: 'Coding Plan',
-  description: 'For individual developers · Weekly quota included',
-} as const;
+// ---------------------------------------------------------------------------
+// Provider config (unified ProviderConfig)
+// ---------------------------------------------------------------------------
 
-export function computeCodingPlanVersion(
-  template: ProviderModelConfig[],
-): string {
-  return createHash('sha256').update(JSON.stringify(template)).digest('hex');
-}
-
-export function resolveCodingPlanEndpoint(
-  baseUrl?: string,
-): CodingPlanEndpoint {
-  return (
-    CODING_PLAN_ENDPOINTS.find((endpoint) => endpoint.baseUrl === baseUrl) ||
-    CODING_PLAN_ENDPOINTS[0]
-  );
-}
-
-export function buildCodingPlanTemplate(
-  baseUrl?: string,
-): ProviderModelConfig[] {
-  const endpoint = resolveCodingPlanEndpoint(baseUrl);
-  const modelNamePrefix = endpoint.modelNamePrefix || 'ModelStudio Coding Plan';
-
-  return ALIBABA_MODELSTUDIO_MODELS.map((model) => ({
-    id: model.id,
-    name: `[${modelNamePrefix}] ${model.id}`,
-    ...(model.description ? { description: model.description } : {}),
-    baseUrl: endpoint.baseUrl,
-    envKey: CODING_PLAN_ENV_KEY,
-    generationConfig: {
-      ...(model.enableThinking
-        ? { extra_body: { enable_thinking: true } }
-        : {}),
-      contextWindowSize: model.contextWindowSize,
-    },
-  }));
-}
-
-export function getCodingPlanConfig(baseUrl?: string): CodingPlanConfig {
-  const endpoint = resolveCodingPlanEndpoint(baseUrl);
-  const template = buildCodingPlanTemplate(endpoint.baseUrl);
-
-  return {
-    id: CODING_PLAN_OPTION.id,
-    option: CODING_PLAN_OPTION.option,
-    displayName: CODING_PLAN_OPTION.title,
-    title: CODING_PLAN_OPTION.title,
-    description: CODING_PLAN_OPTION.description,
-    authEventType: 'coding-plan',
-    envKey: CODING_PLAN_ENV_KEY,
-    metadataKey: 'codingPlan',
-    template,
-    version: computeCodingPlanVersion(template),
-    baseUrl: endpoint.baseUrl,
-    documentationUrl: endpoint.documentationUrl,
-    apiKeyUrl: endpoint.apiKeyUrl,
-  };
-}
-
-export function createCodingPlanInstallPlan({
-  apiKey,
-  baseUrl,
-}: CodingPlanInstallInput): ProviderInstallPlan {
-  const plan = getCodingPlanConfig(baseUrl);
-  const models: ProviderModelConfig[] = plan.template.map((templateConfig) => ({
-    ...templateConfig,
-    envKey: plan.envKey,
-  }));
-  const firstModel = models[0]?.id;
-
-  return {
-    providerId: codingPlanProvider.id,
-    authType: AuthType.USE_OPENAI,
-    ...(apiKey
-      ? {
-          env: {
-            [plan.envKey]: apiKey,
-          },
-        }
-      : {}),
-    ...(firstModel
-      ? {
-          modelSelection: {
-            modelId: firstModel,
-          },
-        }
-      : {}),
-    modelProviders: [
-      {
-        authType: AuthType.USE_OPENAI,
-        models,
-        mergeStrategy: 'prepend-and-remove-owned',
-      },
-    ],
-    providerState: {
-      codingPlan: {
-        version: plan.version,
-        baseUrl: plan.baseUrl,
-      },
-    },
-  };
-}
-
-export function findCodingPlanConfig(
-  baseUrl: string | undefined,
-  envKey: string | undefined,
-): CodingPlanConfig | undefined {
-  if (!baseUrl || envKey !== CODING_PLAN_ENV_KEY) {
-    return undefined;
-  }
-
-  return CODING_PLAN_ENDPOINTS.some((endpoint) => endpoint.baseUrl === baseUrl)
-    ? getCodingPlanConfig(baseUrl)
-    : undefined;
-}
-
-export function isCodingPlanConfig(
-  baseUrl: string | undefined,
-  envKey: string | undefined,
-): boolean {
-  return findCodingPlanConfig(baseUrl, envKey) !== undefined;
-}
-
-export const codingPlanProvider: LlmProvider = {
+export const codingPlanProviderConfig: ProviderConfig = {
   id: 'coding-plan',
-  label: 'Alibaba Cloud Coding Plan',
-  category: 'recommended',
+  label: 'Coding Plan',
+  description: 'For individual developers · Weekly quota included',
   protocol: AuthType.USE_OPENAI,
-  setupMethods: [{ type: 'subscription' }],
-  ownsModel(model) {
-    return isCodingPlanConfig(model.baseUrl, model.envKey);
-  },
-  async createInstallPlan(input) {
-    return createCodingPlanInstallPlan(
-      input as unknown as CodingPlanInstallInput,
-    );
-  },
+  baseUrl: [
+    {
+      id: 'aliyun',
+      label: 'China (Beijing)',
+      url: CODING_PLAN_CHINA_BASE_URL,
+      documentationUrl: 'https://help.aliyun.com/zh/model-studio/coding-plan',
+    },
+    {
+      id: 'alibabacloud',
+      label: 'Singapore (International)',
+      url: CODING_PLAN_GLOBAL_BASE_URL,
+      documentationUrl:
+        'https://www.alibabacloud.com/help/en/model-studio/coding-plan',
+    },
+  ],
+  envKey: CODING_PLAN_ENV_KEY,
+  metadataKey: 'codingPlan',
+  authMethod: 'input',
+  models: MODELSTUDIO_MODELS,
+  modelNamePrefix: (baseUrl) =>
+    baseUrl === CODING_PLAN_GLOBAL_BASE_URL
+      ? 'ModelStudio Coding Plan for Global/Intl'
+      : 'ModelStudio Coding Plan',
+  apiKeyPlaceholder: 'sk-sp-...',
+  validateApiKey: (key, baseUrl) =>
+    baseUrl === CODING_PLAN_CHINA_BASE_URL && !key.startsWith('sk-sp-')
+      ? 'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.'
+      : null,
+  apiKeyHelpUrl: (baseUrl) =>
+    baseUrl === CODING_PLAN_GLOBAL_BASE_URL
+      ? 'https://bailian.console.alibabacloud.com/#/api'
+      : 'https://bailian.console.aliyun.com/#/api',
+  getProviderState: (baseUrl, models) => ({
+    codingPlan: { version: computeModelListVersion(models), baseUrl },
+  }),
+  ownsModel: (model) =>
+    model.envKey === CODING_PLAN_ENV_KEY &&
+    typeof model.baseUrl === 'string' &&
+    (model.baseUrl === CODING_PLAN_CHINA_BASE_URL ||
+      model.baseUrl === CODING_PLAN_GLOBAL_BASE_URL),
+  uiGroup: 'alibaba',
+  uiLabels: { flowTitle: 'Alibaba ModelStudio', baseUrlStepTitle: 'Region' },
 };

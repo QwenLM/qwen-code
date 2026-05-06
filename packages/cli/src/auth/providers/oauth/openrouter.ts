@@ -5,63 +5,47 @@
  */
 
 import { AuthType, type ProviderModelConfig } from '@qwen-code/qwen-code-core';
+import type { ProviderConfig } from '../../providerConfig.js';
+import { buildInstallPlan } from '../../providerConfig.js';
 import {
   getOpenRouterModelsWithFallback,
-  getPreferredOpenRouterModelId,
-  isOpenRouterConfig,
-  OPENROUTER_ENV_KEY,
   selectRecommendedOpenRouterModels,
+  getPreferredOpenRouterModelId,
 } from './openrouterOAuth.js';
-import type { LlmProvider, ProviderInstallPlan } from '../../types.js';
+import type { ProviderInstallPlan } from '../../types.js';
 
-export interface OpenRouterProviderInstallInput {
-  apiKey: string;
-  models?: ProviderModelConfig[];
-}
+export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
+export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+
+export const openRouterProviderConfig: ProviderConfig = {
+  id: 'openrouter',
+  label: 'OpenRouter',
+  description: 'Browser OAuth · Auto-configure API key and OpenRouter models',
+  protocol: AuthType.USE_OPENAI,
+  baseUrl: OPENROUTER_BASE_URL,
+  envKey: OPENROUTER_ENV_KEY,
+  authMethod: 'oauth',
+  models: undefined,
+  modelNamePrefix: 'OpenRouter',
+  ownsModel: (model) => (model.baseUrl ?? '').includes('openrouter.ai'),
+  uiGroup: 'oauth',
+};
 
 export async function createOpenRouterProviderInstallPlan({
   apiKey,
   models,
-}: OpenRouterProviderInstallInput): Promise<ProviderInstallPlan> {
-  const openRouterCatalog = models ?? (await getOpenRouterModelsWithFallback());
-  const openRouterModels = selectRecommendedOpenRouterModels(openRouterCatalog);
-  const activeModelId = getPreferredOpenRouterModelId(openRouterModels);
+}: {
+  apiKey: string;
+  models?: ProviderModelConfig[];
+}): Promise<ProviderInstallPlan> {
+  const catalog = models ?? (await getOpenRouterModelsWithFallback());
+  const recommended = selectRecommendedOpenRouterModels(catalog);
+  const preferredId = getPreferredOpenRouterModelId(recommended);
 
-  return {
-    providerId: openRouterProvider.id,
-    authType: AuthType.USE_OPENAI,
-    env: {
-      [OPENROUTER_ENV_KEY]: apiKey,
-    },
-    ...(activeModelId
-      ? {
-          modelSelection: {
-            modelId: activeModelId,
-          },
-        }
-      : {}),
-    modelProviders: [
-      {
-        authType: AuthType.USE_OPENAI,
-        models: openRouterModels,
-        mergeStrategy: 'prepend-and-remove-owned',
-      },
-    ],
-  };
+  return buildInstallPlan(openRouterProviderConfig, {
+    baseUrl: OPENROUTER_BASE_URL,
+    apiKey,
+    modelIds: preferredId ? [preferredId] : [],
+    prebuiltModels: recommended,
+  });
 }
-
-export const openRouterProvider: LlmProvider = {
-  id: 'openrouter',
-  label: 'OpenRouter',
-  category: 'third-party',
-  protocol: AuthType.USE_OPENAI,
-  setupMethods: [{ type: 'oauth' }],
-  ownsModel(model) {
-    return isOpenRouterConfig(model);
-  },
-  async createInstallPlan(input) {
-    return createOpenRouterProviderInstallPlan(
-      input as unknown as OpenRouterProviderInstallInput,
-    );
-  },
-};

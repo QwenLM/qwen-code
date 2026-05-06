@@ -6,8 +6,7 @@
 
 import type { ExtendedSystemInfo } from './systemInfo.js';
 import { t } from '../i18n/index.js';
-import { findCodingPlanConfig } from '../auth/providers/alibaba/codingPlan.js';
-import { findTokenPlanConfig } from '../auth/providers/alibaba/tokenPlan.js';
+import { findProviderByCredentials } from '../auth/allProviders.js';
 
 /**
  * Field configuration for system information display
@@ -91,11 +90,12 @@ function formatAuth(info: ExtendedSystemInfo): string {
     return '';
   }
 
-  const managedPlan =
-    findCodingPlanConfig(info.baseUrl, info.apiKeyEnvKey) ||
-    findTokenPlanConfig(info.baseUrl, info.apiKeyEnvKey);
-  if (managedPlan) {
-    return t(managedPlan.title);
+  const managedProvider = findProviderByCredentials(
+    info.baseUrl,
+    info.apiKeyEnvKey,
+  );
+  if (managedProvider?.metadataKey) {
+    return t(managedProvider.label);
   }
 
   if (

@@ -5,37 +5,61 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  ZAI_API_KEY_PROVIDER,
-  ZAI_CODING_PLAN_BASE_URL,
-  ZAI_STANDARD_API_KEY_BASE_URL,
-} from './zai.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import { zaiProvider, buildInstallPlan } from '../../allProviders.js';
 
-describe('ZAI_API_KEY_PROVIDER', () => {
+describe('zaiProvider', () => {
   it('offers standard API key and Coding Plan endpoints', () => {
-    expect(ZAI_API_KEY_PROVIDER).toEqual({
+    expect(zaiProvider).toMatchObject({
       id: 'zai',
-      option: 'ZAI_API_KEY',
-      title: 'Z.AI API Key',
-      description: 'Quick setup for Z.AI models',
-      category: 'third-party',
+      label: 'Z.AI API Key',
+      protocol: AuthType.USE_OPENAI,
       envKey: 'ZAI_API_KEY',
-      modelNamePrefix: 'Z.AI',
-      defaultModelIds: 'GLM-5.1,GLM-5,GLM-5-Turbo',
-      endpointOptions: [
-        {
-          id: 'standard-api-key',
-          title: 'Standard API Key',
-          endpoint: ZAI_STANDARD_API_KEY_BASE_URL,
-          documentationUrl: 'https://docs.z.ai/',
-        },
-        {
-          id: 'coding-plan',
-          title: 'Coding Plan',
-          endpoint: ZAI_CODING_PLAN_BASE_URL,
-          documentationUrl: 'https://docs.z.ai/',
-        },
-      ],
     });
+
+    expect(Array.isArray(zaiProvider.baseUrl)).toBe(true);
+    const urls = (zaiProvider.baseUrl as Array<{ url: string }>).map(
+      (o) => o.url,
+    );
+    expect(urls).toContain('https://api.z.ai/api/paas/v4');
+    expect(urls).toContain('https://api.z.ai/api/coding/paas/v4');
+  });
+
+  it('creates an install plan with per-model metadata for known IDs', () => {
+    const plan = buildInstallPlan(zaiProvider, {
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      apiKey: 'sk-zai',
+      modelIds: ['GLM-5.1', 'GLM-5'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models).toHaveLength(2);
+    expect(models?.[0]).toMatchObject({
+      id: 'GLM-5.1',
+      name: '[Z.AI] GLM-5.1',
+      generationConfig: {
+        contextWindowSize: 128000,
+        extra_body: { enable_thinking: true },
+      },
+    });
+    expect(models?.[1]).toMatchObject({
+      id: 'GLM-5',
+      generationConfig: { contextWindowSize: 32768 },
+    });
+  });
+
+  it('falls back gracefully for unknown model IDs', () => {
+    const plan = buildInstallPlan(zaiProvider, {
+      baseUrl: 'https://api.z.ai/api/paas/v4',
+      apiKey: 'sk-zai',
+      modelIds: ['glm-new-model'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models?.[0]).toMatchObject({
+      id: 'glm-new-model',
+      name: '[Z.AI] glm-new-model',
+    });
+    expect(models?.[0]?.generationConfig).toBeUndefined();
   });
 });

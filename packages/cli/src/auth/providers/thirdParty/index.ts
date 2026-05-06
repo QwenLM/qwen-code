@@ -4,6 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export { DEEPSEEK_API_KEY_PROVIDER } from './deepseek.js';
-export { MINIMAX_API_KEY_PROVIDER } from './minimax.js';
-export { ZAI_API_KEY_PROVIDER } from './zai.js';
+export { deepseekProvider } from './deepseek.js';
+export { minimaxProvider } from './minimax.js';
+export { zaiProvider } from './zai.js';

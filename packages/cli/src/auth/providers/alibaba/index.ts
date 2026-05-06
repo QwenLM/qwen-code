@@ -4,10 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export {
-  ALIBABA_STANDARD_API_KEY_PROVIDER,
-  type AlibabaStandardEndpointOption,
-} from './modelStudio.js';
-export * from './modelStudioModels.js';
-export * from './codingPlan.js';
-export * from './tokenPlan.js';
+export { codingPlanProviderConfig } from './codingPlan.js';
+export { tokenPlanProviderConfig } from './tokenPlan.js';
+export { alibabaStandardProvider } from './alibabaStandard.js';

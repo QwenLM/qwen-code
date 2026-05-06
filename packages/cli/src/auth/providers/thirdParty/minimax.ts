@@ -4,36 +4,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { defineApiKeyProvider } from '../../setupMethods/apiKey/defineApiKeyProvider.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import type { ProviderConfig } from '../../providerConfig.js';
 
-export type MiniMaxApiKeyEndpointOption = 'international' | 'china';
-
-export const MINIMAX_INTERNATIONAL_BASE_URL = 'https://api.minimax.io/v1';
-export const MINIMAX_CHINA_BASE_URL = 'https://api.minimaxi.com/v1';
-
-export const MINIMAX_API_KEY_PROVIDER =
-  defineApiKeyProvider<MiniMaxApiKeyEndpointOption>({
-    id: 'minimax',
-    option: 'MINIMAX_API_KEY',
-    title: 'MiniMax API Key',
-    description: 'Quick setup for MiniMax models',
-    category: 'third-party',
-    envKey: 'MINIMAX_API_KEY',
-    modelNamePrefix: 'MiniMax',
-    defaultModelIds:
-      'MiniMax-M2.7,MiniMax-M2.7-highspeed,MiniMax-M2.5,MiniMax-M2.5-highspeed',
-    endpointOptions: [
-      {
-        id: 'international',
-        title: 'International',
-        endpoint: MINIMAX_INTERNATIONAL_BASE_URL,
-        documentationUrl: 'https://www.minimax.io/platform',
-      },
-      {
-        id: 'china',
-        title: 'China',
-        endpoint: MINIMAX_CHINA_BASE_URL,
-        documentationUrl: 'https://platform.minimaxi.com',
-      },
-    ],
-  });
+export const minimaxProvider: ProviderConfig = {
+  id: 'minimax',
+  label: 'MiniMax API Key',
+  description: 'Quick setup for MiniMax models',
+  protocol: AuthType.USE_OPENAI,
+  baseUrl: [
+    {
+      id: 'international',
+      label: 'International',
+      url: 'https://api.minimax.io/v1',
+      documentationUrl: 'https://www.minimax.io/platform',
+    },
+    {
+      id: 'china',
+      label: 'China',
+      url: 'https://api.minimaxi.com/v1',
+      documentationUrl: 'https://platform.minimaxi.com',
+    },
+  ],
+  envKey: 'MINIMAX_API_KEY',
+  authMethod: 'input',
+  models: [
+    { id: 'MiniMax-M2.7', contextWindowSize: 1048576 },
+    { id: 'MiniMax-M2.7-highspeed', contextWindowSize: 1048576 },
+    { id: 'MiniMax-M2.5', contextWindowSize: 1048576 },
+    { id: 'MiniMax-M2.5-highspeed', contextWindowSize: 1048576 },
+  ],
+  modelsEditable: true,
+  modelNamePrefix: 'MiniMax',
+  uiGroup: 'third-party',
+};

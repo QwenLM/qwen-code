@@ -7,65 +7,102 @@
 import type React from 'react';
 import { useState } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import {
-  CODING_PLAN_ENDPOINTS,
-  CODING_PLAN_OPTION,
-  isCodingPlanConfig,
-  resolveCodingPlanEndpoint,
-  getCodingPlanConfig,
-} from '../../auth/providers/alibaba/codingPlan.js';
-import {
-  TOKEN_PLAN_OPTION,
-  getTokenPlanConfig,
-} from '../../auth/providers/alibaba/tokenPlan.js';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
-import { AlibabaModelStudioFlow } from './flows/AlibabaModelStudioFlow.js';
-import { CustomProviderFlow } from './flows/CustomProviderFlow.js';
-import { OAuthFlow } from './flows/OAuthFlow.js';
-import { ThirdPartyProvidersFlow } from './flows/ThirdPartyProvidersFlow.js';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
-import {
-  CODING_PLAN_API_KEY_URL,
-  CODING_PLAN_INTL_API_KEY_URL,
-  type ApiKeyInputPlan,
-} from '../components/ApiKeyInput.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { t } from '../../i18n/index.js';
-import { API_KEY_PROVIDERS } from '../../auth/setupMethods/apiKey/index.js';
-import type {
-  ApiKeyOption,
-  MainOption,
-  OAuthOption,
-  SubscribeOption,
-} from './flows/AuthFlowTypes.js';
-import { useAuthDialogNavigation } from './flows/useAuthDialogNavigation.js';
 import {
-  getApiKeyProviderStepCount,
-  getEndpointStepTitle,
-  getProviderFlowTitle,
-  usePresetApiKeyFlow,
-} from './flows/usePresetApiKeyFlow.js';
-import { useCustomProviderFlow } from './flows/useCustomProviderFlow.js';
+  codingPlanProvider,
+  findProviderByCredentials,
+  tokenPlanProvider,
+  alibabaStandardProvider,
+  deepseekProvider,
+  minimaxProvider,
+  zaiProvider,
+  customProvider,
+  ALIBABA_PROVIDERS,
+  THIRD_PARTY_PROVIDERS,
+} from '../../auth/allProviders.js';
+import type { ProviderConfig } from '../../auth/providerConfig.js';
+import { useProviderSetupFlow } from './flows/useProviderSetupFlow.js';
+import { ProviderSetupSteps } from './flows/ProviderSetupSteps.js';
 
-const MODEL_PROVIDERS_DOCUMENTATION_URL =
-  'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/';
+// ---------------------------------------------------------------------------
+// View levels
+// ---------------------------------------------------------------------------
 
-function parseDefaultAuthType(
-  defaultAuthType: string | undefined,
-): AuthType | null {
-  if (
-    defaultAuthType &&
-    Object.values(AuthType).includes(defaultAuthType as AuthType)
-  ) {
-    return defaultAuthType as AuthType;
-  }
-  return null;
+type ViewLevel =
+  | 'main'
+  | 'alibaba-select'
+  | 'thirdparty-select'
+  | 'oauth-select'
+  | 'provider-setup'; // unified setup flow (driven by ProviderConfig)
+
+// ---------------------------------------------------------------------------
+// Top-level options
+// ---------------------------------------------------------------------------
+
+type MainOption =
+  | 'ALIBABA_MODELSTUDIO'
+  | 'THIRD_PARTY_PROVIDERS'
+  | 'OAUTH'
+  | 'CUSTOM_PROVIDER';
+
+const MAIN_ITEMS = [
+  {
+    key: 'ALIBABA_MODELSTUDIO',
+    title: t('Alibaba ModelStudio'),
+    label: t('Alibaba ModelStudio'),
+    description: t(
+      'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
+    ),
+    value: 'ALIBABA_MODELSTUDIO' as MainOption,
+  },
+  {
+    key: 'THIRD_PARTY_PROVIDERS',
+    title: t('Third-party Providers'),
+    label: t('Third-party Providers'),
+    description: t('Choose a built-in provider and connect with an API key'),
+    value: 'THIRD_PARTY_PROVIDERS' as MainOption,
+  },
+  {
+    key: 'OAUTH',
+    title: t('OAuth'),
+    label: t('OAuth'),
+    description: t(
+      'Open a browser, sign in, and let the CLI finish provider setup',
+    ),
+    value: 'OAUTH' as MainOption,
+  },
+  {
+    key: 'CUSTOM_PROVIDER',
+    title: t('Custom Provider'),
+    label: t('Custom Provider'),
+    description: t(
+      'Manually connect a local server, proxy, or unsupported provider',
+    ),
+    value: 'CUSTOM_PROVIDER' as MainOption,
+  },
+];
+
+function providerToItem(config: ProviderConfig) {
+  return {
+    key: config.id,
+    title: t(config.label),
+    label: t(config.label),
+    description: t(config.description),
+    value: config.id,
+  };
 }
+
+// ---------------------------------------------------------------------------
+// AuthDialog
+// ---------------------------------------------------------------------------
 
 export function AuthDialog(): React.JSX.Element {
   const {
@@ -74,369 +111,171 @@ export function AuthDialog(): React.JSX.Element {
   const {
     auth: {
       handleAuthSelect: onAuthSelect,
-      handleSubscriptionPlanSubmit,
-      handleApiKeyProviderSubmit,
+      handleProviderSubmit,
       handleOpenRouterSubmit,
-      handleCustomApiKeySubmit,
       onAuthError,
     },
   } = useUIActions();
   const config = useConfig();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const navigation = useAuthDialogNavigation('main');
-  const viewLevel = navigation.currentView;
-  const [baseUrlIndex, setBaseUrlIndex] = useState<number>(0);
-  const [baseUrl, setBaseUrl] = useState<string>(
-    CODING_PLAN_ENDPOINTS[0].baseUrl,
-  );
-  const [activeSubscriptionPlan, setActiveSubscriptionPlan] = useState<
-    'coding' | 'token'
-  >('coding');
-  const [alibabaModelStudioIndex, setAlibabaModelStudioIndex] =
-    useState<number>(0);
-  const [mainAuthIndex, setMainAuthIndex] = useState<number | null>(null);
-  const [oauthProviderIndex, setOAuthProviderIndex] = useState<number>(0);
-  const presetApiKeyFlow = usePresetApiKeyFlow({
-    onSubmit: handleApiKeyProviderSubmit,
-  });
-  const customProviderFlow = useCustomProviderFlow();
+  const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
+  // Navigation stack — viewStack stores parent views for goBack
+  const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
-  // Main authentication entries mirror the four user-facing flows from the design doc.
-  const mainItems = [
-    {
-      key: 'ALIBABA_MODELSTUDIO',
-      title: t('Alibaba ModelStudio'),
-      label: t('Alibaba ModelStudio'),
-      description: t(
-        'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
-      ),
-      value: 'ALIBABA_MODELSTUDIO' as MainOption,
-    },
-    {
-      key: 'THIRD_PARTY_PROVIDERS',
-      title: t('Third-party Providers'),
-      label: t('Third-party Providers'),
-      description: t('Choose a built-in provider and connect with an API key'),
-      value: 'THIRD_PARTY_PROVIDERS' as MainOption,
-    },
-    {
-      key: 'OAUTH',
-      title: t('OAuth'),
-      label: t('OAuth'),
-      description: t(
-        'Open a browser, sign in, and let the CLI finish provider setup',
-      ),
-      value: 'OAUTH' as MainOption,
-    },
-    {
-      key: 'CUSTOM_PROVIDER',
-      title: t('Custom Provider'),
-      label: t('Custom Provider'),
-      description: t(
-        'Manually connect a local server, proxy, or unsupported provider',
-      ),
-      value: 'CUSTOM_PROVIDER' as MainOption,
-    },
-  ];
+  // Selection indices for each group
+  const [mainIndex, setMainIndex] = useState<number>(0);
+  const [alibabaIndex, setAlibabaIndex] = useState<number>(0);
+  const [thirdPartyIndex, setThirdPartyIndex] = useState<number>(0);
+  const [oauthIndex, setOauthIndex] = useState<number>(0);
 
-  const subscriptionPlanOptions = [CODING_PLAN_OPTION, TOKEN_PLAN_OPTION];
-  const subscriptionPlanItems = subscriptionPlanOptions.map((plan) => ({
-    key: plan.option,
-    title: t(plan.title),
-    label: t(plan.title),
-    description: t(plan.description),
-    value: plan.option as SubscribeOption,
-  }));
+  // Unified provider setup flow
+  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
 
-  const baseUrlItems = CODING_PLAN_ENDPOINTS.map((endpoint) => ({
-    key: endpoint.baseUrl,
-    title: t(endpoint.title),
-    label: t(endpoint.title),
-    description: (
-      <Link url={endpoint.documentationUrl} fallback={false}>
-        <Text color={theme.text.secondary}>{endpoint.baseUrl}</Text>
-      </Link>
-    ),
-    value: endpoint.baseUrl,
-  }));
+  // -- Navigation helpers ---------------------------------------------------
 
-  const alibabaModelStudioItems = [
-    ...subscriptionPlanItems,
+  const pushView = (view: ViewLevel) => {
+    setViewStack((prev) => [...prev, viewLevel]);
+    setViewLevel(view);
+  };
+
+  const goBack = () => {
+    setErrorMessage(null);
+    onAuthError(null);
+
+    if (viewLevel === 'provider-setup') {
+      const stayedInSetup = setupFlow.goBack();
+      if (stayedInSetup) return;
+      // Fall through to pop view stack
+    }
+
+    setViewStack((prev) => {
+      const next = [...prev];
+      const parent = next.pop() ?? 'main';
+      setViewLevel(parent);
+      return next;
+    });
+  };
+
+  // -- Provider items -------------------------------------------------------
+
+  const alibabaItems = ALIBABA_PROVIDERS.map(providerToItem);
+  const thirdPartyItems = THIRD_PARTY_PROVIDERS.map(providerToItem);
+
+  const oauthItems = [
     {
-      key: API_KEY_PROVIDERS.alibabaStandard.option,
-      title: t(API_KEY_PROVIDERS.alibabaStandard.title),
-      label: t(API_KEY_PROVIDERS.alibabaStandard.title),
-      description: t(API_KEY_PROVIDERS.alibabaStandard.description),
-      value: API_KEY_PROVIDERS.alibabaStandard.option as
-        | SubscribeOption
-        | ApiKeyOption,
-    },
-  ];
-
-  const oauthProviderItems = [
-    {
-      key: 'OPENROUTER_OAUTH',
+      key: 'openrouter',
       title: t('OpenRouter'),
       label: t('OpenRouter'),
       description: t(
         'Browser OAuth · Auto-configure API key and OpenRouter models',
       ),
-      value: 'OPENROUTER_OAUTH' as OAuthOption,
+      value: 'openrouter',
     },
     {
-      key: 'QWEN_OAUTH_DISCONTINUED',
+      key: 'qwen-oauth-discontinued',
       title: t('Qwen'),
       label: t('Qwen'),
       description: t('Discontinued — switch to Coding Plan or API Key'),
-      value: 'QWEN_OAUTH_DISCONTINUED' as OAuthOption,
+      value: 'qwen-oauth-discontinued',
     },
   ];
 
-  // Map a saved auth type to the closest user-facing flow.
+  // -- Compute default main index from current auth state -------------------
+
   const contentGenConfig = config.getContentGeneratorConfig();
-  const isCurrentlyCodingPlan =
-    isCodingPlanConfig(
-      contentGenConfig?.baseUrl,
-      contentGenConfig?.apiKeyEnvKey,
-    ) !== false;
-  const authTypeToMainOption = (authType: AuthType): MainOption => {
-    if (authType === AuthType.QWEN_OAUTH) return 'OAUTH';
-    if (authType === AuthType.USE_OPENAI && isCurrentlyCodingPlan) {
-      return 'ALIBABA_MODELSTUDIO';
-    }
-    return 'THIRD_PARTY_PROVIDERS';
+  const isCurrentlyCodingPlan = !!findProviderByCredentials(
+    contentGenConfig?.baseUrl,
+    contentGenConfig?.apiKeyEnvKey,
+  )?.metadataKey;
+
+  const getDefaultMainIndex = () => {
+    const currentAuth = pendingAuthType ?? config.getAuthType();
+    if (!currentAuth) return 0;
+    if (currentAuth === AuthType.QWEN_OAUTH) return 2;
+    if (currentAuth === AuthType.USE_OPENAI && isCurrentlyCodingPlan) return 0;
+    return 1;
   };
 
-  const defaultAuthIndex = Math.max(
-    0,
-    mainItems.findIndex((item) => {
-      // Priority 1: pendingAuthType
-      if (pendingAuthType) {
-        return item.value === authTypeToMainOption(pendingAuthType);
-      }
+  const defaultMainIndex = Math.max(0, getDefaultMainIndex());
 
-      // Priority 2: config.getAuthType() - the source of truth
-      const currentAuthType = config.getAuthType();
-      if (currentAuthType) {
-        return item.value === authTypeToMainOption(currentAuthType);
-      }
+  // -- Handlers -------------------------------------------------------------
 
-      // Priority 3: QWEN_DEFAULT_AUTH_TYPE env var
-      const defaultAuthType = parseDefaultAuthType(
-        process.env['QWEN_DEFAULT_AUTH_TYPE'],
-      );
-      if (defaultAuthType) {
-        return item.value === authTypeToMainOption(defaultAuthType);
-      }
-
-      // Priority 4: default to the official recommended flow.
-      return item.value === 'ALIBABA_MODELSTUDIO';
-    }),
-  );
-  const initialAuthIndex = mainAuthIndex ?? defaultAuthIndex;
-
-  const handleMainSelect = async (value: MainOption) => {
+  const handleMainSelect = (value: MainOption) => {
     setErrorMessage(null);
     onAuthError(null);
 
-    if (value === 'ALIBABA_MODELSTUDIO') {
-      navigation.pushView('alibaba-modelstudio-select');
-      return;
+    switch (value) {
+      case 'ALIBABA_MODELSTUDIO':
+        pushView('alibaba-select');
+        break;
+      case 'THIRD_PARTY_PROVIDERS':
+        pushView('thirdparty-select');
+        break;
+      case 'OAUTH':
+        pushView('oauth-select');
+        break;
+      case 'CUSTOM_PROVIDER':
+        setupFlow.start(customProvider);
+        pushView('provider-setup');
+        break;
+      default:
+        break;
     }
-
-    if (value === 'THIRD_PARTY_PROVIDERS') {
-      navigation.pushView('api-key-type-select');
-      return;
-    }
-
-    if (value === 'OAUTH') {
-      navigation.pushView('oauth-provider-select');
-      return;
-    }
-
-    customProviderFlow.reset();
-    navigation.pushView('custom-protocol-select');
   };
 
-  const handleAlibabaModelStudioSelect = async (
-    value: SubscribeOption | ApiKeyOption,
-  ) => {
-    const selectedPlan = subscriptionPlanOptions.find(
-      (plan) => plan.option === value,
-    );
-    if (selectedPlan) {
-      await handleSubscriptionPlanSelect(value as SubscribeOption);
-      return;
-    }
-
-    await handleApiKeyTypeSelect(value as ApiKeyOption);
-  };
-
-  const handleSubscriptionPlanSelect = async (value: SubscribeOption) => {
+  const handleProviderSelect = (providerId: string) => {
     setErrorMessage(null);
     onAuthError(null);
 
-    const selectedPlan = subscriptionPlanOptions.find(
-      (plan) => plan.option === value,
-    );
-    if (!selectedPlan) {
-      return;
-    }
+    const providerConfig = [
+      codingPlanProvider,
+      tokenPlanProvider,
+      alibabaStandardProvider,
+      deepseekProvider,
+      minimaxProvider,
+      zaiProvider,
+    ].find((p) => p.id === providerId);
 
-    setActiveSubscriptionPlan(selectedPlan.id);
-    if (selectedPlan.id === 'coding') {
-      setBaseUrl(CODING_PLAN_ENDPOINTS[0].baseUrl);
-      setBaseUrlIndex(0);
-      navigation.pushView('base-url-select');
-      return;
-    }
-
-    navigation.pushView('api-key-input');
+    if (!providerConfig) return;
+    setupFlow.start(providerConfig);
+    pushView('provider-setup');
   };
 
-  const handleApiKeyTypeSelect = async (value: ApiKeyOption) => {
+  const handleOAuthSelect = (value: string) => {
     setErrorMessage(null);
     onAuthError(null);
 
-    const selectedProvider = presetApiKeyFlow.selectProvider(value);
-    if (selectedProvider) {
-      navigation.pushView(
-        selectedProvider.endpointOptions
-          ? 'preset-api-key-endpoint-select'
-          : 'preset-api-key-input',
-      );
-    }
-  };
-
-  const handleOAuthProviderSelect = async (value: OAuthOption) => {
-    setErrorMessage(null);
-    onAuthError(null);
-
-    if (value === 'OPENROUTER_OAUTH') {
-      await handleOpenRouterSubmit();
+    if (value === 'openrouter') {
+      void handleOpenRouterSubmit();
       return;
     }
 
-    // Qwen OAuth free tier discontinued — show warning instead of proceeding
-    if (value === 'QWEN_OAUTH_DISCONTINUED') {
-      setErrorMessage(
-        t(
-          'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
-        ),
-      );
-      return;
-    }
-
-    await onAuthSelect(AuthType.USE_OPENAI);
-  };
-
-  const handleBaseUrlSelect = async (selectedBaseUrl: string) => {
-    setErrorMessage(null);
-    onAuthError(null);
-    setBaseUrl(selectedBaseUrl);
-    navigation.pushView('api-key-input');
-  };
-
-  const handlePresetEndpointOptionSelect = async (
-    selectedEndpointOption: string,
-  ) => {
-    setErrorMessage(null);
-    onAuthError(null);
-    presetApiKeyFlow.selectEndpointOption(selectedEndpointOption);
-    navigation.pushView('preset-api-key-input');
-  };
-
-  const handleApiKeyInputSubmit = async (apiKey: string) => {
-    setErrorMessage(null);
-
-    if (!apiKey.trim()) {
-      setErrorMessage(t('API key cannot be empty.'));
-      return;
-    }
-
-    await handleSubscriptionPlanSubmit(
-      activeSubscriptionPlan,
-      apiKey,
-      activeSubscriptionPlan === 'coding' ? baseUrl : undefined,
+    // Qwen OAuth discontinued
+    setErrorMessage(
+      t(
+        'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
+      ),
     );
   };
 
-  const handlePresetApiKeySubmit = () => {
-    if (presetApiKeyFlow.submitApiKey()) {
-      navigation.pushView('preset-model-id-input');
-    }
-  };
-
-  const handlePresetModelSubmit = () => {
-    const result = presetApiKeyFlow.submitModel();
-    if (result === 'api-key-error') {
-      navigation.replaceView('preset-api-key-input');
-    }
-  };
-
-  const handleCustomProtocolSelect = (protocol: AuthType) => {
-    setErrorMessage(null);
-    onAuthError(null);
-    customProviderFlow.selectProtocol(protocol);
-    navigation.pushView('custom-base-url-input');
-  };
-
-  const handleCustomBaseUrlSubmit = () => {
-    if (customProviderFlow.submitBaseUrl()) {
-      navigation.pushView('custom-api-key-input');
-    }
-  };
-
-  const handleCustomApiKeySubmitLocal = () => {
-    if (customProviderFlow.submitApiKey()) {
-      navigation.pushView('custom-model-id-input');
-    }
-  };
-
-  const handleCustomModelIdSubmit = () => {
-    if (customProviderFlow.submitModelIds()) {
-      navigation.pushView('custom-advanced-config');
-    }
-  };
-
-  const handleAdvancedConfigSubmit = () => {
-    navigation.pushView('custom-review-json');
-  };
-
-  const handleCustomReviewSubmit = () => {
-    customProviderFlow.submit((...args) => {
-      void handleCustomApiKeySubmit(...args);
-    });
-  };
-
-  const handleGoBack = () => {
-    setErrorMessage(null);
-    onAuthError(null);
-    navigation.goBack();
-  };
-
-  const handleSubscriptionApiKeyCancel = () => {
-    if (viewLevel === 'api-key-input' && activeSubscriptionPlan === 'token') {
-      setActiveSubscriptionPlan('coding');
-      navigation.replaceView('alibaba-modelstudio-select');
-      return;
-    }
-
-    handleGoBack();
-  };
+  // -- Keyboard handling ----------------------------------------------------
 
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
+        // ApiKeyInput has its own Escape → onCancel handler; skip here to avoid double goBack
+        if (
+          viewLevel === 'provider-setup' &&
+          setupFlow.state.step === 'apiKey'
+        ) {
+          if (setupFlow.state.provider?.apiKeyHelpUrl) return;
+        }
         if (viewLevel !== 'main') {
-          handleGoBack();
+          goBack();
           return;
         }
-
-        if (errorMessage) {
-          return;
-        }
+        if (errorMessage) return;
         if (config.getAuthType() === undefined) {
           setErrorMessage(
             t(
@@ -451,169 +290,95 @@ export function AuthDialog(): React.JSX.Element {
     { isActive: true },
   );
 
-  // Handle Enter key for review view to save
+  // Handle Enter/Space for advanced config and review steps
   useKeypress(
     (key) => {
-      if (key.name === 'return' && viewLevel === 'custom-review-json') {
-        handleCustomReviewSubmit();
+      if (viewLevel !== 'provider-setup') return;
+      const step = setupFlow.state.step;
+
+      if (step === 'advancedConfig') {
+        if (key.name === 'up') {
+          setupFlow.moveAdvancedFocusUp();
+          return;
+        }
+        if (key.name === 'down') {
+          setupFlow.moveAdvancedFocusDown();
+          return;
+        }
+        if (key.name === 'space') {
+          setupFlow.toggleFocusedAdvancedOption();
+          return;
+        }
+        if (key.name === 'return') {
+          setupFlow.submitAdvancedConfig();
+          return;
+        }
+      }
+
+      if (step === 'review' && key.name === 'return') {
+        setupFlow.submit();
       }
     },
     { isActive: true },
   );
 
-  // Advanced config keypress: ↑↓ to navigate, Space to toggle, Enter to submit
-  useKeypress(
-    (key) => {
-      if (viewLevel !== 'custom-advanced-config') return;
+  // -- View title -----------------------------------------------------------
 
-      const { name } = key;
+  const getGroupStepLabel = (groupLabel: string): string => groupLabel === 'Alibaba ModelStudio' ? 'Access Method' : 'Provider';
 
-      if (name === 'up') {
-        customProviderFlow.moveAdvancedFocusUp();
-        return;
-      }
-
-      if (name === 'down') {
-        customProviderFlow.moveAdvancedFocusDown();
-        return;
-      }
-
-      if (name === 'space') {
-        customProviderFlow.toggleFocusedAdvancedOption();
-        return;
-      }
-
-      if (name === 'return') {
-        handleAdvancedConfigSubmit();
-        return;
-      }
-    },
-    { isActive: true },
-  );
-
-  // Render main auth selection
-  const renderMainView = () => (
-    <>
-      <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={mainItems}
-          initialIndex={initialAuthIndex}
-          onSelect={handleMainSelect}
-          onHighlight={(value) => {
-            const index = mainItems.findIndex((item) => item.value === value);
-            setMainAuthIndex(index);
-          }}
-          itemGap={1}
-        />
-      </Box>
-    </>
-  );
-
-  const getSubscriptionApiKeyInputPlan = (): ApiKeyInputPlan => {
-    const plan =
-      activeSubscriptionPlan === 'token'
-        ? getTokenPlanConfig()
-        : getCodingPlanConfig(baseUrl);
-    const resolvedEndpoint = resolveCodingPlanEndpoint(baseUrl);
-    const apiKeyUrl =
-      plan.apiKeyUrl ||
-      (activeSubscriptionPlan === 'coding' &&
-      resolvedEndpoint.baseUrl === CODING_PLAN_ENDPOINTS[1].baseUrl
-        ? CODING_PLAN_INTL_API_KEY_URL
-        : CODING_PLAN_API_KEY_URL);
-
-    return {
-      apiKeyUrl,
-      helpText: t('You can get your {{plan}} API key here', {
-        plan: t(plan.displayName),
-      }),
-      placeholder: activeSubscriptionPlan === 'coding' ? 'sk-sp-...' : 'sk-...',
-      validate: (apiKey) =>
-        activeSubscriptionPlan === 'coding' &&
-        resolvedEndpoint.baseUrl === CODING_PLAN_ENDPOINTS[0].baseUrl &&
-        !apiKey.startsWith('sk-sp-')
-          ? t(
-              'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
-            )
-          : null,
-    };
+  const getStepLabel = (step: string | null, p: ProviderConfig): string => {
+    if (step === 'protocol') return 'Protocol';
+    if (step === 'baseUrl') {
+      if (p.uiLabels?.baseUrlStepTitle) return p.uiLabels.baseUrlStepTitle;
+      return Array.isArray(p.baseUrl) ? 'Endpoint' : 'Base URL';
+    }
+    if (step === 'apiKey') return 'API Key';
+    if (step === 'models') return 'Model IDs';
+    if (step === 'advancedConfig') return 'Advanced Config';
+    if (step === 'review') return 'Review';
+    return '';
   };
 
-  const getViewTitle = () => {
+  const getViewTitle = (): string => {
     switch (viewLevel) {
       case 'main':
         return t('Select Authentication Method');
-      case 'alibaba-modelstudio-select':
-        return t('Alibaba ModelStudio \u00B7 Step 1/3 \u00B7 Access Method');
-      case 'base-url-select':
-        return t('Alibaba ModelStudio \u00B7 Step 2/3 \u00B7 Region');
-      case 'api-key-input':
-        return activeSubscriptionPlan === 'token'
-          ? t('Alibaba ModelStudio \u00B7 Step 2/2 \u00B7 API Key')
-          : t('Alibaba ModelStudio \u00B7 Step 3/3 \u00B7 API Key');
-      case 'api-key-type-select':
-        return t('Third-party Providers \u00B7 Step 1/3 \u00B7 Provider');
-      case 'preset-api-key-endpoint-select': {
-        const flowTitle = getProviderFlowTitle(
-          presetApiKeyFlow.provider,
-          'Third-party Providers',
-        );
-        const stepTitle = getEndpointStepTitle(presetApiKeyFlow.provider);
-        return t('{{flowTitle}} \u00B7 Step 2/4 \u00B7 {{stepTitle}}', {
+      case 'alibaba-select':
+        return t('Alibaba ModelStudio · {{stepLabel}}', {
+          stepLabel: getGroupStepLabel('Alibaba ModelStudio'),
+        });
+      case 'thirdparty-select':
+        return t('Third-party Providers · {{stepLabel}}', {
+          stepLabel: getGroupStepLabel('Third-party Providers'),
+        });
+      case 'oauth-select':
+        return t('Select OAuth Provider');
+      case 'provider-setup': {
+        const p = setupFlow.state.provider;
+        if (!p) return t('Provider Setup');
+        const flowTitle = p.uiLabels?.flowTitle ?? p.label;
+        const { stepIndex, totalSteps, step } = setupFlow.state;
+
+        // Determine if this flow was entered from a group (adds 1 to step count)
+        const fromGroup =
+          p.uiGroup === 'alibaba' || p.uiGroup === 'third-party';
+        const offset = fromGroup ? 1 : 0;
+        const totalWithOffset = totalSteps + offset;
+        const stepWithOffset = stepIndex + offset;
+
+        return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
           flowTitle,
-          stepTitle,
+          step: String(stepWithOffset),
+          total: String(totalWithOffset),
+          stepLabel: getStepLabel(step, p),
         });
       }
-      case 'preset-api-key-input': {
-        const flowTitle = getProviderFlowTitle(
-          presetApiKeyFlow.provider,
-          'Third-party Providers',
-        );
-        const stepCount = getApiKeyProviderStepCount(presetApiKeyFlow.provider);
-        const stepNumber = presetApiKeyFlow.provider.endpointOptions ? 3 : 2;
-        return t(
-          '{{flowTitle}} \u00B7 Step {{stepNumber}}/{{stepCount}} \u00B7 API Key',
-          {
-            flowTitle,
-            stepNumber: String(stepNumber),
-            stepCount: String(stepCount),
-          },
-        );
-      }
-      case 'preset-model-id-input': {
-        const flowTitle = getProviderFlowTitle(
-          presetApiKeyFlow.provider,
-          'Third-party Providers',
-        );
-        const stepCount = getApiKeyProviderStepCount(presetApiKeyFlow.provider);
-        const stepNumber = presetApiKeyFlow.provider.endpointOptions ? 4 : 3;
-        return t(
-          '{{flowTitle}} \u00B7 Step {{stepNumber}}/{{stepCount}} \u00B7 Models',
-          {
-            flowTitle,
-            stepNumber: String(stepNumber),
-            stepCount: String(stepCount),
-          },
-        );
-      }
-      case 'custom-protocol-select':
-        return t('Custom Provider \u00B7 Step 1/6 \u00B7 Protocol');
-      case 'custom-base-url-input':
-        return t('Custom Provider \u00B7 Step 2/6 \u00B7 Base URL');
-      case 'custom-api-key-input':
-        return t('Custom Provider \u00B7 Step 3/6 \u00B7 API Key');
-      case 'custom-model-id-input':
-        return t('Custom Provider \u00B7 Step 4/6 \u00B7 Model IDs');
-      case 'custom-advanced-config':
-        return t('Custom Provider \u00B7 Step 5/6 \u00B7 Advanced Config');
-      case 'custom-review-json':
-        return t('Custom Provider \u00B7 Step 6/6 \u00B7 Review');
-      case 'oauth-provider-select':
-        return t('Select OAuth Provider');
       default:
         return t('Select Authentication Method');
     }
   };
+
+  // -- Render ---------------------------------------------------------------
 
   return (
     <Box
@@ -625,84 +390,112 @@ export function AuthDialog(): React.JSX.Element {
     >
       <Text bold>{getViewTitle()}</Text>
 
-      {viewLevel === 'main' && renderMainView()}
-      <AlibabaModelStudioFlow
-        viewLevel={viewLevel}
-        items={alibabaModelStudioItems}
-        initialIndex={alibabaModelStudioIndex}
-        baseUrlItems={baseUrlItems}
-        baseUrlIndex={baseUrlIndex}
-        subscriptionApiKeyPlan={getSubscriptionApiKeyInputPlan()}
-        onSelect={handleAlibabaModelStudioSelect}
-        onHighlight={(value) => {
-          const index = alibabaModelStudioItems.findIndex(
-            (item) => item.value === value,
-          );
-          setAlibabaModelStudioIndex(index);
-        }}
-        onBaseUrlSelect={handleBaseUrlSelect}
-        onBaseUrlHighlight={(value) => {
-          const index = baseUrlItems.findIndex((item) => item.value === value);
-          setBaseUrlIndex(index);
-        }}
-        onApiKeySubmit={handleApiKeyInputSubmit}
-        onBack={handleSubscriptionApiKeyCancel}
-      />
-      <ThirdPartyProvidersFlow
-        viewLevel={viewLevel}
-        items={presetApiKeyFlow.providerItems}
-        initialIndex={presetApiKeyFlow.providerIndex}
-        preset={presetApiKeyFlow.state}
-        onSelect={handleApiKeyTypeSelect}
-        onHighlight={(value) => {
-          const index = presetApiKeyFlow.providerItems.findIndex(
-            (item) => item.value === value,
-          );
-          presetApiKeyFlow.setProviderIndex(index);
-        }}
-        onEndpointOptionSelect={handlePresetEndpointOptionSelect}
-        onEndpointOptionHighlight={(value) => {
-          const index = presetApiKeyFlow.state.endpointOptionItems.findIndex(
-            (item) => item.value === value,
-          );
-          presetApiKeyFlow.setEndpointOptionIndex(index);
-        }}
-        onApiKeyChange={presetApiKeyFlow.changeApiKey}
-        onApiKeySubmit={handlePresetApiKeySubmit}
-        onModelIdChange={presetApiKeyFlow.changeModelId}
-        onModelSubmit={handlePresetModelSubmit}
-      />
-      {viewLevel === 'oauth-provider-select' && (
-        <OAuthFlow
-          items={oauthProviderItems}
-          initialIndex={oauthProviderIndex}
-          onSelect={handleOAuthProviderSelect}
-          onHighlight={(value) => {
-            const index = oauthProviderItems.findIndex(
-              (item) => item.value === value,
-            );
-            setOAuthProviderIndex(index);
+      {viewLevel === 'main' && (
+        <Box marginTop={1}>
+          <DescriptiveRadioButtonSelect
+            items={MAIN_ITEMS}
+            initialIndex={mainIndex || defaultMainIndex}
+            onSelect={handleMainSelect}
+            onHighlight={(value) => {
+              setMainIndex(
+                MAIN_ITEMS.findIndex((item) => item.value === value),
+              );
+            }}
+            itemGap={1}
+          />
+        </Box>
+      )}
+
+      {viewLevel === 'alibaba-select' && (
+        <>
+          <Box marginTop={1}>
+            <DescriptiveRadioButtonSelect
+              items={alibabaItems}
+              initialIndex={alibabaIndex}
+              onSelect={handleProviderSelect}
+              onHighlight={(value) => {
+                setAlibabaIndex(
+                  alibabaItems.findIndex((i) => i.value === value),
+                );
+              }}
+              itemGap={1}
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme?.text?.secondary}>
+              {t('Enter to select, ↑↓ to navigate, Esc to go back')}
+            </Text>
+          </Box>
+        </>
+      )}
+
+      {viewLevel === 'thirdparty-select' && (
+        <>
+          <Box marginTop={1}>
+            <DescriptiveRadioButtonSelect
+              items={thirdPartyItems}
+              initialIndex={thirdPartyIndex}
+              onSelect={handleProviderSelect}
+              onHighlight={(value) => {
+                setThirdPartyIndex(
+                  thirdPartyItems.findIndex((i) => i.value === value),
+                );
+              }}
+              itemGap={1}
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme?.text?.secondary}>
+              {t('Enter to select, ↑↓ to navigate, Esc to go back')}
+            </Text>
+          </Box>
+        </>
+      )}
+
+      {viewLevel === 'oauth-select' && (
+        <>
+          <Box marginTop={1}>
+            <DescriptiveRadioButtonSelect
+              items={oauthItems}
+              initialIndex={oauthIndex}
+              onSelect={handleOAuthSelect}
+              onHighlight={(value) => {
+                setOauthIndex(oauthItems.findIndex((i) => i.value === value));
+              }}
+              itemGap={1}
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme?.text?.secondary}>
+              {t('Enter to select, ↑↓ to navigate, Esc to go back')}
+            </Text>
+          </Box>
+        </>
+      )}
+
+      {viewLevel === 'provider-setup' && (
+        <ProviderSetupSteps
+          state={setupFlow.state}
+          onProtocolSelect={(protocol) => {
+            setupFlow.selectProtocol(protocol);
           }}
+          onBaseUrlSelect={setupFlow.selectBaseUrl}
+          onBaseUrlHighlight={(url) => {
+            const p = setupFlow.state.provider;
+            if (p && Array.isArray(p.baseUrl)) {
+              const idx = p.baseUrl.findIndex((o) => o.url === url);
+              setupFlow.setBaseUrlOptionIndex(idx >= 0 ? idx : 0);
+            }
+          }}
+          onBaseUrlChange={setupFlow.changeBaseUrl}
+          onBaseUrlSubmit={setupFlow.submitBaseUrl}
+          onApiKeyChange={setupFlow.changeApiKey}
+          onApiKeySubmit={setupFlow.submitApiKey}
+          onApiKeyBack={goBack}
+          onModelIdsChange={setupFlow.changeModelIds}
+          onModelIdsSubmit={setupFlow.submitModelIds}
         />
       )}
-      <CustomProviderFlow
-        viewLevel={viewLevel}
-        state={customProviderFlow.state}
-        documentationUrl={MODEL_PROVIDERS_DOCUMENTATION_URL}
-        onProtocolSelect={handleCustomProtocolSelect}
-        onProtocolHighlight={(value) => {
-          const index = customProviderFlow.state.protocolItems.findIndex(
-            (item) => item.value === value,
-          );
-          customProviderFlow.setProtocolIndex(index);
-        }}
-        onBaseUrlChange={customProviderFlow.changeBaseUrl}
-        onBaseUrlSubmit={handleCustomBaseUrlSubmit}
-        onApiKeyChange={customProviderFlow.changeApiKey}
-        onApiKeySubmit={handleCustomApiKeySubmitLocal}
-        onModelIdsChange={customProviderFlow.changeModelIds}
-        onModelIdsSubmit={handleCustomModelIdSubmit}
-      />
 
       {(authError || errorMessage) && (
         <Box marginTop={1}>
@@ -712,11 +505,6 @@ export function AuthDialog(): React.JSX.Element {
 
       {viewLevel === 'main' && (
         <>
-          {/* <Box marginTop={1}>
-            <Text color={theme.text.secondary}>
-              {t('Enter to select, \u2191\u2193 to navigate, Esc to close')}
-            </Text>
-          </Box> */}
           <Box marginY={1}>
             <Text color={theme.border.default}>{'\u2500'.repeat(80)}</Text>
           </Box>

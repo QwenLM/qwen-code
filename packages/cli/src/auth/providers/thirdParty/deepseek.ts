@@ -4,17 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { defineApiKeyProvider } from '../../setupMethods/apiKey/defineApiKeyProvider.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import type { ProviderConfig } from '../../providerConfig.js';
 
-export const DEEPSEEK_API_KEY_PROVIDER = defineApiKeyProvider({
+export const deepseekProvider: ProviderConfig = {
   id: 'deepseek',
-  option: 'DEEPSEEK_API_KEY',
-  title: 'DeepSeek API Key',
+  label: 'DeepSeek API Key',
   description: 'Quick setup for DeepSeek (deepseek-v4-flash, deepseek-v4-pro)',
-  category: 'third-party',
+  protocol: AuthType.USE_OPENAI,
+  baseUrl: 'https://api.deepseek.com',
   envKey: 'DEEPSEEK_API_KEY',
+  authMethod: 'input',
+  models: [
+    { id: 'deepseek-v4-flash', contextWindowSize: 65536 },
+    { id: 'deepseek-v4-pro', contextWindowSize: 65536 },
+  ],
+  modelsEditable: true,
   modelNamePrefix: 'DeepSeek',
-  endpoint: 'https://api.deepseek.com',
-  defaultModelIds: 'deepseek-v4-flash,deepseek-v4-pro',
   documentationUrl: 'https://api-docs.deepseek.com/zh-cn/',
-});
+  uiGroup: 'third-party',
+};
