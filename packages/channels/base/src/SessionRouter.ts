@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import type { SessionScope, SessionTarget } from './types.js';
 import type { AcpBridge } from './AcpBridge.js';
 
@@ -196,18 +196,12 @@ export class SessionRouter {
     return { restored, failed };
   }
 
-  /** Clear in-memory state and delete persist file. Used on clean shutdown. */
+  /** Clear in-memory state on shutdown. Persist file is kept so sessions
+   *  can be restored on next start via {@link restoreSessions}. */
   clearAll(): void {
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
-    if (this.persistPath && existsSync(this.persistPath)) {
-      try {
-        unlinkSync(this.persistPath);
-      } catch {
-        // best-effort
-      }
-    }
   }
 
   private persist(): void {

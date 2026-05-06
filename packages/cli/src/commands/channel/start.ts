@@ -215,6 +215,15 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   channels.set(name, channel);
   registerToolCallDispatch(bridge, router, channels);
 
+  // Restore sessions from previous run
+  const restoreResult = await router.restoreSessions();
+  if (restoreResult.restored > 0) {
+    writeStdoutLine(
+      `[Channel] Sessions restored: ${restoreResult.restored}` +
+        (restoreResult.failed > 0 ? `, failed: ${restoreResult.failed}` : ''),
+    );
+  }
+
   try {
     await channel.connect();
   } catch (err) {
@@ -364,6 +373,15 @@ async function startAll(proxy?: string): Promise<void> {
     );
   }
   registerToolCallDispatch(bridge, router, channels);
+
+  // Restore sessions from previous run
+  const restoreResult = await router.restoreSessions();
+  if (restoreResult.restored > 0) {
+    writeStdoutLine(
+      `[Channel] Sessions restored: ${restoreResult.restored}` +
+        (restoreResult.failed > 0 ? `, failed: ${restoreResult.failed}` : ''),
+    );
+  }
 
   // Connect all channels
   let connectedCount = 0;
