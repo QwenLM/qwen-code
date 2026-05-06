@@ -1734,6 +1734,21 @@ describe('ShellExecutionService execution method selection', () => {
       value: 54321,
       configurable: true,
     });
+    // Mirror real Node ChildProcess: `exitCode` / `signalCode` are
+    // `null` while alive. Kept in sync with the `child_process
+    // fallback` describe block's mock setup so any future promote-
+    // related test that lands here doesn't trip the production
+    // `child.exitCode !== null` race guard with a stale `undefined`.
+    Object.defineProperty(mockChildProcess, 'exitCode', {
+      value: null,
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(mockChildProcess, 'signalCode', {
+      value: null,
+      writable: true,
+      configurable: true,
+    });
     mockCpSpawn.mockReturnValue(mockChildProcess);
   });
 
