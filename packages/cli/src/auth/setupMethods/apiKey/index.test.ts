@@ -74,4 +74,40 @@ describe('api key provider', () => {
       }),
     ).toBe(false);
   });
+
+  it('creates an install plan for a selected provider endpoint', () => {
+    const plan = createApiKeyProviderInstallPlan({
+      provider: API_KEY_PROVIDERS.zai,
+      apiKey: 'sk-zai',
+      modelIds: ['glm-4.6'],
+      region: 'coding-plan',
+    });
+
+    expect(plan.modelProviders?.[0]?.models).toEqual([
+      {
+        id: 'glm-4.6',
+        name: '[Z.AI] glm-4.6',
+        baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+        envKey: 'ZAI_API_KEY',
+      },
+    ]);
+  });
+
+  it('creates an install plan for the MiniMax China endpoint', () => {
+    const plan = createApiKeyProviderInstallPlan({
+      provider: API_KEY_PROVIDERS.minimax,
+      apiKey: 'sk-minimax',
+      modelIds: ['MiniMax-M2.5'],
+      region: 'china',
+    });
+
+    expect(plan.modelProviders?.[0]?.models).toEqual([
+      {
+        id: 'MiniMax-M2.5',
+        name: '[MiniMax] MiniMax-M2.5',
+        baseUrl: 'https://api.minimaxi.com/v1',
+        envKey: 'MINIMAX_API_KEY',
+      },
+    ]);
+  });
 });

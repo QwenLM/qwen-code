@@ -15,14 +15,12 @@ export {
   type AlibabaStandardRegion,
 } from '../../providers/alibaba/modelStudio.js';
 export { DEEPSEEK_API_KEY_PROVIDER } from '../../providers/thirdParty/deepseek.js';
-export { HUGGINGFACE_API_KEY_PROVIDER } from '../../providers/thirdParty/huggingface.js';
-export { OPENAI_API_KEY_PROVIDER } from '../../providers/thirdParty/openai.js';
+export { MINIMAX_API_KEY_PROVIDER } from '../../providers/thirdParty/minimax.js';
 export { ZAI_API_KEY_PROVIDER } from '../../providers/thirdParty/zai.js';
 
 import { ALIBABA_STANDARD_API_KEY_PROVIDER } from '../../providers/alibaba/modelStudio.js';
 import { DEEPSEEK_API_KEY_PROVIDER } from '../../providers/thirdParty/deepseek.js';
-import { HUGGINGFACE_API_KEY_PROVIDER } from '../../providers/thirdParty/huggingface.js';
-import { OPENAI_API_KEY_PROVIDER } from '../../providers/thirdParty/openai.js';
+import { MINIMAX_API_KEY_PROVIDER } from '../../providers/thirdParty/minimax.js';
 import { ZAI_API_KEY_PROVIDER } from '../../providers/thirdParty/zai.js';
 import type {
   AnyApiKeyProviderConfig,
@@ -34,8 +32,7 @@ export type ApiKeyProviderRegion = string;
 export const API_KEY_PROVIDERS = {
   alibabaStandard: ALIBABA_STANDARD_API_KEY_PROVIDER,
   deepseek: DEEPSEEK_API_KEY_PROVIDER,
-  openai: OPENAI_API_KEY_PROVIDER,
-  huggingface: HUGGINGFACE_API_KEY_PROVIDER,
+  minimax: MINIMAX_API_KEY_PROVIDER,
   zai: ZAI_API_KEY_PROVIDER,
 } as const satisfies Record<string, AnyApiKeyProviderConfig>;
 

@@ -982,7 +982,10 @@ describe('AuthDialog', () => {
     await vi.waitFor(() => {
       const frame = lastFrame();
       expect(frame).toContain('DeepSeek API Key');
-      expect(frame).toContain('OpenAI API Key');
+      expect(frame).toContain('MiniMax API Key');
+      expect(frame).toContain('Z.AI API Key');
+      expect(frame).not.toContain('OpenAI API Key');
+      expect(frame).not.toContain('HuggingFace API Key');
       expect(frame).not.toContain('Standard API Key');
     });
 

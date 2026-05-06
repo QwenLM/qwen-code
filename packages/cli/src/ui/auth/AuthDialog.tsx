@@ -904,15 +904,21 @@ export function AuthDialog(): React.JSX.Element {
       case 'api-key-type-select':
         return t('Third-party Providers \u00B7 Step 1/3 \u00B7 Provider');
       case 'preset-api-key-region-select':
-        return t('Alibaba ModelStudio \u00B7 Step 2/4 \u00B7 Region');
+        return presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
+          ? t('Alibaba ModelStudio \u00B7 Step 2/4 \u00B7 Region')
+          : t('Third-party Providers \u00B7 Step 2/4 \u00B7 Endpoint');
       case 'preset-api-key-input':
         return presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
           ? t('Alibaba ModelStudio \u00B7 Step 3/4 \u00B7 API Key')
-          : t('Third-party Providers \u00B7 Step 2/3 \u00B7 API Key');
+          : presetApiKeyProvider.regions
+            ? t('Third-party Providers \u00B7 Step 3/4 \u00B7 API Key')
+            : t('Third-party Providers \u00B7 Step 2/3 \u00B7 API Key');
       case 'preset-model-id-input':
         return presetApiKeyProvider.id === API_KEY_PROVIDERS.alibabaStandard.id
           ? t('Alibaba ModelStudio \u00B7 Step 4/4 \u00B7 Models')
-          : t('Third-party Providers \u00B7 Step 3/3 \u00B7 Models');
+          : presetApiKeyProvider.regions
+            ? t('Third-party Providers \u00B7 Step 4/4 \u00B7 Models')
+            : t('Third-party Providers \u00B7 Step 3/3 \u00B7 Models');
       case 'custom-protocol-select':
         return t('Custom Provider \u00B7 Step 1/6 \u00B7 Protocol');
       case 'custom-base-url-input':
