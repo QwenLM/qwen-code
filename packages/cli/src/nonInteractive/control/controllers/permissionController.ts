@@ -382,9 +382,13 @@ export class PermissionController extends BaseController {
 
   /**
    * Handle a teammate tool approval request routed via the
-   * TEAMMATE_APPROVAL_REQUEST team event. Uses the same
-   * permission channel as the leader's own tool approvals
-   * (stream-json control request or local mode check).
+   * TEAMMATE_APPROVAL_REQUEST team event. Stream-json only —
+   * non-stream-json sessions handle teammate approvals directly
+   * in `nonInteractiveCli.ts` (mode-aware fallback that warns on
+   * stderr and cancels). The caller in nonInteractiveCli only
+   * forwards events here when `options.controlService` is set,
+   * which is itself stream-json-only. Defensive guard remains
+   * in case that contract is ever broken.
    */
   async handleTeammateApproval(
     event: TeammateApprovalRequestEvent,
@@ -396,14 +400,10 @@ export class PermissionController extends BaseController {
       }
 
       const inputFormat = this.context.config.getInputFormat?.();
-      const isStreamJsonMode = inputFormat === InputFormat.STREAM_JSON;
-
-      if (!isStreamJsonMode) {
-        const modeCheck = this.checkPermissionMode();
-        const outcome = modeCheck.allowed
-          ? ToolConfirmationOutcome.ProceedOnce
-          : ToolConfirmationOutcome.Cancel;
-        await event.respond(outcome);
+      if (inputFormat !== InputFormat.STREAM_JSON) {
+        // Should not happen under the current wiring; cancel
+        // safely rather than silently auto-proceeding.
+        await event.respond(ToolConfirmationOutcome.Cancel);
         return;
       }
 
