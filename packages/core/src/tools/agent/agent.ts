@@ -934,19 +934,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     // ─── Team routing ────────────────────────────────────
-    // When a team is active, route through TeamManager as a
-    // named teammate. Auto-generate a name from the
-    // description if none was provided.
-    if (this.config.getTeamManager() && !isTeammate()) {
-      const teammateName =
-        this.params.name ??
-        (this.params.description
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-|-$/g, '')
-          .slice(0, 30) ||
-          'teammate');
-      return this.executeTeammate(teammateName, signal);
+    // When a team is active AND the caller passed an explicit
+    // `name`, route through TeamManager as a named teammate.
+    // Without a name we fall through to the regular one-shot
+    // subagent flow — the schema says "When provided, spawn as
+    // a named teammate," so the absence of `name` means the
+    // caller wants a one-shot, not a teammate. Auto-deriving a
+    // name from the description here also caused collisions
+    // (description.slice(0, 30) is not unique) and silently
+    // hijacked every Agent call regardless of intent.
+    if (this.params.name && this.config.getTeamManager() && !isTeammate()) {
+      return this.executeTeammate(this.params.name, signal, updateOutput);
     }
 
     try {
@@ -1521,11 +1519,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    * Returns immediately — the teammate runs concurrently.
    * Messages from the teammate are delivered to the leader
    * via TeamManager's inbox polling mechanism.
+   *
+   * `signal` aborts the spawn itself if the leader cancels
+   * before the teammate is registered. `updateOutput` lets the
+   * UI render a brief "spawning…" / "spawned" status while the
+   * teammate's runtime config is loaded.
    */
   private async executeTeammate(
     name: string,
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
+    updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // Caller (`execute`) gates routing on `!isTeammate()`, so the
+    // recursive-spawn check is upstream. Re-check `getTeamManager`
+    // only — it can race with team_delete between the routing
+    // decision and this point.
     const teamManager = this.config.getTeamManager();
     if (!teamManager) {
       return {
@@ -1535,16 +1543,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
     }
 
-    // Teammates cannot spawn sub-teammates (leader-only).
-    if (isTeammate()) {
+    if (signal?.aborted) {
       return {
-        llmContent: 'Only the team leader can spawn teammates.',
-        returnDisplay: 'Only the team leader can spawn teammates.',
-        error: {
-          message: 'Only the team leader can spawn teammates.',
-        },
+        llmContent: `Teammate spawn aborted before "${name}" was registered.`,
+        returnDisplay: `Teammate spawn aborted.`,
+        error: { message: 'Aborted.' },
       };
     }
+
+    updateOutput?.({
+      type: 'task_execution' as const,
+      subagentName: name,
+      taskDescription: this.params.description,
+      taskPrompt: this.params.prompt,
+      status: 'running' as const,
+    });
 
     try {
       await teamManager.spawnTeammate({
