@@ -116,7 +116,11 @@ export function useProviderSetupFlow(
   // -- Lifecycle ------------------------------------------------------------
 
   const start = useCallback(
-    (config: ProviderConfig, initialProtocol?: AuthType) => {
+    (
+      config: ProviderConfig,
+      initialProtocol?: AuthType,
+      existingEnv?: Record<string, string>,
+    ) => {
       setProvider(config);
       const steps = getVisibleSteps(config);
       setVisibleSteps(steps);
@@ -129,7 +133,17 @@ export function useProviderSetupFlow(
       setBaseUrl(defaultUrl);
       setBaseUrlOptionIndex(0);
       setBaseUrlError(null);
-      setApiKey('');
+
+      let prefillKey = '';
+      if (existingEnv) {
+        const envKeyName =
+          typeof config.envKey === 'function'
+            ? config.envKey(proto, defaultUrl)
+            : config.envKey;
+        prefillKey = existingEnv[envKeyName] ?? '';
+      }
+      setApiKey(prefillKey);
+
       setApiKeyError(null);
       setModelIds(getDefaultModelIds(config).join(', '));
       setModelIdsError(null);

@@ -15,6 +15,7 @@ import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRa
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
 import {
   findProviderById,
@@ -159,6 +160,7 @@ export function AuthDialog(): React.JSX.Element {
     },
   } = useUIActions();
   const config = useConfig();
+  const settings = useSettings();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
@@ -204,11 +206,13 @@ export function AuthDialog(): React.JSX.Element {
     [],
   );
 
+  const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
+
   const handleProviderSelect = (providerId: string) => {
     clearErrors();
     const providerConfig = findProviderById(providerId);
     if (!providerConfig) return;
-    setupFlow.start(providerConfig);
+    setupFlow.start(providerConfig, undefined, existingEnv);
     pushView('provider-setup');
   };
 
@@ -274,7 +278,7 @@ export function AuthDialog(): React.JSX.Element {
         pushView('oauth-select');
         break;
       case 'CUSTOM_PROVIDER':
-        setupFlow.start(customProvider);
+        setupFlow.start(customProvider, undefined, existingEnv);
         pushView('provider-setup');
         break;
       default:
