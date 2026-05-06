@@ -689,7 +689,12 @@ export class SubagentManager {
    * When a subagent's model selector specifies a model (bare ID or
    * authType-prefixed), build a Config override with a dedicated
    * ContentGenerator so the model actually reaches the API.
-   * Returns the original context unchanged for inherit selectors.
+   * For inherit selectors we still build a thin Object.create
+   * override so the subagent gets an isolated FileReadCache via
+   * the per-Config own-property machinery — returning `base`
+   * directly would let the subagent share the parent's read entries
+   * and silently weaken prior-read enforcement on its mutation
+   * paths.
    */
   private async maybeOverrideContentGenerator(
     config: SubagentConfig,
@@ -697,7 +702,21 @@ export class SubagentManager {
   ): Promise<Config> {
     const selection = parseSubagentModelSelection(config.model);
     if (selection.inherits) {
-      return base;
+      // Thin prototype-delegation override: no method changes, but a
+      // distinct instance triggers the lazy-init in
+      // `Config.getFileReadCache()` so the subagent gets its own
+      // cache rather than inheriting the parent's.
+      //
+      // Same caveat as in `agent.ts:createApprovalModeOverride`: the
+      // tool registry was bound on the parent at initialise time, so
+      // tool invocations still resolve `this.config` to the parent
+      // and reach the parent's cache. `InProcessBackend.createPerAgentConfig`
+      // already rebuilds the registry via `override.createToolRegistry()`
+      // + `copyDiscoveredToolsFrom(base.getToolRegistry())`; doing
+      // that here is the follow-up that closes the bound-tool path.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const isolated = Object.create(base) as any;
+      return isolated as Config;
     }
 
     const authType =

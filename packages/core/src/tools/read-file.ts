@@ -147,7 +147,14 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // transcript transformation). When disabled we bypass both the
     // fast-path lookup and the post-read record so behaviour matches
     // the pre-cache implementation byte-for-byte.
-    const cacheEnabled = !this.config.getFileReadCacheDisabled() && !isAutoMem;
+    //
+    // Auto-memory files are *recorded* in the cache (so prior-read
+    // enforcement on Edit / WriteFile recognises them as read) but
+    // never serve the file_unchanged placeholder — those files own a
+    // per-read freshness `<system-reminder>` that must be re-emitted
+    // on every read.
+    const cacheEnabled = !this.config.getFileReadCacheDisabled();
+    const useFastPath = cacheEnabled && !isAutoMem;
     const cache = this.config.getFileReadCache();
     // A "full" Read consumes the whole file: no offset, no limit, no PDF
     // page range. Only full Reads are eligible for the file_unchanged
@@ -172,7 +179,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       });
     }
 
-    if (cacheEnabled && stats && isFullRead) {
+    if (useFastPath && stats && isFullRead) {
       const status = cache.check(stats);
       if (
         status.state === 'fresh' &&
@@ -217,27 +224,27 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     //     everything", so we force the next call back through the full
     //     pipeline.
     //
-    // The stat we record is the one taken **after** the read pipeline,
-    // not `stats` from L158. processSingleFileContent does its own stat
-    // internally; if the file mutated between L158 and that internal
-    // stat, the bytes that landed in `result.llmContent` correspond to
-    // the post-read fingerprint, not the pre-read one. Recording
-    // `stats` would store a fingerprint that does not match the bytes
-    // we just emitted, so a later `check()` could report `fresh` and
-    // serve a placeholder pointing at content the model never saw.
-    if (cacheEnabled && stats) {
+    // The stat we record is the one taken inside `processSingleFileContent`
+    // and surfaced via `result.stats`. The internal stat happens
+    // immediately before the actual content read, so the fingerprint
+    // it captures is the one closest to the bytes the model received.
+    // Falling back to a post-read re-stat would describe a possibly-
+    // mutated file rather than the file the read returned: a write
+    // landing between the read and the post-stat would let the cache
+    // record fingerprint Y for content the model only saw at X, and
+    // a follow-up Edit would pass enforcement (`fresh + full +
+    // cacheable @ Y`) against bytes the model never legitimately saw.
+    //
+    // Race residue: the internal-stat-to-actual-read window is still
+    // a few microseconds wide. Closing it completely needs a content
+    // hash on the read pipeline (deferred follow-up — see Risk
+    // section in the PR description).
+    if (cacheEnabled && (result.stats ?? stats)) {
       const cacheable =
         typeof result.llmContent === 'string' &&
         result.originalLineCount !== undefined &&
         !result.isTruncated;
-      let recordStats: Stats = stats;
-      try {
-        recordStats = await fs.stat(absPath);
-      } catch {
-        // Stat after read failed — fall back to the pre-read stat.
-        // The fingerprint may not exactly match the bytes emitted,
-        // but it is the best we have without a second strategy.
-      }
+      const recordStats: Stats = result.stats ?? stats!;
       cache.recordRead(absPath, recordStats, {
         full: isFullRead,
         cacheable,

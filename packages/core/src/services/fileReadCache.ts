@@ -99,16 +99,54 @@ export class FileReadCache {
    *  - `cacheable` — the produced content is suitable for substitution
    *    with a `file_unchanged` placeholder. Set true for plain text,
    *    false for binary / image / audio / video / PDF / notebook.
+   *
+   * The `lastReadWasFull` and `lastReadCacheable` flags are
+   * **sticky-on-true** when the recorded fingerprint matches the
+   * existing entry's `(mtimeMs, sizeBytes)`. That preserves the
+   * model's read-rights across `Read full → Read partial` and
+   * `WriteFile(create) → Read partial → Edit` sequences against
+   * the same bytes.
+   *
+   * When the fingerprint drifts — i.e. the file was mutated between
+   * the prior record and this one — the flags are **reset** to
+   * exactly what this read produced. Sticky-on-true across drift
+   * would let a `Read full @X → external write → Read partial @Y →
+   * Edit` sequence pass enforcement against bytes the model only
+   * saw the first 10 lines of, exactly the regression flagged in
+   * the maintainer review.
+   *
+   * The fast-path `file_unchanged` check still gates on the
+   * incoming request's own `isFullRead` (in `read-file.ts`), so a
+   * partial read does not get a placeholder it shouldn't.
    */
   recordRead(
     absPath: string,
     stats: Stats,
     opts: { full: boolean; cacheable: boolean },
   ): FileReadEntry {
+    const key = FileReadCache.inodeKey(stats);
+    const existing = this.byInode.get(key);
+    const sameFingerprint =
+      existing !== undefined &&
+      existing.mtimeMs === stats.mtimeMs &&
+      existing.sizeBytes === stats.size;
     const entry = this.upsert(absPath, stats);
     entry.lastReadAt = Date.now();
-    entry.lastReadWasFull = opts.full;
-    entry.lastReadCacheable = opts.cacheable;
+    if (sameFingerprint) {
+      // Same bytes the entry already described — sticky-on-true
+      // preserves prior `true` flags from full reads or writes.
+      if (opts.full) {
+        entry.lastReadWasFull = true;
+      }
+      if (opts.cacheable) {
+        entry.lastReadCacheable = true;
+      }
+    } else {
+      // Drift detected (or fresh entry): the prior flags described
+      // different bytes. Reset to what this read actually produced.
+      entry.lastReadWasFull = opts.full;
+      entry.lastReadCacheable = opts.cacheable;
+    }
     return entry;
   }
 
@@ -118,10 +156,24 @@ export class FileReadCache {
    * differ from any prior Read snapshot, so we refresh the cached
    * fingerprint to the post-write Stats; otherwise the next Edit would
    * see its own write as a "stale" external change.
+   *
+   * Read metadata is **always** refreshed alongside the write, not
+   * just for brand-new entries: the model authored the entire current
+   * content, so for prior-read enforcement purposes it has now "seen"
+   * all bytes — regardless of whether the prior recordRead happened
+   * to be partial (`lastReadWasFull=false`) or non-cacheable
+   * (`lastReadCacheable=false`). Without this, a sequence such as
+   * `ReadFile(limit=10)` → `WriteFile` (full content) → `Edit` would
+   * be rejected on the Edit because `lastReadWasFull=false` from the
+   * earlier partial read would persist through the write.
    */
   recordWrite(absPath: string, stats: Stats): FileReadEntry {
     const entry = this.upsert(absPath, stats);
-    entry.lastWriteAt = Date.now();
+    const now = Date.now();
+    entry.lastWriteAt = now;
+    entry.lastReadAt = now;
+    entry.lastReadWasFull = true;
+    entry.lastReadCacheable = true;
     return entry;
   }
 
