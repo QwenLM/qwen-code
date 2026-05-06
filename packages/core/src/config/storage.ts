@@ -8,9 +8,9 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getProjectHash, sanitizeCwd } from '../utils/paths.js';
+import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
 
-export const QWEN_DIR = '.qwen';
+export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
 export const OAUTH_FILE = 'oauth_creds.json';
 export const SKILL_PROVIDER_CONFIG_DIRS = ['.qwen', '.agents'];

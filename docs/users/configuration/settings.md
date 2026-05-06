@@ -578,6 +578,10 @@ For authentication-related variables (like `OPENAI_*`) and the recommended `.qwe
 | `QWEN_CODE_UNATTENDED_RETRY`   | Set to `true` or `1` to enable persistent retry mode. When enabled, transient API capacity errors (HTTP 429 Rate Limit and 529 Overloaded) are retried indefinitely with exponential backoff (capped at 5 minutes per retry) and heartbeat keepalives every 30 seconds on stderr. | Designed for CI/CD pipelines and background automation where long-running tasks should survive temporary API outages. Must be set explicitly — `CI=true` alone does **not** activate this mode. See [Headless Mode](../features/headless#persistent-retry-mode) for details. Example: `export QWEN_CODE_UNATTENDED_RETRY=1`                                                                                                                                                        |
 | `QWEN_CODE_PROFILE_STARTUP`    | Set to `1` to enable startup performance profiling. Writes a JSON timing report to `~/.qwen/startup-perf/` with per-phase durations.                                                                                                                                              | Only active inside the sandbox child process. Zero overhead when not set. Example: `export QWEN_CODE_PROFILE_STARTUP=1`                                                                                                                                                                                                                                                                                                                                                            |
 
+When both user-level `.env` files define the same variable, the Qwen-specific
+file wins: `<QWEN_HOME>/.env` (or `~/.qwen/.env` when `QWEN_HOME` is unset) is
+loaded before `~/.env`, and existing environment values are not overwritten.
+
 ## Command-Line Arguments
 
 Arguments passed directly when running the CLI can override other configurations for that specific session.

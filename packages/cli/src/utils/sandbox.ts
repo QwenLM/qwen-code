@@ -35,6 +35,30 @@ function getContainerPath(hostPath: string): string {
   return hostPath;
 }
 
+function ensureDirectoryAndGetRealPath(dir: string): string {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return fs.realpathSync(dir);
+}
+
+function normalizeForPathComparison(pathToNormalize: string): string {
+  const normalized = path.normalize(pathToNormalize);
+  return os.platform() === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function isSameOrChildPath(childPath: string, parentPath: string): boolean {
+  const child = normalizeForPathComparison(childPath);
+  const parent = normalizeForPathComparison(parentPath);
+  const relative = path.relative(parent, child);
+  return (
+    relative === '' ||
+    (relative !== '' &&
+      !relative.startsWith('..') &&
+      !path.isAbsolute(relative))
+  );
+}
+
 const LOCAL_DEV_SANDBOX_IMAGE_NAME = 'qwen-code-sandbox';
 const SANDBOX_NETWORK_NAME = 'qwen-code-sandbox';
 const SANDBOX_PROXY_NAME = 'qwen-code-sandbox-proxy';
@@ -432,47 +456,64 @@ export async function start_sandbox(
   // mount current directory as working directory in sandbox (set via --workdir)
   args.push('--volume', `${workdir}:${containerWorkdir}`);
 
-  // mount user settings directory inside container, after creating if missing
-  // note user/home changes inside sandbox and we mount at BOTH paths for consistency
+  // Mount user settings at /home/node/.qwen and at the canonical host path
+  // used by QWEN_HOME, unless that host path is already covered by a broader
+  // runtime-dir mount below.
   const userSettingsDirOnHost = getUserSettingsDir();
+  const runtimeBaseDirOnHost = Storage.getRuntimeBaseDir();
+  const userSettingsDirRealPath = ensureDirectoryAndGetRealPath(
+    userSettingsDirOnHost,
+  );
+  const runtimeBaseDirRealPath =
+    ensureDirectoryAndGetRealPath(runtimeBaseDirOnHost);
   const userSettingsDirInSandbox = getContainerPath(
     `/home/node/${SETTINGS_DIRECTORY_NAME}`,
   );
-  if (!fs.existsSync(userSettingsDirOnHost)) {
-    // recursive: a custom QWEN_HOME like /tmp/qwen/config can have a parent
-    // that doesn't exist yet on first run, and a non-recursive mkdir would
-    // throw ENOENT before we ever get to mount it.
-    fs.mkdirSync(userSettingsDirOnHost, { recursive: true });
-  }
-  args.push('--volume', `${userSettingsDirOnHost}:${userSettingsDirInSandbox}`);
-  if (userSettingsDirInSandbox !== userSettingsDirOnHost) {
+  const userSettingsDirContainerPath = getContainerPath(
+    userSettingsDirRealPath,
+  );
+  const runtimeBaseDirContainerPath = getContainerPath(runtimeBaseDirRealPath);
+  const runtimeCoveredByUserSettings = isSameOrChildPath(
+    runtimeBaseDirRealPath,
+    userSettingsDirRealPath,
+  );
+  const userSettingsCoveredByRuntime = isSameOrChildPath(
+    userSettingsDirRealPath,
+    runtimeBaseDirRealPath,
+  );
+  const runtimeSameAsUserSettings =
+    runtimeCoveredByUserSettings && userSettingsCoveredByRuntime;
+
+  args.push(
+    '--volume',
+    `${userSettingsDirRealPath}:${userSettingsDirInSandbox}`,
+  );
+  if (
+    (!userSettingsCoveredByRuntime || runtimeSameAsUserSettings) &&
+    userSettingsDirInSandbox !== userSettingsDirContainerPath
+  ) {
     args.push(
       '--volume',
-      `${userSettingsDirOnHost}:${getContainerPath(userSettingsDirOnHost)}`,
+      `${userSettingsDirRealPath}:${userSettingsDirContainerPath}`,
     );
   }
 
   // Pass QWEN_HOME so the sandboxed CLI resolves the global qwen dir to the
   // same path the host did, instead of relying on the /home/node/.qwen mount
   // being the default fallback.
-  args.push('--env', `QWEN_HOME=${getContainerPath(userSettingsDirOnHost)}`);
+  args.push('--env', `QWEN_HOME=${userSettingsDirContainerPath}`);
 
   // Mount the runtime base dir and pass QWEN_RUNTIME_DIR when it diverges
   // from the global qwen dir; otherwise the existing user-settings mount
   // already covers it.
-  const runtimeBaseDirOnHost = Storage.getRuntimeBaseDir();
-  if (runtimeBaseDirOnHost !== userSettingsDirOnHost) {
-    if (!fs.existsSync(runtimeBaseDirOnHost)) {
-      fs.mkdirSync(runtimeBaseDirOnHost, { recursive: true });
-    }
+  if (!runtimeCoveredByUserSettings) {
     args.push(
       '--volume',
-      `${runtimeBaseDirOnHost}:${getContainerPath(runtimeBaseDirOnHost)}`,
+      `${runtimeBaseDirRealPath}:${runtimeBaseDirContainerPath}`,
     );
-    args.push(
-      '--env',
-      `QWEN_RUNTIME_DIR=${getContainerPath(runtimeBaseDirOnHost)}`,
-    );
+  }
+  if (!runtimeSameAsUserSettings) {
+    args.push('--env', `QWEN_RUNTIME_DIR=${runtimeBaseDirContainerPath}`);
   }
 
   // mount os.tmpdir() as os.tmpdir() inside container
