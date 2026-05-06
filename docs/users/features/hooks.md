@@ -761,6 +761,11 @@ Hook output supports three categories of fields:
 
 **Purpose**: Executed when a new todo item is created via the `todo_write` tool. Allows validation, logging, or blocking of todo creation.
 
+Todo hooks run in two phases:
+
+- `validation`: runs before persistence. Use this phase for validation only; returning `block` or `deny` prevents the write.
+- `postWrite`: runs after persistence. Use this phase for side effects such as logging or syncing; `block` or `deny` is ignored in this phase.
+
 **Event-specific fields**:
 
 ```json
@@ -768,18 +773,21 @@ Hook output supports three categories of fields:
   "todo_id": "unique identifier for the todo item",
   "todo_content": "content/description of the todo item",
   "todo_status": "pending | in_progress | completed",
-  "all_todos": "array of all todo items in the current list"
+  "all_todos": "array of all todo items in the current list",
+  "phase": "validation | postWrite"
 }
 ```
 
 **Output Options**:
 
-- `decision`: "allow" or "block"
+- `decision`: "allow", "block", or "deny"
 - `reason`: human-readable explanation for the decision (required when blocking)
 
 **Blocking Behavior**:
 
-When `decision` is "block" (exit code 2), the todo creation is prevented. The todo list remains unchanged, and the reason is provided as feedback to the model.
+During the `validation` phase, when `decision` is `block` or `deny` (exit code 2), todo creation is prevented. The todo list remains unchanged, and the reason is provided as feedback to the model.
+
+During the `postWrite` phase, the todo has already been persisted. Hooks may still return output, but `block` / `deny` does not undo the write and should not be used for validation.
 
 **Example Output (Allow)**:
 
@@ -850,6 +858,11 @@ exit 0
 
 **Purpose**: Executed when a todo item is marked as completed. Allows validation, logging, or blocking of todo completion.
 
+Todo hooks run in two phases:
+
+- `validation`: runs before persistence. Use this phase for validation only; returning `block` or `deny` prevents the write.
+- `postWrite`: runs after persistence. Use this phase for side effects such as logging or syncing; `block` or `deny` is ignored in this phase.
+
 **Event-specific fields**:
 
 ```json
@@ -857,18 +870,21 @@ exit 0
   "todo_id": "unique identifier for the todo item",
   "todo_content": "content/description of the todo item",
   "previous_status": "pending | in_progress (status before completion)",
-  "all_todos": "array of all todo items in the current list"
+  "all_todos": "array of all todo items in the current list",
+  "phase": "validation | postWrite"
 }
 ```
 
 **Output Options**:
 
-- `decision`: "allow" or "block"
+- `decision`: "allow", "block", or "deny"
 - `reason`: human-readable explanation for the decision (required when blocking)
 
 **Blocking Behavior**:
 
-When `decision` is "block" (exit code 2), the todo completion is prevented. The todo item remains in its previous status, and the reason is provided as feedback to the model.
+During the `validation` phase, when `decision` is `block` or `deny` (exit code 2), todo completion is prevented. The todo item remains in its previous status, and the reason is provided as feedback to the model.
+
+During the `postWrite` phase, the todo has already been persisted. Hooks may still return output, but `block` / `deny` does not undo the write and should not be used for validation.
 
 **Example Output (Allow)**:
 

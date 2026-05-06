@@ -543,6 +543,7 @@ export default {
   'Updates all extensions or a named extension to the latest version.':
     '将所有扩展或指定扩展更新到最新版本。',
   'Update all extensions.': '更新所有扩展。',
+  'The name of the extension to update.': '要更新的扩展名称。',
   'Either an extension name or --all must be provided':
     '必须提供扩展名称或 --all',
   'Lists installed extensions.': '列出已安装的扩展。',
@@ -645,6 +646,7 @@ export default {
     '按 Escape、Ctrl+C 或 Ctrl+D 取消',
   'Press Space, Enter, or Escape to dismiss': '按空格、回车或 Escape 关闭',
   'No hook selected': '未选择 Hook',
+  'Session (temporary)': '会话（临时）',
   // Hooks - List Step
   'No hook events found.': '未找到 Hook 事件。',
   '{{count}} hook configured': '{{count}} 个 Hook 已配置',
@@ -1556,6 +1558,8 @@ export default {
     '上下文空间不足，用 /compress 释放空间。',
   'Long conversation? /compress summarizes history to free context.':
     '对话太长？用 /compress 总结历史，释放上下文。',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    '显示上下文窗口使用情况明细。使用 "/context detail" 查看逐项明细。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1728,6 +1732,8 @@ export default {
   // Coding Plan Authentication
   // ============================================================================
   'API key cannot be empty.': 'API Key 不能为空。',
+  'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
+    '无效的 API Key。Coding Plan API Key 以 "sk-sp-" 开头，请检查。',
   'You can get your Coding Plan API key here':
     '您可以在这里获取 Coding Plan API Key',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':

@@ -674,7 +674,7 @@ export default {
   'When a permission dialog is displayed':
     'Wenn ein Berechtigungsdialog angezeigt wird',
   'When a new todo item is created':
-    'Wenn eine neue Todo-Element erstellt wird',
+    'Wenn ein neues Todo-Element erstellt wird',
   'When a todo item is marked as completed':
     'Wenn ein Todo-Element als erledigt markiert wird',
   // Hooks - Event Descriptions (detailed)

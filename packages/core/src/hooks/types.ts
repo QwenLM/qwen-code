@@ -965,14 +965,13 @@ export interface TodoItem {
 export interface TodoChanges {
   created: TodoItem[];
   completed: TodoItem[];
-  statusChanged: TodoItem[];
 }
 
 /**
  * Compare old and new todo lists to detect changes
  * @param oldTodos The previous todo list
  * @param newTodos The new todo list
- * @returns TodoChanges containing created, completed, and statusChanged items
+ * @returns TodoChanges containing created and completed items
  */
 export function detectTodoChanges(
   oldTodos: TodoItem[],
@@ -983,7 +982,6 @@ export function detectTodoChanges(
   const changes: TodoChanges = {
     created: [],
     completed: [],
-    statusChanged: [],
   };
 
   for (const newTodo of newTodos) {
@@ -998,9 +996,6 @@ export function detectTodoChanges(
     ) {
       // Todo completed (status changed to 'completed')
       changes.completed.push(newTodo);
-    } else if (oldTodo.status !== newTodo.status) {
-      // Other status change (e.g., pending -> in_progress)
-      changes.statusChanged.push(newTodo);
     }
   }
 

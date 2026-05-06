@@ -7,11 +7,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { TodoWriteParams } from './todoWrite.js';
 import { TodoWriteTool, listTodoSessions } from './todoWrite.js';
-import type { TodoItem } from '../hooks/types.js';
+import { DefaultHookOutput, HookPhase, type TodoItem } from '../hooks/types.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
+import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
 import { Storage } from '../config/storage.js';
 
 // Mock fs modules
@@ -263,6 +264,321 @@ describe('TodoWriteTool', () => {
         expect.stringContaining('test-session-123.json'),
         expect.stringContaining('"todos"'),
         'utf-8',
+      );
+    });
+
+    it('should block todo creation when validation hook returns deny', async () => {
+      const hookResult: AggregatedHookResult = {
+        success: true,
+        allOutputs: [
+          new DefaultHookOutput({
+            decision: 'deny',
+            reason: 'Creation denied',
+          }),
+        ],
+        errors: [],
+        totalDuration: 10,
+        finalOutput: new DefaultHookOutput({
+          decision: 'deny',
+          reason: 'Creation denied',
+        }),
+      };
+      const mockHookSystem = {
+        fireTodoCreatedEvent: vi.fn().mockResolvedValue(hookResult),
+        fireTodoCompletedEvent: vi.fn(),
+      };
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => mockHookSystem,
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+
+      const params: TodoWriteParams = {
+        todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+      };
+
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
+
+      expect(mockHookSystem.fireTodoCreatedEvent).toHaveBeenCalledWith(
+        '1',
+        'Task 1',
+        'pending',
+        params.todos,
+        HookPhase.Validation,
+        mockAbortSignal,
+      );
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      expect(result.llmContent).toContain(
+        'Todo creation blocked: Creation denied',
+      );
+      expect(result.returnDisplay).toBe(
+        'Todo creation blocked: Creation denied',
+      );
+    });
+
+    it('should block todo completion when validation hook returns deny', async () => {
+      const hookResult: AggregatedHookResult = {
+        success: true,
+        allOutputs: [
+          new DefaultHookOutput({
+            decision: 'deny',
+            reason: 'Completion denied',
+          }),
+        ],
+        errors: [],
+        totalDuration: 10,
+        finalOutput: new DefaultHookOutput({
+          decision: 'deny',
+          reason: 'Completion denied',
+        }),
+      };
+      const mockHookSystem = {
+        fireTodoCreatedEvent: vi.fn(),
+        fireTodoCompletedEvent: vi.fn().mockResolvedValue(hookResult),
+      };
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => mockHookSystem,
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+
+      const existingTodos = [
+        { id: '1', content: 'Task 1', status: 'in_progress' },
+      ];
+      const params: TodoWriteParams = {
+        todos: [{ id: '1', content: 'Task 1', status: 'completed' }],
+      };
+
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ todos: existingTodos }),
+      );
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
+
+      expect(mockHookSystem.fireTodoCompletedEvent).toHaveBeenCalledWith(
+        '1',
+        'Task 1',
+        'in_progress',
+        params.todos,
+        HookPhase.Validation,
+        mockAbortSignal,
+      );
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      expect(result.llmContent).toContain(
+        'Todo completion blocked: Completion denied',
+      );
+      expect(result.returnDisplay).toBe(
+        'Todo completion blocked: Completion denied',
+      );
+    });
+
+    it('should ignore postWrite deny decisions after persistence', async () => {
+      const hookResult: AggregatedHookResult = {
+        success: true,
+        allOutputs: [
+          new DefaultHookOutput({
+            decision: 'deny',
+            reason: 'Ignored after write',
+          }),
+        ],
+        errors: [],
+        totalDuration: 10,
+        finalOutput: new DefaultHookOutput({
+          decision: 'deny',
+          reason: 'Ignored after write',
+        }),
+      };
+      const mockHookSystem = {
+        fireTodoCreatedEvent: vi
+          .fn()
+          .mockResolvedValueOnce({
+            success: true,
+            allOutputs: [new DefaultHookOutput({ decision: 'allow' })],
+            errors: [],
+            totalDuration: 10,
+            finalOutput: new DefaultHookOutput({ decision: 'allow' }),
+          })
+          .mockResolvedValueOnce(hookResult),
+        fireTodoCompletedEvent: vi.fn(),
+      };
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => mockHookSystem,
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+
+      const params: TodoWriteParams = {
+        todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+      };
+
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockFs.writeFile.mockResolvedValue(undefined);
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
+
+      expect(mockFs.writeFile).toHaveBeenCalled();
+      expect(mockHookSystem.fireTodoCreatedEvent).toHaveBeenNthCalledWith(
+        1,
+        '1',
+        'Task 1',
+        'pending',
+        params.todos,
+        HookPhase.Validation,
+        mockAbortSignal,
+      );
+      expect(mockHookSystem.fireTodoCreatedEvent).toHaveBeenNthCalledWith(
+        2,
+        '1',
+        'Task 1',
+        'pending',
+        params.todos,
+        HookPhase.PostWrite,
+        mockAbortSignal,
+      );
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
+      );
+    });
+
+    it('should validate created todos concurrently and stop before writing when one blocks', async () => {
+      let releaseSlowHook: (() => void) | undefined;
+      const slowValidation = new Promise<AggregatedHookResult>((resolve) => {
+        releaseSlowHook = () =>
+          resolve({
+            success: true,
+            allOutputs: [new DefaultHookOutput({ decision: 'allow' })],
+            errors: [],
+            totalDuration: 10,
+            finalOutput: new DefaultHookOutput({ decision: 'allow' }),
+          });
+      });
+
+      const mockHookSystem = {
+        fireTodoCreatedEvent: vi
+          .fn()
+          .mockImplementationOnce(() => slowValidation)
+          .mockResolvedValueOnce({
+            success: true,
+            allOutputs: [
+              new DefaultHookOutput({
+                decision: 'deny',
+                reason: 'Second todo denied',
+              }),
+            ],
+            errors: [],
+            totalDuration: 10,
+            finalOutput: new DefaultHookOutput({
+              decision: 'deny',
+              reason: 'Second todo denied',
+            }),
+          }),
+        fireTodoCompletedEvent: vi.fn(),
+      };
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => mockHookSystem,
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+
+      const params: TodoWriteParams = {
+        todos: [
+          { id: '1', content: 'Task 1', status: 'pending' },
+          { id: '2', content: 'Task 2', status: 'pending' },
+        ],
+      };
+
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
+
+      const invocation = tool.build(params);
+      const executionPromise = invocation.execute(mockAbortSignal);
+
+      await vi.waitFor(() => {
+        expect(mockHookSystem.fireTodoCreatedEvent).toHaveBeenCalledTimes(2);
+      });
+
+      releaseSlowHook?.();
+      const result = await executionPromise;
+
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      expect(result.llmContent).toContain(
+        'Todo creation blocked: Second todo denied',
+      );
+    });
+
+    it('should run postWrite hooks concurrently after persistence', async () => {
+      let postWriteReleaseCount = 0;
+      const postWriteStarted: string[] = [];
+      const validationAllow: AggregatedHookResult = {
+        success: true,
+        allOutputs: [new DefaultHookOutput({ decision: 'allow' })],
+        errors: [],
+        totalDuration: 10,
+        finalOutput: new DefaultHookOutput({ decision: 'allow' }),
+      };
+
+      const mockHookSystem = {
+        fireTodoCreatedEvent: vi
+          .fn()
+          .mockImplementation((id, _content, _status, _allTodos, phase) => {
+            if (phase === HookPhase.Validation) {
+              return Promise.resolve(validationAllow);
+            }
+
+            postWriteStarted.push(id as string);
+            return new Promise<AggregatedHookResult>((resolve) => {
+              setTimeout(() => {
+                postWriteReleaseCount += 1;
+                resolve({
+                  success: true,
+                  allOutputs: [new DefaultHookOutput({ decision: 'allow' })],
+                  errors: [],
+                  totalDuration: 10,
+                  finalOutput: new DefaultHookOutput({ decision: 'allow' }),
+                });
+              }, 0);
+            });
+          }),
+        fireTodoCompletedEvent: vi.fn(),
+      };
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => mockHookSystem,
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+
+      const params: TodoWriteParams = {
+        todos: [
+          { id: '1', content: 'Task 1', status: 'pending' },
+          { id: '2', content: 'Task 2', status: 'pending' },
+        ],
+      };
+
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockFs.writeFile.mockResolvedValue(undefined);
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
+
+      expect(mockFs.writeFile).toHaveBeenCalled();
+      expect(postWriteStarted).toEqual(['1', '2']);
+      expect(postWriteReleaseCount).toBe(2);
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
       );
     });
   });

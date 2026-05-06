@@ -15,9 +15,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { TodoItem } from '../hooks/types.js';
-import { detectTodoChanges, HookPhase } from '../hooks/types.js';
-import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
+import { detectTodoChanges, HookPhase, type TodoItem } from '../hooks/types.js';
 export type { TodoItem } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('TODO_WRITE');
@@ -289,6 +287,20 @@ async function writeTodosToFile(
   await fs.writeFile(todoFilePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+function createBlockedTodoResult(
+  message: string,
+  systemMessage: string,
+): ToolResult {
+  return {
+    llmContent: `${message}
+
+<system-reminder>
+${systemMessage}
+</system-reminder>`,
+    returnDisplay: message,
+  };
+}
+
 class TodoWriteToolInvocation extends BaseToolInvocation<
   TodoWriteParams,
   ToolResult
@@ -337,34 +349,43 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
       // Validate TodoCreated hooks
       if (hookSystem && changes.created.length > 0) {
-        for (const todo of changes.created) {
-          const result: AggregatedHookResult =
-            await hookSystem.fireTodoCreatedEvent(
+        const createdResults = await Promise.all(
+          changes.created.map((todo) =>
+            hookSystem.fireTodoCreatedEvent(
               todo.id,
               todo.content,
               todo.status,
               finalTodos,
               HookPhase.Validation,
               _signal,
-            );
+            ),
+          ),
+        );
 
-          // If blocking, throw WITHOUT writing (no side effects executed yet)
-          if (result.finalOutput?.decision === 'block') {
-            throw new Error(
-              `TodoCreated hook feedback: ${result.finalOutput.reason || 'Hook blocked todo creation'}`,
-            );
-          }
+        const blockedCreatedResult = createdResults.find(
+          (result) =>
+            result.finalOutput?.decision === 'block' ||
+            result.finalOutput?.decision === 'deny',
+        );
+        if (blockedCreatedResult?.finalOutput) {
+          const reason =
+            blockedCreatedResult.finalOutput.reason ||
+            'Hook blocked todo creation';
+          return createBlockedTodoResult(
+            `Todo creation blocked: ${reason}`,
+            `Todo list was not modified because a TodoCreated hook blocked the operation: ${reason}`,
+          );
         }
       }
 
       // Validate TodoCompleted hooks
       if (hookSystem && changes.completed.length > 0) {
-        for (const todo of changes.completed) {
-          const oldTodo = oldTodosMap.get(todo.id);
-          const previousStatus = oldTodo?.status ?? 'pending';
+        const completedResults = await Promise.all(
+          changes.completed.map((todo) => {
+            const oldTodo = oldTodosMap.get(todo.id);
+            const previousStatus = oldTodo?.status ?? 'pending';
 
-          const result: AggregatedHookResult =
-            await hookSystem.fireTodoCompletedEvent(
+            return hookSystem.fireTodoCompletedEvent(
               todo.id,
               todo.content,
               previousStatus as 'pending' | 'in_progress',
@@ -372,13 +393,22 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
               HookPhase.Validation,
               _signal,
             );
+          }),
+        );
 
-          // If blocking, throw WITHOUT writing
-          if (result.finalOutput?.decision === 'block') {
-            throw new Error(
-              `TodoCompleted hook feedback: ${result.finalOutput.reason || 'Hook blocked todo completion'}`,
-            );
-          }
+        const blockedCompletedResult = completedResults.find(
+          (result) =>
+            result.finalOutput?.decision === 'block' ||
+            result.finalOutput?.decision === 'deny',
+        );
+        if (blockedCompletedResult?.finalOutput) {
+          const reason =
+            blockedCompletedResult.finalOutput.reason ||
+            'Hook blocked todo completion';
+          return createBlockedTodoResult(
+            `Todo completion blocked: ${reason}`,
+            `Todo list was not modified because a TodoCompleted hook blocked the operation: ${reason}`,
+          );
         }
       }
 
@@ -389,32 +419,36 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       // These hooks can now safely perform side effects knowing data is persisted
       // We don't check for blocking here since validation already passed
       if (hookSystem && changes.created.length > 0) {
-        for (const todo of changes.created) {
-          await hookSystem.fireTodoCreatedEvent(
-            todo.id,
-            todo.content,
-            todo.status,
-            finalTodos,
-            HookPhase.PostWrite,
-            _signal,
-          );
-        }
+        await Promise.all(
+          changes.created.map((todo) =>
+            hookSystem.fireTodoCreatedEvent(
+              todo.id,
+              todo.content,
+              todo.status,
+              finalTodos,
+              HookPhase.PostWrite,
+              _signal,
+            ),
+          ),
+        );
       }
 
       if (hookSystem && changes.completed.length > 0) {
-        for (const todo of changes.completed) {
-          const oldTodo = oldTodosMap.get(todo.id);
-          const previousStatus = oldTodo?.status ?? 'pending';
+        await Promise.all(
+          changes.completed.map((todo) => {
+            const oldTodo = oldTodosMap.get(todo.id);
+            const previousStatus = oldTodo?.status ?? 'pending';
 
-          await hookSystem.fireTodoCompletedEvent(
-            todo.id,
-            todo.content,
-            previousStatus as 'pending' | 'in_progress',
-            finalTodos,
-            HookPhase.PostWrite,
-            _signal,
-          );
-        }
+            return hookSystem.fireTodoCompletedEvent(
+              todo.id,
+              todo.content,
+              previousStatus as 'pending' | 'in_progress',
+              finalTodos,
+              HookPhase.PostWrite,
+              _signal,
+            );
+          }),
+        );
       }
 
       // 6. Create structured display object for rich UI rendering
