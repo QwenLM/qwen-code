@@ -306,11 +306,11 @@ export class Turn {
           continue; // Skip to the next event in the stream
         }
 
-        // Surface auto-compaction that fired inside the chat stream as the
-        // top-level ChatCompressed event so existing UI handlers stay
-        // connected. GeminiClient.sendMessageStream typically runs the
-        // compression pass earlier and emits this event itself; this branch
-        // catches the case where the chat compressed without a pre-call.
+        // Surface auto-compaction that fired inside chat.sendMessageStream
+        // as the top-level ChatCompressed event so existing UI handlers stay
+        // connected. This bridge is the primary path for auto-compaction
+        // events; manual /compress emits its own ChatCompressed in
+        // GeminiClient.tryCompressChat.
         if (streamEvent.type === 'compressed') {
           yield {
             type: GeminiEventType.ChatCompressed,

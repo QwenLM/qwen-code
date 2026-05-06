@@ -1847,8 +1847,12 @@ describe('ChatCompressionService', () => {
         },
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      // Set originalTokenCount above the threshold gate (0.7 * 30000 = 21000)
+      // so the test actually exercises findCompressSplitPoint and the
+      // MIN_COMPRESSION_FRACTION decision rather than short-circuiting at
+      // the cheap-gate.
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        20_000,
+        22_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',

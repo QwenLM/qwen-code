@@ -1408,6 +1408,12 @@ export class GeminiClient {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const compressedHistory = this.getChat().getHistory();
       await this.startChat(compressedHistory);
+      // startChat() creates a new GeminiChat without touching FileReadCache,
+      // so prior read_file results that were summarised away would still
+      // resolve to the file_unchanged placeholder. Clear so post-compaction
+      // Reads re-emit bytes the model can no longer see in history.
+      debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
+      this.config.getFileReadCache().clear();
       this.getChat().setLastPromptTokenCount(info.newTokenCount);
       // Re-send a full IDE context blob on the next regular message —
       // compression dropped the previous context turn from history.

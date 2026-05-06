@@ -22,7 +22,7 @@ import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { CompressionStatus } from './turn.js';
+import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
 import { ChatCompressionService } from '../services/chatCompressionService.js';
 
 // Mock fs module to prevent actual file system operations during tests
@@ -127,6 +127,7 @@ describe('GeminiChat', async () => {
         .fn()
         .mockReturnValue({ debug: vi.fn(), warn: vi.fn(), info: vi.fn() }),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
     } as unknown as Config;
 
     // Disable 429 simulation for tests
@@ -1121,6 +1122,48 @@ describe('GeminiChat', async () => {
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
       expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(123_456);
+    });
+
+    it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ok' }] },
+      ];
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: compressedHistory,
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('answer'),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'go' },
+        'prompt-id-yield-compressed',
+      );
+      const events: Array<{ type: StreamEventType }> = [];
+      for await (const event of stream) {
+        events.push(event as { type: StreamEventType });
+      }
+
+      expect(events.length).toBeGreaterThan(0);
+      expect(events[0].type).toBe(StreamEventType.COMPRESSED);
+      expect(
+        (events[0] as { type: StreamEventType; info: ChatCompressionInfo }).info
+          .compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSED);
+      expect(
+        (events[0] as { type: StreamEventType; info: ChatCompressionInfo }).info
+          .newTokenCount,
+      ).toBe(200);
     });
 
     it('clears hasFailedCompressionAttempt after a forced successful compression', async () => {

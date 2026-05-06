@@ -399,6 +399,12 @@ export class GeminiChat {
         compressedHistory: newHistory,
       });
       this.setHistory(newHistory);
+      // Compaction summarises away prior full-Read tool results, but the
+      // FileReadCache still treats those reads as "in this conversation".
+      // A follow-up Read could then return the file_unchanged placeholder
+      // pointing at content the model can no longer retrieve from history.
+      debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
+      this.config.getFileReadCache().clear();
       this.lastPromptTokenCount = info.newTokenCount;
       // Mirror to the global singleton only when wired (main session).
       // Subagents pass `telemetryService=undefined` to keep their context
@@ -411,7 +417,9 @@ export class GeminiChat {
       info.compressionStatus ===
         CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
       info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY
+        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
+      info.compressionStatus ===
+        CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR
     ) {
       // Track failed attempts (only mark as failed if not forced) so we
       // stop spending compression-API calls on a chat that can't shrink.

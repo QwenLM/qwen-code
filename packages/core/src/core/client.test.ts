@@ -903,6 +903,47 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(client['forceFullIdeContext']).toBe(false);
     });
+
+    it('flips forceFullIdeContext when ChatCompressed flows through sendMessageStream', async () => {
+      // Auto-compaction lives inside chat.sendMessageStream and surfaces via
+      // the compressed → ChatCompressed bridge in turn.ts. The flip on this
+      // path is owned by the for-await loop in client.sendMessageStream, not
+      // by tryCompressChat — so this test feeds the event in directly.
+      vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.NOOP,
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-auto-flip',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
   });
 
   describe('sendMessageStream', () => {
