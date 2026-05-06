@@ -1156,6 +1156,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentId: hookOpts.agentId,
           description: this.params.description,
           subagentType: subagentConfig.name,
+          flavor: 'background',
           status: 'running',
           startTime: Date.now(),
           abortController: bgAbortController,
@@ -1334,20 +1335,98 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Same agent-identity frame as the background path: a foreground
       // subagent can also launch nested agents, and those nested launches
       // need to see this subagent's id as their `parentAgentId`.
-      const runFramed = () =>
-        runWithAgentContext({ agentId: hookOpts.agentId }, () =>
-          this.runSubagentWithHooks(subagent, contextState, hookOpts),
-        );
 
       if (isFork) {
         // Background fork execution. Run under an AsyncLocalStorage frame so
         // nested `agent` tool calls by the fork's model can be detected.
-        void runInForkContext(runFramed);
+        // Forks run async (return a placeholder); skip foreground registration.
+        const runFramedFork = () =>
+          runWithAgentContext({ agentId: hookOpts.agentId }, () =>
+            this.runSubagentWithHooks(subagent, contextState, hookOpts),
+          );
+        void runInForkContext(runFramedFork);
         return {
           llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
           returnDisplay: this.currentDisplay!,
         };
+      }
+
+      // ── Foreground (synchronous) execution path ────────────────
+      // Compose a child AbortController so the dialog's per-agent cancel
+      // can abort just this subagent without aborting the parent turn.
+      // Parent abort still propagates down (so ESC at the parent kills
+      // the subagent), but child abort does NOT propagate up.
+      const fgAbortController = new AbortController();
+      const onParentAbort = () => fgAbortController.abort();
+      if (signal?.aborted) {
+        fgAbortController.abort();
       } else {
+        signal?.addEventListener('abort', onParentAbort, { once: true });
+      }
+
+      const fgHookOpts = { ...hookOpts, signal: fgAbortController.signal };
+      const runFramed = () =>
+        runWithAgentContext({ agentId: hookOpts.agentId }, () =>
+          this.runSubagentWithHooks(subagent, contextState, fgHookOpts),
+        );
+
+      // Register in BackgroundTaskRegistry with flavor:'foreground' so the
+      // pill counts the run and the dialog can drill in. Foreground entries
+      // skip XML notification and headless-holdback (see the registry for
+      // the gating logic).
+      const registry = this.config.getBackgroundTaskRegistry();
+      registry.register({
+        agentId: hookOpts.agentId,
+        description: this.params.description,
+        subagentType: hookOpts.agentType,
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: fgAbortController,
+        prompt: this.params.prompt,
+        toolUseId: this.callId,
+      });
+
+      // Mirror the background path's progress wiring so the dialog detail
+      // body has live tool-call activity AND a current `entry.stats`
+      // subtitle (`N tools · X tokens · Ys`). Without this, foreground
+      // entries collapse to elapsed-only in the dialog while background
+      // entries show full stats — strictly less information for the same
+      // runtime events.
+      //
+      // This is a separate listener from setupEventListeners' TOOL_CALL
+      // handler (which feeds `currentDisplay.toolCalls` for the committed
+      // inline frame). They consume different state — committed inline UI
+      // vs. live registry stats — and setupEventListeners runs before we
+      // know the flavor or the registry id, so folding them is awkward.
+      let fgLiveToolCallCount = 0;
+      const refreshFgLiveStats = () => {
+        const entry = registry.get(hookOpts.agentId);
+        if (!entry || entry.status !== 'running') return;
+        const summary = subagent.getExecutionSummary();
+        entry.stats = {
+          totalTokens: summary.totalTokens,
+          toolUses: fgLiveToolCallCount,
+          durationMs: summary.totalDurationMs,
+        };
+      };
+      const onFgToolCall = (...args: unknown[]) => {
+        const event = args[0] as AgentToolCallEvent;
+        fgLiveToolCallCount += 1;
+        refreshFgLiveStats();
+        registry.appendActivity(hookOpts.agentId, {
+          name: event.name,
+          description: event.description,
+          at: event.timestamp,
+        });
+      };
+      const onFgUsageMetadata = () => {
+        refreshFgLiveStats();
+      };
+      this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
+      this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+
+      try {
         await runFramed();
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
@@ -1357,10 +1436,39 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             returnDisplay: this.currentDisplay!,
           };
         }
+        if (terminateMode === AgentTerminateMode.CANCELLED) {
+          // Distinguish a user-cancelled run from a successful complete in
+          // the parent model's tool result. Without this prefix, a cancel
+          // collapses into the same `{ llmContent: [{ text: finalText }] }`
+          // shape as a successful run — the parent can't tell that the
+          // partial result is incomplete and may act on it as if the agent
+          // had finished. The background path surfaces this via the
+          // `<status>cancelled</status>` XML envelope; the foreground path
+          // has no equivalent envelope, so the marker has to ride the
+          // llmContent payload itself.
+          const partial = finalText || '(no partial result captured)';
+          return {
+            llmContent: [
+              {
+                text: `Agent was cancelled by the user. Partial result follows:\n\n${partial}`,
+              },
+            ],
+            returnDisplay: this.currentDisplay!,
+          };
+        }
         return {
           llmContent: [{ text: finalText }],
           returnDisplay: this.currentDisplay!,
         };
+      } finally {
+        this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
+        this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+        signal?.removeEventListener('abort', onParentAbort);
+        // Foreground entries leave the registry as soon as the tool-call
+        // returns — the parent's tool-result is the durable record. Doing
+        // this in finally guarantees we clean up on success, failure,
+        // cancel, AND any unexpected throw inside runFramed.
+        registry.unregisterForeground(hookOpts.agentId);
       }
     } catch (error) {
       const errorMessage =

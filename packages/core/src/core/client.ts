@@ -22,6 +22,8 @@ const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
 import type { ContentGenerator } from './contentGenerator.js';
+import type { ResolvedModelConfig } from '../models/types.js';
+import { AuthType, createContentGenerator } from './contentGenerator.js';
 import { GeminiChat } from './geminiChat.js';
 import {
   getArenaSystemReminder,
@@ -40,12 +42,14 @@ import {
 
 // Services
 import {
-  ChatCompressionService,
   COMPRESSION_PRESERVE_THRESHOLD,
   COMPRESSION_TOKEN_THRESHOLD,
 } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+
+// Models
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -126,6 +130,43 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
   strategy: 'none',
 };
 
+/**
+ * Resolve the auto-memory recall promise with a hard deadline.
+ * If the recall (model-driven selection + heuristic fallback) does not complete
+ * within the deadline, return an empty result so the main request is not delayed.
+ *
+ * The deadline is set slightly above the model-driven selector's own
+ * AbortSignal.timeout (2s) to give the heuristic fallback time to complete,
+ * but low enough that the user does not perceive a delay on every turn.
+ */
+async function resolveAutoMemoryWithDeadline(
+  promise: Promise<RelevantAutoMemoryPromptResult> | undefined,
+  onDeadline: () => void,
+): Promise<RelevantAutoMemoryPromptResult> {
+  if (!promise) {
+    return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<RelevantAutoMemoryPromptResult>((resolve) => {
+    timer = setTimeout(() => {
+      try {
+        onDeadline();
+      } finally {
+        resolve(EMPTY_RELEVANT_AUTO_MEMORY_RESULT);
+      }
+    }, 2_500);
+  });
+
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
@@ -135,12 +176,15 @@ export class GeminiClient {
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
+  private pendingRecallAbortController: AbortController | undefined;
 
   /**
-   * At any point in this conversation, was compression triggered without
-   * being forced and did it fail?
+   * Cache of per-model ContentGenerators keyed by model ID.
+   * Avoids rebuilding the generator (SDK instantiation, config resolution)
+   * on every side query (recap, title, tool summary).
+   * Cleared on session reset (resetChat) to pick up config changes.
    */
-  private hasFailedCompressionAttempt = false;
+  private perModelGeneratorCache = new Map<string, Promise<ContentGenerator>>();
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -174,6 +218,9 @@ export class GeminiClient {
         resumedSessionData.conversation,
       );
       await this.startChat(resumedHistory);
+      this.getChat().setLastPromptTokenCount(
+        uiTelemetryService.getLastPromptTokenCount(),
+      );
 
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
@@ -305,6 +352,13 @@ export class GeminiClient {
     // pointing at content the model can no longer retrieve.
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
+    this.perModelGeneratorCache.clear();
+    // Abort any in-flight auto-memory recall so the stale controller
+    // does not leak into the next session.
+    if (this.pendingRecallAbortController) {
+      this.pendingRecallAbortController.abort();
+      this.pendingRecallAbortController = undefined;
+    }
     await this.startChat();
   }
 
@@ -345,7 +399,6 @@ export class GeminiClient {
 
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
-    this.hasFailedCompressionAttempt = false;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
@@ -731,19 +784,36 @@ export class GeminiClient {
       messageType === SendMessageType.Cron
     ) {
       if (this.config.getManagedAutoMemoryEnabled()) {
-        relevantAutoMemoryPromise = this.config
+        const recallAbortController = new AbortController();
+        const rawRecallPromise = this.config
           .getMemoryManager()
           .recall(this.config.getProjectRoot(), partToString(request), {
             config: this.config,
             excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+            abortSignal: recallAbortController.signal,
           })
           .catch((error: unknown) => {
-            debugLogger.warn(
-              'Managed auto-memory recall prefetch failed.',
-              error,
-            );
+            if (error instanceof DOMException && error.name === 'AbortError') {
+              debugLogger.debug(
+                'Auto-memory recall aborted by deadline.',
+                error,
+              );
+            } else {
+              debugLogger.warn(
+                'Managed auto-memory recall prefetch failed.',
+                error,
+              );
+            }
             return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
           });
+        this.pendingRecallAbortController = recallAbortController;
+        // Race the recall against the deadline at initiation time so the 2.5s
+        // budget is not consumed by intermediate work (microcompact, compression,
+        // token checks, IDE context) between initiation and consumption.
+        relevantAutoMemoryPromise = resolveAutoMemoryWithDeadline(
+          rawRecallPromise,
+          () => recallAbortController.abort(),
+        );
       }
 
       // Track prompt count for commit attribution. Only the user typing a
@@ -814,6 +884,8 @@ export class GeminiClient {
         this.config.getMaxSessionTurns() > 0 &&
         this.sessionTurnCount > this.config.getMaxSessionTurns()
       ) {
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         yield { type: GeminiEventType.MaxSessionTurns };
         return new Turn(this.getChat(), prompt_id);
       }
@@ -822,21 +894,21 @@ export class GeminiClient {
     // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
     const boundedTurns = Math.min(turns, MAX_TURNS);
     if (!boundedTurns) {
+      this.pendingRecallAbortController?.abort();
+      this.pendingRecallAbortController = undefined;
       return new Turn(this.getChat(), prompt_id);
     }
 
-    const compressed = await this.tryCompressChat(prompt_id, false, signal);
-
-    if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
-      yield { type: GeminiEventType.ChatCompressed, value: compressed };
-    }
-
-    // Check session token limit after compression.
-    // `lastPromptTokenCount` is treated as authoritative for the (possibly compressed) history;
+    // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
+    // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
+    // still calls tryCompressChat directly for the full reset (env refresh +
+    // forceFullIdeContext flip).
     const sessionTokenLimit = this.config.getSessionTokenLimit();
     if (sessionTokenLimit > 0) {
       const lastPromptTokenCount = uiTelemetryService.getLastPromptTokenCount();
       if (lastPromptTokenCount > sessionTokenLimit) {
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         yield {
           type: GeminiEventType.SessionTokenLimitExceeded,
           value: {
@@ -887,6 +959,8 @@ export class GeminiClient {
           `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
         );
         await arenaAgentClient.reportCancelled();
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         return new Turn(this.getChat(), prompt_id);
       }
     }
@@ -903,6 +977,9 @@ export class GeminiClient {
       messageType === SendMessageType.Cron
     ) {
       const systemReminders = [];
+      // The recall promise was already raced against the 2.5s deadline at
+      // initiation time; this await just collects the result.
+      this.pendingRecallAbortController = undefined;
       const relevantAutoMemory = relevantAutoMemoryPromise
         ? await relevantAutoMemoryPromise
         : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
@@ -969,6 +1046,13 @@ export class GeminiClient {
       // automatically from uiTelemetryService by the reporter.
       if (arenaAgentClient && event.type === GeminiEventType.Finished) {
         await arenaAgentClient.updateStatus();
+      }
+
+      // Re-send a full IDE context blob on the next regular message — auto
+      // compaction inside chat.sendMessageStream may have summarized away
+      // the previous IDE-context turn.
+      if (event.type === GeminiEventType.ChatCompressed) {
+        this.forceFullIdeContext = true;
       }
 
       yield event;
@@ -1193,10 +1277,31 @@ export class GeminiClient {
         systemInstruction: finalSystemInstruction,
       };
 
+      // When the requested model differs from the main model (e.g. fast model
+      // side queries for session recap / title / summary), resolve the target
+      // model's own ContentGeneratorConfig so that per-model settings like
+      // extra_body, samplingParams, and reasoning are not inherited from the
+      // main model's config.
+      const mainModel = this.config.getModel() ?? model;
+      const isPerModel = model !== mainModel;
+
+      // Resolve the authType for retry logic. When using a per-model content
+      // generator (e.g. fast model side queries), the retry authType must match
+      // the target model's provider, not the main session's provider. This
+      // ensures QWEN_OAUTH quota detection checks against the right provider.
+      const retryAuthType = isPerModel
+        ? (this.createRetryAuthTypeForModel(model) ??
+          this.config.getContentGeneratorConfig()?.authType ??
+          AuthType.USE_OPENAI)
+        : this.config.getContentGeneratorConfig()?.authType;
+
+      const contentGenerator = isPerModel
+        ? await this.createContentGeneratorForModel(model)
+        : this.getContentGeneratorOrFail();
       const apiCall = () => {
         currentAttemptModel = model;
 
-        return this.getContentGeneratorOrFail().generateContent(
+        return contentGenerator.generateContent(
           {
             model,
             config: requestConfig,
@@ -1206,7 +1311,7 @@ export class GeminiClient {
         );
       };
       const result = await retryWithBackoff(apiCall, {
-        authType: this.config.getContentGeneratorConfig()?.authType,
+        authType: retryAuthType,
         persistentMode: isUnattendedMode(),
         signal: abortSignal,
         heartbeatFn: (info) => {
@@ -1236,58 +1341,141 @@ export class GeminiClient {
     }
   }
 
+  /**
+   * Resolve a model across all authTypes. Handles the case where the target
+   * model is registered under a different authType than the main model
+   * (e.g. main=QWEN_OAUTH, fast=USE_ANTHROPIC).
+   *
+   * TODO: Move cross-authType resolution to ModelRegistry for a cleaner
+   * data-layer solution. Follow-up PR.
+   */
+
+  private resolveModelAcrossAuthTypes(
+    model: string,
+  ): ResolvedModelConfig | undefined {
+    const modelsConfig = this.config.getModelsConfig();
+    const allAuthTypes: AuthType[] = [
+      AuthType.QWEN_OAUTH,
+      AuthType.USE_OPENAI,
+      AuthType.USE_VERTEX_AI,
+      AuthType.USE_ANTHROPIC,
+      AuthType.USE_GEMINI,
+    ];
+
+    // Try the main authType first for early exit
+    const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
+    if (mainAuthType) {
+      const resolved = modelsConfig.getResolvedModel(mainAuthType, model);
+      if (resolved) return resolved;
+    }
+
+    for (const authType of allAuthTypes) {
+      if (authType === mainAuthType) continue;
+      const resolved = modelsConfig.getResolvedModel(authType, model);
+      if (resolved) return resolved;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Resolve the authType for a given model without creating a full generator.
+   * Used by retry logic to ensure provider-specific checks (e.g. QWEN_OAUTH
+   * quota detection) reference the correct provider.
+   */
+  private createRetryAuthTypeForModel(model: string): string | undefined {
+    return this.resolveModelAcrossAuthTypes(model)?.authType;
+  }
+
+  /**
+   * Return a ContentGenerator for a specific model (e.g. the fast model) with
+   * its own per-model settings from modelProviders.  This prevents the main
+   * model's extra_body / samplingParams / reasoning from leaking into side
+   * queries that target a different model.
+   *
+   * Falls back to the main content generator when the target model is not in
+   * the registry or when creating a dedicated generator fails (e.g. in test
+   * environments without full auth setup).
+   *
+   * Results are cached by model ID to avoid rebuilding the generator
+   * (SDK instantiation, config resolution) on every side query.
+   */
+  private async createContentGeneratorForModel(
+    model: string,
+  ): Promise<ContentGenerator> {
+    // Check cache first (Promise coalescing to prevent redundant SDK instantiations)
+    const cached = this.perModelGeneratorCache.get(model);
+    if (cached) return cached;
+
+    const generatorPromise = (async () => {
+      try {
+        const resolvedModel = this.resolveModelAcrossAuthTypes(model);
+
+        if (!resolvedModel) {
+          debugLogger.warn(
+            `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
+          );
+          return this.getContentGeneratorOrFail();
+        }
+
+        const targetConfig = buildAgentContentGeneratorConfig(
+          this.config,
+          model,
+          {
+            authType: resolvedModel.authType,
+            apiKey: resolvedModel.envKey
+              ? (process.env[resolvedModel.envKey] ?? undefined)
+              : undefined,
+            baseUrl: resolvedModel.baseUrl,
+          },
+        );
+
+        return await createContentGenerator(targetConfig, this.config);
+      } catch (err: unknown) {
+        debugLogger.warn(
+          `Failed to create content generator for model "${model}", falling back to main generator.`,
+          err instanceof Error ? err.message : String(err),
+        );
+        // On failure, delete from cache so subsequent attempts can retry.
+        this.perModelGeneratorCache.delete(model);
+        return this.getContentGeneratorOrFail();
+      }
+    })();
+
+    this.perModelGeneratorCache.set(model, generatorPromise);
+    return generatorPromise;
+  }
+
+  /**
+   * Wrapper around {@link GeminiChat.tryCompress} that restores main-session
+   * startup context after successful compaction and flips the IDE full-context
+   * flag for the next regular message.
+   */
   async tryCompressChat(
     prompt_id: string,
     force: boolean = false,
     signal?: AbortSignal,
   ): Promise<ChatCompressionInfo> {
-    const compressionService = new ChatCompressionService();
-
-    const { newHistory, info } = await compressionService.compress(
-      this.getChat(),
+    const info = await this.getChat().tryCompress(
       prompt_id,
-      force,
       this.config.getModel(),
-      this.config,
-      this.hasFailedCompressionAttempt,
+      force,
       signal,
     );
-
-    // Handle compression result
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      // Success: update chat with new compressed history
-      if (newHistory) {
-        const chatRecordingService = this.config.getChatRecordingService();
-        chatRecordingService?.recordChatCompression({
-          info,
-          compressedHistory: newHistory,
-        });
-
-        await this.startChat(newHistory);
-        // Compaction rewrites the prompt history: prior full-Read tool
-        // results may have been summarised away, but the FileReadCache
-        // still believes those reads are "in this conversation". A
-        // follow-up Read could then return the file_unchanged
-        // placeholder pointing at content the model can no longer
-        // retrieve from its own context. Clear the cache so post-
-        // compaction Reads re-emit the bytes.
-        debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
-        this.config.getFileReadCache().clear();
-        uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
-        this.forceFullIdeContext = true;
-      }
-    } else if (
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY
-    ) {
-      // Track failed attempts (only mark as failed if not forced)
-      if (!force) {
-        this.hasFailedCompressionAttempt = true;
-      }
+      const compressedHistory = this.getChat().getHistory();
+      await this.startChat(compressedHistory);
+      // startChat() creates a new GeminiChat without touching FileReadCache,
+      // so prior read_file results that were summarised away would still
+      // resolve to the file_unchanged placeholder. Clear so post-compaction
+      // Reads re-emit bytes the model can no longer see in history.
+      debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
+      this.config.getFileReadCache().clear();
+      this.getChat().setLastPromptTokenCount(info.newTokenCount);
+      // Re-send a full IDE context blob on the next regular message —
+      // compression dropped the previous context turn from history.
+      this.forceFullIdeContext = true;
     }
-
     return info;
   }
 }

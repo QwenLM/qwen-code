@@ -62,6 +62,7 @@ export interface GrepToolParams {
  */
 interface GrepMatch {
   filePath: string;
+  absoluteFilePath: string;
   lineNumber: number;
   line: string;
 }
@@ -209,20 +210,38 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build grep output
       let grepOutput = '';
-      for (const filePath in matchesByFile) {
-        grepOutput += `File: ${filePath}\n`;
-        matchesByFile[filePath].forEach((match) => {
-          const trimmedLine = match.line.trim();
-          grepOutput += `L${match.lineNumber}: ${trimmedLine}\n`;
-        });
-        grepOutput += '---\n';
-      }
-
-      // Apply character limit as safety net
+      const visibleMatches: GrepMatch[] = [];
       let truncatedByCharLimit = false;
-      if (Number.isFinite(charLimit) && grepOutput.length > charLimit) {
-        grepOutput = grepOutput.slice(0, charLimit) + '...';
-        truncatedByCharLimit = true;
+      const appendChunk = (chunk: string, match?: GrepMatch): boolean => {
+        if (
+          Number.isFinite(charLimit) &&
+          grepOutput.length + chunk.length > charLimit
+        ) {
+          grepOutput += chunk.slice(
+            0,
+            Math.max(charLimit - grepOutput.length, 0),
+          );
+          grepOutput += '...';
+          if (match) visibleMatches.push(match);
+          truncatedByCharLimit = true;
+          return false;
+        }
+        grepOutput += chunk;
+        if (match) visibleMatches.push(match);
+        return true;
+      };
+
+      for (const filePath in matchesByFile) {
+        if (!appendChunk(`File: ${filePath}\n`)) break;
+        let stopRendering = false;
+        for (const match of matchesByFile[filePath]) {
+          const trimmedLine = match.line.trim();
+          if (!appendChunk(`L${match.lineNumber}: ${trimmedLine}\n`, match)) {
+            stopRendering = true;
+            break;
+          }
+        }
+        if (stopRendering || !appendChunk('---\n')) break;
       }
 
       // Count how many lines we actually included after character truncation
@@ -252,6 +271,13 @@ class GrepToolInvocation extends BaseToolInvocation<
       return {
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
+        resultFilePaths: Array.from(
+          new Set(
+            visibleMatches
+              .map((match) => match.absoluteFilePath)
+              .filter((filePath) => filePath !== ''),
+          ),
+        ),
       };
     } catch (error) {
       debugLogger.error(`Error during GrepLogic execution: ${error}`);
@@ -308,8 +334,9 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         results.push({
           filePath: relativeFilePath || path.basename(absoluteFilePath),
+          absoluteFilePath,
           lineNumber,
-          line: lineContent,
+          line: lineContent.replace(/\r$/, ''),
         });
       }
     }
@@ -531,6 +558,7 @@ class GrepToolInvocation extends BaseToolInvocation<
                 filePath:
                   path.relative(absolutePath, fileAbsolutePath) ||
                   path.basename(fileAbsolutePath),
+                absoluteFilePath: fileAbsolutePath,
                 lineNumber: index + 1,
                 line,
               });
