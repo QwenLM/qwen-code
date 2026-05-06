@@ -48,6 +48,8 @@ import { CronScheduler } from '../services/cronScheduler.js';
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
 import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { expandHomeDir } from '../utils/paths.js';
+
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient } from '../lsp/types.js';
