@@ -561,6 +561,13 @@ export interface FileDiff {
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;
+  truncatedForSession?: boolean;
+  fileDiffLength?: number;
+  originalContentLength?: number;
+  newContentLength?: number;
+  fileDiffTruncated?: boolean;
+  originalContentTruncated?: boolean;
+  newContentTruncated?: boolean;
 }
 
 export interface DiffStat {
