@@ -34,8 +34,10 @@ const sampleNote: CommitAttributionNote = {
 
 describe('attributionTrailer', () => {
   describe('buildGitNotesCommand', () => {
+    const TARGET_SHA = 'abc1234567890abcdef1234567890abcdef12345';
+
     it('should build a valid git notes invocation', () => {
-      const cmd = buildGitNotesCommand(sampleNote);
+      const cmd = buildGitNotesCommand(sampleNote, TARGET_SHA);
       expect(cmd).not.toBeNull();
       expect(cmd!.command).toBe('git');
       expect(cmd!.args.slice(0, 6)).toEqual([
@@ -47,16 +49,20 @@ describe('attributionTrailer', () => {
         // index 5 is the JSON note payload, asserted below
         cmd!.args[5],
       ]);
-      expect(cmd!.args.at(-1)).toBe('HEAD');
+      // Note must target the captured SHA, not the symbolic `HEAD` —
+      // otherwise a post-commit hook or chained command can move HEAD
+      // between capture and exec, and `-f` lands the note on the
+      // wrong commit.
+      expect(cmd!.args.at(-1)).toBe(TARGET_SHA);
     });
 
     it('should pass the JSON note as a single argv entry (no shell quoting)', () => {
       // The `-f` flag is at args[3]; the note JSON sits at args[5] between
-      // `-m` and `HEAD`. Returning argv (rather than a shell-quoted command
-      // string) keeps the payload off the shell parser entirely so quotes,
-      // command substitution, and platform-specific escaping cannot break
-      // it on cmd.exe / PowerShell.
-      const cmd = buildGitNotesCommand(sampleNote)!;
+      // `-m` and the target commit. Returning argv (rather than a
+      // shell-quoted command string) keeps the payload off the shell
+      // parser entirely so quotes, command substitution, and
+      // platform-specific escaping cannot break it on cmd.exe / PowerShell.
+      const cmd = buildGitNotesCommand(sampleNote, TARGET_SHA)!;
       const noteArg = cmd.args[5]!;
       const parsed = JSON.parse(noteArg);
       expect(parsed.version).toBe(1);
@@ -76,7 +82,7 @@ describe('attributionTrailer', () => {
           `src/very/long/path/to/some/deeply/nested/file_${i}.ts`
         ] = { aiChars: 999999, humanChars: 999999, percent: 50 };
       }
-      expect(buildGitNotesCommand(hugeNote)).toBeNull();
+      expect(buildGitNotesCommand(hugeNote, TARGET_SHA)).toBeNull();
     });
 
     it('should leave single quotes literal in the argv payload', () => {
@@ -89,7 +95,7 @@ describe('attributionTrailer', () => {
           "it's-a-file.ts": { aiChars: 10, humanChars: 5, percent: 67 },
         },
       };
-      const cmd = buildGitNotesCommand(noteWithQuotes);
+      const cmd = buildGitNotesCommand(noteWithQuotes, TARGET_SHA);
       expect(cmd).not.toBeNull();
       const parsed = JSON.parse(cmd!.args[5]!);
       expect(parsed.files["it's-a-file.ts"].percent).toBe(67);

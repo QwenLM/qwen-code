@@ -20,9 +20,14 @@
  * - Generated file exclusion
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isGeneratedFile } from './generatedFiles.js';
+
+function computeContentHash(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
 
 /**
  * Resolve symlinks on a path. On macOS in particular, `/var` is a
@@ -50,6 +55,17 @@ export interface FileAttribution {
   aiContribution: number;
   /** Whether the file was created by AI */
   aiCreated: boolean;
+  /**
+   * SHA-256 of the file content immediately after AI's last write. Used
+   * to detect out-of-band mutation (paste-replace via external editor,
+   * `rm` + recreate, manual save) so AI's accumulated counter doesn't
+   * silently get credited to subsequent human edits. recordEdit checks
+   * this on every call (resets when the input `oldContent` doesn't
+   * match), and `validateOnDiskHashes` re-verifies before a commit
+   * note is generated to catch user edits that happened entirely
+   * outside the Edit/Write tools.
+   */
+  contentHash: string;
 }
 
 /** Per-file attribution detail in the git notes payload. */
@@ -173,6 +189,7 @@ function sanitiseAttribution(v: unknown): FileAttribution {
   return {
     aiContribution: sanitiseCount(obj.aiContribution),
     aiCreated: typeof obj.aiCreated === 'boolean' ? obj.aiCreated : false,
+    contentHash: typeof obj.contentHash === 'string' ? obj.contentHash : '',
   };
 }
 
@@ -228,6 +245,14 @@ export class CommitAttributionService {
    * as a key, so symlinked paths (e.g. `/var/...` ↔ `/private/var/...`
    * on macOS) collapse to the same entry instead of silently producing
    * two parallel records.
+   *
+   * Divergence detection: if a tracked entry's recorded `contentHash`
+   * doesn't match the hash of the `oldContent` we received here, the
+   * file was changed out-of-band between AI's last write and this
+   * call (paste-replace via external editor, `git checkout`, manual
+   * save, ...). Reset `aiContribution` and `aiCreated` to 0/false
+   * before applying the new edit so prior AI work that the user
+   * since overwrote isn't credited to the next commit.
    */
   recordEdit(
     filePath: string,
@@ -236,20 +261,62 @@ export class CommitAttributionService {
   ): void {
     const key = realpathOrSelf(filePath);
 
-    const existing = this.fileAttributions.get(key) || {
-      aiContribution: 0,
-      aiCreated: false,
-    };
-
+    const existing = this.fileAttributions.get(key);
     const isNewFile = oldContent === null;
-    const contribution = computeCharContribution(oldContent ?? '', newContent);
 
-    existing.aiContribution += contribution;
-    if (isNewFile && !existing.aiCreated) {
-      existing.aiCreated = true;
+    let aiContribution = existing?.aiContribution ?? 0;
+    let aiCreated = existing?.aiCreated ?? false;
+
+    // If we have a prior tracked state for this file AND the input
+    // `oldContent` we're being told about doesn't match the hash we
+    // recorded after AI's last write, the file diverged out-of-band.
+    // Drop the accumulated counters before applying the new edit.
+    if (existing && oldContent !== null) {
+      const oldHash = computeContentHash(oldContent);
+      if (existing.contentHash !== oldHash) {
+        aiContribution = 0;
+        aiCreated = false;
+      }
     }
 
-    this.fileAttributions.set(key, existing);
+    const contribution = computeCharContribution(oldContent ?? '', newContent);
+    aiContribution += contribution;
+    if (isNewFile) aiCreated = true;
+
+    this.fileAttributions.set(key, {
+      aiContribution,
+      aiCreated,
+      contentHash: computeContentHash(newContent),
+    });
+  }
+
+  /**
+   * Re-hash each tracked file's CURRENT on-disk content and drop
+   * entries whose hash doesn't match what AI's last write recorded.
+   * Catches the cases recordEdit's input-hash check can't see — i.e.
+   * the user (or another tool) modified the file entirely outside
+   * the Edit/Write tools, then committed it. Without this, the AI's
+   * stale aiContribution would attach to the human-only diff at
+   * commit time and credit AI for human work.
+   *
+   * Called immediately before generateNotePayload in the
+   * commit-attribution path. Files that no longer exist on disk
+   * (deletion) are left alone — the commit's deletion record is
+   * what the note should reflect, and reading them would just throw.
+   */
+  validateOnDiskHashes(): void {
+    for (const [key, attr] of this.fileAttributions) {
+      let current: string;
+      try {
+        current = fs.readFileSync(key, 'utf-8');
+      } catch {
+        // File doesn't exist (deletion) or isn't readable — skip.
+        continue;
+      }
+      if (computeContentHash(current) !== attr.contentHash) {
+        this.fileAttributions.delete(key);
+      }
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -487,9 +554,15 @@ export class CommitAttributionService {
       const incoming = sanitiseAttribution(v);
       const existing = this.fileAttributions.get(canonicalKey);
       if (existing) {
+        // Sum aiContribution and OR aiCreated. Pick the
+        // most-recently-recorded contentHash (incoming wins) so
+        // post-restore divergence checks compare against the freshest
+        // hash; an old form's stale hash would force unnecessary
+        // resets on the next recordEdit.
         this.fileAttributions.set(canonicalKey, {
           aiContribution: existing.aiContribution + incoming.aiContribution,
           aiCreated: existing.aiCreated || incoming.aiCreated,
+          contentHash: incoming.contentHash || existing.contentHash,
         });
       } else {
         this.fileAttributions.set(canonicalKey, incoming);

@@ -156,6 +156,14 @@ function tokeniseSegment(segment: string): string[] | null {
     while (i < tokens.length && tokens[i]!.startsWith('-')) {
       const flag = tokens[i]!;
       i++;
+      // `env -C DIR` / `env --chdir DIR` relocates the working
+      // directory before exec. Treat the segment as repo-shifting
+      // (same contract as a leading `GIT_DIR=...` assignment) so
+      // we don't stamp our trailer onto a commit that landed in a
+      // different repository.
+      if (wrapper === 'env' && ENV_FLAGS_SHIFT_CWD.has(flag)) {
+        return null;
+      }
       // Value-taking flag tables, per wrapper: `sudo -u user`,
       // `env -u NAME` (unset), `env -S string` (split-string args).
       // `command` has no value-taking options in this allowlist.
@@ -206,6 +214,16 @@ const SUDO_FLAGS_WITH_VALUE = new Set([
 // the value, `env -u FOO git commit ...` would leave `FOO` as the
 // next token and the parser would treat it as the program.
 const ENV_FLAGS_WITH_VALUE = new Set(['-u', '--unset', '-S', '--split-string']);
+
+// `env`'s flags that relocate the working directory (and therefore
+// the implicit repository) before exec — GNU coreutils 8.30+'s
+// `-C DIR` / `--chdir DIR`. A `git commit` inside such an env wrapper
+// runs against whatever repo lives at DIR, NOT our cwd, so we must
+// refuse the segment outright the same way `cd /elsewhere && git
+// commit` is refused. Returning null from tokeniseSegment makes the
+// segment non-attributable, which suppresses both trailer injection
+// and the per-file note.
+const ENV_FLAGS_SHIFT_CWD = new Set(['-C', '--chdir']);
 
 /**
  * Environment variables that redirect git's repository selection. A
@@ -2033,6 +2051,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
       } catch {
         canonicalBase = baseDir;
       }
+
+      // Drop tracked entries whose on-disk content has diverged from
+      // what AI's last write recorded — catches the case where the
+      // user paste-replaced via an external editor, ran `git checkout`,
+      // or otherwise modified the file outside the Edit/Write tools.
+      // Without this, the AI's stale aiContribution would attach to
+      // the human-only diff at commit time and credit AI for the human
+      // work. Run this BEFORE matchCommittedFiles so the dropped
+      // entries are also out of the per-file payload.
+      attributionService.validateOnDiskHashes();
+
       committedAbsolutePaths = attributionService.matchCommittedFiles(
         stagedInfo.files,
         canonicalBase,
@@ -2065,7 +2094,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
         baseDir,
         this.config.getModel(),
       );
-      const notesCommand = buildGitNotesCommand(note);
+      // Pin the note to the SHA we captured at commit-detection time
+      // (`postHead`) rather than the symbolic `HEAD`. A post-commit
+      // hook, chained `git commit && git tag -m ...`, or parallel
+      // process can advance HEAD between that capture and this
+      // execFile — without the SHA pin, `-f` would silently land the
+      // note on the wrong commit.
+      const notesCommand = buildGitNotesCommand(note, postHead);
 
       if (!notesCommand) {
         debugLogger.warn(

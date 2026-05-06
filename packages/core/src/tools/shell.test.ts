@@ -1760,6 +1760,11 @@ describe('ShellTool', () => {
           'env-wrapped GIT_DIR',
           'env GIT_DIR=/tmp/other/.git git commit -m "msg"',
         ],
+        // GNU coreutils 8.30+'s `env -C DIR` / `--chdir` relocates
+        // the working directory before exec — same repo-shifting
+        // contract as `cd /elsewhere && git commit`.
+        ['env -C', 'env -C /tmp/other git commit -m "msg"'],
+        ['env --chdir', 'env --chdir /tmp/other git commit -m "msg"'],
       ])(
         'should NOT add co-author for repo-redirecting %s assignment',
         async (_label, command) => {

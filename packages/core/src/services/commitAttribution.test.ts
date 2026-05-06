@@ -16,6 +16,8 @@ vi.mock('node:fs', async () => {
 });
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   CommitAttributionService,
   computeCharContribution,
@@ -110,6 +112,93 @@ describe('CommitAttributionService', () => {
     service.recordEdit('/project/f.ts', 'aaa', 'bbb'); // 3
     service.recordEdit('/project/f.ts', 'bbb', 'bbbccc'); // 3
     expect(service.getFileAttribution('/project/f.ts')!.aiContribution).toBe(6);
+  });
+
+  // Out-of-band mutation detection: if the input `oldContent` doesn't
+  // match the contentHash AI recorded after its previous edit, the
+  // file was changed externally between AI's two writes — drop the
+  // accumulator before counting the new edit so prior AI work the
+  // user has since overwritten doesn't get credited later.
+  it('should reset accumulator when oldContent diverges from AI last write', () => {
+    const service = CommitAttributionService.getInstance();
+    // First AI edit: file goes from 'abc' to 'AI block of 100 chars padded' (28 chars).
+    const aiBlock = 'AI block of 100 chars padded';
+    service.recordEdit('/project/f.ts', 'abc', aiBlock);
+    const after1 = service.getFileAttribution('/project/f.ts')!;
+    expect(after1.aiContribution).toBeGreaterThan(0);
+
+    // Now a DIFFERENT oldContent shows up — the user paste-replaced
+    // the file via an external editor in between. AI's recordEdit
+    // should reset the counter before applying the new contribution.
+    service.recordEdit('/project/f.ts', 'user paste replacement', 'final');
+    const after2 = service.getFileAttribution('/project/f.ts')!;
+    // aiContribution is now bounded by the divergent edit alone, NOT
+    // accumulated on top of after1.aiContribution.
+    expect(after2.aiContribution).toBeLessThan(after1.aiContribution);
+  });
+
+  it('should NOT reset accumulator when oldContent matches AI last write', () => {
+    const service = CommitAttributionService.getInstance();
+    service.recordEdit('/project/f.ts', 'abc', 'AI step one');
+    const after1 = service.getFileAttribution('/project/f.ts')!;
+    // Second AI edit picks up where the first left off — oldContent
+    // matches the post-first hash, so accumulation continues.
+    service.recordEdit('/project/f.ts', 'AI step one', 'AI step two final');
+    const after2 = service.getFileAttribution('/project/f.ts')!;
+    expect(after2.aiContribution).toBeGreaterThan(after1.aiContribution);
+  });
+
+  // validateOnDiskHashes runs at commit time and drops entries whose
+  // current on-disk hash doesn't match what AI recorded — catches
+  // user edits that happened entirely outside the Edit/Write tools
+  // (no recordEdit was called, so the input-hash check above couldn't
+  // see the divergence).
+  describe('validateOnDiskHashes', () => {
+    let tmpDir: string;
+    beforeEach(() => {
+      // Real fs (not mocked) — we want validateOnDiskHashes to
+      // actually read the disk we wrote to.
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attr-validate-'));
+    });
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('drops entries whose on-disk content has diverged', () => {
+      const service = CommitAttributionService.getInstance();
+      const filePath = path.join(tmpDir, 'diverged.ts');
+      fs.writeFileSync(filePath, 'AI wrote this', 'utf-8');
+      service.recordEdit(filePath, null, 'AI wrote this');
+      expect(service.getFileAttribution(filePath)).toBeDefined();
+
+      // User overwrites the file outside the Edit/Write tools.
+      fs.writeFileSync(filePath, 'human replaced this', 'utf-8');
+
+      service.validateOnDiskHashes();
+      expect(service.getFileAttribution(filePath)).toBeUndefined();
+    });
+
+    it('keeps entries whose on-disk content matches', () => {
+      const service = CommitAttributionService.getInstance();
+      const filePath = path.join(tmpDir, 'unchanged.ts');
+      fs.writeFileSync(filePath, 'AI wrote this', 'utf-8');
+      service.recordEdit(filePath, null, 'AI wrote this');
+      service.validateOnDiskHashes();
+      expect(service.getFileAttribution(filePath)).toBeDefined();
+    });
+
+    it('keeps entries for files that no longer exist on disk', () => {
+      const service = CommitAttributionService.getInstance();
+      const filePath = path.join(tmpDir, 'deleted.ts');
+      fs.writeFileSync(filePath, 'will be deleted', 'utf-8');
+      service.recordEdit(filePath, null, 'will be deleted');
+      fs.unlinkSync(filePath);
+      // Deleted file: leave the attribution alone — the commit's
+      // deletion record is what the note will reflect, and a missing
+      // file isn't a divergence signal.
+      service.validateOnDiskHashes();
+      expect(service.getFileAttribution(filePath)).toBeDefined();
+    });
   });
 
   it('should save session baseline on first edit', () => {
@@ -367,6 +456,7 @@ describe('CommitAttributionService', () => {
           '/var/repo/src/legacy.ts': {
             aiContribution: 99,
             aiCreated: false,
+            contentHash: '',
           },
         },
         promptCount: 0,
@@ -395,10 +485,12 @@ describe('CommitAttributionService', () => {
           '/var/repo/src/dup.ts': {
             aiContribution: 30,
             aiCreated: false,
+            contentHash: 'old',
           },
           '/private/var/repo/src/dup.ts': {
             aiContribution: 70,
             aiCreated: true,
+            contentHash: 'new',
           },
         },
         promptCount: 0,
@@ -505,7 +597,7 @@ describe('CommitAttributionService', () => {
           surface: 'cli',
           fileStates: badFileStates as unknown as Record<
             string,
-            { aiContribution: number; aiCreated: boolean }
+            { aiContribution: number; aiCreated: boolean; contentHash: string }
           >,
           promptCount: 0,
           promptCountAtLastCommit: 0,

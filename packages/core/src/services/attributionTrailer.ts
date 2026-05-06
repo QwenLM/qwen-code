@@ -44,14 +44,22 @@ export interface GitNotesCommand {
 }
 
 /**
- * Build the git notes add invocation to attach attribution metadata to the
- * most recent commit. Caller should pass the result to a process-spawning
- * API (`child_process.execFile`) along with a `cwd` option.
+ * Build the git notes add invocation to attach attribution metadata to a
+ * specific commit. `targetCommit` MUST be the SHA the caller captured
+ * after detecting the commit's HEAD movement — passing the symbolic
+ * `'HEAD'` opens a TOCTOU window where a post-commit hook, a chained
+ * `git commit && git tag -m ...`, or a parallel process can advance
+ * HEAD between capture and exec, and `-f` would silently overwrite the
+ * note on the wrong commit.
+ *
+ * Caller should pass the result to a process-spawning API
+ * (`child_process.execFile`) along with a `cwd` option.
  *
  * Returns null if the serialized note exceeds MAX_NOTE_BYTES.
  */
 export function buildGitNotesCommand(
   note: CommitAttributionNote,
+  targetCommit: string,
 ): GitNotesCommand | null {
   const noteJson = JSON.stringify(note);
   if (Buffer.byteLength(noteJson, 'utf-8') > MAX_NOTE_BYTES) {
@@ -66,7 +74,7 @@ export function buildGitNotesCommand(
       '-f',
       '-m',
       noteJson,
-      'HEAD',
+      targetCommit,
     ],
   };
 }
