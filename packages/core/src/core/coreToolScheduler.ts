@@ -78,6 +78,18 @@ import { IdeClient } from '../ide/ide-client.js';
 import { withSpan } from '../telemetry/tracer.js';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 
+const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
+const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
+const TOOL_FAILURE_KIND_POST_HOOK_STOPPED = 'post_hook_stopped';
+const TOOL_FAILURE_KIND_TOOL_ERROR = 'tool_error';
+const TOOL_FAILURE_KIND_TOOL_EXCEPTION = 'tool_exception';
+const TOOL_FAILURE_KIND_CANCELLED = 'cancelled';
+
+const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
+const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
+const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
+const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
+
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
   'which caused incomplete tool call parameters. ' +
@@ -96,6 +108,25 @@ const TRUNCATION_EDIT_REJECTION =
   'first write_file with a skeleton/partial content, ' +
   'then use edit to add the remaining sections incrementally. ' +
   'Do NOT retry with the same large content.';
+
+function setToolSpanFailure(
+  span: Span,
+  failureKind: string,
+  message: string,
+): void {
+  span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, failureKind);
+  span.setStatus({
+    code: SpanStatusCode.ERROR,
+    message,
+  });
+}
+
+function setToolSpanCancelled(span: Span): void {
+  span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, TOOL_FAILURE_KIND_CANCELLED);
+  span.setStatus({
+    code: SpanStatusCode.UNSET,
+  });
+}
 
 export type ValidatingToolCall = {
   status: 'validating';
@@ -1813,10 +1844,11 @@ export class CoreToolScheduler {
               ToolErrorType.EXECUTION_DENIED,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: blockMessage,
-            });
+            setToolSpanFailure(
+              span,
+              TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
+              TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
+            );
             return;
           }
         }
@@ -1896,9 +1928,7 @@ export class CoreToolScheduler {
               );
             }
             // Load-bearing: prevents withSpan from auto-setting OK on normal return
-            span.setStatus({
-              code: SpanStatusCode.UNSET,
-            });
+            setToolSpanCancelled(span);
             return; // Both code paths should return here
           }
 
@@ -1941,10 +1971,11 @@ export class CoreToolScheduler {
                   ToolErrorType.EXECUTION_DENIED,
                 );
                 this.setStatusInternal(callId, 'error', errorResponse);
-                span.setStatus({
-                  code: SpanStatusCode.ERROR,
-                  message: stopMessage,
-                });
+                setToolSpanFailure(
+                  span,
+                  TOOL_FAILURE_KIND_POST_HOOK_STOPPED,
+                  TOOL_SPAN_STATUS_POST_HOOK_STOPPED,
+                );
                 return;
               }
             }
@@ -2091,10 +2122,11 @@ export class CoreToolScheduler {
               toolResult.error.type,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: errorMessage,
-            });
+            setToolSpanFailure(
+              span,
+              TOOL_FAILURE_KIND_TOOL_ERROR,
+              TOOL_SPAN_STATUS_TOOL_ERROR,
+            );
           }
         } catch (executionError: unknown) {
           const errorMessage =
@@ -2129,9 +2161,7 @@ export class CoreToolScheduler {
               );
             }
             // Load-bearing: prevents withSpan from auto-setting OK on normal return
-            span.setStatus({
-              code: SpanStatusCode.UNSET,
-            });
+            setToolSpanCancelled(span);
             return;
           } else {
             // PostToolUseFailure Hook
@@ -2163,10 +2193,11 @@ export class CoreToolScheduler {
                 ToolErrorType.UNHANDLED_EXCEPTION,
               ),
             );
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: exceptionErrorMessage,
-            });
+            setToolSpanFailure(
+              span,
+              TOOL_FAILURE_KIND_TOOL_EXCEPTION,
+              TOOL_SPAN_STATUS_TOOL_EXCEPTION,
+            );
           }
         }
       },

@@ -162,6 +162,17 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   setLastPromptTokenCount: vi.fn(),
   getLastPromptTokenCount: vi.fn(),
 }));
+const clientSpanCalls = vi.hoisted(
+  (): Array<{
+    name: string;
+    attributes: Record<string, string | number | boolean>;
+  }> => [],
+);
+const mockWithSpan = vi.hoisted(() => vi.fn());
+
+vi.mock('../telemetry/tracer.js', () => ({
+  withSpan: mockWithSpan,
+}));
 
 vi.mock('../telemetry/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../telemetry/index.js')>();
@@ -304,6 +315,25 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    clientSpanCalls.length = 0;
+    mockWithSpan.mockImplementation(
+      async (
+        name: string,
+        attributes: Record<string, string | number | boolean>,
+        fn: (span: {
+          setStatus: ReturnType<typeof vi.fn>;
+          setAttribute: ReturnType<typeof vi.fn>;
+          end: ReturnType<typeof vi.fn>;
+        }) => Promise<unknown>,
+      ) => {
+        clientSpanCalls.push({ name, attributes });
+        return fn({
+          setStatus: vi.fn(),
+          setAttribute: vi.fn(),
+          end: vi.fn(),
+        });
+      },
+    );
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
 
     // Default: createContentGenerator rejects (simulates test env without auth).
@@ -3305,6 +3335,13 @@ Other open files:
         }),
         'btw-prompt-id',
       );
+      expect(clientSpanCalls.at(-1)).toEqual({
+        name: 'client.generateContent',
+        attributes: {
+          model: DEFAULT_QWEN_FLASH_MODEL,
+          prompt_id: 'btw-prompt-id',
+        },
+      });
     });
 
     it('should prefer an explicit prompt id override over the current context', async () => {
@@ -3332,6 +3369,13 @@ Other open files:
         }),
         'override-prompt-id',
       );
+      expect(clientSpanCalls.at(-1)).toEqual({
+        name: 'client.generateContent',
+        attributes: {
+          model: DEFAULT_QWEN_FLASH_MODEL,
+          prompt_id: 'override-prompt-id',
+        },
+      });
     });
 
     it('should use config system prompt override when provided', async () => {

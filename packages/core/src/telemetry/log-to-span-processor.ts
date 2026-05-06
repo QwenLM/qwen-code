@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SpanKind, SpanStatusCode, type HrTime } from '@opentelemetry/api';
+import {
+  SpanKind,
+  SpanStatusCode,
+  TraceFlags,
+  type HrTime,
+} from '@opentelemetry/api';
 import type {
   LogRecordProcessor,
   ReadableLogRecord,
@@ -122,7 +127,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       spanContext: () => ({
         traceId,
         spanId,
-        traceFlags: 1, // SAMPLED
+        traceFlags: TraceFlags.SAMPLED,
       }),
       startTime,
       endTime,

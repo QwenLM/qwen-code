@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpanKind, SpanStatusCode, type HrTime } from '@opentelemetry/api';
+import {
+  SpanKind,
+  SpanStatusCode,
+  TraceFlags,
+  type HrTime,
+} from '@opentelemetry/api';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import type { ReadableLogRecord } from '@opentelemetry/sdk-logs';
 import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
@@ -62,6 +67,7 @@ describe('LogToSpanProcessor', () => {
     expect(span.attributes['log.bridge']).toBe(true);
     expect(span.startTime).toEqual([1000, 500000000]);
     expect(span.endTime).toEqual([1000, 500000000]);
+    expect(span.spanContext().traceFlags).toBe(TraceFlags.SAMPLED);
     expect(span.status.code).toBe(SpanStatusCode.OK);
   });
 

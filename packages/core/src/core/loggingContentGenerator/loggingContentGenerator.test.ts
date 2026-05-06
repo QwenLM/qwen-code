@@ -10,6 +10,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GenerateContentResponse } from '@google/genai';
+import { SpanStatusCode } from '@opentelemetry/api';
 import type { Config } from '../../config/config.js';
 import type { ContentGenerator } from '../contentGenerator.js';
 import { AuthType } from '../contentGenerator.js';
@@ -22,6 +23,140 @@ import {
 } from '../../telemetry/loggers.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
+
+const activeOtelContext = vi.hoisted(() => ({ current: 'root' }));
+const loggingSpanRecords = vi.hoisted(
+  (): Array<{
+    name: string;
+    attributes: Record<string, string | number | boolean>;
+    statuses: Array<{ code: number; message?: string }>;
+    ended: boolean;
+  }> => [],
+);
+
+vi.mock('@opentelemetry/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@opentelemetry/api')>();
+
+  function runWithActive<T>(label: string, fn: () => T): T {
+    const previous = activeOtelContext.current;
+    activeOtelContext.current = label;
+    try {
+      const result = fn();
+      if (result instanceof Promise) {
+        return result.finally(() => {
+          activeOtelContext.current = previous;
+        }) as T;
+      }
+      activeOtelContext.current = previous;
+      return result;
+    } catch (error) {
+      activeOtelContext.current = previous;
+      throw error;
+    }
+  }
+
+  return {
+    ...actual,
+    context: {
+      ...actual.context,
+      active: () => ({ label: activeOtelContext.current }),
+      with<T>(ctx: unknown, fn: () => T): T {
+        const label =
+          typeof ctx === 'object' &&
+          ctx !== null &&
+          'label' in ctx &&
+          typeof ctx.label === 'string'
+            ? ctx.label
+            : activeOtelContext.current;
+        return runWithActive(label, fn);
+      },
+    },
+    trace: {
+      ...actual.trace,
+      setSpan: (_ctx: unknown, span: unknown) => ({
+        label:
+          typeof span === 'object' &&
+          span !== null &&
+          '__spanName' in span &&
+          typeof span.__spanName === 'string'
+            ? span.__spanName
+            : 'span',
+        span,
+      }),
+      getSpan: (ctx: unknown) =>
+        typeof ctx === 'object' && ctx !== null && 'span' in ctx
+          ? ctx.span
+          : undefined,
+    },
+  };
+});
+
+vi.mock('../../telemetry/tracer.js', () => {
+  function createSpan(
+    name: string,
+    attributes: Record<string, string | number | boolean>,
+  ) {
+    const record = {
+      name,
+      attributes,
+      statuses: [] as Array<{ code: number; message?: string }>,
+      ended: false,
+    };
+    loggingSpanRecords.push(record);
+    return {
+      __spanName: name,
+      setStatus(status: { code: number; message?: string }) {
+        record.statuses.push(status);
+      },
+      setAttribute: vi.fn(),
+      end() {
+        record.ended = true;
+      },
+      spanContext: () => ({
+        traceId: 'a'.repeat(32),
+        spanId: 'b'.repeat(16),
+        traceFlags: 1,
+      }),
+    };
+  }
+
+  function runWithActive<T>(label: string, fn: () => T): T {
+    const previous = activeOtelContext.current;
+    activeOtelContext.current = label;
+    try {
+      const result = fn();
+      if (result instanceof Promise) {
+        return result.finally(() => {
+          activeOtelContext.current = previous;
+        }) as T;
+      }
+      activeOtelContext.current = previous;
+      return result;
+    } catch (error) {
+      activeOtelContext.current = previous;
+      throw error;
+    }
+  }
+
+  return {
+    withSpan: vi.fn(
+      async (
+        name: string,
+        attributes: Record<string, string | number | boolean>,
+        fn: (span: ReturnType<typeof createSpan>) => Promise<unknown>,
+      ) => fn(createSpan(name, attributes)),
+    ),
+    startSpanWithContext: vi.fn(
+      (name: string, attributes: Record<string, string | number | boolean>) => {
+        const span = createSpan(name, attributes);
+        return {
+          span,
+          runInContext: <T>(fn: () => T): T => runWithActive(name, fn),
+        };
+      },
+    ),
+  };
+});
 
 vi.mock('../../telemetry/loggers.js', async (importOriginal) => {
   const actual =
@@ -108,9 +243,21 @@ const createResponse = (
   return response;
 };
 
+const getStreamSpanRecord = () => {
+  const spanRecord = loggingSpanRecords.find(
+    (record) => record.name === 'api.generateContentStream',
+  );
+  if (!spanRecord) {
+    throw new Error('api.generateContentStream span was not created');
+  }
+  return spanRecord;
+};
+
 describe('LoggingContentGenerator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    activeOtelContext.current = 'root';
+    loggingSpanRecords.length = 0;
   });
 
   afterEach(() => {
@@ -357,6 +504,43 @@ describe('LoggingContentGenerator', () => {
     expect(consolidatedResponse.usageMetadata).toBe(usage2);
     expect(consolidatedResponse.responseId).toBe('resp-2');
     expect(consolidatedResponse.candidates?.[0]?.finishReason).toBe('STOP');
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('activates the stream span while the wrapped generator creates the stream', async () => {
+    const response = createResponse('resp-1', 'model-stream', [
+      { text: 'Hello' },
+    ]);
+    let activeContextDuringWrappedCall = '';
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockImplementation(async () => {
+        activeContextDuringWrappedCall = activeOtelContext.current;
+        return (async function* () {
+          yield response;
+        })();
+      }),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(request, 'prompt-3');
+    for await (const _item of stream) {
+      // Consume stream to trigger cleanup.
+    }
+
+    expect(activeContextDuringWrappedCall).toBe('api.generateContentStream');
   });
 
   it('logs stream errors and skips response logging', async () => {
@@ -401,6 +585,48 @@ describe('LoggingContentGenerator', () => {
     const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
       ?.value as { logInteraction: ReturnType<typeof vi.fn> };
     expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'stream-fail' },
+    ]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('ends the stream span when the consumer stops early', async () => {
+    const response1 = createResponse('resp-1', 'model-stream', [
+      { text: 'first' },
+    ]);
+    const response2 = createResponse('resp-2', 'model-stream', [
+      { text: 'second' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response1;
+          yield response2;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(request, 'prompt-4');
+    for await (const _item of stream) {
+      break;
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.ended).toBe(true);
   });
 
   it('uses generator modalities when converting logged OpenAI requests', async () => {
