@@ -16,7 +16,7 @@ describe('useBranchCommand', () => {
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
   let recordCustomTitle: ReturnType<typeof vi.fn>;
-  let findSessionsByTitle: ReturnType<typeof vi.fn>;
+  let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
   let fireSessionStartEvent: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
   let loadHistory: ReturnType<typeof vi.fn>;
@@ -63,7 +63,7 @@ describe('useBranchCommand', () => {
     });
     finalize = vi.fn();
     recordCustomTitle = vi.fn().mockReturnValue(true);
-    findSessionsByTitle = vi.fn().mockResolvedValue([]);
+    findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
     fireSessionStartEvent = vi.fn();
     startNewSessionConfig = vi.fn();
     startNewSessionUI = vi.fn();
@@ -77,7 +77,7 @@ describe('useBranchCommand', () => {
       getSessionService: () => ({
         forkSession,
         loadSession,
-        findSessionsByTitle,
+        findSessionTitlesByPrefix,
       }),
       getChatRecordingService: () => ({ finalize, recordCustomTitle }),
       getGeminiClient: () => ({ initialize: vi.fn() }),
@@ -136,12 +136,10 @@ describe('useBranchCommand', () => {
   });
 
   it('bumps to (Branch N) when the default suffix is already taken', async () => {
-    findSessionsByTitle.mockImplementation(async (title: string) => {
-      if (title === 'my-branch (Branch)') {
-        return [{ sessionId: 'other', customTitle: title } as unknown];
-      }
-      return [];
-    });
+    // `findSessionTitlesByPrefix` returns every existing title under the
+    // `${name} (Branch` prefix in one shot, so the bump logic picks the
+    // first free slot in memory — no per-candidate disk probe.
+    findSessionTitlesByPrefix.mockResolvedValue(['my-branch (Branch)']);
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -149,6 +147,28 @@ describe('useBranchCommand', () => {
     });
     expect(recordCustomTitle).toHaveBeenCalledWith('my-branch (Branch 2)');
     expect(setSessionName).toHaveBeenCalledWith('my-branch (Branch 2)');
+  });
+
+  it('does ONE prefix scan even when many (Branch N) slots are taken', async () => {
+    // Pin the perf invariant: regardless of collision density, the
+    // collision lookup must be a single project-wide scan, not N probes.
+    // Reviewer's concern was that 99 sequential probes can stall /branch
+    // on dense title spaces.
+    findSessionTitlesByPrefix.mockResolvedValue([
+      'my-branch (Branch)',
+      'my-branch (Branch 2)',
+      'my-branch (Branch 3)',
+      'my-branch (Branch 4)',
+    ]);
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(findSessionTitlesByPrefix).toHaveBeenCalledTimes(1);
+    expect(findSessionTitlesByPrefix).toHaveBeenCalledWith('my-branch (Branch');
+    expect(recordCustomTitle).toHaveBeenCalledWith('my-branch (Branch 5)');
   });
 
   it('derives the base title from the first user ChatRecord when no name is given', async () => {

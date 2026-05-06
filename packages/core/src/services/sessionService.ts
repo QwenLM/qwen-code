@@ -905,6 +905,67 @@ export class SessionService {
   }
 
   /**
+   * Returns the customTitles in this project that start with `prefix`
+   * (case-insensitive). Single project-wide scan — meant to replace
+   * repeated `findSessionsByTitle()` probes when the caller needs to
+   * pick the first free `(Branch N)` slot in memory.
+   *
+   * Skips the heavy hydration steps (message count, prompt extraction)
+   * that `findSessionsByTitle` does — collision lookup only needs the
+   * title and a project filter, so we read the first record only when
+   * the title actually matches the prefix.
+   *
+   * @param prefix Case-insensitive title prefix to match.
+   */
+  async findSessionTitlesByPrefix(prefix: string): Promise<string[]> {
+    const normalizedPrefix = prefix.toLowerCase().trim();
+    const titles: string[] = [];
+    const chatsDir = this.getChatsDir();
+
+    let fileNames: string[];
+    try {
+      fileNames = fs.readdirSync(chatsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return titles;
+      }
+      throw error;
+    }
+
+    let filesProcessed = 0;
+    for (const name of fileNames) {
+      if (!SESSION_FILE_PATTERN.test(name)) continue;
+      if (filesProcessed >= MAX_FILES_TO_PROCESS) break;
+      filesProcessed++;
+
+      const filePath = path.join(chatsDir, name);
+
+      // Cheap tail-read to extract the title before doing any project-
+      // filter work. Saves a per-file jsonl.readLines on the common
+      // case where most sessions don't share this prefix.
+      const titleInfo = this.readSessionTitleInfoFromFile(filePath);
+      if (!titleInfo.title) continue;
+      const normalizedTitle = titleInfo.title.toLowerCase().trim();
+      if (!normalizedTitle.startsWith(normalizedPrefix)) continue;
+
+      // Project filter — same semantics as findSessionsByTitle: scope
+      // collisions to the current project so a fork in another project
+      // can't make this one bump unnecessarily.
+      try {
+        const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+        if (records.length === 0) continue;
+        if (getProjectHash(records[0].cwd) !== this.projectHash) continue;
+      } catch {
+        continue;
+      }
+
+      titles.push(titleInfo.title);
+    }
+
+    return titles;
+  }
+
+  /**
    * Loads the most recent session for the current project.
    * Combines listSessions and loadSession for convenience.
    *

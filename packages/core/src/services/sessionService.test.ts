@@ -1112,4 +1112,179 @@ describe('SessionService', () => {
       );
     });
   });
+
+  describe('findSessionTitlesByPrefix', () => {
+    // Uses real disk like forkSession — readSessionTitleInfoFromFile reads
+    // the file tail for the custom_title record, so mocks would defeat the
+    // method. Mirrors the forkSession describe's setup verbatim so the tmp
+    // sandbox + un-mocked path/jsonl utilities are in place.
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    let service: SessionService;
+    let cwd: string;
+
+    beforeEach(async () => {
+      const realOs = await import('node:os');
+      realPath = await vi.importActual<typeof import('node:path')>('node:path');
+      const actualPaths =
+        await vi.importActual<typeof import('../utils/paths.js')>(
+          '../utils/paths.js',
+        );
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+
+      vi.mocked(path.join).mockImplementation(
+        realPath.join as unknown as typeof path.join,
+      );
+      vi.mocked(path.dirname).mockImplementation(
+        realPath.dirname as unknown as typeof path.dirname,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation(
+        realPath.isAbsolute as unknown as typeof path.isAbsolute,
+      );
+      vi.mocked(path.resolve).mockImplementation(
+        realPath.resolve as unknown as typeof path.resolve,
+      );
+      vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
+      const mockedPaths = (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      };
+      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
+      vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+
+      vi.mocked(readdirSyncSpy).mockRestore?.();
+      vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(unlinkSyncSpy).mockRestore?.();
+
+      realTmpDir = fs.mkdtempSync(
+        realPath.join(realOs.tmpdir(), 'find-titles-prefix-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
+      cwd = process.cwd();
+      service = new SessionService(cwd);
+    });
+
+    afterEach(() => {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      try {
+        fs.rmSync(realTmpDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    const seedSessionWithTitle = (
+      sessionId: string,
+      title: string,
+      sessionCwd: string = cwd,
+    ) => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
+      const lines = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd: sessionCwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'u1',
+          sessionId,
+          type: 'system',
+          subtype: 'custom_title',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd: sessionCwd,
+          version: 'test',
+          systemPayload: { customTitle: title, titleSource: 'manual' },
+        },
+      ];
+      fs.writeFileSync(
+        file,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+      return file;
+    };
+
+    it('returns titles whose custom_title starts with the prefix (case-insensitive)', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch (Branch)',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'My-Branch (Branch 2)',
+      );
+      seedSessionWithTitle(
+        '33333333-3333-3333-3333-333333333333',
+        'unrelated session',
+      );
+
+      const titles =
+        await service.findSessionTitlesByPrefix('my-branch (Branch');
+
+      expect(new Set(titles)).toEqual(
+        new Set(['my-branch (Branch)', 'My-Branch (Branch 2)']),
+      );
+    });
+
+    it('returns empty when chats directory does not exist', async () => {
+      const titles = await service.findSessionTitlesByPrefix('anything');
+      expect(titles).toEqual([]);
+    });
+
+    it('skips sessions from other projects (collisions are project-scoped)', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'shared (Branch)',
+        cwd,
+      );
+      // Same chats dir (sessions are stored under projectHash anyway), but
+      // the record's cwd belongs to another project → must be skipped.
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'shared (Branch 2)',
+        '/some/other/project',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('shared (Branch');
+      expect(titles).toEqual(['shared (Branch)']);
+    });
+
+    it('skips files without a custom_title record', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hi' }] },
+        }) + '\n',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('anything');
+      expect(titles).toEqual([]);
+    });
+  });
 });

@@ -19,9 +19,10 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { t } from '../../i18n/index.js';
 
 /**
- * Cap for the `(Branch N)` collision scan. Each probe is a project-wide
- * scan via `findSessionsByTitle`; 99 is generous for realistic use and
- * bounds the worst case.
+ * Cap for the `(Branch N)` collision suffix. We scan all matching titles
+ * once via `findSessionTitlesByPrefix` and then pick the first free slot
+ * in memory; 99 is generous for realistic use and bounds the timestamp-
+ * fallback path on pathologically dense title spaces.
  */
 const MAX_BRANCH_COLLISION_SCAN = 99;
 
@@ -60,21 +61,28 @@ function deriveFirstPrompt(messages: ChatRecord[]): string {
  * Appends ` (Branch)` to `baseName`, bumping to ` (Branch 2)`, ` (Branch 3)`,
  * ... when the exact name is already taken by another session's customTitle
  * in the current project. Mirrors Claude's `getUniqueForkName`.
+ *
+ * Does ONE prefix scan instead of probing each candidate via
+ * `findSessionsByTitle`: in dense title spaces the per-probe scanner could
+ * walk the project's chat directory up to {@link MAX_BRANCH_COLLISION_SCAN}
+ * times, and `/branch` would visibly stall. We collect every existing
+ * `${trimmed} (Branch...` title once, then pick the first free slot in memory.
  */
 async function computeUniqueBranchTitle(
   baseName: string,
   sessionService: SessionService,
 ): Promise<string> {
   const trimmed = baseName.trim();
+  const taken = new Set(
+    (await sessionService.findSessionTitlesByPrefix(`${trimmed} (Branch`)).map(
+      (t) => t.toLowerCase().trim(),
+    ),
+  );
   const first = `${trimmed} (Branch)`;
-  if ((await sessionService.findSessionsByTitle(first)).length === 0) {
-    return first;
-  }
+  if (!taken.has(first.toLowerCase())) return first;
   for (let n = 2; n <= MAX_BRANCH_COLLISION_SCAN; n++) {
     const candidate = `${trimmed} (Branch ${n})`;
-    if ((await sessionService.findSessionsByTitle(candidate)).length === 0) {
-      return candidate;
-    }
+    if (!taken.has(candidate.toLowerCase())) return candidate;
   }
   // Pathological density — timestamp fallback keeps the fork unique.
   return `${trimmed} (Branch ${Date.now()})`;
