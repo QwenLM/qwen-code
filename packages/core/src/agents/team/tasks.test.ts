@@ -323,6 +323,33 @@ describe('tasks', () => {
     it('returns empty for nonexistent team', async () => {
       expect(await listTasks('nope')).toEqual([]);
     });
+
+    it('quarantines corrupt task files instead of silently skipping', async () => {
+      // Regression: previously a corrupt or truncated `{id}.json`
+      // (e.g. process killed mid-write) was swallowed as undefined
+      // and silently filtered out. The leader saw an apparently
+      // empty board while in-flight work was invisible.
+      const t1 = await createTask('team', {
+        subject: 'Real one',
+        description: 'A',
+      });
+
+      // Write a truncated JSON file alongside the real task.
+      const dir = path.join(tmpDir, 'tasks', 'team');
+      const corruptPath = path.join(dir, '999.json');
+      await fs.writeFile(corruptPath, '{ "id": "999", "subj', 'utf-8');
+
+      // Listing still succeeds for the well-formed task.
+      const tasks = await listTasks('team');
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.id).toBe(t1.id);
+
+      // The corrupt file is renamed out of `.json` so it stops
+      // failing parses on every subsequent listTasks call.
+      await expect(fs.access(corruptPath)).rejects.toThrow();
+      const entries = await fs.readdir(dir);
+      expect(entries.some((e) => e.startsWith('999.json.corrupt-'))).toBe(true);
+    });
   });
 
   // ─── resetTaskList ─────────────────────────────────────────

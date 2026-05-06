@@ -240,12 +240,25 @@ async function ensureInboxFile(inboxPath: string): Promise<void> {
   }
 }
 
-/** Read inbox without locking (caller must hold lock or accept races). */
+/**
+ * Read inbox without locking (caller must hold lock or accept races).
+ *
+ * Returns [] only when the inbox file is missing — that's a
+ * legitimate empty mailbox. For any other failure (parse error, I/O
+ * error) propagate the error so the caller can surface it instead
+ * of the next `writeMessage` overwriting a corrupt-but-recoverable
+ * file with a single new message.
+ */
 async function readInboxRaw(inboxPath: string): Promise<MailboxMessage[]> {
   try {
     const raw = await fs.readFile(inboxPath, 'utf-8');
     return JSON.parse(raw) as MailboxMessage[];
-  } catch {
-    return [];
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') return [];
+    const errMsg = err instanceof Error ? err.message : String(err);
+    debug.warn(`Failed to read inbox at ${inboxPath}: ${errMsg}`);
+    throw err instanceof Error
+      ? err
+      : new Error(`Failed to read inbox at ${inboxPath}: ${errMsg}`);
   }
 }

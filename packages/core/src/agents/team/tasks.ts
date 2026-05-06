@@ -293,10 +293,30 @@ export async function listTasks(
   const jsonEntries = entries.filter((e) => e.endsWith('.json'));
   const reads = await Promise.all(
     jsonEntries.map(async (entry) => {
+      const filePath = path.join(dir, entry);
       try {
-        const raw = await fs.readFile(path.join(dir, entry), 'utf-8');
+        const raw = await fs.readFile(filePath, 'utf-8');
         return JSON.parse(raw) as SwarmTask;
-      } catch {
+      } catch (err) {
+        // ENOENT is fine — the file may have been deleted between
+        // the readdir and the readFile (e.g. a concurrent
+        // `task_update(status: 'deleted')`). Anything else means
+        // the file is corrupt or unreadable; quarantine it so it
+        // stops silently disappearing from `task_list` (and so the
+        // next `listTasks` call doesn't keep failing on the same
+        // file). Renamed out of the `.json` suffix so subsequent
+        // scans skip it.
+        if (isNodeError(err) && err.code === 'ENOENT') return undefined;
+        const errMsg = err instanceof Error ? err.message : String(err);
+        debug.warn(`Quarantining corrupt task file ${filePath}: ${errMsg}`);
+        const quarantined = `${filePath}.corrupt-${Date.now()}`;
+        try {
+          await fs.rename(filePath, quarantined);
+        } catch (renameErr) {
+          const renameMsg =
+            renameErr instanceof Error ? renameErr.message : String(renameErr);
+          debug.warn(`Failed to quarantine ${filePath}: ${renameMsg}`);
+        }
         return undefined;
       }
     }),

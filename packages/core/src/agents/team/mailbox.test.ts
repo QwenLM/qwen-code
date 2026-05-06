@@ -212,6 +212,30 @@ describe('mailbox', () => {
     expect(messages[0]!.timestamp).toBeDefined();
   });
 
+  // ─── Corrupt inbox handling ────────────────────────────────
+
+  it('writeMessage refuses to overwrite a corrupt inbox', async () => {
+    // Regression: a previous implementation silently treated any
+    // read or parse failure as an empty inbox, so a partially-
+    // written or corrupt JSON file was clobbered by the next
+    // writeMessage with `[<single new message>]` — losing every
+    // queued message that was already on disk.
+    await writeMessage('team', 'worker', makeMessage({ text: 'preserved-1' }));
+    await writeMessage('team', 'worker', makeMessage({ text: 'preserved-2' }));
+
+    // Truncate the file mid-array to simulate a kill during write.
+    const inboxPath = getInboxPath('team', 'worker');
+    await fs.writeFile(inboxPath, '[ {"from":"leader","te', 'utf-8');
+
+    await expect(
+      writeMessage('team', 'worker', makeMessage({ text: 'new' })),
+    ).rejects.toThrow();
+
+    // The corrupt file is left intact — not overwritten with [new].
+    const raw = await fs.readFile(inboxPath, 'utf-8');
+    expect(raw).toBe('[ {"from":"leader","te');
+  });
+
   // ─── Concurrent writes ────────────────────────────────────
 
   it('handles concurrent writes without corruption', async () => {
