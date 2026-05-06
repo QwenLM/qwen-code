@@ -227,6 +227,37 @@ describe('resolveCustomBanner', () => {
     expect(out.asciiArt.small).toBe('ABS\nART');
   });
 
+  it('refuses to open a FIFO at the configured path (POSIX) — must not hang startup', () => {
+    if (process.platform === 'win32') return;
+    const fifoPath = path.join(tmpDir, 'pipe.fifo');
+    // mkfifo via child_process keeps this test self-contained without
+    // pulling in a native dep. If `mkfifo` isn't available (very rare on
+    // POSIX dev boxes) we skip the assertion rather than fail the suite.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('node:child_process').execFileSync('mkfifo', [fifoPath]);
+    } catch {
+      return;
+    }
+    const start = Date.now();
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: {
+          customAsciiArt: { path: 'pipe.fifo' } as CustomAsciiArtSetting,
+        },
+        userPath: path.join(tmpDir, 'settings.json'),
+      }),
+    );
+    const elapsedMs = Date.now() - start;
+    // The pre-open lstat() check should reject the FIFO instantly. If the
+    // resolver ever regresses to opening a FIFO read-only, this assertion
+    // will catch it because the open would block until a writer connects
+    // (we never start one) and the test would hang well past 1s.
+    expect(elapsedMs).toBeLessThan(1000);
+    expect(out.asciiArt.small).toBeUndefined();
+    expect(out.asciiArt.large).toBeUndefined();
+  });
+
   it('refuses to follow a symlink at the configured path on POSIX', () => {
     if (process.platform === 'win32') return;
     const real = path.join(tmpDir, 'real.txt');
@@ -272,6 +303,73 @@ describe('resolveCustomBanner', () => {
     );
     // Capped at 200 cols regardless; mostly we're asserting "doesn't blow up".
     expect(out.asciiArt.small?.length).toBe(200);
+  });
+
+  it('rejects {path} mixed with tier keys (mutually exclusive object branches)', () => {
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: {
+          customAsciiArt: {
+            path: 'p.txt',
+            small: 'should-be-rejected',
+          } as unknown as CustomAsciiArtSetting,
+        },
+        userPath: '/home/u/.qwen/settings.json',
+      }),
+    );
+    // The resolver must NOT silently let `path` win — both forms are
+    // dropped and we fall through to the default art.
+    expect(out.asciiArt.small).toBeUndefined();
+    expect(out.asciiArt.large).toBeUndefined();
+  });
+
+  it('caps art width by terminal cells, not UTF-16 length (CJK fullwidth)', () => {
+    // 200 fullwidth CJK characters render at ~400 cells; before the fix
+    // the .length cap let them through. The cap is now visual width, so
+    // ~100 fullwidth chars max per line.
+    const fullwidth = '一'.repeat(150); // 150 chars × 2 cells = 300 cells
+    const out = resolveCustomBanner(
+      makeSettings({ userUi: { customAsciiArt: fullwidth } }),
+    );
+    const small = out.asciiArt.small ?? '';
+    // Truncated by visual width: each fullwidth char is 2 cells, so
+    // ≤ 100 chars fit under MAX_ART_COLS=200.
+    expect(small.length).toBeLessThanOrEqual(100);
+    // And it's a valid string of fullwidth chars (no surrogate / split
+    // mid-codepoint — every char is a full BMP code point here).
+    expect(/^一+$/.test(small)).toBe(true);
+  });
+
+  it('falls back when a {path} entry lives in a scope with no associated file path', () => {
+    // `userPath: ''` simulates a path-less scope (e.g. systemDefaults).
+    // A {path} tier in such a scope can't resolve relative paths, so we
+    // soft-fail it specifically instead of silently dropping the whole
+    // scope (which would block inline tiers from path-less scopes too).
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: {
+          customAsciiArt: { path: 'art.txt' } as CustomAsciiArtSetting,
+        },
+        userPath: '',
+      }),
+    );
+    expect(out.asciiArt.small).toBeUndefined();
+    expect(out.asciiArt.large).toBeUndefined();
+  });
+
+  it('still accepts inline string art from a scope with no file path (decoupled from {path} resolution)', () => {
+    // The flip side of the previous test: inline strings don't need an
+    // owning settings directory, so a path-less scope must still
+    // contribute. Before the decoupling, the whole scope was dropped on
+    // `!file.path`, so even inline art would silently disappear.
+    const out = resolveCustomBanner(
+      makeSettings({
+        userUi: { customAsciiArt: 'INLINE-FROM-PATHLESS-SCOPE' },
+        userPath: '',
+      }),
+    );
+    expect(out.asciiArt.small).toBe('INLINE-FROM-PATHLESS-SCOPE');
+    expect(out.asciiArt.large).toBe('INLINE-FROM-PATHLESS-SCOPE');
   });
 
   it('rejects a malformed customAsciiArt and falls back to default', () => {

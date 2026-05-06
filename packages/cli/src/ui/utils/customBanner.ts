@@ -6,12 +6,19 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  stripTerminalControlSequences,
+  TERMINAL_OSC_REGEX,
+  TERMINAL_CSI_REGEX,
+  TERMINAL_SHIFT_DCS_REGEX,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings, SettingsFile } from '../../config/settings.js';
 import type {
   AsciiArtSource,
   CustomAsciiArtSetting,
 } from '../../config/settingsSchema.js';
+import { getCachedStringWidth, toCodePoints } from './textUtils.js';
 
 const debugLogger = createDebugLogger('BANNER');
 
@@ -118,15 +125,37 @@ function collectScopedTiers(settings: LoadedSettings): {
     if (small && large) break;
     const raw = file.settings.ui?.customAsciiArt;
     if (raw === undefined || raw === null) continue;
-    if (!file.path) continue;
     const tiers = normalizeTiers(raw);
     if (!tiers) continue;
-    const dir = path.dirname(file.path);
-    if (!small && tiers.small !== undefined) {
-      small = { source: tiers.small, dir };
+    // `dir` is only meaningful for `{path}` entries (relative paths
+    // resolve against the file that declared them). Inline-string tiers
+    // don't need it, so a scope with no associated file path (e.g.
+    // `systemDefaults`, future SDK-injected scopes) can still contribute
+    // string art. When a `{path}` lands in a path-less scope we soft-fail
+    // that tier specifically and log a `[BANNER]` warn — dropping the
+    // entire scope was unnecessary coupling.
+    const dir = file.path ? path.dirname(file.path) : '';
+    const considerTier = (
+      tier: AsciiArtSource | undefined,
+      label: 'small' | 'large',
+    ): ScopedSource | undefined => {
+      if (tier === undefined) return undefined;
+      const isPathSource = typeof tier === 'object';
+      if (isPathSource && !dir) {
+        debugLogger.warn(
+          `Ignoring ui.customAsciiArt.${label}: {path} entry has no owning settings file directory to resolve against.`,
+        );
+        return undefined;
+      }
+      return { source: tier, dir };
+    };
+    if (!small) {
+      const next = considerTier(tiers.small, 'small');
+      if (next) small = next;
     }
-    if (!large && tiers.large !== undefined) {
-      large = { source: tiers.large, dir };
+    if (!large) {
+      const next = considerTier(tiers.large, 'large');
+      if (next) large = next;
     }
   }
   return { small, large };
@@ -150,11 +179,25 @@ function normalizeTiers(
     return undefined;
   }
 
-  if ('path' in value && typeof value.path === 'string') {
+  // Mirror the JSON schema's mutually-exclusive object branches: an object
+  // with `path` cannot also carry `small` / `large`, and vice versa. The
+  // schema rejects this shape in VS Code; without the same check at
+  // runtime, JSON parsed at startup would silently let `path` win and
+  // drop the tier keys (or vice versa).
+  const hasPath = 'path' in value && typeof value.path === 'string';
+  const hasTierKeys = 'small' in value || 'large' in value;
+  if (hasPath && hasTierKeys) {
+    debugLogger.warn(
+      'Ignoring ui.customAsciiArt: object combines `path` with `small` / `large`. Use one shape or the other.',
+    );
+    return undefined;
+  }
+
+  if (hasPath) {
     return { small: value, large: value };
   }
 
-  if ('small' in value || 'large' in value) {
+  if (hasTierKeys) {
     const tiered = value as {
       small?: unknown;
       large?: unknown;
@@ -227,14 +270,40 @@ function memo(
 function readArtFile(absolutePath: string): string | undefined {
   let fd: number | undefined;
   try {
-    // O_NOFOLLOW prevents a symlink at the configured path from redirecting
-    // the read to an attacker-controlled file. Not portable to Windows,
-    // where `O_NOFOLLOW` is not defined; fall back to a plain read there.
+    // Step 1: refuse non-regular files BEFORE opening. On POSIX, opening a
+    // FIFO / named pipe read-only blocks until a writer connects — which
+    // means a misconfigured `customAsciiArt: { "path": "/tmp/some-fifo" }`
+    // would hang CLI startup forever. `O_NOFOLLOW` does not help here; it
+    // refuses symlinks at the final path component, not FIFOs / sockets /
+    // devices. `lstatSync` (rather than `statSync`) also covers the
+    // "configured path is itself a symlink" case so we soft-fail before
+    // opening.
+    let preOpenStat: fs.Stats;
+    try {
+      preOpenStat = fs.lstatSync(absolutePath);
+    } catch (err) {
+      debugLogger.warn(
+        `Failed to stat ui.customAsciiArt at ${absolutePath}: ${(err as Error).message}`,
+      );
+      return undefined;
+    }
+    if (!preOpenStat.isFile()) {
+      debugLogger.warn(
+        `Ignoring ui.customAsciiArt: ${absolutePath} is not a regular file.`,
+      );
+      return undefined;
+    }
+
+    // Step 2: open with O_NOFOLLOW (POSIX only) so a TOCTOU symlink swap
+    // between the lstat above and this open also soft-fails. Windows has
+    // no equivalent constant, so it falls back to a plain read.
     const flags =
       typeof fs.constants.O_NOFOLLOW === 'number'
         ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
         : fs.constants.O_RDONLY;
     fd = fs.openSync(absolutePath, flags);
+    // Re-check via fstat on the FD: if anything changed between lstat and
+    // open, refuse rather than reading whatever the FD now points at.
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) {
       debugLogger.warn(
@@ -268,28 +337,27 @@ function readArtFile(absolutePath: string): string | undefined {
 }
 
 /**
- * Banner-specific sanitizer. Like `stripTerminalControlSequences` but
- * preserves `\n` so multi-line ASCII art survives. Strips OSC/CSI/SS2/SS3
- * sequences and replaces every other C0/C1 control byte (and DEL) with a
- * single space — a hostile or accidental escape can't paint, redirect, or
- * hyperlink in the user's terminal.
+ * Banner-specific sanitizer. Re-uses the OSC / CSI / SS2 / SS3 patterns
+ * exported from `stripTerminalControlSequences` (in
+ * `@qwen-code/qwen-code-core`) so the regexes are authored once, but
+ * preserves `\n` and `\t` — multi-line / tab-aligned ASCII art needs
+ * those, while the shared core helper strips them. The fallback range
+ * here matches the core helper's C0/C1/DEL strip but carves out
+ * `\t` (0x09) and `\n` (0x0a) so they survive into the rendered art.
  */
 function sanitizeArt(input: string): string {
   // Normalize CRLF / CR to LF so the column cap is computed against the
   // same line boundaries the renderer will see.
   let s = input.replace(/\r\n?/g, '\n');
-  /* eslint-disable no-control-regex */
-  // OSC: ESC ] ... (BEL | ESC \)
-  s = s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ' ');
-  // CSI: ESC [ params final-byte
-  s = s.replace(/\x1b\[[\d;?]*[a-zA-Z]/g, ' ');
-  // SS2/SS3/DCS leaders
-  s = s.replace(/\x1b[NOP]/g, ' ');
+  s = s
+    .replace(TERMINAL_OSC_REGEX, ' ')
+    .replace(TERMINAL_CSI_REGEX, ' ')
+    .replace(TERMINAL_SHIFT_DCS_REGEX, ' ');
   // Remaining C0 controls + DEL + C1 controls (0x80-0x9f, e.g. single-byte
   // CSI 0x9b) → space. Keep \n (0x0a) and \t (0x09) so multi-line ASCII art
   // and tab-aligned art survive.
+  // eslint-disable-next-line no-control-regex
   s = s.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ' ');
-  /* eslint-enable no-control-regex */
 
   const rawLines = s.split('\n');
   const truncatedRows = rawLines.length > MAX_ART_LINES;
@@ -303,11 +371,22 @@ function sanitizeArt(input: string): string {
     // doesn't expand differently per terminal.
     const detabbed = line.replace(/\t/g, '  ');
     const trimmed = detabbed.replace(/\s+$/u, '');
-    if (trimmed.length > MAX_ART_COLS) {
-      truncatedCols = true;
-      return trimmed.slice(0, MAX_ART_COLS);
+    // Cap by *visual* width (terminal cells), not UTF-16 length: 200 CJK
+    // fullwidth characters render as ~400 cells, and a `.length` slice
+    // could split a fullwidth code point or surrogate pair down the
+    // middle. We walk code points until adding the next one would push
+    // the cell width past the cap.
+    if (getCachedStringWidth(trimmed) <= MAX_ART_COLS) {
+      return trimmed;
     }
-    return trimmed;
+    truncatedCols = true;
+    const codePoints = toCodePoints(trimmed);
+    let kept = '';
+    for (const cp of codePoints) {
+      if (getCachedStringWidth(kept + cp) > MAX_ART_COLS) break;
+      kept += cp;
+    }
+    return kept;
   });
 
   // Drop trailing empty lines so width measurement isn't skewed by a
@@ -344,11 +423,12 @@ function sanitizeSubtitle(raw: unknown): string | undefined {
 
 /**
  * Shared cleaner for any single-line info-panel string (title, subtitle).
- * Strips OSC / CSI / SS2 / SS3 leaders, replaces every other C0 / C1
- * control byte (and DEL) with a space, then folds any internal whitespace
- * (including the newlines we just dropped from controls) into a single
- * space and trims the ends. Returns `undefined` for empty input so
- * `<Header />` knows to fall back to its default rendering.
+ * Delegates the escape-sequence + C0/C1 stripping to the core
+ * `stripTerminalControlSequences` helper (which already handles `\n` /
+ * `\t` because single-line fields don't need them), then folds any
+ * remaining whitespace into a single space and trims the ends. Returns
+ * `undefined` for empty input so `<Header />` knows to fall back to its
+ * default rendering.
  */
 function sanitizeSingleLine(
   raw: unknown,
@@ -356,17 +436,7 @@ function sanitizeSingleLine(
   fieldLabel: string,
 ): string | undefined {
   if (typeof raw !== 'string') return undefined;
-  /* eslint-disable no-control-regex */
-  let t = raw
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ' ')
-    .replace(/\x1b\[[\d;?]*[a-zA-Z]/g, ' ')
-    .replace(/\x1b[NOP]/g, ' ')
-    // C0 + DEL + C1 controls. Single-line fields never need newlines or
-    // tabs (they live on a single line of the info panel) so the range is
-    // denser than the art sanitizer's.
-    .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
-  /* eslint-enable no-control-regex */
-  t = t.replace(/\s+/g, ' ').trim();
+  let t = stripTerminalControlSequences(raw).replace(/\s+/g, ' ').trim();
   if (!t) return undefined;
   if (t.length > maxLength) {
     debugLogger.warn(`Truncated ${fieldLabel} to ${maxLength} characters.`);

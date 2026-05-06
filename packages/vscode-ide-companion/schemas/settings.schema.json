@@ -286,7 +286,16 @@
               "properties": {
                 "path": {
                   "type": "string"
-                },
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
                 "small": {
                   "oneOf": [
                     {

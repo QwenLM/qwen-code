@@ -799,13 +799,25 @@ const SETTINGS_SCHEMA = {
         // the way (we don't want a multi-line ASCII editor in the TUI), but
         // the JSON Schema needs a real union so VS Code stops flagging the
         // documented bare-string form.
+        // The `oneOf` here uses three *mutually exclusive* branches rather
+        // than one permissive object branch, so VS Code rejects nonsense
+        // like `{ path, small, large }` (which the runtime would also
+        // reject — see `normalizeTiers` in `customBanner.ts`).
         jsonSchemaOverride: {
           oneOf: [
             { type: 'string' },
+            // Bare `{path}` — no tier keys allowed.
+            {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+              required: ['path'],
+              additionalProperties: false,
+            },
+            // Width-aware `{small?, large?}` — `path` not allowed at this
+            // level; each tier is itself string-or-`{path}`.
             {
               type: 'object',
               properties: {
-                path: { type: 'string' },
                 small: {
                   oneOf: [
                     { type: 'string' },
