@@ -373,12 +373,6 @@ jobs:
           set -euo pipefail
           TAG_NAME="sdk-python-${RELEASE_TAG}"
 
-          if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
-            PRERELEASE_FLAG="--prerelease"
-          else
-            PRERELEASE_FLAG=""
-          fi
-
           if gh release view "${TAG_NAME}" --json tagName >/dev/null 2>&1; then
             echo "::warning::GitHub release ${TAG_NAME} already exists; skipping create."
             exit 0
@@ -403,35 +397,34 @@ jobs:
             echo ""
           } > "${NOTES_FILE}"
 
-          NOTES_START_TAG_ARG=""
-          GENERATE_NOTES_FLAG="--generate-notes"
+          GH_RELEASE_ARGS=()
           if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
             # Verify the previous tag exists in Git before using --notes-start-tag.
             # If a prior release published to PyPI but failed to create a GitHub
             # release/tag, the tag won't exist — fall back to static notes to
             # avoid failing gh release create after PyPI publish.
             if git rev-parse "sdk-python-${PREVIOUS_RELEASE_TAG}" >/dev/null 2>&1; then
-              NOTES_START_TAG_ARG="--notes-start-tag sdk-python-${PREVIOUS_RELEASE_TAG}"
+              GH_RELEASE_ARGS+=(--generate-notes --notes-start-tag "sdk-python-${PREVIOUS_RELEASE_TAG}")
             else
               echo "::warning::Previous tag sdk-python-${PREVIOUS_RELEASE_TAG} not found; skipping --generate-notes."
-              GENERATE_NOTES_FLAG=""
               echo "See commit history for changes." >> "${NOTES_FILE}"
             fi
           else
             # PREVIOUS_RELEASE_TAG is empty for preview/nightly (not computed)
             # and for the very first stable release (no prior stable on PyPI).
             # Skip --generate-notes to avoid including non-SDK commits.
-            GENERATE_NOTES_FLAG=""
             echo "See commit history for changes." >> "${NOTES_FILE}"
+          fi
+
+          if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
+            GH_RELEASE_ARGS+=(--prerelease)
           fi
 
           gh release create "${TAG_NAME}" \
             --target "${RELEASE_TARGET_SHA}" \
             --title "SDK Python Release ${RELEASE_TAG}" \
             --notes-file "${NOTES_FILE}" \
-            ${GENERATE_NOTES_FLAG} \
-            ${NOTES_START_TAG_ARG} \
-            ${PRERELEASE_FLAG}
+            "${GH_RELEASE_ARGS[@]}"
 
           rm -f "${NOTES_FILE}"
 
