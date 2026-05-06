@@ -377,6 +377,33 @@ describe('TeamCoordinationHarness', () => {
     });
   });
 
+  // ─── Spawn lifecycle ────────────────────────────────────────
+
+  describe('spawn cap', () => {
+    it('concurrent spawns cannot exceed MAX_TEAMMATES', async () => {
+      // Regression: the cap check was synchronous but the push to
+      // `members` happened after `loadSubagent`/`convertToRuntimeConfig`
+      // awaits. With concurrent spawns, all callers passed the
+      // check at the original count, then all pushed.
+      const h = await createHarness();
+      const MAX = 10;
+      const ATTEMPTS = MAX + 5;
+
+      const results = await Promise.allSettled(
+        Array.from({ length: ATTEMPTS }, (_, i) =>
+          h.teamManager.spawnTeammate({ name: `worker-${i}` }),
+        ),
+      );
+
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r) => r.status === 'rejected');
+
+      expect(fulfilled).toHaveLength(MAX);
+      expect(rejected).toHaveLength(ATTEMPTS - MAX);
+      expect(h.teamManager.getTeamFile().members).toHaveLength(MAX);
+    });
+  });
+
   // ─── Leader inbox: race + envelope hardening ────────────────
 
   describe('leader inbox', () => {

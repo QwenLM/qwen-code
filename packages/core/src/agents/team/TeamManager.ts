@@ -209,89 +209,6 @@ export class TeamManager {
       subscriptions: [],
     };
 
-    // Load specialized subagent config when an agentType is specified.
-    // Copies prompt, model, runConfig, and tools from the subagent
-    // definition so the teammate behaves like that agent type.
-    let subagentPrompt: string | undefined;
-    let subagentModel: string | undefined;
-    let subagentRunConfig: Record<string, unknown> | undefined;
-    let toolConfig: ToolConfig | undefined;
-    if (config.agentType && this.subagentManager) {
-      const subagentConfig = await this.subagentManager.loadSubagent(
-        config.agentType,
-      );
-      if (!subagentConfig) {
-        throw new Error(`Subagent type "${config.agentType}" not found.`);
-      }
-      const runtimeCfg =
-        await this.subagentManager.convertToRuntimeConfig(subagentConfig);
-      subagentPrompt = runtimeCfg.promptConfig.systemPrompt;
-      subagentModel = runtimeCfg.modelConfig.model;
-      subagentRunConfig = runtimeCfg.runConfig as Record<string, unknown>;
-      toolConfig = runtimeCfg.toolConfig;
-      // Ensure team coordination tools are always available,
-      // even when the subagent defines a restricted tool set.
-      if (toolConfig) {
-        const teamTools = [
-          'send_message',
-          'task_list',
-          'task_update',
-          'task_create',
-        ];
-        const existing = new Set(
-          toolConfig.tools.map((t) => (typeof t === 'string' ? t : t.name)),
-        );
-        for (const tool of teamTools) {
-          if (!existing.has(tool)) {
-            toolConfig.tools.push(tool);
-          }
-        }
-      }
-    }
-
-    // Build system prompt: subagent prompt (if any) or user prompt + team addendum.
-    const addendum = buildTeammatePromptAddendum(
-      name,
-      this.teamFile.name,
-      LEADER_NAME,
-    );
-    const basePrompt = subagentPrompt ?? config.prompt;
-    const systemPrompt = basePrompt ? `${basePrompt}\n\n${addendum}` : addendum;
-
-    // Build spawn config for the backend.
-    const spawnConfig: AgentSpawnConfig = {
-      agentId,
-      command: '',
-      args: [],
-      cwd,
-      inProcess: {
-        agentName: name,
-        completeOnIdle: false,
-        initialTask:
-          config.prompt ??
-          'You have joined the team. Call task_list now to ' +
-            'find pending tasks. Claim one with task_update ' +
-            '(status: "in_progress"), do the work, report ' +
-            'via send_message(to: "leader"), then mark ' +
-            'completed with task_update.',
-        runtimeConfig: {
-          promptConfig: {
-            systemPrompt,
-          },
-          modelConfig: {
-            model: config.model ?? subagentModel,
-          },
-          runConfig: {
-            ...subagentRunConfig,
-          },
-          toolConfig,
-        },
-      },
-    };
-
-    // Store identity so flushNextMessage can re-enter it
-    // on follow-up turns (enqueueMessage runs outside the
-    // original AsyncLocalStorage context).
     const identity: TeammateIdentity = {
       agentName: name,
       teamName: this.teamFile.name,
@@ -300,27 +217,124 @@ export class TeamManager {
       isTeamLead: false,
     };
 
-    // Register the member only after config validation succeeds.
-    // If spawnAgent() fails below, we roll back to avoid ghost members.
+    // Reserve the slot synchronously, before any await. Otherwise
+    // N concurrent spawns can all pass the cap check while the
+    // first is awaiting loadSubagent, and all N then push, blowing
+    // past MAX_TEAMMATES.
     this.teamFile.members.push(member);
     this.pendingMessages.set(agentId, []);
     this.lastActivityAt.set(agentId, Date.now());
     this.agentIdentities.set(agentId, identity);
 
+    const rollback = () => {
+      const idx = this.teamFile.members.indexOf(member);
+      if (idx !== -1) this.teamFile.members.splice(idx, 1);
+      this.pendingMessages.delete(agentId);
+      this.lastActivityAt.delete(agentId);
+      this.agentIdentities.delete(agentId);
+    };
+
     try {
+      // Load specialized subagent config when an agentType is specified.
+      // Copies prompt, model, runConfig, and tools from the subagent
+      // definition so the teammate behaves like that agent type.
+      let subagentPrompt: string | undefined;
+      let subagentModel: string | undefined;
+      let subagentRunConfig: Record<string, unknown> | undefined;
+      let toolConfig: ToolConfig | undefined;
+      if (config.agentType && this.subagentManager) {
+        const subagentConfig = await this.subagentManager.loadSubagent(
+          config.agentType,
+        );
+        if (!subagentConfig) {
+          throw new Error(`Subagent type "${config.agentType}" not found.`);
+        }
+        const runtimeCfg =
+          await this.subagentManager.convertToRuntimeConfig(subagentConfig);
+        subagentPrompt = runtimeCfg.promptConfig.systemPrompt;
+        subagentModel = runtimeCfg.modelConfig.model;
+        subagentRunConfig = runtimeCfg.runConfig as Record<string, unknown>;
+        toolConfig = runtimeCfg.toolConfig;
+        // Ensure team coordination tools are always available,
+        // even when the subagent defines a restricted tool set.
+        if (toolConfig) {
+          const teamTools = [
+            'send_message',
+            'task_list',
+            'task_update',
+            'task_create',
+          ];
+          const existing = new Set(
+            toolConfig.tools.map((t) => (typeof t === 'string' ? t : t.name)),
+          );
+          for (const tool of teamTools) {
+            if (!existing.has(tool)) {
+              toolConfig.tools.push(tool);
+            }
+          }
+          // Also strip team tools from `disallowedTools` so they
+          // aren't filtered out downstream — `disallowedTools` is
+          // applied AFTER the allowlist, so adding them above is
+          // not enough on its own. A subagent that explicitly
+          // disallows e.g. `send_message` would otherwise spawn
+          // successfully but then be unable to coordinate.
+          if (toolConfig.disallowedTools?.length) {
+            toolConfig.disallowedTools = toolConfig.disallowedTools.filter(
+              (t) => !teamTools.includes(t),
+            );
+          }
+        }
+      }
+
+      // Build system prompt: subagent prompt (if any) or user prompt + team addendum.
+      const addendum = buildTeammatePromptAddendum(
+        name,
+        this.teamFile.name,
+        LEADER_NAME,
+      );
+      const basePrompt = subagentPrompt ?? config.prompt;
+      const systemPrompt = basePrompt
+        ? `${basePrompt}\n\n${addendum}`
+        : addendum;
+
+      // Build spawn config for the backend.
+      const spawnConfig: AgentSpawnConfig = {
+        agentId,
+        command: '',
+        args: [],
+        cwd,
+        inProcess: {
+          agentName: name,
+          completeOnIdle: false,
+          initialTask:
+            config.prompt ??
+            'You have joined the team. Call task_list now to ' +
+              'find pending tasks. Claim one with task_update ' +
+              '(status: "in_progress"), do the work, report ' +
+              'via send_message(to: "leader"), then mark ' +
+              'completed with task_update.',
+          runtimeConfig: {
+            promptConfig: {
+              systemPrompt,
+            },
+            modelConfig: {
+              model: config.model ?? subagentModel,
+            },
+            runConfig: {
+              ...subagentRunConfig,
+            },
+            toolConfig,
+          },
+        },
+      };
+
       // Wrap in teammate identity so that AsyncLocalStorage
       // propagates through the agent's start() async chain.
       await runWithTeammateIdentity(identity, () =>
         this.backend.spawnAgent(spawnConfig),
       );
     } catch (err) {
-      // Roll back in-memory membership state so the name and
-      // slot can be reused.
-      const idx = this.teamFile.members.indexOf(member);
-      if (idx !== -1) this.teamFile.members.splice(idx, 1);
-      this.pendingMessages.delete(agentId);
-      this.lastActivityAt.delete(agentId);
-      this.agentIdentities.delete(agentId);
+      rollback();
       throw err;
     }
     this.setupEventBridge(agentId, name);
