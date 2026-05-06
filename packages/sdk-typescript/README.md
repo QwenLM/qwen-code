@@ -12,7 +12,7 @@ npm install @qwen-code/sdk
 
 ## Requirements
 
-- Node.js >= 20.0.0
+- Node.js >= 22.0.0
 
 > From v0.1.1, the CLI is bundled with the SDK. So no standalone CLI installation is needed.
 
