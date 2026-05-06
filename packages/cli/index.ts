@@ -14,6 +14,7 @@ initStartupProfiler();
 import './src/gemini.js';
 import { main } from './src/gemini.js';
 import { FatalError } from '@qwen-code/qwen-code-core';
+import { AlreadyReportedError } from './src/utils/errors.js';
 import { writeStderrLine } from './src/utils/stdioHelpers.js';
 
 // --- Global Entry Point ---
@@ -90,6 +91,15 @@ main().catch((error) => {
       errorMessage = `\x1b[31m${errorMessage}\x1b[0m`;
     }
     console.error(errorMessage);
+    process.exit(error.exitCode);
+  }
+  // AlreadyReportedError means an upstream layer (e.g. the non-interactive
+  // stream-error handler) has already written the user-facing message to
+  // stderr and just wants to surface a non-zero exit code. Don't print
+  // "An unexpected critical error occurred:" with a stack trace — that
+  // framing is for genuinely unexpected, programmer-level bugs, and a
+  // routine 4xx from an upstream API does not qualify.
+  if (error instanceof AlreadyReportedError) {
     process.exit(error.exitCode);
   }
   console.error('An unexpected critical error occurred:');
