@@ -22,7 +22,9 @@ export type Unsubscribe = () => void;
 export class WorkspaceContext {
   private directories = new Set<string>();
   private initialDirectories: Set<string>;
+  private readonly skippedDirectories = new Set<string>();
   private onDirectoriesChangedListeners = new Set<() => void>();
+
   /**
    * Memoized realpath results. Every workspace-bounded tool call ultimately
    * routes through {@link fullyResolvedPath} → `fs.realpathSync`; without
@@ -51,7 +53,16 @@ export class WorkspaceContext {
   }
 
   /**
+   * Returns directories that were skipped during construction because they
+   * did not exist or were not readable.
+   */
+  getSkippedDirectories(): readonly string[] {
+    return Array.from(this.skippedDirectories);
+  }
+
+  /**
    * Registers a listener that is called when the workspace directories change.
+
    * @param listener The listener to call.
    * @returns A function to unsubscribe the listener.
    */
@@ -88,6 +99,7 @@ export class WorkspaceContext {
       this.directories.add(resolved);
       this.notifyDirectoriesChanged();
     } catch (err) {
+      this.skippedDirectories.add(directory);
       debugLogger.warn(
         `Skipping unreadable directory: ${directory} (${err instanceof Error ? err.message : String(err)})`,
       );
