@@ -17,7 +17,7 @@ import type { ProviderInstallPlan } from '../../types.js';
 export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
-export const openRouterProviderConfig: ProviderConfig = {
+export const openRouterProvider: ProviderConfig = {
   id: 'openrouter',
   label: 'OpenRouter',
   description: 'Browser OAuth · Auto-configure API key and OpenRouter models',
@@ -42,7 +42,7 @@ export async function createOpenRouterProviderInstallPlan({
   const recommended = selectRecommendedOpenRouterModels(catalog);
   const preferredId = getPreferredOpenRouterModelId(recommended);
 
-  return buildInstallPlan(openRouterProviderConfig, {
+  return buildInstallPlan(openRouterProvider, {
     baseUrl: OPENROUTER_BASE_URL,
     apiKey,
     modelIds: preferredId ? [preferredId] : [],

@@ -15,7 +15,6 @@ import {
   computeModelListVersion,
   getDefaultModelIds,
   resolveBaseUrl,
-  toLlmProvider,
   type ProviderConfig,
 } from '../../auth/providerConfig.js';
 import { findProviderByCredentials } from '../../auth/allProviders.js';
@@ -88,11 +87,7 @@ export function useCodingPlanUpdates(
           (cfg) => cfg.id === previousModel,
         );
 
-        await applyProviderInstallPlan(installPlan, {
-          settings,
-          config,
-          provider: toLlmProvider(providerCfg),
-        });
+        await applyProviderInstallPlan(installPlan, { settings, config });
 
         const activeModel = config.getModel();
         const displayName = t(providerCfg.label);

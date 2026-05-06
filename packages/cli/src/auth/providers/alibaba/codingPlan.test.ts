@@ -9,7 +9,7 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import {
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
-  codingPlanProviderConfig,
+  codingPlanProvider,
 } from './codingPlan.js';
 import {
   buildInstallPlan,
@@ -17,25 +17,24 @@ import {
   computeModelListVersion,
   getDefaultModelIds,
   resolveBaseUrl,
-  toLlmProvider,
 } from '../../providerConfig.js';
 
 describe('coding plan provider', () => {
   it('creates a Coding Plan install plan', () => {
     const baseUrl = resolveBaseUrl(
-      codingPlanProviderConfig,
+      codingPlanProvider,
       CODING_PLAN_CHINA_BASE_URL,
     );
     const template = buildProviderTemplate(
-      codingPlanProviderConfig,
+      codingPlanProvider,
       CODING_PLAN_CHINA_BASE_URL,
     );
     const version = computeModelListVersion(template);
 
-    const plan = buildInstallPlan(codingPlanProviderConfig, {
+    const plan = buildInstallPlan(codingPlanProvider, {
       baseUrl,
       apiKey: 'sk-coding',
-      modelIds: getDefaultModelIds(codingPlanProviderConfig),
+      modelIds: getDefaultModelIds(codingPlanProvider),
     });
 
     expect(plan.providerId).toBe('coding-plan');
@@ -62,17 +61,15 @@ describe('coding plan provider', () => {
   });
 
   it('owns Coding Plan models', () => {
-    const provider = toLlmProvider(codingPlanProviderConfig);
-
     expect(
-      provider.ownsModel?.({
+      codingPlanProvider.ownsModel?.({
         id: 'coding-model',
         baseUrl: CODING_PLAN_CHINA_BASE_URL,
         envKey: CODING_PLAN_ENV_KEY,
       }),
     ).toBe(true);
     expect(
-      provider.ownsModel?.({
+      codingPlanProvider.ownsModel?.({
         id: 'custom-model',
         baseUrl: 'https://custom.example.com/v1',
         envKey: 'CUSTOM_API_KEY',

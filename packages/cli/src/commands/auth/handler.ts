@@ -14,14 +14,10 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
-import { codingPlanProviderConfig } from '../../auth/providers/alibaba/codingPlan.js';
-import {
-  openRouterProviderConfig,
-  createOpenRouterProviderInstallPlan,
-} from '../../auth/providers/oauth/openrouter.js';
+import { codingPlanProvider } from '../../auth/providers/alibaba/codingPlan.js';
+import { createOpenRouterProviderInstallPlan } from '../../auth/providers/oauth/openrouter.js';
 import {
   buildInstallPlan,
-  toLlmProvider,
   resolveBaseUrl,
   getDefaultModelIds,
 } from '../../auth/providerConfig.js';
@@ -211,17 +207,13 @@ async function handleCodePlanAuth(
   writeStdoutLine(t('Processing Alibaba Cloud Coding Plan authentication...'));
 
   try {
-    const resolved = resolveBaseUrl(codingPlanProviderConfig, selectedBaseUrl);
-    const installPlan = buildInstallPlan(codingPlanProviderConfig, {
+    const resolved = resolveBaseUrl(codingPlanProvider, selectedBaseUrl);
+    const installPlan = buildInstallPlan(codingPlanProvider, {
       baseUrl: resolved,
       apiKey: selectedKey,
-      modelIds: getDefaultModelIds(codingPlanProviderConfig),
+      modelIds: getDefaultModelIds(codingPlanProvider),
     });
-    await applyProviderInstallPlan(installPlan, {
-      settings,
-      config,
-      provider: toLlmProvider(codingPlanProviderConfig),
-    });
+    await applyProviderInstallPlan(installPlan, { settings, config });
 
     writeStdoutLine(
       t('Successfully authenticated with Alibaba Cloud Coding Plan.'),
@@ -298,11 +290,7 @@ async function handleOpenRouterAuth(
     const installPlan = await createOpenRouterProviderInstallPlan({
       apiKey: selectedKey,
     });
-    await applyProviderInstallPlan(installPlan, {
-      settings,
-      config,
-      provider: toLlmProvider(openRouterProviderConfig),
-    });
+    await applyProviderInstallPlan(installPlan, { settings, config });
     writeStdoutLine(
       t('Fetched OpenRouter models in {{elapsed}}.', {
         elapsed: formatElapsedTime(modelsStartMs),
@@ -327,8 +315,8 @@ async function handleOpenRouterAuth(
 }
 
 async function promptForCodingPlanBaseUrl(): Promise<string> {
-  const baseUrlOptions = Array.isArray(codingPlanProviderConfig.baseUrl)
-    ? codingPlanProviderConfig.baseUrl
+  const baseUrlOptions = Array.isArray(codingPlanProvider.baseUrl)
+    ? codingPlanProvider.baseUrl
     : [];
   const selector = new InteractiveSelector(
     baseUrlOptions.map((opt) => ({

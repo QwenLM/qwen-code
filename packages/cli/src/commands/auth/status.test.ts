@@ -11,7 +11,7 @@ import {
   CODING_PLAN_ENV_KEY,
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_GLOBAL_BASE_URL,
-  codingPlanProviderConfig,
+  codingPlanProvider,
 } from '../../auth/providers/alibaba/codingPlan.js';
 import { buildProviderTemplate } from '../../auth/providerConfig.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -29,10 +29,7 @@ import { loadSettings } from '../../config/settings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const codingPlanProviders = (baseUrl: string = CODING_PLAN_CHINA_BASE_URL) => ({
-  [AuthType.USE_OPENAI]: buildProviderTemplate(
-    codingPlanProviderConfig,
-    baseUrl,
-  ),
+  [AuthType.USE_OPENAI]: buildProviderTemplate(codingPlanProvider, baseUrl),
 });
 
 describe('showAuthStatus', () => {

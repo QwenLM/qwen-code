@@ -204,6 +204,29 @@ export function useProviderSetupFlow(
     setApiKeyError(null);
   }, []);
 
+  // Shared helper: assemble ProviderSetupInputs from current form state
+  const buildCurrentInputs = useCallback(
+    (overrides?: Partial<ProviderSetupInputs>): ProviderSetupInputs => ({
+      protocol: provider?.protocolOptions ? protocol : undefined,
+      baseUrl: baseUrl.trim(),
+      apiKey: apiKey.trim(),
+      modelIds: normalizeModelIds(modelIds),
+      ...overrides,
+    }),
+    [provider, protocol, baseUrl, apiKey, modelIds],
+  );
+
+  const submitOrNext = useCallback(
+    (overrides?: Partial<ProviderSetupInputs>) => {
+      if (stepIndex >= visibleSteps.length - 1) {
+        if (provider) void onSubmit(provider, buildCurrentInputs(overrides));
+      } else {
+        goNext();
+      }
+    },
+    [stepIndex, visibleSteps, provider, onSubmit, buildCurrentInputs, goNext],
+  );
+
   const submitApiKey = useCallback(
     (keyOverride?: string): boolean => {
       const trimmed = (keyOverride ?? apiKey).trim();
@@ -220,32 +243,10 @@ export function useProviderSetupFlow(
       }
       setApiKeyError(null);
       setApiKey(trimmed);
-
-      if (stepIndex >= visibleSteps.length - 1) {
-        const inputs: ProviderSetupInputs = {
-          protocol:
-            provider?.id === 'custom-openai-compatible' ? protocol : undefined,
-          baseUrl: baseUrl.trim(),
-          apiKey: trimmed,
-          modelIds: normalizeModelIds(modelIds),
-        };
-        if (provider) void onSubmit(provider, inputs);
-      } else {
-        goNext();
-      }
+      submitOrNext({ apiKey: trimmed });
       return true;
     },
-    [
-      apiKey,
-      provider,
-      baseUrl,
-      goNext,
-      stepIndex,
-      visibleSteps,
-      protocol,
-      modelIds,
-      onSubmit,
-    ],
+    [apiKey, provider, baseUrl, submitOrNext],
   );
 
   const changeModelIds = useCallback((value: string) => {
@@ -260,33 +261,9 @@ export function useProviderSetupFlow(
       return false;
     }
     setModelIdsError(null);
-
-    if (stepIndex >= visibleSteps.length - 1) {
-      if (provider) {
-        const inputs: ProviderSetupInputs = {
-          protocol:
-            provider.id === 'custom-openai-compatible' ? protocol : undefined,
-          baseUrl: baseUrl.trim(),
-          apiKey: apiKey.trim(),
-          modelIds: normalized,
-        };
-        void onSubmit(provider, inputs);
-      }
-    } else {
-      goNext();
-    }
+    submitOrNext({ modelIds: normalized });
     return true;
-  }, [
-    modelIds,
-    goNext,
-    stepIndex,
-    visibleSteps,
-    provider,
-    protocol,
-    baseUrl,
-    apiKey,
-    onSubmit,
-  ]);
+  }, [modelIds, submitOrNext]);
 
   const moveAdvancedFocusUp = useCallback(() => {
     setFocusedConfigIndex((v) => (v <= 0 ? 1 : v - 1));
@@ -312,32 +289,22 @@ export function useProviderSetupFlow(
 
   const submit = useCallback(() => {
     if (!provider) return;
-    const inputs: ProviderSetupInputs = {
-      protocol:
-        provider.id === 'custom-openai-compatible' ? protocol : undefined,
-      baseUrl: baseUrl.trim(),
-      apiKey: apiKey.trim(),
-      modelIds: normalizeModelIds(modelIds),
-      advancedConfig:
-        thinkingEnabled || modalityEnabled
-          ? {
-              enableThinking: thinkingEnabled || undefined,
-              multimodal: modalityEnabled
-                ? { image: true, video: true, audio: true }
-                : undefined,
-            }
-          : undefined,
-    };
-    void onSubmit(provider, inputs);
+    const advancedConfig =
+      thinkingEnabled || modalityEnabled
+        ? {
+            enableThinking: thinkingEnabled || undefined,
+            multimodal: modalityEnabled
+              ? { image: true, video: true, audio: true }
+              : undefined,
+          }
+        : undefined;
+    void onSubmit(provider, buildCurrentInputs({ advancedConfig }));
   }, [
     provider,
-    protocol,
-    baseUrl,
-    apiKey,
-    modelIds,
     thinkingEnabled,
     modalityEnabled,
     onSubmit,
+    buildCurrentInputs,
   ]);
 
   // -- Preview JSON (for review step) ---------------------------------------

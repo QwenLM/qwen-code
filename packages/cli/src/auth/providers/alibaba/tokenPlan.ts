@@ -27,7 +27,7 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
 // Provider config (unified ProviderConfig)
 // ---------------------------------------------------------------------------
 
-export const tokenPlanProviderConfig: ProviderConfig = {
+export const tokenPlanProvider: ProviderConfig = {
   id: 'token-plan',
   label: 'Token Plan',
   description:

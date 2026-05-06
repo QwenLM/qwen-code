@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import { applyProviderInstallPlan } from './applyProviderInstallPlan.js';
-import type { LlmProvider, ProviderInstallPlan } from '../types.js';
+import type { ProviderInstallPlan } from '../types.js';
 
 vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),
@@ -17,20 +17,6 @@ vi.mock('../../utils/settingsUtils.js', () => ({
 vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => SettingScope.User),
 }));
-
-const provider: LlmProvider = {
-  id: 'test-provider',
-  label: 'Test Provider',
-  category: 'custom',
-  protocol: AuthType.USE_OPENAI,
-  setupMethods: [{ type: 'manual' }],
-  ownsModel(model) {
-    return model.envKey === 'TEST_API_KEY';
-  },
-  async createInstallPlan() {
-    throw new Error('not used');
-  },
-};
 
 function createSettings(modelProviders = {}) {
   return {
@@ -89,6 +75,7 @@ describe('applyProviderInstallPlan', () => {
           authType: AuthType.USE_OPENAI,
           models: [{ id: 'new-model', envKey: 'TEST_API_KEY' }],
           mergeStrategy: 'prepend-and-remove-owned',
+          ownsModel: (model) => model.envKey === 'TEST_API_KEY',
         },
       ],
     };
@@ -96,7 +83,6 @@ describe('applyProviderInstallPlan', () => {
     await applyProviderInstallPlan(plan, {
       settings: settings as never,
       config: config as never,
-      provider,
     });
 
     expect(settings.forScope).toHaveBeenCalledWith(SettingScope.User);
@@ -159,7 +145,6 @@ describe('applyProviderInstallPlan', () => {
     await applyProviderInstallPlan(plan, {
       settings: settings as never,
       config: config as never,
-      provider,
       refreshAuth: false,
     });
 
@@ -177,7 +162,7 @@ describe('applyProviderInstallPlan', () => {
     expect(config.refreshAuth).not.toHaveBeenCalled();
   });
 
-  it('uses patch ownership before provider ownership', async () => {
+  it('uses patch ownsModel for merge filtering', async () => {
     const settings = createSettings({
       [AuthType.USE_OPENAI]: [
         { id: 'old-a', envKey: 'A' },
@@ -203,12 +188,6 @@ describe('applyProviderInstallPlan', () => {
     await applyProviderInstallPlan(plan, {
       settings: settings as never,
       config: config as never,
-      provider: {
-        ...provider,
-        ownsModel(model) {
-          return typeof model.envKey === 'string';
-        },
-      },
     });
 
     expect(settings.setValue).toHaveBeenCalledWith(
@@ -221,7 +200,7 @@ describe('applyProviderInstallPlan', () => {
     );
   });
 
-  it('writes whitelisted provider state and legacy credentials', async () => {
+  it('writes provider state and legacy credentials', async () => {
     const settings = createSettings();
     const config = createConfig();
     const plan: ProviderInstallPlan = {
@@ -242,7 +221,6 @@ describe('applyProviderInstallPlan', () => {
     await applyProviderInstallPlan(plan, {
       settings: settings as never,
       config: config as never,
-      provider,
     });
 
     expect(settings.setValue).toHaveBeenCalledWith(

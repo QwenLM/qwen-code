@@ -91,6 +91,8 @@ vi.mock('../../auth/providers/oauth/openrouter.js', () => ({
           },
         ],
         mergeStrategy: 'prepend-and-remove-owned',
+        ownsModel: (model: { baseUrl?: string }) =>
+          (model.baseUrl ?? '').includes('openrouter.ai'),
       },
     ],
   })),

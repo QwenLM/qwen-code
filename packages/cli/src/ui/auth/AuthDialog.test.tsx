@@ -53,10 +53,7 @@ const createMockUIActions = (overrides: UIActionsOverrides = {}): UIActions => {
   const authActions = {
     handleAuthSelect: vi.fn(),
     handleProviderSubmit: vi.fn(),
-    handleSubscriptionPlanSubmit: vi.fn(),
-    handleApiKeyProviderSubmit: vi.fn(),
     handleOpenRouterSubmit: vi.fn(),
-    handleCustomApiKeySubmit: vi.fn(),
     setAuthState: vi.fn(),
     onAuthError: vi.fn(),
     openAuthDialog: vi.fn(),
@@ -854,7 +851,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Alibaba ModelStudio · Step 2/3 · Region',
+      'Alibaba ModelStudio · Step 1/2 · Region',
     );
     stdin.write('\u001b');
 
@@ -919,7 +916,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'DeepSeek API Key · Step 2/3 · API Key',
+      'DeepSeek API Key · Step 1/2 · API Key',
     );
     stdin.write('\u001b');
 
@@ -1044,7 +1041,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'DeepSeek API Key · Step 2/3 · API Key',
+      'DeepSeek API Key · Step 1/2 · API Key',
     );
     stdin.write('\u001b');
     await vi.waitFor(() => {
@@ -1054,7 +1051,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'MiniMax API Key · Step 2/4 · Endpoint',
+      'MiniMax API Key · Step 1/3 · Endpoint',
     );
 
     await vi.waitFor(() => {
@@ -1168,7 +1165,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Alibaba ModelStudio · Step 2/2 · API Key',
+      'Alibaba ModelStudio · Step 1/1 · API Key',
     );
 
     await typeText(stdin, 'sk-token-plan');
@@ -1224,7 +1221,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Alibaba ModelStudio · Step 2/2 · API Key',
+      'Alibaba ModelStudio · Step 1/1 · API Key',
     );
     stdin.write('\u001b');
 
@@ -1343,10 +1340,9 @@ describe('AuthDialog Custom API Key Wizard', () => {
     'navigates to protocol selection when Custom API Key is selected',
     async () => {
       const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn();
 
       const mockUIState = createMockUIState();
-      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
+      const mockUIActions = createMockUIActions();
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -1380,10 +1376,9 @@ describe('AuthDialog Custom API Key Wizard', () => {
     'navigates to base URL input after selecting a protocol',
     async () => {
       const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn();
 
       const mockUIState = createMockUIState();
-      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
+      const mockUIActions = createMockUIActions();
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -1415,10 +1410,9 @@ describe('AuthDialog Custom API Key Wizard', () => {
     'shows review screen with JSON after entering model IDs',
     async () => {
       const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn();
 
       const mockUIState = createMockUIState();
-      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
+      const mockUIActions = createMockUIActions();
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),
@@ -1522,10 +1516,9 @@ describe('AuthDialog Custom API Key Wizard', () => {
     'shows advanced config screen after entering model IDs',
     async () => {
       const settings = createStandardSettings();
-      const handleCustomApiKeySubmit = vi.fn();
 
       const mockUIState = createMockUIState();
-      const mockUIActions = createMockUIActions({ handleCustomApiKeySubmit });
+      const mockUIActions = createMockUIActions();
 
       const mockConfig = {
         getAuthType: vi.fn(() => undefined),

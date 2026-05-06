@@ -8,16 +8,8 @@ export { applyProviderInstallPlan } from './install/applyProviderInstallPlan.js'
 export type {
   ApplyProviderInstallPlanOptions,
   ApplyProviderInstallPlanResult,
-  LlmProvider,
-  ProviderCategory,
   ProviderId,
   ProviderInstallPlan,
   ProviderInstallState,
   ProviderModelProvidersPatch,
-  ProviderSetupContext,
-  ProviderSetupInput,
-  ProviderSetupMethod,
-  ProviderSetupMethodType,
-  ProviderSetupResult,
-  ProviderValidationResult,
 } from './types.js';

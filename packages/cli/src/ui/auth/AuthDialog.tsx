@@ -17,13 +17,8 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { t } from '../../i18n/index.js';
 import {
-  codingPlanProvider,
+  findProviderById,
   findProviderByCredentials,
-  tokenPlanProvider,
-  alibabaStandardProvider,
-  deepseekProvider,
-  minimaxProvider,
-  zaiProvider,
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
@@ -228,15 +223,7 @@ export function AuthDialog(): React.JSX.Element {
     setErrorMessage(null);
     onAuthError(null);
 
-    const providerConfig = [
-      codingPlanProvider,
-      tokenPlanProvider,
-      alibabaStandardProvider,
-      deepseekProvider,
-      minimaxProvider,
-      zaiProvider,
-    ].find((p) => p.id === providerId);
-
+    const providerConfig = findProviderById(providerId);
     if (!providerConfig) return;
     setupFlow.start(providerConfig);
     pushView('provider-setup');

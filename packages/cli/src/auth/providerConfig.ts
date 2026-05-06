@@ -6,11 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import type { AuthType, ProviderModelConfig } from '@qwen-code/qwen-code-core';
-import type {
-  LlmProvider,
-  ProviderInstallPlan,
-  ProviderInstallState,
-} from './types.js';
+import type { ProviderInstallPlan, ProviderInstallState } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Declarative provider config — every built-in provider is an instance of this
@@ -293,32 +289,6 @@ export function buildInstallPlan(
       },
     ],
     providerState: config.getProviderState?.(inputs.baseUrl, models),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Adapt ProviderConfig → LlmProvider (backward compat)
-// ---------------------------------------------------------------------------
-
-export function toLlmProvider(config: ProviderConfig): LlmProvider {
-  return {
-    id: config.id,
-    label: config.label,
-    description: config.description,
-    category:
-      config.uiGroup === 'alibaba'
-        ? 'recommended'
-        : config.uiGroup === 'custom'
-          ? 'custom'
-          : 'third-party',
-    protocol: config.protocol,
-    setupMethods: [
-      { type: config.authMethod === 'oauth' ? 'oauth' : 'api-key' },
-    ],
-    ownsModel: resolveOwnsModel(config),
-    async createInstallPlan(input) {
-      return buildInstallPlan(config, input as unknown as ProviderSetupInputs);
-    },
   };
 }
 

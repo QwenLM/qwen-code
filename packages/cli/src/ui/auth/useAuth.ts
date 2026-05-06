@@ -23,7 +23,6 @@ import { t } from '../../i18n/index.js';
 import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
 import {
   buildInstallPlan,
-  toLlmProvider,
   getDefaultModelIds,
   resolveBaseUrl,
   type ProviderConfig,
@@ -32,7 +31,7 @@ import {
 import {
   codingPlanProvider,
   tokenPlanProvider,
-  openRouterProvider as openRouterProviderConfig,
+  openRouterProvider,
   findProviderById,
 } from '../../auth/allProviders.js';
 import {
@@ -105,26 +104,6 @@ export type AuthController = {
     handleOpenRouterSubmit: () => Promise<void>;
     openAuthDialog: () => void;
     cancelAuthentication: () => void;
-
-    // Legacy wrappers — kept for backward compat, delegate to handleProviderSubmit
-    handleSubscriptionPlanSubmit: (
-      planId: 'coding' | 'token',
-      apiKey: string,
-      baseUrl?: string,
-    ) => Promise<void>;
-    handleApiKeyProviderSubmit: (
-      providerId: string,
-      apiKey: string,
-      modelIdsInput: string,
-      endpointOption?: string,
-    ) => Promise<void>;
-    handleCustomApiKeySubmit: (
-      protocol: AuthType,
-      baseUrl: string,
-      apiKey: string,
-      modelIdsInput: string,
-      generationConfig?: ProviderSetupInputs['advancedConfig'],
-    ) => Promise<void>;
   };
 };
 
@@ -204,11 +183,7 @@ export const useAuthCommand = (
         setAuthError(null);
 
         const plan = buildInstallPlan(providerConfig, inputs);
-        await applyProviderInstallPlan(plan, {
-          settings,
-          config,
-          provider: toLlmProvider(providerConfig),
-        });
+        await applyProviderInstallPlan(plan, { settings, config });
 
         completeAuthentication();
 
@@ -277,8 +252,8 @@ export const useAuthCommand = (
       const recommendedModels = selectRecommendedOpenRouterModels(allModels);
       const preferredModelId = getPreferredOpenRouterModelId(recommendedModels);
 
-      const plan = buildInstallPlan(openRouterProviderConfig, {
-        baseUrl: resolveBaseUrl(openRouterProviderConfig),
+      const plan = buildInstallPlan(openRouterProvider, {
+        baseUrl: resolveBaseUrl(openRouterProvider),
         apiKey: selectedKey,
         modelIds: preferredModelId ? [preferredModelId] : [],
         prebuiltModels: recommendedModels,
@@ -287,7 +262,6 @@ export const useAuthCommand = (
       await applyProviderInstallPlan(plan, {
         settings,
         config,
-        provider: toLlmProvider(openRouterProviderConfig),
         refreshAuth: false,
       });
 
@@ -553,9 +527,6 @@ export const useAuthCommand = (
       handleAuthSelect,
       handleProviderSubmit,
       handleOpenRouterSubmit,
-      handleSubscriptionPlanSubmit,
-      handleApiKeyProviderSubmit,
-      handleCustomApiKeySubmit,
       openAuthDialog,
       cancelAuthentication,
     }),
@@ -565,9 +536,6 @@ export const useAuthCommand = (
       handleAuthSelect,
       handleProviderSubmit,
       handleOpenRouterSubmit,
-      handleSubscriptionPlanSubmit,
-      handleApiKeyProviderSubmit,
-      handleCustomApiKeySubmit,
       openAuthDialog,
       cancelAuthentication,
     ],

@@ -8,9 +8,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import {
   createOpenRouterProviderInstallPlan,
-  openRouterProviderConfig,
+  openRouterProvider,
 } from './openrouter.js';
-import { toLlmProvider } from '../../providerConfig.js';
 
 vi.mock('./openrouterOAuth.js', () => ({
   getOpenRouterModelsWithFallback: vi.fn(),
@@ -67,16 +66,14 @@ describe('openRouterProvider', () => {
   });
 
   it('owns models by OpenRouter base URL', () => {
-    const provider = toLlmProvider(openRouterProviderConfig);
-
     expect(
-      provider.ownsModel?.({
+      openRouterProvider.ownsModel?.({
         id: 'openrouter-model',
         baseUrl: 'https://openrouter.ai/api/v1',
       }),
     ).toBe(true);
     expect(
-      provider.ownsModel?.({
+      openRouterProvider.ownsModel?.({
         id: 'other-model',
         baseUrl: 'https://api.example.com/v1',
       }),

@@ -17,7 +17,6 @@ import type {
 function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
-  provider: ApplyProviderInstallPlanOptions['provider'],
 ): ModelProvidersConfig {
   const existingModels = existingModelProviders[patch.authType] ?? [];
 
@@ -25,7 +24,7 @@ function applyModelProvidersPatch(
   if (patch.mergeStrategy === 'append') {
     updatedModels = [...existingModels, ...patch.models];
   } else {
-    const ownsModel = patch.ownsModel ?? provider.ownsModel;
+    const ownsModel = patch.ownsModel;
     const preservedModels = existingModels.filter((model) => {
       if (ownsModel) {
         return !ownsModel(model);
@@ -50,7 +49,6 @@ export async function applyProviderInstallPlan(
   {
     settings,
     config,
-    provider,
     scope,
     refreshAuth = true,
   }: ApplyProviderInstallPlanOptions,
@@ -73,7 +71,6 @@ export async function applyProviderInstallPlan(
     updatedModelProviders = applyModelProvidersPatch(
       updatedModelProviders,
       patch,
-      provider,
     );
     settings.setValue(
       persistScope,
@@ -104,33 +101,11 @@ export async function applyProviderInstallPlan(
     settings.setValue(persistScope, 'model.name', plan.modelSelection.modelId);
   }
 
-  if (plan.providerState?.codingPlan?.baseUrl != null) {
-    settings.setValue(
-      persistScope,
-      'codingPlan.baseUrl',
-      plan.providerState.codingPlan.baseUrl,
-    );
-  }
-  if (plan.providerState?.codingPlan?.version != null) {
-    settings.setValue(
-      persistScope,
-      'codingPlan.version',
-      plan.providerState.codingPlan.version,
-    );
-  }
-  if (plan.providerState?.tokenPlan?.baseUrl != null) {
-    settings.setValue(
-      persistScope,
-      'tokenPlan.baseUrl',
-      plan.providerState.tokenPlan.baseUrl,
-    );
-  }
-  if (plan.providerState?.tokenPlan?.version != null) {
-    settings.setValue(
-      persistScope,
-      'tokenPlan.version',
-      plan.providerState.tokenPlan.version,
-    );
+  // Persist arbitrary provider state (e.g. codingPlan.version, tokenPlan.baseUrl)
+  for (const [key, entries] of Object.entries(plan.providerState ?? {})) {
+    for (const [field, value] of Object.entries(entries)) {
+      settings.setValue(persistScope, `${key}.${field}`, value);
+    }
   }
 
   config.reloadModelProvidersConfig(updatedModelProviders);

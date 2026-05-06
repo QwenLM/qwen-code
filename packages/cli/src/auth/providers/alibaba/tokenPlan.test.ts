@@ -9,7 +9,7 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import {
   TOKEN_PLAN_ENV_KEY,
   TOKEN_PLAN_BASE_URL,
-  tokenPlanProviderConfig,
+  tokenPlanProvider,
 } from './tokenPlan.js';
 import {
   buildInstallPlan,
@@ -17,19 +17,18 @@ import {
   computeModelListVersion,
   getDefaultModelIds,
   resolveBaseUrl,
-  toLlmProvider,
-} from '../../providerConfig.js';
+ providerMatchesCredentials } from '../../providerConfig.js';
 
 describe('token plan provider', () => {
   it('creates a Token Plan install plan', () => {
-    const template = buildProviderTemplate(tokenPlanProviderConfig);
+    const template = buildProviderTemplate(tokenPlanProvider);
     const version = computeModelListVersion(template);
-    const baseUrl = resolveBaseUrl(tokenPlanProviderConfig);
+    const baseUrl = resolveBaseUrl(tokenPlanProvider);
 
-    const plan = buildInstallPlan(tokenPlanProviderConfig, {
+    const plan = buildInstallPlan(tokenPlanProvider, {
       baseUrl,
       apiKey: 'sk-token',
-      modelIds: getDefaultModelIds(tokenPlanProviderConfig),
+      modelIds: getDefaultModelIds(tokenPlanProvider),
     });
 
     expect(template.map((model) => model.id)).toEqual([
@@ -61,24 +60,20 @@ describe('token plan provider', () => {
     });
   });
 
-  it('owns Token Plan models', () => {
-    const provider = toLlmProvider(tokenPlanProviderConfig);
-
+  it('matches Token Plan credentials', () => {
     expect(
-      provider.ownsModel?.({
-        id: 'token-model',
-        name: '[ModelStudio Token Plan] token-model',
-        baseUrl: TOKEN_PLAN_BASE_URL,
-        envKey: TOKEN_PLAN_ENV_KEY,
-      }),
+      providerMatchesCredentials(
+        tokenPlanProvider,
+        TOKEN_PLAN_BASE_URL,
+        TOKEN_PLAN_ENV_KEY,
+      ),
     ).toBe(true);
     expect(
-      provider.ownsModel?.({
-        id: 'custom-model',
-        name: '[Other] custom-model',
-        baseUrl: 'https://custom.example.com/v1',
-        envKey: 'CUSTOM_API_KEY',
-      }),
+      providerMatchesCredentials(
+        tokenPlanProvider,
+        'https://custom.example.com/v1',
+        'CUSTOM_API_KEY',
+      ),
     ).toBe(false);
   });
 });

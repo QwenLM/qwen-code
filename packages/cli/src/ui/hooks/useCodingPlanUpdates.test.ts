@@ -11,7 +11,7 @@ import { useCodingPlanUpdates } from './useCodingPlanUpdates.js';
 import {
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
-  codingPlanProviderConfig,
+  codingPlanProvider,
 } from '../../auth/providers/alibaba/codingPlan.js';
 import {
   buildProviderTemplate,
@@ -23,7 +23,7 @@ vi.mock('../../utils/settingsUtils.js', () => ({
 }));
 
 const chinaTemplate = buildProviderTemplate(
-  codingPlanProviderConfig,
+  codingPlanProvider,
   CODING_PLAN_CHINA_BASE_URL,
 );
 const chinaVersion = computeModelListVersion(chinaTemplate);

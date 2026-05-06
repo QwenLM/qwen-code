@@ -1,9 +1,0 @@
-/**
- * @license
- * Copyright 2026 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
- */
-
-export { deepseekProvider } from './deepseek.js';
-export { minimaxProvider } from './minimax.js';
-export { zaiProvider } from './zai.js';

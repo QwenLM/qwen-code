@@ -11,41 +11,30 @@ import {
   providerMatchesCredentials,
   type ProviderConfig,
 } from './providerConfig.js';
-
-// ---------------------------------------------------------------------------
-// Import all providers from their respective files
-// ---------------------------------------------------------------------------
-
-export {
-  codingPlanProviderConfig,
-  codingPlanProviderConfig as codingPlanProvider,
-} from './providers/alibaba/codingPlan.js';
-export {
-  tokenPlanProviderConfig,
-  tokenPlanProviderConfig as tokenPlanProvider,
-} from './providers/alibaba/tokenPlan.js';
-export { alibabaStandardProvider } from './providers/alibaba/alibabaStandard.js';
-export {
-  openRouterProviderConfig,
-  openRouterProviderConfig as openRouterProvider,
-} from './providers/oauth/openrouter.js';
-export { deepseekProvider } from './providers/thirdParty/deepseek.js';
-export { minimaxProvider } from './providers/thirdParty/minimax.js';
-export { zaiProvider } from './providers/thirdParty/zai.js';
-export {
-  customProvider,
-  CUSTOM_API_KEY_ENV_PREFIX,
-  generateCustomEnvKey,
-} from './providers/custom/customProvider.js';
-
-import { codingPlanProviderConfig } from './providers/alibaba/codingPlan.js';
-import { tokenPlanProviderConfig } from './providers/alibaba/tokenPlan.js';
+import { codingPlanProvider } from './providers/alibaba/codingPlan.js';
+import { tokenPlanProvider } from './providers/alibaba/tokenPlan.js';
 import { alibabaStandardProvider } from './providers/alibaba/alibabaStandard.js';
-import { openRouterProviderConfig } from './providers/oauth/openrouter.js';
+import { openRouterProvider } from './providers/oauth/openrouter.js';
 import { deepseekProvider } from './providers/thirdParty/deepseek.js';
 import { minimaxProvider } from './providers/thirdParty/minimax.js';
 import { zaiProvider } from './providers/thirdParty/zai.js';
 import { customProvider } from './providers/custom/customProvider.js';
+
+// Re-export all providers
+export {
+  codingPlanProvider,
+  tokenPlanProvider,
+  alibabaStandardProvider,
+  openRouterProvider,
+  deepseekProvider,
+  minimaxProvider,
+  zaiProvider,
+  customProvider,
+};
+export {
+  CUSTOM_API_KEY_ENV_PREFIX,
+  generateCustomEnvKey,
+} from './providers/custom/customProvider.js';
 
 // ---------------------------------------------------------------------------
 // Provider Registry
@@ -53,10 +42,10 @@ import { customProvider } from './providers/custom/customProvider.js';
 
 /** All known providers, in display order. */
 export const ALL_PROVIDERS: readonly ProviderConfig[] = [
-  codingPlanProviderConfig,
-  tokenPlanProviderConfig,
+  codingPlanProvider,
+  tokenPlanProvider,
   alibabaStandardProvider,
-  openRouterProviderConfig,
+  openRouterProvider,
   deepseekProvider,
   minimaxProvider,
   zaiProvider,
@@ -100,7 +89,6 @@ export function getAllProviderBaseUrls(): string[] {
 // Re-export providerConfig utilities for convenience
 export {
   buildInstallPlan,
-  toLlmProvider,
   resolveBaseUrl,
   getDefaultModelIds,
   shouldShowStep,

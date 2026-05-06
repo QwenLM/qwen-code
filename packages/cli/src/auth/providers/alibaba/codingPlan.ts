@@ -43,7 +43,7 @@ const MODELSTUDIO_MODELS: ModelSpec[] = [
 // Provider config (unified ProviderConfig)
 // ---------------------------------------------------------------------------
 
-export const codingPlanProviderConfig: ProviderConfig = {
+export const codingPlanProvider: ProviderConfig = {
   id: 'coding-plan',
   label: 'Coding Plan',
   description: 'For individual developers · Weekly quota included',
