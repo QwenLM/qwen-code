@@ -239,10 +239,14 @@ export class LoggingContentGenerator implements ContentGenerator {
           code: SpanStatusCode.ERROR,
           message: error instanceof Error ? error.message : String(error),
         });
-      } catch {}
+      } catch {
+        // OTel errors must not mask the original API error
+      }
       try {
         span.end();
-      } catch {}
+      } catch {
+        // OTel errors must not mask the original API error
+      }
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
@@ -342,12 +346,16 @@ export class LoggingContentGenerator implements ContentGenerator {
           code: SpanStatusCode.ERROR,
           message: error instanceof Error ? error.message : String(error),
         });
-      } catch {}
+      } catch {
+        // OTel errors must not mask the original API error
+      }
       throw error;
     } finally {
       try {
         span?.end();
-      } catch {}
+      } catch {
+        // OTel errors must not mask the original API error
+      }
     }
   }
 
