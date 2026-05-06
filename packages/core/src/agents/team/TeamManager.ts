@@ -683,8 +683,13 @@ export class TeamManager {
           resolved = true;
           clearTimeout(timer);
           signal?.removeEventListener('abort', onAbort);
-          // Restore original callback if we wrapped it.
-          if (wrappedCb) {
+          // Restore original callback ONLY if our wrapper is still
+          // installed. Without this check, an external
+          // setLeaderMessageCallback(newCb) during the wait (manager
+          // swap, React unmount, team_delete) would be clobbered
+          // here on cleanup — the same bug class fixed in f4582d68
+          // for the manager-swap path, reintroduced via this wrapper.
+          if (this.leaderMessageCallback === wrappedCallback) {
             this.leaderMessageCallback = origCb;
           }
           this.teamEventEmitter.off(
@@ -702,13 +707,18 @@ export class TeamManager {
 
         // Resolve when a message is delivered.
         const origCb = this.leaderMessageCallback;
-        let wrappedCb = true;
-        this.leaderMessageCallback = (msg) => {
-          this.leaderMessageCallback = origCb;
-          wrappedCb = false;
+        const wrappedCallback = (msg: string) => {
+          // Restore early so a second message doesn't re-enter the
+          // wrapper after we've already finished. Same identity-
+          // check as in finish() — don't stomp on an externally-set
+          // callback.
+          if (this.leaderMessageCallback === wrappedCallback) {
+            this.leaderMessageCallback = origCb;
+          }
           origCb?.(msg);
           finish('message');
         };
+        this.leaderMessageCallback = wrappedCallback;
 
         // Resolve when all teammates terminate.
         const onTerminated = () => finish('terminated');
