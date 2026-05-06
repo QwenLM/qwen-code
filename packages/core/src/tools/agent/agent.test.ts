@@ -122,6 +122,7 @@ describe('AgentTool', () => {
       copyDiscoveredToolsFrom: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
+      stop: vi.fn().mockResolvedValue(undefined),
     };
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),

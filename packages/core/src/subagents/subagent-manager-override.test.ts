@@ -4,13 +4,45 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Config, ApprovalMode } from '../config/config.js';
 import { SubagentManager } from './subagent-manager.js';
 import type { SubagentConfig } from './types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { EditTool } from '../tools/edit.js';
 import { ReadFileTool } from '../tools/read-file.js';
+import { createApprovalModeOverride } from '../tools/agent/agent.js';
+
+// The non-inherit (explicit-model) branch in maybeOverrideContentGenerator
+// builds a fresh ContentGenerator. We don't want the test to actually
+// reach the OpenAI / Anthropic SDK — replacing the factory with a stub
+// is enough to exercise the code path.
+vi.mock('../core/contentGenerator.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../core/contentGenerator.js')
+  >('../core/contentGenerator.js');
+  return {
+    ...actual,
+    createContentGenerator: vi.fn().mockResolvedValue({
+      generateContent: vi.fn(),
+      generateContentStream: vi.fn(),
+    }),
+  };
+});
+
+vi.mock('../models/content-generator-config.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../models/content-generator-config.js')
+  >('../models/content-generator-config.js');
+  return {
+    ...actual,
+    buildAgentContentGeneratorConfig: vi.fn().mockReturnValue({
+      model: 'override-model',
+      authType: 'openai',
+      apiKey: 'override-key',
+    }),
+  };
+});
 
 /**
  * Companion to `tools/agent/agent-override.test.ts`. Same regression:
@@ -137,12 +169,20 @@ describe('SubagentManager.maybeOverrideContentGenerator bound-tool isolation', (
   it('inherits branch: skips rebuild and inherits registry via prototype when the base already has its own registry (real-world chained-override case)', async () => {
     // This mirrors the real-world flow: agent.ts wraps the parent in
     // `createApprovalModeOverride` (which builds R1 on the wrapper),
-    // then passes that wrapper through `createAgentHeadless` →
-    // `maybeOverrideContentGenerator`. We do NOT want the second layer
-    // to build a redundant R2 — that would (a) waste work, (b) leak
-    // listeners on every later AgentTool/SkillTool factory invocation,
-    // and (c) split the cache so client-level clears target an empty
-    // R2 cache while the bound tools (still in R1) keep using R1's.
+    // then passes that wrapper — sometimes wrapped one more level in
+    // `bgConfig = Object.create(agentConfig)` for the background path —
+    // through `createAgentHeadless` → `maybeOverrideContentGenerator`.
+    // We do NOT want the second layer to build a redundant R2 — that
+    // would (a) waste work, (b) leak listeners on every later
+    // AgentTool/SkillTool factory invocation, and (c) split the cache
+    // so client-level clears target an empty R2 cache while the bound
+    // tools (still in R1) keep using R1's.
+    //
+    // Detection is via the `TOOL_REGISTRY_REBUILT` symbol marker that
+    // `createApprovalModeOverride` sets on its return value; Symbol
+    // property lookup walks the prototype chain so even an Object.create
+    // wrapper above the rebuilt Config is correctly recognised as
+    // having an upstream rebuild.
     const parent = new Config(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {
       skipDiscovery: true,
@@ -150,17 +190,19 @@ describe('SubagentManager.maybeOverrideContentGenerator bound-tool isolation', (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (parent as any).toolRegistry = parentRegistry;
 
-    // Simulate what `agent.ts:createApprovalModeOverride` produces: a
-    // Config with its own getToolRegistry method that returns its own
-    // distinct registry.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const upstreamWrapper = Object.create(parent) as any;
-    const upstreamRegistry = await upstreamWrapper.createToolRegistry(
-      undefined,
-      { skipDiscovery: true },
+    // Layer 1: actual createApprovalModeOverride (sets the marker).
+    const upstreamWrapper = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO_EDIT,
     );
-    upstreamRegistry.copyDiscoveredToolsFrom(parentRegistry);
-    upstreamWrapper.getToolRegistry = () => upstreamRegistry;
+    const upstreamRegistry = upstreamWrapper.getToolRegistry();
+
+    // Layer 2: simulate `bgConfig = Object.create(agentConfig)` from
+    // the background path — own properties added on this layer should
+    // not hide the marker on the prototype.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bgWrapper = Object.create(upstreamWrapper) as any;
+    bgWrapper.getShouldAvoidPermissionPrompts = () => true;
 
     const manager = new SubagentManager(parent);
     const subagentConfig: SubagentConfig = {
@@ -174,14 +216,14 @@ describe('SubagentManager.maybeOverrideContentGenerator bound-tool isolation', (
     const child = await callMaybeOverride(
       manager,
       subagentConfig,
-      upstreamWrapper as Config,
+      bgWrapper as Config,
     );
 
     // child is still a distinct instance (Object.create) so the
     // FileReadCache lazy-init still works, but its registry must
-    // resolve via the prototype to upstreamRegistry — we did not build
-    // a new one.
-    expect(child).not.toBe(upstreamWrapper);
+    // resolve via the prototype back to upstreamRegistry — we did not
+    // build a new one.
+    expect(child).not.toBe(bgWrapper);
     expect(child.getToolRegistry()).toBe(upstreamRegistry);
 
     // Critically: tools the model later instantiates from the registry
@@ -190,6 +232,112 @@ describe('SubagentManager.maybeOverrideContentGenerator bound-tool isolation', (
     // `this.config.getFileReadCache()` to upstreamWrapper's cache,
     // which is the cache the rest of the subagent execution actually
     // uses.
+    const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
+    expect(childEdit).toBeInstanceOf(EditTool);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((childEdit as any).config).toBe(upstreamWrapper);
+  });
+
+  it('non-inherit branch (explicit-model selector): rebuilds registry and binds Edit/Read to the override Config', async () => {
+    // The non-inherit branch swaps the ContentGenerator (so the
+    // subagent talks to the model the selector requests). It must
+    // ALSO rebuild the tool registry — without that step explicit-model
+    // subagents would still resolve their core tools' `this.config` to
+    // the parent and read the parent's FileReadCache.
+    const parent = new Config(baseParams);
+    // Even though bare mode skips most tools, the non-inherit branch
+    // requires getContentGeneratorConfig() to return something for the
+    // authType fallback. Stub it minimally.
+    vi.spyOn(parent, 'getContentGeneratorConfig').mockReturnValue({
+      model: 'parent-model',
+      authType: 'openai',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const manager = new SubagentManager(parent);
+    const subagentConfig: SubagentConfig = {
+      name: 'explicit-model-agent',
+      description: 'Uses an explicit model selector',
+      systemPrompt: 'You are a helpful assistant.',
+      level: 'project',
+      filePath: '/test/project/.qwen/agents/explicit-model-agent.md',
+      // Bare model ID -> non-inherits branch (parses to {modelId,
+      // inherits:false}).
+      model: 'override-model',
+    };
+
+    const child = await callMaybeOverride(manager, subagentConfig, parent);
+
+    expect(child).not.toBe(parent);
+    expect(child.getToolRegistry()).not.toBe(parentRegistry);
+
+    const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
+    const childRead = await child
+      .getToolRegistry()
+      .ensureTool(ToolNames.READ_FILE);
+
+    expect(childEdit).toBeInstanceOf(EditTool);
+    expect(childRead).toBeInstanceOf(ReadFileTool);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((childEdit as any).config).toBe(child);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((childRead as any).config).toBe(child);
+
+    // The bound EditTool's FileReadCache must be the override's, not
+    // the parent's.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const boundConfig = (childEdit as any).config as Config;
+    expect(boundConfig.getFileReadCache()).toBe(child.getFileReadCache());
+    expect(boundConfig.getFileReadCache()).not.toBe(parent.getFileReadCache());
+  });
+
+  it('non-inherit branch: skips rebuild when an upstream wrapper has already rebuilt the registry', async () => {
+    const parent = new Config(baseParams);
+    vi.spyOn(parent, 'getContentGeneratorConfig').mockReturnValue({
+      model: 'parent-model',
+      authType: 'openai',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const upstreamWrapper = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO_EDIT,
+    );
+    const upstreamRegistry = upstreamWrapper.getToolRegistry();
+
+    const manager = new SubagentManager(parent);
+    const subagentConfig: SubagentConfig = {
+      name: 'explicit-model-agent',
+      description: 'Uses an explicit model selector',
+      systemPrompt: 'You are a helpful assistant.',
+      level: 'project',
+      filePath: '/test/project/.qwen/agents/explicit-model-agent.md',
+      model: 'override-model',
+    };
+
+    const child = await callMaybeOverride(
+      manager,
+      subagentConfig,
+      upstreamWrapper,
+    );
+
+    // Upstream rebuild was detected via the symbol marker, so the
+    // override has no own registry — it inherits via the prototype.
+    expect(child.getToolRegistry()).toBe(upstreamRegistry);
+
+    // Bound tools resolve to upstreamWrapper, not the second-layer
+    // child — same as the inherits branch's chained-override case.
     const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
     expect(childEdit).toBeInstanceOf(EditTool);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

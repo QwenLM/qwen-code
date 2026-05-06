@@ -67,6 +67,7 @@ describe('BackgroundAgentResumeService', () => {
       copyDiscoveredToolsFrom: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
+      stop: vi.fn().mockResolvedValue(undefined),
     };
     const config = {
       storage: {

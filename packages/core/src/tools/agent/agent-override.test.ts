@@ -6,7 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { Config, ApprovalMode } from '../../config/config.js';
-import { createApprovalModeOverride } from './agent.js';
+import {
+  createApprovalModeOverride,
+  hasRebuiltToolRegistry,
+  rebuildToolRegistryOnOverride,
+  TOOL_REGISTRY_REBUILT,
+} from './agent.js';
 import { ToolNames } from '../tool-names.js';
 import { EditTool } from '../edit.js';
 import { WriteFileTool } from '../write-file.js';
@@ -209,5 +214,78 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(childNonBareWrite).toBeInstanceOf(WriteFileTool);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((childNonBareWrite as any).config).toBe(childNonBare);
+  });
+
+  describe('TOOL_REGISTRY_REBUILT marker propagation', () => {
+    // Reviewer raised a concern that
+    // `Object.prototype.hasOwnProperty.call(base, 'getToolRegistry')`
+    // returns false when `base` is an Object.create wrapper above the
+    // rebuilt Config (e.g. `bgConfig = Object.create(agentConfig)`),
+    // causing a redundant rebuild. Switching to a Symbol-keyed marker
+    // fixes that because Symbol property reads walk the prototype
+    // chain through normal lookup. These tests pin that contract.
+
+    it('hasRebuiltToolRegistry returns true even when checked on an Object.create wrapper above the rebuilt Config', async () => {
+      const parent = new Config(baseParams);
+      const parentRegistry = await parent.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (parent as any).toolRegistry = parentRegistry;
+
+      const upstream = await createApprovalModeOverride(
+        parent,
+        ApprovalMode.AUTO_EDIT,
+      );
+      expect(hasRebuiltToolRegistry(upstream)).toBe(true);
+
+      // bgConfig pattern: Object.create wrapper above the rebuilt
+      // Config, with a method override layered on top.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const bgWrapper = Object.create(upstream) as any;
+      bgWrapper.getShouldAvoidPermissionPrompts = () => true;
+
+      // The plain own-property check would miss this — Symbol lookup
+      // doesn't.
+      expect(
+        Object.prototype.hasOwnProperty.call(bgWrapper, 'getToolRegistry'),
+      ).toBe(false);
+      expect(hasRebuiltToolRegistry(bgWrapper as Config)).toBe(true);
+    });
+
+    it('hasRebuiltToolRegistry returns false on a fresh Config and on a wrapper that was not rebuilt', () => {
+      const parent = new Config(baseParams);
+      expect(hasRebuiltToolRegistry(parent)).toBe(false);
+
+      // Plain Object.create wrapper without a rebuild — must still
+      // report false so the downstream caller knows it has to rebuild.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const plainWrapper = Object.create(parent) as any;
+      plainWrapper.getApprovalMode = () => ApprovalMode.AUTO_EDIT;
+      expect(hasRebuiltToolRegistry(plainWrapper as Config)).toBe(false);
+    });
+
+    it('rebuildToolRegistryOnOverride installs the marker and an own getToolRegistry', async () => {
+      const parent = new Config(baseParams);
+      const parentRegistry = await parent.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (parent as any).toolRegistry = parentRegistry;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const override = Object.create(parent) as any;
+      override.getApprovalMode = () => ApprovalMode.YOLO;
+      await rebuildToolRegistryOnOverride(override as Config, parent);
+
+      expect(
+        Object.prototype.hasOwnProperty.call(override, 'getToolRegistry'),
+      ).toBe(true);
+      expect(
+        Object.prototype.hasOwnProperty.call(override, TOOL_REGISTRY_REBUILT),
+      ).toBe(true);
+      expect(override[TOOL_REGISTRY_REBUILT]).toBe(true);
+      expect(hasRebuiltToolRegistry(override as Config)).toBe(true);
+    });
   });
 });

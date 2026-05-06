@@ -771,6 +771,16 @@ export class BackgroundAgentResumeService {
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
           cleanupJsonl?.();
+          // Release the per-subagent ToolRegistry the resumed agent's
+          // wrapper Config built in `createApprovalModeOverride` so any
+          // AgentTool / SkillTool the model instantiated during this
+          // run disposes its change-listeners on shared
+          // SubagentManager / SkillManager. Without this, every resume
+          // accumulates listeners for the rest of the session.
+          void agentConfig
+            .getToolRegistry()
+            .stop()
+            .catch(() => {});
         }
       };
 

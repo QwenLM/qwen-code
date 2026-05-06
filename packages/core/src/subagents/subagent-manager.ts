@@ -48,6 +48,10 @@ import { parseSubagentModelSelection } from './model-selection.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
+import {
+  hasRebuiltToolRegistry,
+  rebuildToolRegistryOnOverride,
+} from '../tools/agent/agent.js';
 
 const QWEN_CONFIG_DIR = '.qwen';
 const AGENT_CONFIG_DIR = 'agents';
@@ -701,26 +705,20 @@ export class SubagentManager {
     base: Config,
   ): Promise<Config> {
     const selection = parseSubagentModelSelection(config.model);
-    // If `base` has its own tool registry (i.e. an upstream override —
-    // typically `agent.ts:createApprovalModeOverride` — already rebuilt
-    // one), we do NOT rebuild again. The bound tools in that upstream
-    // registry already resolve `this.config` to a Config that has the
-    // FileReadCache lazy-init, so prior-read enforcement and approval
-    // mode resolve correctly. Rebuilding a second time would
-    // - waste work (re-register ~10 lazy factories, re-copy discovered
-    //   tools that were already copied),
-    // - leak listeners (any AgentTool / SkillTool the model later
-    //   instantiates from the second registry registers a
-    //   change-listener on shared managers; without an explicit stop()
-    //   on this short-lived layer those listeners survive until the
-    //   session ends), and
-    // - introduce a divergence where bound-tool reads/edits go to the
-    //   upstream layer's cache while client-level cache clears would
-    //   target this layer's empty cache.
-    const baseHasOwnRegistry = Object.prototype.hasOwnProperty.call(
-      base,
-      'getToolRegistry',
-    );
+    // Skip the registry rebuild if any wrapper above `base` already
+    // rebuilt one (typically `agent.ts:createApprovalModeOverride`,
+    // which marks itself via Symbol-keyed flag — Symbol property lookup
+    // walks the prototype chain, so this also catches
+    // wrapper-on-wrapper layering like
+    // `bgConfig = Object.create(agentConfig)` passed in from the
+    // background path). Rebuilding a second time would waste work,
+    // leak listeners on shared managers (any AgentTool / SkillTool the
+    // second registry later instantiates registers a change-listener
+    // and the short-lived registry has no explicit stop() site), and
+    // split the cache so client-level cache clears target an empty
+    // second-layer cache while bound tools (still in the upstream
+    // layer's registry) keep using the upstream cache.
+    const upstreamRebuilt = hasRebuiltToolRegistry(base);
 
     if (selection.inherits) {
       // Thin prototype-delegation override: no method changes, but a
@@ -728,22 +726,17 @@ export class SubagentManager {
       // `Config.getFileReadCache()` so the subagent gets its own
       // cache rather than inheriting the parent's.
       //
-      // We also rebuild the tool registry so `EditTool` /
-      // `WriteFileTool` / `ReadFileTool` are bound to the override
-      // and resolve `this.config` to the subagent — without that
-      // step, the parent's cached tool instances still reach the
-      // parent's FileReadCache and silently weaken prior-read
+      // When no upstream rebuild has happened, also rebuild the tool
+      // registry so `EditTool` / `WriteFileTool` / `ReadFileTool` are
+      // bound to the override and resolve `this.config` to the subagent
+      // — without that step, the parent's cached tool instances still
+      // reach the parent's FileReadCache and silently weaken prior-read
       // enforcement on the subagent's mutation paths.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const isolated = Object.create(base) as any;
-      if (!baseHasOwnRegistry) {
-        const isolatedRegistry = await isolated.createToolRegistry(undefined, {
-          skipDiscovery: true,
-        });
-        isolatedRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
-        isolated.getToolRegistry = () => isolatedRegistry;
+      const isolated = Object.create(base) as Config;
+      if (!upstreamRebuilt) {
+        await rebuildToolRegistryOnOverride(isolated, base);
       }
-      return isolated as Config;
+      return isolated;
     }
 
     const authType =
@@ -776,12 +769,8 @@ export class SubagentManager {
     // `this.config` to the subagent — but only if the upstream caller
     // did not already build one. See the comment at the top of this
     // function for the reasoning.
-    if (!baseHasOwnRegistry) {
-      const overrideRegistry = await override.createToolRegistry(undefined, {
-        skipDiscovery: true,
-      });
-      overrideRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
-      override.getToolRegistry = () => overrideRegistry;
+    if (!upstreamRebuilt) {
+      await rebuildToolRegistryOnOverride(override as Config, base);
     }
 
     debugLogger.info(
