@@ -18,7 +18,7 @@ import type {
 } from '@google/genai';
 import { createUserContent, FinishReason } from '@google/genai';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
-import { getErrorStatus } from '../utils/errors.js';
+import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
@@ -31,13 +31,17 @@ import {
   logContentRetryFailure,
 } from '../telemetry/loggers.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
-import { ChatCompressionService } from '../services/chatCompressionService.js';
+import {
+  ChatCompressionService,
+  type CompactTrigger,
+} from '../services/chatCompressionService.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
+import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -74,6 +78,11 @@ interface ContentRetryOptions {
   maxAttempts: number;
   /** The base delay in milliseconds for linear backoff. */
   initialDelayMs: number;
+}
+
+interface TryCompressOptions {
+  originalTokenCountOverride?: number;
+  trigger?: CompactTrigger;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -381,6 +390,7 @@ export class GeminiChat {
     model: string,
     force = false,
     signal?: AbortSignal,
+    options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
@@ -389,7 +399,9 @@ export class GeminiChat {
       model,
       config: this.config,
       hasFailedCompressionAttempt: this.hasFailedCompressionAttempt,
-      originalTokenCount: this.lastPromptTokenCount,
+      originalTokenCount:
+        options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      trigger: options?.trigger,
       signal,
     });
 
@@ -495,7 +507,7 @@ export class GeminiChat {
 
     // Add user content to history ONCE before any attempts.
     this.history.push(userContent);
-    const requestContents = this.getHistory(true);
+    let requestContents = this.getHistory(true);
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
@@ -518,6 +530,8 @@ export class GeminiChat {
         let lastError: unknown = new Error('Request failed after all retries.');
         let rateLimitRetryCount = 0;
         let invalidStreamRetryCount = 0;
+        let reactiveCompressionAttempted = false;
+        let suppressNextRetryEvent = false;
 
         // Read per-config overrides; fall back to built-in defaults.
         const cgConfig = self.config.getContentGeneratorConfig();
@@ -542,7 +556,9 @@ export class GeminiChat {
           attempt++
         ) {
           try {
-            if (
+            if (suppressNextRetryEvent) {
+              suppressNextRetryEvent = false;
+            } else if (
               attempt > 0 ||
               rateLimitRetryCount > 0 ||
               invalidStreamRetryCount > 0
@@ -602,6 +618,67 @@ export class GeminiChat {
               attempt--;
               await delayPromise;
               continue;
+            }
+
+            const contextOverflow = getContextLengthExceededInfo(error);
+            if (contextOverflow.isExceeded) {
+              if (!reactiveCompressionAttempted) {
+                reactiveCompressionAttempted = true;
+                debugLogger.warn(
+                  'Context length exceeded; attempting reactive compression.',
+                );
+                try {
+                  const reactiveInfo = await self.tryCompress(
+                    prompt_id,
+                    model,
+                    true,
+                    params.config?.abortSignal,
+                    {
+                      originalTokenCountOverride: contextOverflow.actualTokens,
+                      trigger: 'auto',
+                    },
+                  );
+
+                  if (
+                    reactiveInfo.compressionStatus ===
+                    CompressionStatus.COMPRESSED
+                  ) {
+                    requestContents = self.getHistory(true);
+                    debugLogger.info(
+                      `Reactive compression succeeded: ` +
+                        `${reactiveInfo.originalTokenCount} -> ` +
+                        `${reactiveInfo.newTokenCount} tokens.`,
+                    );
+                    yield {
+                      type: StreamEventType.COMPRESSED,
+                      info: reactiveInfo,
+                    };
+                    yield { type: StreamEventType.RETRY };
+                    suppressNextRetryEvent = true;
+                    // Do not count reactive compression against the content
+                    // validation retry budget.
+                    attempt--;
+                    continue;
+                  }
+
+                  debugLogger.warn(
+                    `Reactive compression did not recover context overflow: ` +
+                      `status=${reactiveInfo.compressionStatus}.`,
+                  );
+                } catch (compressionError) {
+                  if (
+                    params.config?.abortSignal?.aborted ||
+                    isAbortError(compressionError)
+                  ) {
+                    throw compressionError;
+                  }
+                  debugLogger.warn(
+                    'Reactive compression failed.',
+                    compressionError,
+                  );
+                }
+              }
+              break;
             }
 
             // Transient stream anomalies (NO_FINISH_REASON / NO_RESPONSE_TEXT):
