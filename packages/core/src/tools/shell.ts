@@ -156,12 +156,16 @@ function tokeniseSegment(segment: string): string[] | null {
     while (i < tokens.length && tokens[i]!.startsWith('-')) {
       const flag = tokens[i]!;
       i++;
-      // `env -C DIR` / `env --chdir DIR` relocates the working
-      // directory before exec. Treat the segment as repo-shifting
-      // (same contract as a leading `GIT_DIR=...` assignment) so
-      // we don't stamp our trailer onto a commit that landed in a
-      // different repository.
-      if (wrapper === 'env' && ENV_FLAGS_SHIFT_CWD.has(flag)) {
+      // `env -C DIR` / `env --chdir DIR` (GNU coreutils 8.30+) and
+      // `sudo -D DIR` / `sudo --chdir DIR` (Linux sudo with --chdir)
+      // both relocate the working directory before exec. Treat the
+      // segment as repo-shifting (same contract as a leading
+      // `GIT_DIR=...` assignment) so we don't stamp our trailer onto
+      // a commit that landed in a different repository.
+      if (
+        (wrapper === 'env' && ENV_FLAGS_SHIFT_CWD.has(flag)) ||
+        (wrapper === 'sudo' && SUDO_FLAGS_SHIFT_CWD.has(flag))
+      ) {
         return null;
       }
       // Value-taking flag tables, per wrapper: `sudo -u user`,
@@ -225,6 +229,12 @@ const ENV_FLAGS_WITH_VALUE = new Set(['-u', '--unset', '-S', '--split-string']);
 // and the per-file note.
 const ENV_FLAGS_SHIFT_CWD = new Set(['-C', '--chdir']);
 
+// `sudo`'s flags that relocate the working directory before exec.
+// Linux sudo's `-D DIR` / `--chdir DIR` (1.9.2+) makes the inner
+// command run in DIR, which means a `git commit` underneath it
+// targets DIR's repo, not ours. Refuse the segment.
+const SUDO_FLAGS_SHIFT_CWD = new Set(['-D', '--chdir']);
+
 /**
  * Environment variables that redirect git's repository selection. A
  * leading `GIT_DIR=...`, `GIT_WORK_TREE=...`, etc. on a command makes
@@ -239,12 +249,16 @@ const ENV_FLAGS_SHIFT_CWD = new Set(['-C', '--chdir']);
  * but don't move it to another repo, so attribution is still
  * meaningful.
  */
+// `GIT_NAMESPACE` is intentionally NOT here: it prefixes ref names
+// within the same repository, but the working tree and object store
+// are unchanged, so a `git commit` under it still lands in our cwd's
+// repo. The set covers ONLY variables that change which on-disk
+// repository git acts on.
 const GIT_ENV_SHIFTS_REPO = new Set([
   'GIT_DIR',
   'GIT_WORK_TREE',
   'GIT_COMMON_DIR',
   'GIT_INDEX_FILE',
-  'GIT_NAMESPACE',
 ]);
 
 /**
@@ -360,10 +374,10 @@ function gitCommitContext(command: string): {
 
     const program = tokens[0]!;
 
-    if (program === 'cd') {
-      // A cd before any commit might redirect a later `git commit` into
-      // a different repo. A cd AFTER the commit doesn't matter for the
-      // commit we already saw.
+    if (program === 'cd' || program === 'pushd') {
+      // A cd / pushd before any commit might redirect a later
+      // `git commit` into a different repo. A cd AFTER the commit
+      // doesn't matter for the commit we already saw.
       //
       // A heuristic relaxation: relative cd targets that don't escape
       // upward (no `..`, no absolute path, no env-var/$home expansion)
@@ -376,6 +390,14 @@ function gitCommitContext(command: string): {
       // fs/exec call that the rest of this walk avoids — the heuristic
       // covers the common case and stays conservative on the rest.
       if (!hasCommit && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
+      continue;
+    }
+    if (program === 'popd') {
+      // `popd` returns to a previous directory in the bash dir-stack.
+      // Without tracking the stack we can't know whether the resulting
+      // cwd is the same repo or a different one — treat conservatively
+      // as a shift before any commit.
+      if (!hasCommit) cwdShifted = true;
       continue;
     }
 
@@ -487,8 +509,12 @@ function isAmendCommit(command: string): boolean {
     const tokens = tokeniseSegment(sub);
     if (!tokens || tokens.length === 0) continue;
     const program = tokens[0]!;
-    if (program === 'cd') {
+    if (program === 'cd' || program === 'pushd') {
       if (!cwdShifted && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
+      continue;
+    }
+    if (program === 'popd') {
+      cwdShifted = true;
       continue;
     }
     if (program !== 'git') continue;
@@ -540,11 +566,15 @@ function findAttributableCommitSegment(
     const tokens = tokeniseSegment(sub);
     if (!tokens || tokens.length === 0) continue;
     const program = tokens[0]!;
-    if (program === 'cd') {
-      // Mirror gitCommitContext's cd heuristic: relative paths that
-      // don't escape upward are treated as in-repo, so
+    if (program === 'cd' || program === 'pushd') {
+      // Mirror gitCommitContext's cd/pushd heuristic: relative paths
+      // that don't escape upward are treated as in-repo, so
       // `cd subdir && git commit ...` still finds the segment.
       if (!cwdShifted && cdTargetMayChangeRepo(tokens)) cwdShifted = true;
+      continue;
+    }
+    if (program === 'popd') {
+      cwdShifted = true;
       continue;
     }
     if (program === 'git') {
@@ -2060,15 +2090,42 @@ export class ShellToolInvocation extends BaseToolInvocation<
         canonicalBase = baseDir;
       }
 
-      // Drop tracked entries whose on-disk content has diverged from
-      // what AI's last write recorded — catches the case where the
-      // user paste-replaced via an external editor, ran `git checkout`,
-      // or otherwise modified the file outside the Edit/Write tools.
-      // Without this, the AI's stale aiContribution would attach to
-      // the human-only diff at commit time and credit AI for the human
-      // work. Run this BEFORE matchCommittedFiles so the dropped
-      // entries are also out of the per-file payload.
-      attributionService.validateOnDiskHashes();
+      // Drop tracked entries whose COMMITTED content has diverged
+      // from what AI's last write recorded — catches the case where
+      // the user paste-replaced via an external editor, ran
+      // `git checkout`, or otherwise modified the file outside the
+      // Edit/Write tools. Validate against the COMMITTED blob (via
+      // `git show HEAD:<rel>`) rather than the live working tree:
+      // the user can `git add` AI's content, then make additional
+      // unstaged edits, then `git commit` — the commit's blob still
+      // matches AI's recorded hash, but the working-tree file does
+      // not. A working-tree comparison would drop the entry on a
+      // commit that legitimately came from AI. Run BEFORE
+      // matchCommittedFiles so dropped entries are also out of the
+      // per-file payload.
+      attributionService.validateAgainst((absPath) => {
+        const rel = path
+          .relative(canonicalBase, absPath)
+          .split(path.sep)
+          .join('/');
+        if (!rel || rel.startsWith('..')) return null;
+        try {
+          return childProcess
+            .execFileSync('git', ['show', `HEAD:${rel}`], {
+              cwd,
+              timeout: 2000,
+              stdio: ['ignore', 'pipe', 'ignore'],
+              maxBuffer: 16 * 1024 * 1024,
+            })
+            .toString('utf-8');
+        } catch {
+          // No committed content (deleted file, file not in commit,
+          // or git error) — leave the entry alone. Deletion handling
+          // is its own thread; what matters here is that we don't
+          // FALSE-positive on a missing-from-commit signal.
+          return null;
+        }
+      });
 
       committedAbsolutePaths = attributionService.matchCommittedFiles(
         stagedInfo.files,

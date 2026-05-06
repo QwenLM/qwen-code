@@ -148,55 +148,101 @@ describe('CommitAttributionService', () => {
     expect(after2.aiContribution).toBeGreaterThan(after1.aiContribution);
   });
 
-  // validateOnDiskHashes runs at commit time and drops entries whose
-  // current on-disk hash doesn't match what AI recorded — catches
-  // user edits that happened entirely outside the Edit/Write tools
-  // (no recordEdit was called, so the input-hash check above couldn't
-  // see the divergence).
-  describe('validateOnDiskHashes', () => {
+  // validateAgainst runs at commit time and drops entries whose
+  // recorded post-write hash doesn't match the caller-supplied
+  // content — catches user edits that happened entirely outside the
+  // Edit/Write tools (no recordEdit was called, so the input-hash
+  // check above couldn't see the divergence).
+  describe('validateAgainst', () => {
     let tmpDir: string;
     beforeEach(() => {
-      // Real fs (not mocked) — we want validateOnDiskHashes to
-      // actually read the disk we wrote to.
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attr-validate-'));
     });
     afterEach(() => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it('drops entries whose on-disk content has diverged', () => {
+    it('drops entries whose content has diverged', () => {
       const service = CommitAttributionService.getInstance();
       const filePath = path.join(tmpDir, 'diverged.ts');
       fs.writeFileSync(filePath, 'AI wrote this', 'utf-8');
       service.recordEdit(filePath, null, 'AI wrote this');
       expect(service.getFileAttribution(filePath)).toBeDefined();
 
-      // User overwrites the file outside the Edit/Write tools.
-      fs.writeFileSync(filePath, 'human replaced this', 'utf-8');
-
-      service.validateOnDiskHashes();
+      // Caller passes a reader that returns the diverged content.
+      service.validateAgainst(() => 'human replaced this');
       expect(service.getFileAttribution(filePath)).toBeUndefined();
     });
 
-    it('keeps entries whose on-disk content matches', () => {
+    it('keeps entries whose content matches', () => {
       const service = CommitAttributionService.getInstance();
       const filePath = path.join(tmpDir, 'unchanged.ts');
       fs.writeFileSync(filePath, 'AI wrote this', 'utf-8');
       service.recordEdit(filePath, null, 'AI wrote this');
-      service.validateOnDiskHashes();
+      service.validateAgainst(() => 'AI wrote this');
       expect(service.getFileAttribution(filePath)).toBeDefined();
     });
 
-    it('keeps entries for files that no longer exist on disk', () => {
+    it('keeps entries when getContent returns null (no comparison signal)', () => {
+      const service = CommitAttributionService.getInstance();
+      const filePath = path.join(tmpDir, 'no-comparison.ts');
+      fs.writeFileSync(filePath, 'will be queried', 'utf-8');
+      service.recordEdit(filePath, null, 'will be queried');
+      // null = "no committed blob / unreadable / out-of-scope" — the
+      // entry should NOT be dropped.
+      service.validateAgainst(() => null);
+      expect(service.getFileAttribution(filePath)).toBeDefined();
+    });
+
+    // Legacy snapshot from before contentHash existed: the entry has
+    // an empty contentHash. We can't tell stale from fresh, so leave
+    // it alone (don't reset).
+    it('skips entries with empty contentHash (legacy snapshot)', () => {
+      const service = CommitAttributionService.getInstance();
+      service.restoreFromSnapshot({
+        type: 'attribution-snapshot',
+        surface: 'cli',
+        fileStates: {
+          '/legacy.ts': {
+            aiContribution: 50,
+            aiCreated: false,
+            contentHash: '',
+          },
+        },
+        promptCount: 0,
+        promptCountAtLastCommit: 0,
+      });
+      // Even if the reader claims a different hash, an empty recorded
+      // hash means we have no baseline — keep the entry.
+      service.validateAgainst(() => 'totally different');
+      expect(service.getFileAttribution('/legacy.ts')).toBeDefined();
+    });
+
+    // Working-tree variant for code paths without committed blobs.
+    it('validateAgainstWorkingTree drops entries whose on-disk content diverged', () => {
+      const service = CommitAttributionService.getInstance();
+      const filePath = path.join(tmpDir, 'wt-diverged.ts');
+      fs.writeFileSync(filePath, 'AI wrote this', 'utf-8');
+      service.recordEdit(filePath, null, 'AI wrote this');
+      fs.writeFileSync(filePath, 'human replaced', 'utf-8');
+      service.validateAgainstWorkingTree();
+      expect(service.getFileAttribution(filePath)).toBeUndefined();
+    });
+
+    // Deleted-file lookup must remain stable: recordEdit canonicalises
+    // the path via realpathSync; getFileAttribution must still resolve
+    // the same canonical key after the leaf is unlinked. realpathOrSelf
+    // canonicalises the parent and rejoins the basename for missing
+    // leaves so macOS /var ↔ /private/var doesn't break the lookup
+    // post-deletion.
+    it('keeps deleted-file entries reachable via the original path', () => {
       const service = CommitAttributionService.getInstance();
       const filePath = path.join(tmpDir, 'deleted.ts');
       fs.writeFileSync(filePath, 'will be deleted', 'utf-8');
       service.recordEdit(filePath, null, 'will be deleted');
       fs.unlinkSync(filePath);
-      // Deleted file: leave the attribution alone — the commit's
-      // deletion record is what the note will reflect, and a missing
-      // file isn't a divergence signal.
-      service.validateOnDiskHashes();
+      // Lookup must still find the entry by the original path even
+      // though realpath of the leaf now throws.
       expect(service.getFileAttribution(filePath)).toBeDefined();
     });
   });

@@ -23,7 +23,10 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { isGeneratedFile } from './generatedFiles.js';
+
+const debugLogger = createDebugLogger('COMMIT_ATTRIBUTION');
 
 function computeContentHash(content: string): string {
   return createHash('sha256').update(content).digest('hex');
@@ -35,14 +38,26 @@ function computeContentHash(content: string): string {
  * `fs.realpathSync` (what edit.ts/write-file.ts records) and
  * `path.relative` against `git rev-parse --show-toplevel` (which may
  * report either form) won't line up unless we normalise both sides.
- * Falls back to the input on any fs error so a missing path can't
- * make the lookup fail outright.
+ *
+ * For DELETED leaves (file no longer exists on disk), realpathSync
+ * throws — but the parent directory is still resolvable. Canonicalise
+ * the parent and rejoin the missing basename so a deleted file's
+ * lookup still hits the canonical key recordEdit stored before the
+ * file was removed. Without this, a `getFileAttribution(deletedPath)`
+ * call after the file was deleted would fall back to the
+ * non-canonical input and miss the canonical entry on macOS.
  */
 function realpathOrSelf(p: string): string {
   try {
     return fs.realpathSync(p);
   } catch {
-    return p;
+    try {
+      const parent = path.dirname(p);
+      const realParent = fs.realpathSync(parent);
+      return path.join(realParent, path.basename(p));
+    } catch {
+      return p;
+    }
   }
 }
 
@@ -271,7 +286,13 @@ export class CommitAttributionService {
     // `oldContent` we're being told about doesn't match the hash we
     // recorded after AI's last write, the file diverged out-of-band.
     // Drop the accumulated counters before applying the new edit.
-    if (existing && oldContent !== null) {
+    //
+    // Skip the check when `existing.contentHash` is empty: that's a
+    // legacy snapshot (pre-divergence-detection schema) where we
+    // never recorded the post-write hash. Comparing an empty hash to
+    // the actual file hash would always trip the reset and silently
+    // wipe AI work that's still on disk.
+    if (existing && existing.contentHash && oldContent !== null) {
       const oldHash = computeContentHash(oldContent);
       if (existing.contentHash !== oldHash) {
         aiContribution = 0;
@@ -291,32 +312,59 @@ export class CommitAttributionService {
   }
 
   /**
-   * Re-hash each tracked file's CURRENT on-disk content and drop
-   * entries whose hash doesn't match what AI's last write recorded.
-   * Catches the cases recordEdit's input-hash check can't see — i.e.
-   * the user (or another tool) modified the file entirely outside
-   * the Edit/Write tools, then committed it. Without this, the AI's
-   * stale aiContribution would attach to the human-only diff at
-   * commit time and credit AI for human work.
+   * Re-hash each tracked file's content via a caller-supplied reader
+   * and drop entries whose hash doesn't match what AI's last write
+   * recorded. Catches the cases recordEdit's input-hash check can't
+   * see — i.e. the user (or another tool) modified the file entirely
+   * outside the Edit/Write tools, then committed it. Without this,
+   * the AI's stale aiContribution would attach to the human-only
+   * diff at commit time and credit AI for human work.
    *
-   * Called immediately before generateNotePayload in the
-   * commit-attribution path. Files that no longer exist on disk
-   * (deletion) are left alone — the commit's deletion record is
-   * what the note should reflect, and reading them would just throw.
+   * `getContent(absPath)` returns the bytes the caller wants to
+   * compare against, or `null` if the entry shouldn't be checked
+   * (deletion, unreadable, no committed copy). Returning `null`
+   * leaves the entry alone rather than dropping it.
+   *
+   * Two production callers:
+   *   1. `attachCommitAttribution` after a commit — should pass a
+   *      reader that fetches the COMMITTED blob (`git show HEAD:<rel>`)
+   *      so unstaged working-tree changes the user made AFTER `git add`
+   *      don't trip the divergence check on a commit whose blob still
+   *      matches AI's recorded hash.
+   *   2. The legacy live-disk reader (`fs.readFileSync`) is exposed
+   *      via `validateAgainstWorkingTree` for the no-committed-blob
+   *      cases (e.g. amend-without-reflog where we can't pin a
+   *      ref). Less precise but better than nothing.
    */
-  validateOnDiskHashes(): void {
+  validateAgainst(getContent: (absPath: string) => string | null): void {
     for (const [key, attr] of this.fileAttributions) {
-      let current: string;
-      try {
-        current = fs.readFileSync(key, 'utf-8');
-      } catch {
-        // File doesn't exist (deletion) or isn't readable — skip.
-        continue;
-      }
+      // Skip legacy entries that have no recorded post-write hash —
+      // we can't tell stale from fresh, so leave them alone.
+      if (!attr.contentHash) continue;
+      const current = getContent(key);
+      if (current === null) continue; // not a divergence signal
       if (computeContentHash(current) !== attr.contentHash) {
+        debugLogger.debug(
+          `validateAgainst: dropping stale attribution for ${key} (hash diverged)`,
+        );
         this.fileAttributions.delete(key);
       }
     }
+  }
+
+  /**
+   * Convenience wrapper around {@link validateAgainst} that reads
+   * the live working-tree file. Used for code paths where we can't
+   * read the committed blob (no commit happened, no ref available).
+   */
+  validateAgainstWorkingTree(): void {
+    this.validateAgainst((p) => {
+      try {
+        return fs.readFileSync(p, 'utf-8');
+      } catch {
+        return null;
+      }
+    });
   }
 
   // -----------------------------------------------------------------------
