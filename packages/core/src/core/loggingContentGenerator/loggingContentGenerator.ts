@@ -178,18 +178,29 @@ export class LoggingContentGenerator implements ContentGenerator {
         response.usageMetadata,
       );
       if (!isInternal) {
-        await this.logOpenAIInteraction(await session.resolve(req), response);
+        // Logging must not discard the successful API response if the
+        // synthetic-fallback build inside resolve() throws.
+        try {
+          await this.logOpenAIInteraction(await session.resolve(req), response);
+        } catch {
+          // swallow logging-side error
+        }
       }
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
-        await this.logOpenAIInteraction(
-          await session.resolve(req),
-          undefined,
-          error,
-        );
+        // Logging must not replace the original API error if resolve() throws.
+        try {
+          await this.logOpenAIInteraction(
+            await session.resolve(req),
+            undefined,
+            error,
+          );
+        } catch {
+          // swallow logging-side error
+        }
       }
       throw error;
     }
@@ -220,21 +231,34 @@ export class LoggingContentGenerator implements ContentGenerator {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
-        await this.logOpenAIInteraction(
-          await session.resolve(req),
-          undefined,
-          error,
-        );
+        // Logging must not replace the original API error if resolve() throws.
+        try {
+          await this.logOpenAIInteraction(
+            await session.resolve(req),
+            undefined,
+            error,
+          );
+        } catch {
+          // swallow logging-side error
+        }
       }
       throw error;
     }
 
+    let resolvedRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+    if (!isInternal) {
+      try {
+        resolvedRequest = await session.resolve(req);
+      } catch {
+        // Resolve must not abort the stream that the SDK already returned.
+      }
+    }
     return this.loggingStreamWrapper(
       stream,
       startTime,
       userPromptId,
       req.model,
-      isInternal ? undefined : await session.resolve(req),
+      resolvedRequest,
     );
   }
 

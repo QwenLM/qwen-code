@@ -621,6 +621,60 @@ describe('LoggingContentGenerator', () => {
     );
   });
 
+  it('does not propagate logging-side throws (success and error paths)', async () => {
+    const successResponse = createResponse('resp-safe', 'test-model', [
+      { text: 'ok' },
+    ]);
+    const successWrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(successResponse),
+      vi.fn(),
+    );
+    const successGen = new LoggingContentGenerator(
+      successWrapped,
+      createConfig(),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+        openAILoggingDir: 'logs',
+      },
+    );
+
+    // No capture fires, so resolve() falls through to the synthetic builder.
+    // Force the synthetic build to throw, then verify the API result still surfaces.
+    convertGeminiRequestToOpenAISpy.mockImplementationOnce(() => {
+      throw new Error('synth-fail-success');
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      successGen.generateContent(request, 'prompt-safe-success'),
+    ).resolves.toBe(successResponse);
+
+    const apiError = new Error('api-boom');
+    const errorWrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(apiError),
+      vi.fn(),
+    );
+    const errorGen = new LoggingContentGenerator(errorWrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+    });
+    convertGeminiRequestToOpenAISpy.mockImplementationOnce(() => {
+      throw new Error('synth-fail-error');
+    });
+
+    await expect(
+      errorGen.generateContent(request, 'prompt-safe-error'),
+    ).rejects.toThrow('api-boom');
+  });
+
   it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
     'skips logApiRequest and OpenAI logging for internal promptId %s (generateContent)',
     async (promptId) => {

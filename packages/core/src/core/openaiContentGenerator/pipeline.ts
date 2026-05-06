@@ -510,6 +510,9 @@ export class ContentGenerationPipeline {
         isStreaming,
       );
 
+      // Position is load-bearing: capture must run after buildRequest (post
+      // provider enhancement, post disable-reasoning) and before the SDK call
+      // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
 
       const result = await executor(openaiRequest, context);
