@@ -44,18 +44,34 @@ const PROMOTE_DRAIN_TIMEOUT_MS = 200;
  *     would force the kill path through the promote branch on any plain
  *     `abortController.abort({})`. Lifecycle/safety branches deserve the
  *     extra check.
+ *   - Wrap the property read in try/catch — an own getter or a `Proxy`
+ *     trap may throw during inspection. A throw here would propagate up
+ *     past the abort handler (which is dispatched async and not awaited
+ *     by AbortSignal), leaving the shell process alive instead of being
+ *     killed on cancel. We swallow the throw and fall back to 'cancel'.
  *   - Whitelist the value against the known union — anything else (typos,
  *     future-untyped variants) defaults to `'cancel'` so the historical
  *     kill behavior is preserved as the safe fallback.
+ *
+ * Exported for direct unit testing of all six edge cases (null /
+ * non-object / `{}` no own kind / prototype-only kind / unknown kind /
+ * throwing accessor) — the integration tests only exercise the three
+ * happy-path inputs.
  */
-function getShellAbortReasonKind(reason: unknown): ShellAbortReason['kind'] {
+export function getShellAbortReasonKind(
+  reason: unknown,
+): ShellAbortReason['kind'] {
   if (
     reason !== null &&
     typeof reason === 'object' &&
     Object.prototype.hasOwnProperty.call(reason, 'kind')
   ) {
-    const kind = (reason as { kind?: unknown }).kind;
-    if (kind === 'background' || kind === 'cancel') return kind;
+    try {
+      const kind = (reason as { kind?: unknown }).kind;
+      if (kind === 'background' || kind === 'cancel') return kind;
+    } catch {
+      // Throwing accessor / Proxy trap — fall back to safe kill below.
+    }
   }
   return 'cancel';
 }
@@ -604,6 +620,25 @@ export class ShellExecutionService {
 
         const performBackgroundPromote = (): void => {
           if (!child.pid || exited) return;
+          // Race guard: the child may have already exited but the 'exit'
+          // event hasn't reached our handler yet (Node delivers
+          // child_process events on the next microtask). Promoting in
+          // that window would detach our exit listener, leak the
+          // already-terminal exit code, and report `promoted: true` to
+          // the caller for a process that's already dead — they'd hold
+          // an inert pid expecting to take over. Check exitCode /
+          // signalCode before detaching: if either is non-null the
+          // child is gone, so leave the listeners alone and let the
+          // pending exit handler fire normally with the real exit info.
+          if (child.exitCode !== null || child.signalCode !== null) {
+            debugLogger.debug(
+              `Background-promote requested for pid ${child.pid} but child ` +
+                `is already terminal (exitCode=${child.exitCode}, ` +
+                `signalCode=${child.signalCode}); falling through to the ` +
+                `normal exit-handled resolution.`,
+            );
+            return;
+          }
           // Detach our listeners (so post-promote output doesn't leak
           // into the foreground onOutputEvent or the now-finalized text
           // decoder), drop the child from our active set (so cleanup()
@@ -688,11 +723,17 @@ export class ShellExecutionService {
               await performCancelKill();
               return;
             default: {
+              // Unreachable at runtime: getShellAbortReasonKind whitelists
+              // the return to the union members, so this branch only
+              // exists to force a TS error if the `ShellAbortReason` union
+              // ever gains a new variant — that error directs the
+              // developer to (1) extend the helper's whitelist and
+              // (2) add a `case` here. Without this exhaustiveness check
+              // the helper's whitelist and the switch could drift apart
+              // silently when the union grows.
               const _exhaustive: never = kind;
-              debugLogger.warn(
-                `Unknown ShellAbortReason kind, falling back to cancel/kill: ${String(_exhaustive)}`,
-              );
               await performCancelKill();
+              return _exhaustive;
             }
           }
         };
@@ -1171,17 +1212,42 @@ export class ShellExecutionService {
           const finalBuffer = Buffer.concat(outputChunks);
           let snapshot = '';
           try {
-            snapshot = serializeTerminalToText(headlessTerminal) ?? '';
+            // Mirror the normal exit path's snapshot logic: re-decode
+            // the full buffer with the final encoding (the streaming
+            // decoder fed `headlessTerminal` from a first-chunk
+            // heuristic, which can mis-detect when early output is
+            // ASCII-only but later output is in a different encoding,
+            // e.g. GBK). Then replay through a fresh terminal so ANSI
+            // sequences land at the right cursor position. Falling back
+            // to `serializeTerminalToText(headlessTerminal)` would risk
+            // mojibake on the promoted snapshot that the normal exit
+            // path doesn't produce.
+            if (isStreamingRawContent) {
+              const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
+              const decodedOutput = new TextDecoder(finalEncoding).decode(
+                finalBuffer,
+              );
+              snapshot = await replayTerminalOutput(decodedOutput, cols, rows);
+            } else {
+              snapshot = serializeTerminalToText(headlessTerminal) ?? '';
+            }
           } catch (serErr) {
-            // Best-effort snapshot — terminal serialization may fail if
-            // the PTY is mid-render. Empty snapshot is acceptable since
-            // the caller has rawOutput, but log so the failure leaves a
-            // diagnostic trail (otherwise an empty `output` is
-            // indistinguishable from "command produced no output").
+            // Best-effort snapshot — re-decode + replay may fail (encoding
+            // detection error, terminal write throw, etc.). Empty snapshot
+            // is acceptable since the caller has rawOutput, but log so
+            // the failure leaves a diagnostic trail (otherwise an empty
+            // `output` is indistinguishable from "command produced no
+            // output"). Try the simpler direct-serialize path as a
+            // last-ditch fallback before giving up.
             debugLogger.warn(
-              `Background-promote snapshot serialization failed: ${serErr instanceof Error ? serErr.message : String(serErr)}. ` +
-                `Result.output will be empty; caller should fall back to rawOutput.`,
+              `Background-promote snapshot replay failed: ${serErr instanceof Error ? serErr.message : String(serErr)}. ` +
+                `Falling back to direct headlessTerminal serialize; if that also fails, output stays empty.`,
             );
+            try {
+              snapshot = serializeTerminalToText(headlessTerminal) ?? '';
+            } catch {
+              // Both paths failed — leave snapshot empty.
+            }
           }
           resolve({
             rawOutput: finalBuffer,
@@ -1234,11 +1300,17 @@ export class ShellExecutionService {
               await performCancelKill();
               return;
             default: {
+              // Unreachable at runtime: getShellAbortReasonKind whitelists
+              // the return to the union members, so this branch only
+              // exists to force a TS error if the `ShellAbortReason` union
+              // ever gains a new variant — that error directs the
+              // developer to (1) extend the helper's whitelist and
+              // (2) add a `case` here. Without this exhaustiveness check
+              // the helper's whitelist and the switch could drift apart
+              // silently when the union grows.
               const _exhaustive: never = kind;
-              debugLogger.warn(
-                `Unknown ShellAbortReason kind, falling back to cancel/kill: ${String(_exhaustive)}`,
-              );
               await performCancelKill();
+              return _exhaustive;
             }
           }
         };

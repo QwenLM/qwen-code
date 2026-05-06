@@ -21,7 +21,10 @@ import type {
   ShellAbortReason,
   ShellOutputEvent,
 } from './shellExecutionService.js';
-import { ShellExecutionService } from './shellExecutionService.js';
+import {
+  getShellAbortReasonKind,
+  ShellExecutionService,
+} from './shellExecutionService.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
 const { Terminal } = pkg;
@@ -700,6 +703,40 @@ describe('ShellExecutionService', () => {
       expect(exitDisposableStub.dispose).toHaveBeenCalled();
     });
 
+    it("post-promotion: ptyProcess error listener is removed via 'removeListener', NOT 'off' (regression guard for @lydell/node-pty)", async () => {
+      // node EventEmitter exposes both `off` (Node 10+) and the legacy
+      // `removeListener`, but @lydell/node-pty's IPty interface only
+      // surfaces `removeListener` — calling `.off(...)` on a real PTY
+      // throws TypeError. Pin that the production code path uses
+      // `removeListener` so a future refactor swapping to `.off()`
+      // doesn't silently regress under the EventEmitter mock (which
+      // tolerates both).
+      const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
+      const offSpy = vi.spyOn(mockPtyProcess, 'off');
+
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (_pty, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      // The 'error' handler is removed via legacy API; `.off` must not
+      // appear in the production teardown path.
+      expect(removeListenerSpy).toHaveBeenCalledWith(
+        'error',
+        expect.any(Function),
+      );
+      const offErrorCalls = offSpy.mock.calls.filter(
+        ([event]) => event === 'error',
+      );
+      expect(offErrorCalls).toEqual([]);
+    });
+
     it('post-promotion: PTY exit does NOT re-resolve the result (already resolved with promoted)', async () => {
       // Pin: even if the still-running child later exits naturally and the
       // caller's own exit listener fires, our foreground result Promise
@@ -1057,6 +1094,22 @@ describe('ShellExecutionService child_process fallback', () => {
       value: 12345,
       configurable: true,
     });
+    // Mirror real Node ChildProcess: `exitCode` / `signalCode` are `null`
+    // while the child is alive and become a number / signal name on
+    // exit. The background-promote liveness guard reads these to detect
+    // an exit that fired between abort dispatch and the abort handler
+    // run, and a default of `undefined` would mistakenly look terminal
+    // and skip the promote.
+    Object.defineProperty(mockChildProcess, 'exitCode', {
+      value: null,
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(mockChildProcess, 'signalCode', {
+      value: null,
+      writable: true,
+      configurable: true,
+    });
 
     mockCpSpawn.mockReturnValue(mockChildProcess);
   });
@@ -1348,6 +1401,45 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).toContain('pre-promote');
       expect(result.output).not.toContain('post-promote-stdout');
       expect(result.output).not.toContain('post-promote-stderr');
+    });
+
+    it('post-exit race: background-promote refuses if child is already terminal (exitCode/signalCode non-null)', async () => {
+      // Race window: the child may have exited (exitCode set) but the
+      // 'exit' event hasn't reached our handler yet because Node delivers
+      // child_process events on the next microtask. Promoting in that
+      // window would detach our exit listener and report `promoted: true`
+      // for a process that's already dead — the caller would hold an
+      // inert pid expecting to take over. Production code reads
+      // exitCode / signalCode before detaching; if either is non-null,
+      // it falls through and lets the pending exit handler resolve
+      // normally with the real exit info.
+      mockPlatform.mockReturnValue('linux');
+      const { result } = await simulateExecution(
+        'fast-and-cancelled',
+        (cp, abortController) => {
+          // Simulate the race: pretend the child has already exited
+          // (exitCode set on the ChildProcess) but the 'exit' event
+          // emit is queued behind the abort dispatch.
+          Object.defineProperty(cp, 'exitCode', {
+            value: 0,
+            writable: true,
+            configurable: true,
+          });
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+          // Now drain the pending exit + close events; the normal
+          // exit path should resolve the result.
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      // Result is the normal exit shape, not the promoted shape.
+      expect(result.promoted).toBeUndefined();
+      expect(result.aborted).toBe(true); // abortSignal.aborted is still true
+      expect(result.exitCode).toBe(0);
     });
 
     it('post-promotion: child exit does NOT re-resolve the result with a non-promoted shape', async () => {
@@ -1663,5 +1755,79 @@ describe('ShellExecutionService execution method selection', () => {
     expect(mockPtySpawn).not.toHaveBeenCalled();
     expect(mockCpSpawn).toHaveBeenCalled();
     expect(result.executionMethod).toBe('child_process');
+  });
+});
+
+describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
+  it("returns 'cancel' for null reason (e.g. plain abortController.abort())", () => {
+    expect(getShellAbortReasonKind(null)).toBe('cancel');
+    expect(getShellAbortReasonKind(undefined)).toBe('cancel');
+  });
+
+  it("returns 'cancel' for non-object reasons (string / number / DOMException)", () => {
+    expect(getShellAbortReasonKind('background')).toBe('cancel');
+    expect(getShellAbortReasonKind(42)).toBe('cancel');
+    expect(getShellAbortReasonKind(true)).toBe('cancel');
+    // DOMException-like object — not the real DOMException constructor in
+    // the test runtime, but the principle is the same: a non-discriminated
+    // object reason without an own `kind` falls back to cancel.
+    expect(getShellAbortReasonKind(new Error('aborted'))).toBe('cancel');
+  });
+
+  it("returns 'cancel' for an empty object (no own kind)", () => {
+    expect(getShellAbortReasonKind({})).toBe('cancel');
+  });
+
+  it("returns 'cancel' when 'kind' lives only on the prototype (pollution defense)", () => {
+    const polluted: Record<string, unknown> = Object.create({
+      kind: 'background',
+    });
+    // hasOwnProperty('kind') is false → helper rejects the prototype-only kind
+    expect(getShellAbortReasonKind(polluted)).toBe('cancel');
+  });
+
+  it("returns 'cancel' for an unknown kind value (typo / future-untyped variant)", () => {
+    expect(getShellAbortReasonKind({ kind: 'suspend' })).toBe('cancel');
+    expect(getShellAbortReasonKind({ kind: 'BACKGROUND' })).toBe('cancel');
+    expect(getShellAbortReasonKind({ kind: 42 })).toBe('cancel');
+  });
+
+  it("returns 'cancel' when reading 'kind' throws (accessor / Proxy trap)", () => {
+    const throwingReason = Object.defineProperty({}, 'kind', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw new Error('accessor blew up');
+      },
+    });
+    expect(getShellAbortReasonKind(throwingReason)).toBe('cancel');
+
+    const proxyReason = new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          if (prop === 'kind') throw new Error('proxy trap blew up');
+          return undefined;
+        },
+        getOwnPropertyDescriptor(_target, prop) {
+          if (prop === 'kind') {
+            return { configurable: true, enumerable: true, value: 'unused' };
+          }
+          return undefined;
+        },
+      },
+    );
+    expect(getShellAbortReasonKind(proxyReason)).toBe('cancel');
+  });
+
+  it("returns 'background' for the canonical happy-path reason", () => {
+    expect(getShellAbortReasonKind({ kind: 'background' })).toBe('background');
+    expect(
+      getShellAbortReasonKind({ kind: 'background', shellId: 'bg_x' }),
+    ).toBe('background');
+  });
+
+  it("returns 'cancel' for the canonical cancel reason", () => {
+    expect(getShellAbortReasonKind({ kind: 'cancel' })).toBe('cancel');
   });
 });
