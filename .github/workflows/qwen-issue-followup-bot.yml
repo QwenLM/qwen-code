@@ -118,6 +118,12 @@ jobs:
             exit 2
           }
 
+          require_write_enabled() {
+            if [[ "${DRY_RUN:-true}" == 'true' ]]; then
+              reject "$@"
+            fi
+          }
+
           reject_if_arg_contains_secret() {
             for arg in "$@"; do
               for secret in "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${BOT_GITHUB_TOKEN:-}" "${OPENAI_API_KEY:-}"; do
@@ -128,48 +134,122 @@ jobs:
             done
           }
 
+          validate_issue_edit_args() {
+            local original=("$@")
+            local target_count=0
+            local add_label_count=0
+            local expect=''
+
+            while (($# > 0)); do
+              local arg="$1"
+              shift
+
+              if [[ -n "${expect}" ]]; then
+                case "${expect}" in
+                  repo)
+                    ;;
+                  add_label)
+                    add_label_count=$((add_label_count + 1))
+                    ;;
+                  *)
+                    reject "${original[@]}"
+                    ;;
+                esac
+                expect=''
+                continue
+              fi
+
+              case "${arg}" in
+                --repo|-R)
+                  expect='repo'
+                  ;;
+                --repo=*)
+                  ;;
+                --add-label)
+                  expect='add_label'
+                  ;;
+                --add-label=*)
+                  add_label_count=$((add_label_count + 1))
+                  ;;
+                --*|-*)
+                  reject "${original[@]}"
+                  ;;
+                *)
+                  target_count=$((target_count + 1))
+                  ;;
+              esac
+            done
+
+            if [[ -n "${expect}" || "${target_count}" -ne 1 || "${add_label_count}" -lt 1 ]]; then
+              reject "${original[@]}"
+            fi
+          }
+
+          validate_issue_comment_args() {
+            local original=("$@")
+            local target_count=0
+            local body_count=0
+            local expect=''
+
+            while (($# > 0)); do
+              local arg="$1"
+              shift
+
+              if [[ -n "${expect}" ]]; then
+                case "${expect}" in
+                  repo)
+                    ;;
+                  body)
+                    body_count=$((body_count + 1))
+                    ;;
+                  *)
+                    reject "${original[@]}"
+                    ;;
+                esac
+                expect=''
+                continue
+              fi
+
+              case "${arg}" in
+                --repo|-R)
+                  expect='repo'
+                  ;;
+                --repo=*)
+                  ;;
+                --body)
+                  expect='body'
+                  ;;
+                --body=*)
+                  body_count=$((body_count + 1))
+                  ;;
+                --*|-*)
+                  reject "${original[@]}"
+                  ;;
+                *)
+                  target_count=$((target_count + 1))
+                  ;;
+              esac
+            done
+
+            if [[ -n "${expect}" || "${target_count}" -ne 1 || "${body_count}" -ne 1 ]]; then
+              reject "${original[@]}"
+            fi
+          }
+
           case "${1:-} ${2:-}" in
             'issue view'|'issue list'|'label list')
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
             'issue comment')
-              has_body='false'
-              for arg in "$@"; do
-                case "${arg}" in
-                  --body|--body=*)
-                    has_body='true'
-                    ;;
-                  --body-file|--body-file=*|--edit-last|--delete-last|--create-if-none|--web)
-                    reject "$@"
-                    ;;
-                esac
-              done
-
-              if [[ "${has_body}" != 'true' ]]; then
-                reject "$@"
-              fi
-
+              require_write_enabled "$@"
+              validate_issue_comment_args "${@:3}"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
             'issue edit')
-              has_add_label='false'
-              for arg in "$@"; do
-                case "${arg}" in
-                  --add-label|--add-label=*)
-                    has_add_label='true'
-                    ;;
-                  --remove-label|--remove-label=*|--add-assignee|--add-assignee=*|--remove-assignee|--remove-assignee=*|--assignee|--assignee=*|--milestone|--milestone=*|--project|--project=*|--remove-project|--remove-project=*|--state|--state=*|--title|--title=*|--body|--body=*|--body-file|--body-file=*|--web)
-                    reject "$@"
-                    ;;
-                esac
-              done
-
-              if [[ "${has_add_label}" != 'true' ]]; then
-                reject "$@"
-              fi
-
+              require_write_enabled "$@"
+              validate_issue_edit_args "${@:3}"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
