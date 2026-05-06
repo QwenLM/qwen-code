@@ -224,15 +224,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
-      if (!isInternal) {
-        this.logApiRequest(
-          this.toContents(req.contents),
-          req.model,
-          userPromptId,
-        );
-        openaiRequest = await this.buildOpenAIRequestForLogging(req);
-      }
-      stream = await this.wrapped.generateContentStream(req, userPromptId);
+      stream = await runInContext(async () => {
+        if (!isInternal) {
+          this.logApiRequest(
+            this.toContents(req.contents),
+            req.model,
+            userPromptId,
+          );
+          openaiRequest = await this.buildOpenAIRequestForLogging(req);
+        }
+        return this.wrapped.generateContentStream(req, userPromptId);
+      });
     } catch (error) {
       try {
         span.setStatus({

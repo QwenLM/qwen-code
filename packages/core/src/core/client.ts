@@ -1207,18 +1207,22 @@ export class GeminiClient {
     model: string,
     promptIdOverride?: string,
   ): Promise<GenerateContentResponse> {
+    const promptId =
+      promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
+
     return withSpan(
       'client.generateContent',
-      { model, prompt_id: promptIdOverride ?? '' },
+      { model, prompt_id: promptId },
       async () => {
         let currentAttemptModel: string = model;
-        const promptId =
-          promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
 
         try {
           const userMemory = this.config.getUserMemory();
           const finalSystemInstruction = generationConfig.systemInstruction
-            ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
+            ? getCustomSystemPrompt(
+                generationConfig.systemInstruction,
+                userMemory,
+              )
             : this.getMainSessionSystemInstruction();
 
           const requestConfig: GenerateContentConfig = {
