@@ -49,22 +49,6 @@ env:
   BOT_GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
 
 jobs:
-  configuration-notice:
-    timeout-minutes: 1
-    if: |-
-      ${{
-        github.repository == 'QwenLM/qwen-code' &&
-        github.event_name != 'workflow_dispatch' &&
-        vars.QWEN_ISSUE_FOLLOWUP_BOT_ENABLED != 'true'
-      }}
-    runs-on: 'ubuntu-latest'
-    permissions:
-      contents: 'read'
-    steps:
-      - name: 'Report disabled automatic follow-up'
-        run: |-
-          echo "::warning::QWEN_ISSUE_FOLLOWUP_BOT_ENABLED is not 'true'. Automated issue follow-up is skipped."
-
   follow-up-issues:
     timeout-minutes: 15
     if: |-
@@ -78,7 +62,6 @@ jobs:
       - name: 'Prepare issue follow-up runtime'
         id: 'runtime'
         env:
-          BOT_GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
           EVENT_NAME: '${{ github.event_name }}'
           GH_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
           DISPATCH_DRY_RUN: "${{ github.event.inputs.dry_run || 'true' }}"
@@ -107,6 +90,9 @@ jobs:
           real_gh="$(command -v gh)"
           safe_gh_dir="${RUNNER_TEMP}/qwen-safe-gh"
           mkdir -p "${safe_gh_dir}"
+          # The shim intentionally accepts only subcommand-first `gh` calls
+          # with explicit long-form mutation flags; global flags and short
+          # aliases stay rejected by default.
           cat > "${safe_gh_dir}/gh" <<'SAFE_GH'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -139,166 +125,108 @@ jobs:
           }
 
           expected_repo="${REPOSITORY:-${GITHUB_REPOSITORY:-}}"
+          [[ -n "${expected_repo}" ]] || { echo '::error::expected_repo is unset' >&2; exit 2; }
 
-          require_explicit_repo() {
-            local original=("$@")
-            local expect=''
-            local saw_repo='false'
-
-            if [[ -z "${expected_repo}" ]]; then
-              reject "${original[@]}"
-            fi
-
+          require_repo_match() {
+            # Reject unless exactly one --repo value equals expected_repo.
+            local original=("$@") seen=0 expect='' arg
             while (($# > 0)); do
-              local arg="$1"
-              shift
-
+              arg="$1"; shift
               if [[ "${expect}" == 'repo' ]]; then
-                if [[ "${arg}" != "${expected_repo}" ]]; then
-                  reject "${original[@]}"
-                fi
-                saw_repo='true'
-                expect=''
-                continue
+                [[ "${arg}" == "${expected_repo}" ]] || reject "${original[@]}"
+                seen=$((seen + 1)); expect=''; continue
               fi
-
               case "${arg}" in
-                --repo|-R)
-                  expect='repo'
-                  ;;
+                --repo|-R) expect='repo' ;;
                 --repo=*)
-                  if [[ "${arg#*=}" != "${expected_repo}" ]]; then
-                    reject "${original[@]}"
-                  fi
-                  saw_repo='true'
+                  [[ "${arg#*=}" == "${expected_repo}" ]] || reject "${original[@]}"
+                  seen=$((seen + 1))
                   ;;
               esac
             done
-
-            if [[ "${expect}" == 'repo' || "${saw_repo}" != 'true' ]]; then
-              reject "${original[@]}"
-            fi
+            [[ "${seen}" -eq 1 && -z "${expect}" ]] || reject "${original[@]}"
           }
 
           validate_issue_edit_args() {
-            local original=("$@")
-            local target_count=0
-            local add_label_count=0
-            local expect=''
+            local original=("$@") target_count=0 add_label_count=0 repo_count=0 expect='' arg
 
             while (($# > 0)); do
-              local arg="$1"
-              shift
-
+              arg="$1"; shift
               if [[ -n "${expect}" ]]; then
                 case "${expect}" in
                   repo)
-                    ;;
-                  add_label)
-                    add_label_count=$((add_label_count + 1))
-                    ;;
-                  *)
-                    reject "${original[@]}"
-                    ;;
+                    [[ "${arg}" == "${expected_repo}" ]] || reject "${original[@]}"
+                    repo_count=$((repo_count + 1)) ;;
+                  add_label) add_label_count=$((add_label_count + 1)) ;;
+                  *) reject "${original[@]}" ;;
                 esac
-                expect=''
-                continue
+                expect=''; continue
               fi
-
               case "${arg}" in
-                --repo|-R)
-                  expect='repo'
-                  ;;
+                --repo|-R) expect='repo' ;;
                 --repo=*)
-                  ;;
-                --add-label)
-                  expect='add_label'
-                  ;;
-                --add-label=*)
-                  add_label_count=$((add_label_count + 1))
-                  ;;
-                --*|-*)
-                  reject "${original[@]}"
-                  ;;
-                *)
-                  target_count=$((target_count + 1))
-                  ;;
+                  [[ "${arg#*=}" == "${expected_repo}" ]] || reject "${original[@]}"
+                  repo_count=$((repo_count + 1)) ;;
+                --add-label) expect='add_label' ;;
+                --add-label=*) add_label_count=$((add_label_count + 1)) ;;
+                --*|-*) reject "${original[@]}" ;;
+                *) target_count=$((target_count + 1)) ;;
               esac
             done
 
-            if [[ -n "${expect}" || "${target_count}" -ne 1 || "${add_label_count}" -lt 1 ]]; then
-              reject "${original[@]}"
-            fi
+            [[ -z "${expect}" && "${target_count}" -eq 1 && "${add_label_count}" -ge 1 && "${repo_count}" -eq 1 ]] \
+              || reject "${original[@]}"
           }
 
           validate_issue_comment_args() {
-            local original=("$@")
-            local target_count=0
-            local body_count=0
-            local expect=''
+            local original=("$@") target_count=0 body_count=0 repo_count=0 expect='' arg
 
             while (($# > 0)); do
-              local arg="$1"
-              shift
-
+              arg="$1"; shift
               if [[ -n "${expect}" ]]; then
                 case "${expect}" in
                   repo)
-                    ;;
-                  body)
-                    body_count=$((body_count + 1))
-                    ;;
-                  *)
-                    reject "${original[@]}"
-                    ;;
+                    [[ "${arg}" == "${expected_repo}" ]] || reject "${original[@]}"
+                    repo_count=$((repo_count + 1)) ;;
+                  body) body_count=$((body_count + 1)) ;;
+                  *) reject "${original[@]}" ;;
                 esac
-                expect=''
-                continue
+                expect=''; continue
               fi
-
               case "${arg}" in
-                --repo|-R)
-                  expect='repo'
-                  ;;
+                --repo|-R) expect='repo' ;;
                 --repo=*)
-                  ;;
-                --body)
-                  expect='body'
-                  ;;
-                --body=*)
-                  body_count=$((body_count + 1))
-                  ;;
-                --*|-*)
-                  reject "${original[@]}"
-                  ;;
-                *)
-                  target_count=$((target_count + 1))
-                  ;;
+                  [[ "${arg#*=}" == "${expected_repo}" ]] || reject "${original[@]}"
+                  repo_count=$((repo_count + 1)) ;;
+                --body) expect='body' ;;
+                --body=*) body_count=$((body_count + 1)) ;;
+                --*|-*) reject "${original[@]}" ;;
+                *) target_count=$((target_count + 1)) ;;
               esac
             done
 
-            if [[ -n "${expect}" || "${target_count}" -ne 1 || "${body_count}" -ne 1 ]]; then
-              reject "${original[@]}"
-            fi
+            [[ -z "${expect}" && "${target_count}" -eq 1 && "${body_count}" -eq 1 && "${repo_count}" -eq 1 ]] \
+              || reject "${original[@]}"
           }
 
+          # Subcommand match is positional; global flags before the subcommand
+          # (e.g. `gh --repo X issue view`) intentionally fall through to
+          # default reject.
           case "${1:-} ${2:-}" in
             'issue view'|'issue list'|'label list')
-              require_explicit_repo "${@:3}"
+              require_repo_match "${@:3}"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
             'issue comment')
               require_write_enabled "$@"
               validate_issue_comment_args "${@:3}"
-              require_explicit_repo "${@:3}"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
             'issue edit')
               require_write_enabled "$@"
               validate_issue_edit_args "${@:3}"
-              require_explicit_repo "${@:3}"
               reject_if_arg_contains_secret "$@"
               exec "${real_gh}" "$@"
               ;;
@@ -311,20 +239,20 @@ jobs:
           echo "SAFE_GH_REAL=${real_gh}" >> "${GITHUB_ENV}"
           echo "${safe_gh_dir}" >> "${GITHUB_PATH}"
 
+          # GITHUB_PATH applies to later steps, so this still calls the real
+          # gh binary before the shim is active.
           gh auth status --hostname github.com
 
-          dry_run='false'
+          dry_run='true'
           if [[ "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
-            if [[ "${DISPATCH_DRY_RUN}" == 'true' ]]; then
-              dry_run='true'
+            if [[ "${DISPATCH_DRY_RUN}" == 'false' ]]; then
+              dry_run='false'
             fi
           elif [[ "${EVENT_NAME}" == 'issues' ]]; then
-            dry_run='true'
             if [[ "${ISSUE_OPENED_DRY_RUN}" == 'false' ]]; then
               dry_run='false'
             fi
           else
-            dry_run='true'
             if [[ "${SCHEDULE_DRY_RUN}" == 'false' ]]; then
               dry_run='false'
             fi
@@ -332,13 +260,7 @@ jobs:
 
           echo "dry_run=${dry_run}" >> "${GITHUB_OUTPUT}"
           echo "scheduled_limit=${SCHEDULED_LIMIT_INPUT}" >> "${GITHUB_OUTPUT}"
-          echo "Issue follow-up resolved state:"
-          echo "  EVENT_NAME=${EVENT_NAME}"
-          echo "  DISPATCH_DRY_RUN=${DISPATCH_DRY_RUN}"
-          echo "  ISSUE_OPENED_DRY_RUN=${ISSUE_OPENED_DRY_RUN}"
-          echo "  SCHEDULE_DRY_RUN=${SCHEDULE_DRY_RUN}"
-          echo "  resolved dry_run=${dry_run}"
-          echo "  scheduled_limit=${SCHEDULED_LIMIT_INPUT}"
+          echo "Issue follow-up state: event=${EVENT_NAME} dispatch_dry=${DISPATCH_DRY_RUN} issues_dry=${ISSUE_OPENED_DRY_RUN} schedule_dry=${SCHEDULE_DRY_RUN} resolved_dry_run=${dry_run} scheduled_limit=${SCHEDULED_LIMIT_INPUT}"
 
       - name: 'Run Qwen issue follow-up'
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
@@ -468,6 +390,8 @@ jobs:
 
             - Run `gh label list --repo "${{ github.repository }}" --limit 200` before
               selecting labels.
+            - Use the exact long-form `gh` commands shown here. The runner
+              rejects global flags and short aliases such as `-b` or `-F`.
             - Use `gh issue edit <number> --repo "${{ github.repository }}" --add-label "<label>"`
               only to add labels. The runner blocks label removal, assignment,
               state changes, and other issue edits.
