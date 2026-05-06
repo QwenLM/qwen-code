@@ -394,6 +394,17 @@ export default {
   'Manage workspace directories': '管理工作區目錄',
   'Add directories to the workspace. Use comma to separate multiple paths':
     '將目錄添加到工作區。使用逗號分隔多個路徑',
+  'Remove a directory from the workspace':
+    '從工作區中移除目錄',
+  'Please provide a directory path to remove.':
+    '請提供要移除的目錄路徑。',
+  'Cannot remove initial workspace directory: {{directory}}':
+    '無法移除初始工作區目錄：{{directory}}',
+  'Directory not found in workspace: {{directory}}':
+    '工作區中未找到目錄：{{directory}}',
+  'Directory removed from workspace but error updating settings: {{error}}':
+    '目錄已從工作區移除，但更新設置時出錯：{{error}}',
+  'Removed directory: {{directory}}': '已移除目錄：{{directory}}',
   'Show all directories in the workspace': '顯示工作區中的所有目錄',
   'set external editor preference': '設置外部編輯器首選項',
   'Select Editor': '選擇編輯器',
