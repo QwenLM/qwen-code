@@ -963,6 +963,152 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('attach honors modelServiceId on existing session', () => {
+    /** Channel + agent factory that records every set-model call. */
+    function setupRecording() {
+      const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+      const factory: ChannelFactory = async () => {
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const fakeAgent = new FakeAgent();
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async (req: { sessionId: string; modelId: string }) => {
+                setModelCalls.push({
+                  sessionId: req.sessionId,
+                  modelId: req.modelId,
+                });
+                return {};
+              };
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<void>(() => {}),
+          kill: async () => {},
+        };
+      };
+      return { factory, setModelCalls };
+    }
+
+    it('applies modelServiceId on attach via unstable_setSessionModel', async () => {
+      const { factory, setModelCalls } = setupRecording();
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+
+      // First call spawns; second call attaches with a DIFFERENT model.
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: '/work/a',
+        modelServiceId: 'model-A',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: '/work/a',
+        modelServiceId: 'model-B',
+      });
+
+      expect(second.attached).toBe(true);
+      expect(second.sessionId).toBe(first.sessionId);
+      // Two set-model calls: one at create time, one at attach time.
+      expect(setModelCalls.map((c) => c.modelId)).toEqual([
+        'model-A',
+        'model-B',
+      ]);
+
+      await bridge.shutdown();
+    });
+
+    it('attach without modelServiceId does NOT issue setSessionModel', async () => {
+      const { factory, setModelCalls } = setupRecording();
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+
+      await bridge.spawnOrAttach({
+        workspaceCwd: '/work/a',
+        modelServiceId: 'model-A',
+      });
+      // Plain attach — no model preference passed.
+      await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      expect(setModelCalls).toEqual([
+        { sessionId: expect.any(String), modelId: 'model-A' },
+      ]);
+
+      await bridge.shutdown();
+    });
+  });
+
+  describe('sendPrompt fail-fast on transport close', () => {
+    it('rejects in-flight prompt when channel.exited fires', async () => {
+      // Build a channel whose `prompt()` never resolves naturally;
+      // exposing the `crash()` hook lets us trigger channel.exited.
+      let resolveExited: (() => void) | undefined;
+      const exited = new Promise<void>((r) => {
+        resolveExited = r;
+      });
+      const factory: ChannelFactory = async () => {
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        // Fake agent's prompt() never replies — we want the bridge's
+        // race-against-exited to be the only resolution path.
+        const stuckAgent: Agent = {
+          async initialize() {
+            return {
+              protocolVersion: PROTOCOL_VERSION,
+              agentInfo: { name: 'stuck', version: '0' },
+              authMethods: [],
+              agentCapabilities: {},
+            };
+          },
+          async newSession(p) {
+            return { sessionId: `stuck:${p.cwd}` };
+          },
+          async loadSession() {
+            throw new Error('not impl');
+          },
+          async authenticate() {
+            throw new Error('not impl');
+          },
+          async prompt() {
+            return new Promise(() => {}); // hang forever
+          },
+          async cancel() {},
+          async setSessionMode() {
+            throw new Error('not impl');
+          },
+          async setSessionConfigOption() {
+            throw new Error('not impl');
+          },
+        };
+        new AgentSideConnection(() => stuckAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited,
+          kill: async () => resolveExited!(),
+        };
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      const promptResult = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Trigger transport close mid-flight.
+      setTimeout(() => resolveExited!(), 50);
+
+      await expect(promptResult).rejects.toThrow(/channel closed/i);
+      await bridge.shutdown();
+    });
+  });
+
   describe('opts validation', () => {
     it('rejects an invalid sessionScope', () => {
       expect(() =>

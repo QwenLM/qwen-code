@@ -292,6 +292,20 @@ class BridgeClient implements Client {
   async writeTextFile(
     params: WriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
+    // Stage 1 known divergence: this raw `fs.writeFile` reimplements file
+    // I/O instead of delegating to core's filesystem service. The
+    // user-visible scenarios where they differ:
+    //   - BOM handling: this drops/re-encodes whatever the agent passed;
+    //     core would preserve.
+    //   - Non-UTF-8 source files: round-tripping through utf8 mangles
+    //     content.
+    //   - Original line endings: core preserves CRLF on Windows files;
+    //     this writes whatever the agent buffered.
+    // Wiring core's FileSystemService through the bridge requires
+    // exposing it as a constructor dep; the cost-benefit is low for
+    // Stage 1 (most agent-side tools call core directly, NOT through
+    // these ACP fs methods) and Stage 2 in-process eliminates the
+    // bridge fs proxy entirely. Tracked as a Stage 2 prerequisite.
     await fs.writeFile(params.path, params.content, 'utf8');
     return {};
   }
@@ -502,6 +516,34 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     }
   }
 
+  /**
+   * Send `unstable_setSessionModel` and broadcast a `model_switched`
+   * event. Used at create-session time (via doSpawn) AND on attach when
+   * the caller passes a modelServiceId — the existing session may be
+   * running a different model.
+   */
+  async function applyModelServiceId(
+    entry: SessionEntry,
+    modelId: string,
+    timeoutMs: number,
+  ): Promise<void> {
+    const conn = entry.connection as unknown as {
+      unstable_setSessionModel(p: {
+        sessionId: string;
+        modelId: string;
+      }): Promise<unknown>;
+    };
+    await withTimeout(
+      conn.unstable_setSessionModel({ sessionId: entry.sessionId, modelId }),
+      timeoutMs,
+      'setSessionModel',
+    );
+    entry.events.publish({
+      type: 'model_switched',
+      data: { sessionId: entry.sessionId, modelId },
+    });
+  }
+
   /** Resolve every pending request belonging to one session as cancelled. */
   const cancelPendingForSession = (sessionId: string) => {
     const entry = byId.get(sessionId);
@@ -533,6 +575,20 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       if (sessionScope === 'single') {
         const existing = byWorkspace.get(workspaceKey);
         if (existing) {
+          // If the caller passed a modelServiceId on attach, the session
+          // may currently be running a DIFFERENT model. Honor the request
+          // by issuing setSessionModel — same call we'd use on
+          // /session/:id/model. Surfaces a `model_switched` event so
+          // every attached client sees the change. If the new model is
+          // rejected, propagate as a spawn-style error rather than
+          // silently returning an attach-with-stale-model.
+          if (req.modelServiceId) {
+            await applyModelServiceId(
+              existing,
+              req.modelServiceId,
+              initTimeoutMs,
+            );
+          }
           return {
             sessionId: existing.sessionId,
             workspaceCwd: existing.workspaceCwd,
@@ -541,10 +597,22 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         }
         // Coalesce: if another caller is already mid-spawn for this same
         // workspace, await their result. The reporter's call appears as an
-        // attach (the spawn was someone else's, not theirs).
+        // attach (the spawn was someone else's, not theirs). If the
+        // reporter asked for a different modelServiceId than the spawn
+        // chose, apply it now.
         const inFlight = inFlightSpawns.get(workspaceKey);
         if (inFlight) {
           const session = await inFlight;
+          if (req.modelServiceId) {
+            const liveEntry = byId.get(session.sessionId);
+            if (liveEntry) {
+              await applyModelServiceId(
+                liveEntry,
+                req.modelServiceId,
+                initTimeoutMs,
+              );
+            }
+          }
           return { ...session, attached: true };
         }
       }
@@ -579,7 +647,21 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           throw new DOMException('Prompt aborted', 'AbortError');
         }
         const promptPromise = entry.connection.prompt(normalized);
-        if (!signal) return promptPromise;
+
+        // Race against channel termination: if the underlying transport
+        // dies (child crashed, stream torn down) WHILE the prompt is in
+        // flight, the SDK's pending-request promise can hang because the
+        // wire never delivers a response. Make the prompt fail-fast in
+        // that case so the per-session FIFO doesn't poison the next
+        // queued prompt with an unbounded await.
+        const transportClosed = entry.channel.exited.then(() => {
+          throw new Error(
+            `agent channel closed while prompt was in flight (session ${sessionId})`,
+          );
+        });
+        const racedPromise = Promise.race([promptPromise, transportClosed]);
+
+        if (!signal) return racedPromise;
         // Wire the abort: when the signal fires (e.g. SSE route's
         // req.on('close')), tell the agent to wind down. ACP cancel is a
         // notification — the active prompt resolves with
@@ -595,11 +677,11 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           signal.addEventListener('abort', onAbort, { once: true });
           // Detach the listener once the prompt resolves so the
           // AbortController can be GC'd.
-          promptPromise.finally(() =>
+          racedPromise.finally(() =>
             signal.removeEventListener('abort', onAbort),
           );
         }
-        return promptPromise;
+        return racedPromise;
       });
       // Tail swallows failures so subsequent prompts still run. The caller
       // still sees rejections on its own `result` reference.

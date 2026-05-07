@@ -56,8 +56,19 @@ export async function runQwenServe(
   let actualPort = opts.port;
   const app = createServeApp(opts, () => actualPort, { bridge });
 
+  // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
+  // operators conventionally type `[::1]` (or copy/paste from URLs that
+  // need the brackets to disambiguate the port). Strip brackets at
+  // bind-time, keep them for the printed URL — without this fixup
+  // `qwen serve --hostname [::1]` would pass the loopback/token check
+  // and then fail to start with ENOTFOUND.
+  const listenHostname =
+    opts.hostname.startsWith('[') && opts.hostname.endsWith(']')
+      ? opts.hostname.slice(1, -1)
+      : opts.hostname;
+
   return await new Promise<RunHandle>((resolve, reject) => {
-    const server = app.listen(opts.port, opts.hostname, () => {
+    const server = app.listen(opts.port, listenHostname, () => {
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const url = `http://${opts.hostname}:${actualPort}`;

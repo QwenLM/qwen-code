@@ -755,6 +755,26 @@ describe('runQwenServe', () => {
     expect(await res.json()).toEqual({ status: 'ok' });
   });
 
+  it('strips brackets from `[::1]` before passing to app.listen()', async () => {
+    // Node's app.listen wants the unbracketed IPv6 literal — `[::1]`
+    // would fail with ENOTFOUND. The fixup is in runQwenServe's
+    // bind-time normalization.
+    handle = await runQwenServe({
+      hostname: '[::1]',
+      port: 0,
+      mode: 'http-bridge',
+    });
+    const addr = handle.server.address();
+    expect(typeof addr).toBe('object');
+    if (typeof addr === 'object' && addr) {
+      // Successfully bound — the string the OS reports is `::1` (no
+      // brackets).
+      expect(
+        addr.address === '::1' || addr.address === '::ffff:127.0.0.1',
+      ).toBe(true);
+    }
+  });
+
   it('drains the bridge before closing the listener', async () => {
     const bridge = fakeBridge();
     handle = await runQwenServe(
