@@ -125,7 +125,7 @@ describe('LoggingContentGenerator', () => {
         createResponse(
           'resp-1',
           'model-v2',
-          [{ text: 'ok' }],
+          [{ text: 'ok' }, { text: 'hidden thought', thought: true }],
           {
             promptTokenCount: 3,
             candidatesTokenCount: 5,
@@ -199,6 +199,7 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.model).toBe('model-v2');
     expect(responseEvent.prompt_id).toBe('prompt-1');
     expect(responseEvent.input_token_count).toBe(3);
+    expect(responseEvent.response_text).toBe('ok');
 
     expect(convertGeminiRequestToOpenAISpy).toHaveBeenCalledTimes(1);
     expect(convertGeminiToolsToOpenAISpy).toHaveBeenCalledTimes(1);
@@ -342,6 +343,7 @@ describe('LoggingContentGenerator', () => {
     const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
     expect(responseEvent.response_id).toBe('resp-1');
     expect(responseEvent.input_token_count).toBe(2);
+    expect(responseEvent.response_text).toBe('Hello world');
 
     expect(convertGeminiResponseToOpenAISpy).toHaveBeenCalledTimes(1);
     const [consolidatedResponse] =
@@ -511,6 +513,8 @@ describe('LoggingContentGenerator', () => {
       expect(logApiRequest).not.toHaveBeenCalled();
       // logApiResponse SHOULD be called (for /stats token tracking)
       expect(logApiResponse).toHaveBeenCalled();
+      const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+      expect(responseEvent.response_text).toBeUndefined();
       // OpenAI logger should be constructed, but no interaction should be logged
       expect(OpenAILogger).toHaveBeenCalled();
       const loggerInstance = (
@@ -558,6 +562,8 @@ describe('LoggingContentGenerator', () => {
 
       expect(logApiRequest).not.toHaveBeenCalled();
       expect(logApiResponse).toHaveBeenCalled();
+      const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+      expect(responseEvent.response_text).toBeUndefined();
       expect(OpenAILogger).toHaveBeenCalled();
       const loggerInstance = (
         OpenAILogger as unknown as ReturnType<typeof vi.fn>

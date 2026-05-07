@@ -167,12 +167,16 @@ export class LoggingContentGenerator implements ContentGenerator {
     try {
       const response = await this.wrapped.generateContent(req, userPromptId);
       const durationMs = Date.now() - startTime;
+      const responseText = isInternal
+        ? undefined
+        : this.extractResponseText(response);
       this._logApiResponse(
         response.responseId ?? '',
         durationMs,
         response.modelVersion || req.model,
         userPromptId,
         response.usageMetadata,
+        responseText,
       );
       if (!isInternal) {
         await this.logOpenAIInteraction(openaiRequest, response);
@@ -261,16 +265,18 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       // Only log successful API response if no error occurred
       const durationMs = Date.now() - startTime;
+      const consolidatedResponse = isInternal
+        ? undefined
+        : this.consolidateGeminiResponsesForLogging(responses);
       this._logApiResponse(
         firstResponseId,
         durationMs,
         firstModelVersion || model,
         userPromptId,
         lastUsageMetadata,
+        this.extractResponseText(consolidatedResponse),
       );
       if (!isInternal) {
-        const consolidatedResponse =
-          this.consolidateGeminiResponsesForLogging(responses);
         await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
       }
     } catch (error) {
@@ -467,6 +473,36 @@ export class LoggingContentGenerator implements ContentGenerator {
     ];
 
     return consolidated;
+  }
+
+  private extractResponseText(
+    response: GenerateContentResponse | undefined,
+  ): string | undefined {
+    const parts = response?.candidates?.[0]?.content?.parts;
+    if (!parts?.length) {
+      return undefined;
+    }
+
+    let text = '';
+    let hasText = false;
+    for (const part of parts as Part[]) {
+      if (typeof part === 'string') {
+        text += part;
+        hasText = true;
+        continue;
+      }
+
+      if (
+        'text' in part &&
+        typeof part.text === 'string' &&
+        !('thought' in part && part.thought)
+      ) {
+        text += part.text;
+        hasText = true;
+      }
+    }
+
+    return hasText ? text : undefined;
   }
 
   async countTokens(req: CountTokensParameters): Promise<CountTokensResponse> {
