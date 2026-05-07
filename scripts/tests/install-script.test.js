@@ -1283,6 +1283,7 @@ describe('standalone release packaging', () => {
       installationReleaseVerificationScriptUrl
     );
 
+    // file:// must be rejected as a URL the verifier cannot reach safely.
     await expect(verifyReleaseBaseUrl('file:///tmp/release/')).rejects.toThrow(
       /--base-url must use https/,
     );
