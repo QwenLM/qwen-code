@@ -78,6 +78,7 @@ export const codingPlanProvider: ProviderConfig = {
   metadataKey: 'codingPlan',
   authMethod: 'input',
   models: MODELSTUDIO_MODELS,
+  modelsEditable: true,
   modelNamePrefix: (baseUrl) =>
     baseUrl === CODING_PLAN_GLOBAL_BASE_URL
       ? 'ModelStudio Coding Plan for Global/Intl'
