@@ -26,6 +26,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import { truncateToolOutput } from '../utils/truncation.js';
 import type {
   ShellExecutionConfig,
+  ShellExecutionResult,
   ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
@@ -571,6 +572,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
+    setPromoteAbortControllerCallback?: (ac: AbortController) => void,
   ): Promise<ToolResult> {
     if (signal.aborted) {
       return {
@@ -586,11 +588,26 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const effectiveTimeout =
       this.params.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_MS;
 
-    // Create combined signal with timeout for foreground execution
-    let combinedSignal = signal;
+    // Create combined signal with timeout AND promote-trigger for
+    // foreground execution. The promoteAbortController is exposed to
+    // the caller (the future Ctrl+B keybind handler in PR-3) via
+    // `setPromoteAbortControllerCallback`. When the keybind fires
+    // `promoteAbortController.abort({ kind: 'background', shellId })`,
+    // ShellExecutionService detects the discriminated reason and
+    // returns `result.promoted: true` instead of killing the child —
+    // see #3842 / #3886 for the foundation.
+    const promoteAbortController = new AbortController();
+    let combinedSignal = AbortSignal.any([
+      signal,
+      promoteAbortController.signal,
+    ]);
     if (effectiveTimeout) {
       const timeoutSignal = AbortSignal.timeout(effectiveTimeout);
-      combinedSignal = AbortSignal.any([signal, timeoutSignal]);
+      combinedSignal = AbortSignal.any([
+        signal,
+        timeoutSignal,
+        promoteAbortController.signal,
+      ]);
     }
 
     // Add co-author to git commit commands
@@ -676,6 +693,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (pid && setPidCallback) {
       setPidCallback(pid);
     }
+    // Hand the promote controller up to the scheduler so a future UI
+    // surface (PR-3 Ctrl+B keybind) can find it and trigger promote.
+    // Done unconditionally — the caller can ignore it if they don't
+    // implement promote yet, but exposing it now means PR-3 doesn't
+    // need to revisit shell.ts.
+    setPromoteAbortControllerCallback?.(promoteAbortController);
 
     // Bracket the spawn → settle wall-clock so the result builder below
     // can decide whether to append the long-run advisory. Captured AFTER
@@ -695,6 +718,49 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const executionStartTime = performance.now();
 
     const result = await resultPromise;
+
+    // Background-promote path: the user pressed Ctrl+B (PR-3 wires the
+    // keybind to `promoteAbortController.abort({ kind: 'background' })`),
+    // ShellExecutionService skipped the kill, snapshotted the output up
+    // to that moment, and resolved with `promoted: true`. Per #3831
+    // design question 7, `result.aborted` is `false` for promoted
+    // results, so this branch is checked BEFORE the `if (result.aborted)`
+    // arm and falls through naturally to the success-shape arm if
+    // promote didn't fire.
+    //
+    // What we do here:
+    //   1. Generate a `bg_xxx` shell id + on-disk output path under the
+    //      same project temp dir `executeBackground` uses.
+    //   2. Write `result.output` (the snapshot ShellExecutionService
+    //      built right before promote) to the file as the initial
+    //      content. The agent / `/tasks` / dialog can `Read` this file.
+    //   3. Register a `BackgroundShellEntry` with the existing pid +
+    //      the same `promoteAbortController` we already wired into the
+    //      child's signal — `task_stop bg_xxx` and the Background tasks
+    //      dialog's `x` key both abort via `entry.abortController` and
+    //      will land on the running child.
+    //   4. Return a model-facing `ToolResult` with promote-flavored copy
+    //      pointing the agent at `/tasks` / the Background tasks dialog
+    //      / `task_stop` for follow-up.
+    //
+    // KNOWN LIMITATION (deferred to PR-2.5): post-promote, the
+    // ShellExecutionService no longer streams output to the file (PR-1
+    // detached its data listener as part of the ownership-transfer
+    // contract), and there's no path for the registry entry to settle
+    // when the underlying child exits naturally. The entry stays
+    // `'running'` until `task_stop bg_xxx` or session shutdown
+    // (`abortAll`) clears it. PR-2.5 will add post-promote stream
+    // redirect (so /tasks shows live output) and a settle hook (so
+    // natural exit transitions the entry to `completed`/`failed`).
+    if (result.promoted) {
+      const promotedToolResult = await this.handlePromotedForeground(
+        result,
+        cwd,
+        commandToExecute,
+        promoteAbortController,
+      );
+      return promotedToolResult;
+    }
 
     let llmContent = '';
     if (result.aborted) {
@@ -907,6 +973,98 @@ export class ShellToolInvocation extends BaseToolInvocation<
       llmContent,
       returnDisplay: returnDisplayMessage,
       ...executionError,
+    };
+  }
+
+  /**
+   * Foreground → background promote handler. Called when the foreground
+   * execute path observes `result.promoted: true` (the user pressed
+   * Ctrl+B mid-flight). Snapshots captured output to a `bg_xxx.output`
+   * file, registers a `BackgroundShellEntry` in the same registry the
+   * `is_background: true` path uses, and returns a model-facing
+   * `ToolResult` pointing at `/tasks` / the dialog / `task_stop` for
+   * follow-up.
+   *
+   * Limitations (PR-2.5 follow-up):
+   *   - The registry entry stays `'running'` until `task_stop bg_xxx`
+   *     or session-end `abortAll` clears it; natural child exit does
+   *     NOT auto-settle the entry today (no settle hook from the
+   *     service after promote — the listener was detached as part of
+   *     PR-1's ownership-transfer contract).
+   *   - The `outputPath` content is FROZEN at the promote moment; the
+   *     service no longer streams post-promote bytes to the file.
+   *     Caller-side stream redirect lands in PR-2.5.
+   */
+  private async handlePromotedForeground(
+    result: ShellExecutionResult,
+    cwd: string,
+    commandToExecute: string,
+    abortController: AbortController,
+  ): Promise<ToolResult> {
+    // Mirror executeBackground's outputPath layout so /tasks-on-disk and
+    // ReadFileTool's auto-allow rules treat foreground-promoted shells
+    // and originally-background shells identically.
+    const outputDir = path.join(
+      this.config.storage.getProjectTempDir(),
+      'background-shells',
+      this.config.getSessionId(),
+    );
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
+    const outputPath = path.join(outputDir, `shell-${shellId}.output`);
+    // Best-effort initial snapshot write — if disk is full or
+    // permission flips, log + continue (the registry entry is still
+    // valuable on its own; the file is only the inspection surface).
+    try {
+      fs.writeFileSync(outputPath, result.output);
+    } catch (err) {
+      debugLogger.warn(
+        `promote: failed to write initial output snapshot to ${outputPath}: ${getErrorMessage(err)}`,
+      );
+    }
+
+    const startTime = Date.now();
+    const entry: BackgroundShellEntry = {
+      shellId,
+      command: this.params.command,
+      cwd,
+      pid: result.pid,
+      status: 'running',
+      startTime,
+      outputPath,
+      // The same AbortController we wired into the live child via
+      // combinedSignal — `task_stop bg_xxx` and the dialog's `x` key
+      // route through `entry.abortController.abort()` and will land on
+      // the still-running process, killing it as expected.
+      abortController,
+    };
+
+    const registry = this.config.getBackgroundShellRegistry();
+    registry.register(entry);
+
+    const llmContent = [
+      `Foreground command "${this.params.command}" promoted to background as ${shellId}.`,
+      `Status: running. PID: ${result.pid ?? '(unknown)'}.`,
+      `Output snapshot at promote time saved to: ${outputPath}`,
+      `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`,
+      `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`,
+    ].join('\n');
+
+    debugLogger.debug(
+      `promote: registered ${shellId} (pid=${result.pid}) — outputPath=${outputPath}`,
+    );
+
+    // Reference `commandToExecute` to satisfy the unused-parameter
+    // checker without actually using it in the result — the param is
+    // kept on the method signature so a future PR-2.5 that compares
+    // the executed command against `params.command` (e.g. for PowerShell
+    // UTF-8 prefix detection) can read it without re-plumbing.
+    void commandToExecute;
+
+    return {
+      llmContent,
+      returnDisplay: `Promoted to background: ${shellId}`,
     };
   }
 

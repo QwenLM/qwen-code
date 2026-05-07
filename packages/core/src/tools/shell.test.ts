@@ -23,7 +23,7 @@ vi.mock('os');
 vi.mock('crypto');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
-import { ShellTool } from './shell.js';
+import { ShellTool, type ShellToolInvocation } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { type Config } from '../config/config.js';
@@ -1592,6 +1592,117 @@ describe('ShellTool', () => {
           false,
           {},
         );
+      });
+    });
+
+    describe('foreground → background promote (#3831 PR-2)', () => {
+      it('exposes a promote AbortController via setPromoteAbortControllerCallback', async () => {
+        const setPromoteAc = vi.fn();
+        const invocation = shellTool.build({
+          command: 'npm run dev',
+          is_background: false,
+        });
+        // Cast to the concrete invocation type to access the extra
+        // ShellTool-specific execute() params (setPidCallback +
+        // setPromoteAbortControllerCallback) — the base ToolInvocation
+        // type only has the 3-param signature shared across all tools.
+        const promise = (invocation as ShellToolInvocation).execute(
+          mockAbortSignal,
+          undefined,
+          {},
+          undefined,
+          setPromoteAc,
+        );
+        resolveShellExecution({ pid: 12345 });
+        await promise;
+
+        // Called once, with an AbortController whose signal is wired
+        // into the combined signal handed to ShellExecutionService.
+        expect(setPromoteAc).toHaveBeenCalledTimes(1);
+        const passedAc = setPromoteAc.mock.calls[0][0] as AbortController;
+        expect(passedAc).toBeInstanceOf(AbortController);
+      });
+
+      it('registers a bg_xxx entry on `result.promoted: true` and returns promote-flavored ToolResult', async () => {
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockReturnValue(undefined);
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        // Service signals promote: snapshot ready, child still alive.
+        resolveShellExecution({
+          output: 'partial output before promote',
+          exitCode: null,
+          signal: null,
+          aborted: false, // ← per #3831 design question 7
+          promoted: true,
+          pid: 99999,
+        });
+        const result = await promise;
+
+        // Entry registered with the spawn pid + promote AbortController.
+        expect(registry.register).toHaveBeenCalledTimes(1);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(entry.command).toBe('tail -f /tmp/never.log');
+        expect(entry.cwd).toBe('/test/dir');
+        expect(entry.status).toBe('running');
+        expect(entry.pid).toBe(99999);
+        expect(entry.shellId).toMatch(/^bg_/);
+        expect(entry.outputPath).toContain(entry.shellId);
+        expect(entry.abortController).toBeInstanceOf(AbortController);
+
+        // Snapshot written to disk.
+        expect(writeFileSyncSpy).toHaveBeenCalledWith(
+          entry.outputPath,
+          'partial output before promote',
+        );
+
+        // Model-facing copy points at /tasks / dialog / task_stop.
+        expect(result.llmContent).toContain(
+          `promoted to background as ${entry.shellId}`,
+        );
+        expect(result.llmContent).toContain(`PID: 99999`);
+        expect(result.llmContent).toContain('/tasks');
+        expect(result.llmContent).toContain(
+          `task_stop({ task_id: '${entry.shellId}'`,
+        );
+        expect(result.returnDisplay).toContain(
+          `Promoted to background: ${entry.shellId}`,
+        );
+        // No `error` on the result — promote is a success-shaped outcome
+        // per #3831 design question 7 / @tanzhenxin's PR-1 review.
+        expect(result.error).toBeUndefined();
+      });
+
+      it('survives a snapshot write failure — registry entry still registered', async () => {
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockImplementation(() => {
+          throw new Error('ENOSPC: no space left on device');
+        });
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: 'pre-promote',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 88888,
+        });
+        const result = await promise;
+
+        // The disk write failure is logged + swallowed: the entry is
+        // still valuable on its own; the file is the inspection
+        // surface, not the source of truth.
+        expect(registry.register).toHaveBeenCalledTimes(1);
+        expect(result.llmContent).toContain('promoted to background');
       });
     });
   });
