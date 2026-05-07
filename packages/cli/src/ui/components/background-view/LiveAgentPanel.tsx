@@ -403,12 +403,12 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
   const { glyph, color } = statusIcon(entry);
   const label = descriptionWithoutPrefix(entry);
   // Note: foreground vs background is intentionally not surfaced here.
-  // Earlier iterations prefixed foreground rows with `[in turn]` (the
-  // BackgroundTasksDialog convention), but in the panel context the
-  // marker reads as cryptic — the foreground / background distinction
-  // matters in the dialog (where cancel semantics differ) but the
-  // glance roster just needs identity + intent + cost. Keep the
-  // dialog as the place that surfaces the flavor distinction.
+  // BackgroundTasksDialog tags foreground rows with `[blocking]`
+  // (formerly `[in turn]`) to warn that cancelling will end the
+  // current turn — useful in the dialog where `x` triggers a real
+  // cancel. The glance panel has no cancel surface, so the marker
+  // reads as ambient noise. Keep the dialog as the place that
+  // surfaces the flavor distinction.
   const activity = activityLabel(entry);
   const elapsed = elapsedLabel(entry, now);
   const showType =

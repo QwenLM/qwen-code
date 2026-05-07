@@ -336,7 +336,12 @@ describe('<LiveAgentPanel />', () => {
       ],
     });
     const frame = lastFrame() ?? '';
+    // Neither the legacy `[in turn]` (pre-rename) nor the current
+    // `[blocking]` (BackgroundTasksDialog convention) should bleed
+    // into the glance panel — only the dialog surfaces the flavor
+    // distinction, where the cancel semantics warrant it.
     expect(frame).not.toContain('[in turn]');
+    expect(frame).not.toContain('[blocking]');
     expect(frame).toContain('editor');
     expect(frame).toContain('tighten import order');
   });
