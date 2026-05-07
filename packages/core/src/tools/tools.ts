@@ -642,6 +642,15 @@ export interface ToolConfirmationPayload {
   permissionRules?: string[];
   // used to pass user answers from ask_user_question tool
   answers?: Record<string, string>;
+  // Replacement tool args from the host's permission policy
+  // (Anthropic stream-json `can_use_tool` returns this as
+  // `updatedInput` when sanitising a tool call before allowing
+  // it). When present and the outcome is allow, the scheduler
+  // overrides the tool's args with this object before scheduling.
+  // Cross-process callers (teammates) rely on this because they
+  // can't reach into the leader's local WaitingToolCall to mutate
+  // args directly the way the leader's same-process path does.
+  updatedInput?: Record<string, unknown>;
 }
 
 export interface ToolExecuteConfirmationDetails {

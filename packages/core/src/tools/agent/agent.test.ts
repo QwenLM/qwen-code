@@ -296,6 +296,24 @@ describe('AgentTool', () => {
     });
   });
 
+  describe('team routing', () => {
+    it('rejects `name` when no team is active', async () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn helper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeDefined();
+      expect(result.llmContent).toContain('no active team');
+      expect(result.llmContent).toContain('"helper"');
+      // Subagent must NOT have been spawned as a one-shot fallback.
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+    });
+  });
+
   describe('refreshSubagents', () => {
     it('should refresh when change listener fires', async () => {
       const newSubagents: SubagentConfig[] = [

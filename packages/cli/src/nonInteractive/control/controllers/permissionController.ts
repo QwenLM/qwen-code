@@ -431,7 +431,26 @@ export class PermissionController extends BaseController {
       const behavior = String(payload['behavior'] || '').toLowerCase();
 
       if (behavior === 'allow') {
-        await event.respond(ToolConfirmationOutcome.ProceedOnce);
+        // Forward `updatedInput` (the SDK's sanitised tool args)
+        // to the teammate's scheduler so a host that approves a
+        // command-with-stripped-flag, or a write-with-rewritten-
+        // path, actually runs the sanitised version. Without
+        // this, the teammate runs the original (un-sanitised)
+        // args and the host's policy is silently bypassed. The
+        // leader's same-process path mutates `request.args`
+        // directly; teammates can't reach across process so the
+        // payload carries the override instead.
+        const updatedInput = payload['updatedInput'];
+        const respondPayload: ToolConfirmationPayload | undefined =
+          updatedInput &&
+          typeof updatedInput === 'object' &&
+          !Array.isArray(updatedInput)
+            ? { updatedInput: updatedInput as Record<string, unknown> }
+            : undefined;
+        await event.respond(
+          ToolConfirmationOutcome.ProceedOnce,
+          respondPayload,
+        );
       } else {
         const cancelMessage =
           typeof payload['message'] === 'string'

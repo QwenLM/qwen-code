@@ -1570,6 +1570,21 @@ export class CoreToolScheduler {
         } as ToolCallConfirmationDetails);
       }
     } else {
+      // If the host's permission policy returned sanitized tool
+      // args (`updatedInput` from the can_use_tool response),
+      // apply them before scheduling. This is how cross-process
+      // callers (teammate tool calls routed through the leader's
+      // SDK) propagate sanitization — the leader's same-process
+      // path mutates `toolCall.request.args` directly, but the
+      // teammate's scheduler is in a different process and only
+      // sees the `payload`.
+      if (
+        payload?.updatedInput &&
+        typeof payload.updatedInput === 'object' &&
+        toolCall
+      ) {
+        this.setArgsInternal(callId, payload.updatedInput);
+      }
       // If the client provided new content, apply it before scheduling.
       if (payload?.newContent && toolCall) {
         await this._applyInlineModify(

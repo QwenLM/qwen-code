@@ -145,6 +145,45 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       return { llmContent: msg, returnDisplay: msg };
     }
 
+    // Reject dependency edges that point at tasks which don't
+    // exist yet. Without this the primary `updateTask` happily
+    // persists the bad id into `blocks` / `blockedBy`, while the
+    // reciprocal `updateTask` returns undefined silently — so
+    // the tool reports success but the task is now permanently
+    // blocked by a phantom id and auto-claim will never unblock
+    // it.
+    const referencedIds = new Set<string>();
+    for (const id of this.params.addBlocks ?? []) {
+      if (id !== taskId) referencedIds.add(id);
+    }
+    for (const id of this.params.addBlockedBy ?? []) {
+      if (id !== taskId) referencedIds.add(id);
+    }
+    if (referencedIds.size > 0) {
+      const missing: string[] = [];
+      await Promise.all(
+        Array.from(referencedIds).map(async (id) => {
+          const t = await getTask(teamName, id);
+          if (!t) missing.push(id);
+        }),
+      );
+      if (missing.length > 0) {
+        const ids = missing
+          .sort()
+          .map((id) => `#${id}`)
+          .join(', ');
+        const msg =
+          `Cannot update task #${taskId}: ` +
+          `referenced task${missing.length === 1 ? '' : 's'} ` +
+          `${ids} not found.`;
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
     // Auto-assign owner on in_progress if caller doesn't
     // specify one. In the leader context getAgentName() is
     // undefined, so require an explicit owner to avoid

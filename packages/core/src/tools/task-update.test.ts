@@ -96,4 +96,56 @@ describe('TaskUpdateTool', () => {
   it('validates required taskId', () => {
     expect(() => tool.build({} as never)).toThrow();
   });
+
+  it('rejects addBlockedBy that references a missing task', async () => {
+    const task = await createTask(TEAM, {
+      subject: 'Test',
+      description: 'desc',
+    });
+    const invocation = tool.build({
+      taskId: task.id,
+      addBlockedBy: ['999'],
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('not found');
+    expect(result.llmContent).toContain('#999');
+
+    // Primary task must remain unchanged when validation fails so
+    // the model can retry with a real id.
+    const { getTask } = await import('../agents/team/tasks.js');
+    const reloaded = await getTask(TEAM, task.id);
+    expect(reloaded?.blockedBy ?? []).toEqual([]);
+  });
+
+  it('rejects addBlocks that references a missing task', async () => {
+    const task = await createTask(TEAM, {
+      subject: 'Test',
+      description: 'desc',
+    });
+    const invocation = tool.build({
+      taskId: task.id,
+      addBlocks: ['999'],
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('#999');
+  });
+
+  it('mirrors dependency edges when both ids exist', async () => {
+    const a = await createTask(TEAM, { subject: 'A', description: 'a' });
+    const b = await createTask(TEAM, { subject: 'B', description: 'b' });
+    const invocation = tool.build({
+      taskId: a.id,
+      addBlockedBy: [b.id],
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+
+    const { getTask } = await import('../agents/team/tasks.js');
+    const aReloaded = await getTask(TEAM, a.id);
+    const bReloaded = await getTask(TEAM, b.id);
+    expect(aReloaded?.blockedBy).toContain(b.id);
+    expect(bReloaded?.blocks).toContain(a.id);
+  });
 });

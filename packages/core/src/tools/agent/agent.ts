@@ -949,7 +949,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // name from the description here also caused collisions
     // (description.slice(0, 30) is not unique) and silently
     // hijacked every Agent call regardless of intent.
-    if (this.params.name && this.config.getTeamManager() && !isTeammate()) {
+    if (this.params.name && !isTeammate()) {
+      // The schema for `name` says it requires an active team,
+      // so reject the call up front instead of silently launching
+      // a different kind of agent (one-shot subagent) that
+      // ignores the supplied name.
+      if (!this.config.getTeamManager()) {
+        const msg =
+          `Cannot spawn teammate "${this.params.name}": no active team. ` +
+          `Use team_create to start a team first, or omit "name" to ` +
+          `launch a one-shot subagent.`;
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
       return this.executeTeammate(this.params.name, signal, updateOutput);
     }
 

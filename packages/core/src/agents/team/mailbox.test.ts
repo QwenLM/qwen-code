@@ -252,4 +252,51 @@ describe('mailbox', () => {
     const expected = Array.from({ length: count }, (_, i) => `msg-${i}`).sort();
     expect(texts).toEqual(expected);
   });
+
+  // ─── Lockless reads during concurrent writes ──────────────
+  //
+  // Regression: `writeMessage` previously did `fs.writeFile`
+  // (open with O_TRUNC) under a `proper-lockfile` write lock,
+  // but `readInbox` does not take that lock — the leader's
+  // 500ms inbox poll therefore could observe a 0-byte or
+  // partially-written file during the brief truncate→write
+  // window. `JSON.parse` would throw and
+  // `readLeaderInboxOrQuarantine` would rename the inbox to
+  // `.corrupt-{ts}`, dropping unread teammate messages.
+  //
+  // The fix replaces O_TRUNC writes with tmp-file + rename;
+  // POSIX rename is atomic so a lockless reader either sees
+  // the pre-write or post-write file, never a partial one.
+  // This test stresses the race: many writers + many readers
+  // running concurrently, none of the reads should throw.
+  it('lockless readInbox never sees a partial file mid-write', async () => {
+    const writeCount = 10;
+    const readCount = 200;
+
+    // Seed the inbox so the first reads have something to parse.
+    await writeMessage('team', 'worker', makeMessage({ text: 'seed' }));
+
+    const writes = Array.from({ length: writeCount }, (_, i) =>
+      writeMessage('team', 'worker', makeMessage({ text: `w-${i}` })),
+    );
+    const reads = Array.from({ length: readCount }, () =>
+      readInbox('team', 'worker'),
+    );
+
+    // Promise.all rejects on the first failure, which is exactly
+    // what we want: any parse or I/O error should fail this test.
+    const [, readResults] = await Promise.all([
+      Promise.all(writes),
+      Promise.all(reads),
+    ]);
+
+    // Every read returned a parseable array — no quarantine, no
+    // dropped messages.
+    for (const result of readResults) {
+      expect(Array.isArray(result)).toBe(true);
+    }
+
+    const finalMessages = await readInbox('team', 'worker');
+    expect(finalMessages).toHaveLength(writeCount + 1);
+  });
 });
