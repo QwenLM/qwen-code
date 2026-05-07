@@ -100,15 +100,22 @@ export class DaemonClient {
     res: Response,
     label: string,
   ): Promise<DaemonHttpError> {
+    // Read the body exactly once. `res.json()` consumes the stream even on
+    // parse-failure, leaving a subsequent `res.text()` empty — so go via
+    // text() and attempt JSON parsing ourselves; raw text is a useful
+    // fallback (the daemon may surface text/plain on upstream errors).
     let body: unknown = undefined;
     try {
-      body = await res.json();
-    } catch {
-      try {
-        body = await res.text();
-      } catch {
-        /* drop */
+      const text = await res.text();
+      if (text.length > 0) {
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = text;
+        }
       }
+    } catch {
+      /* body unreadable */
     }
     const detail =
       body && typeof body === 'object' && 'error' in body

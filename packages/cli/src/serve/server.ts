@@ -284,9 +284,11 @@ function isValidOutcome(
 }
 
 function parseLastEventId(raw: unknown): number | undefined {
-  if (typeof raw !== 'string' || !raw) return undefined;
+  // Stricter than Number.parseInt: only accept pure decimal digits to avoid
+  // values like "1abc" or "1.5e10z" silently parsing to 1.
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
   const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 0) return undefined;
+  if (!Number.isFinite(n)) return undefined;
   return n;
 }
 

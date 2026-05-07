@@ -768,6 +768,76 @@ describe('GET /session/:id/events (SSE)', () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(aborted.value).toBe(true);
   });
+
+  it('emits a stream_error frame when the bridge iterator throws mid-stream', async () => {
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+        throw new Error('agent died');
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    const frames = await readSseFrames(res.body!, 2);
+    expect(frames).toHaveLength(2);
+    expect(frames[0]?.event).toBe('session_update');
+    expect(frames[1]?.event).toBe('stream_error');
+    expect(JSON.parse(frames[1]!.data!).data).toEqual({ error: 'agent died' });
+  });
+
+  it('forwards numeric Last-Event-ID even when supplied as a string', async () => {
+    let seen: number | undefined;
+    const bridge = fakeBridge({
+      subscribeImpl: (_sessionId, opts) => {
+        seen = opts?.lastEventId;
+        // Empty stream — close immediately so the test doesn't hang.
+        return (async function* () {
+          /* no events */
+        })();
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`, {
+      headers: { 'Last-Event-ID': '17' },
+    });
+    // Drain the empty response so the connection closes.
+    await res.body?.cancel();
+    expect(seen).toBe(17);
+  });
+
+  it('drops malformed Last-Event-ID values (non-numeric, negative)', async () => {
+    const seen: Array<number | undefined> = [];
+    const bridge = fakeBridge({
+      subscribeImpl: (_sessionId, opts) => {
+        seen.push(opts?.lastEventId);
+        return (async function* () {
+          /* no events */
+        })();
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    for (const value of ['abc', '-1', '1.5e10z']) {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/session/sess-A/events`,
+        { headers: { 'Last-Event-ID': value } },
+      );
+      await res.body?.cancel();
+    }
+    // None of these should pass through as a parsed lastEventId.
+    expect(seen).toEqual([undefined, undefined, undefined]);
+  });
 });
 
 describe('runQwenServe SIGINT handler', () => {

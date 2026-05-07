@@ -351,6 +351,75 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('error coercion', () => {
+    it('falls back to text body when the response is not JSON', async () => {
+      const { fetch } = recordingFetch(
+        () =>
+          new Response('plaintext error from upstream', {
+            status: 502,
+            headers: { 'content-type': 'text/plain' },
+          }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const err = await client.health().then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(DaemonHttpError);
+      expect((err as DaemonHttpError).status).toBe(502);
+      expect((err as DaemonHttpError).body).toBe(
+        'plaintext error from upstream',
+      );
+    });
+
+    it('respondToPermission throws on 5xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(503, { error: 'agent crashed' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.respondToPermission('req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      ).rejects.toMatchObject({ status: 503 });
+    });
+  });
+
+  describe('subscribeEvents edge cases', () => {
+    it('throws when the response body is null', async () => {
+      const { fetch } = recordingFetch(
+        () =>
+          new Response(null, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const iter = client.subscribeEvents('s-1');
+      await expect(iter.next()).rejects.toThrow(/SSE response has no body/);
+    });
+  });
+
+  describe('URL encoding of session-scoped endpoints', () => {
+    it('cancel encodes a slash-bearing sessionId', async () => {
+      const { fetch, calls } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.cancel('weird/id');
+      expect(calls[0]?.url).toBe('http://daemon/session/weird%2Fid/cancel');
+    });
+
+    it('respondToPermission encodes a slash-bearing requestId', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.respondToPermission('weird/req', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(calls[0]?.url).toBe('http://daemon/permission/weird%2Freq');
+    });
+  });
+
   describe('baseUrl normalization', () => {
     it('strips trailing slashes', async () => {
       const { fetch, calls } = recordingFetch(() =>

@@ -5,6 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { randomBytes } from 'node:crypto';
+import { promises as fsp } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   AgentSideConnection,
   PROTOCOL_VERSION,
@@ -752,6 +756,173 @@ describe('createHttpAcpBridge', () => {
       expect(bridge.pendingPermissionCount).toBe(0);
 
       subAbort.abort();
+    });
+  });
+
+  describe('concurrent spawn coalescing (single scope)', () => {
+    it('two parallel calls for the same workspace spawn ONE channel', async () => {
+      let spawnCount = 0;
+      const factory: ChannelFactory = async () => {
+        spawnCount += 1;
+        // Tiny delay so the second call's check arrives before the first
+        // resolves — this is the race window without coalescing.
+        await new Promise((r) => setTimeout(r, 10));
+        return makeChannel().channel;
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+
+      const [a, b] = await Promise.all([
+        bridge.spawnOrAttach({ workspaceCwd: '/work/a' }),
+        bridge.spawnOrAttach({ workspaceCwd: '/work/a' }),
+      ]);
+
+      expect(spawnCount).toBe(1);
+      expect(a.sessionId).toBe(b.sessionId);
+      // Exactly one of the two callers reports `attached: false` (the spawn
+      // owner); the other reports `attached: true`.
+      expect([a.attached, b.attached].sort()).toEqual([false, true]);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.shutdown();
+    });
+
+    it('clears the in-flight slot on rejection so the next call can retry', async () => {
+      let attempt = 0;
+      const factory: ChannelFactory = async () => {
+        attempt += 1;
+        if (attempt === 1) {
+          // First spawn fails the initialize handshake.
+          const h = makeChannel({
+            initializeThrows: new Error('boom'),
+          });
+          return h.channel;
+        }
+        return makeChannel().channel;
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: '/work/a' }),
+      ).rejects.toBeTruthy();
+
+      // The retry must NOT see the rejected promise still parked in
+      // inFlightSpawns — that would poison every future call.
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      expect(session.sessionId).toBe('sess:/work/a');
+      expect(session.attached).toBe(false);
+      expect(attempt).toBe(2);
+
+      await bridge.shutdown();
+    });
+  });
+
+  describe('BridgeClient file proxy (Stage 1: same-host trust)', () => {
+    /** Spawn an agent that drives readTextFile/writeTextFile from the agent
+     *  side, exercising the BridgeClient proxy. */
+    async function setupForFs() {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent(),
+          agentStream,
+        );
+        return { stream: clientStream, kill: async () => {} };
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      return { bridge, session, conn: capturedConn! };
+    }
+
+    it('writeTextFile writes to local fs', async () => {
+      const { bridge, conn } = await setupForFs();
+      const tmp = path.join(
+        os.tmpdir(),
+        `qwen-bridge-write-${randomBytes(8).toString('hex')}.txt`,
+      );
+      try {
+        await (
+          conn as unknown as {
+            writeTextFile(p: {
+              path: string;
+              content: string;
+              sessionId: string;
+            }): Promise<unknown>;
+          }
+        ).writeTextFile({
+          sessionId: 'unused',
+          path: tmp,
+          content: 'hello bridge',
+        });
+        const content = await fsp.readFile(tmp, 'utf8');
+        expect(content).toBe('hello bridge');
+      } finally {
+        await fsp.rm(tmp, { force: true });
+        await bridge.shutdown();
+      }
+    });
+
+    it('readTextFile returns full content by default', async () => {
+      const { bridge, conn } = await setupForFs();
+      const tmp = path.join(
+        os.tmpdir(),
+        `qwen-bridge-read-${randomBytes(8).toString('hex')}.txt`,
+      );
+      await fsp.writeFile(
+        tmp,
+        'line one\nline two\nline three\nline four',
+        'utf8',
+      );
+      try {
+        const result = (await (
+          conn as unknown as {
+            readTextFile(p: {
+              path: string;
+              sessionId: string;
+            }): Promise<{ content: string }>;
+          }
+        ).readTextFile({ sessionId: 'unused', path: tmp })) as {
+          content: string;
+        };
+        expect(result.content).toContain('line one');
+        expect(result.content).toContain('line four');
+      } finally {
+        await fsp.rm(tmp, { force: true });
+        await bridge.shutdown();
+      }
+    });
+
+    it('readTextFile slices via line/limit', async () => {
+      const { bridge, conn } = await setupForFs();
+      const tmp = path.join(
+        os.tmpdir(),
+        `qwen-bridge-slice-${randomBytes(8).toString('hex')}.txt`,
+      );
+      await fsp.writeFile(tmp, 'a\nb\nc\nd\ne', 'utf8');
+      try {
+        const result = (await (
+          conn as unknown as {
+            readTextFile(p: {
+              path: string;
+              sessionId: string;
+              line?: number;
+              limit?: number;
+            }): Promise<{ content: string }>;
+          }
+        ).readTextFile({
+          sessionId: 'unused',
+          path: tmp,
+          line: 1,
+          limit: 2,
+        })) as { content: string };
+        expect(result.content).toBe('b\nc');
+      } finally {
+        await fsp.rm(tmp, { force: true });
+        await bridge.shutdown();
+      }
     });
   });
 

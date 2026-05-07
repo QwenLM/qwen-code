@@ -11,7 +11,12 @@ import { createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
-const LOOPBACK_BINDS = new Set(['127.0.0.1', 'localhost']);
+// Hostnames that don't require a token (developer convenience). Includes the
+// IPv6 loopback variants because Node may bind to `::1` when the OS prefers
+// IPv6 even for the literal string `localhost`. We compare against the raw
+// hostname string the operator typed, not the resolved interface — both
+// must be loopback for the bind to be auth-free.
+const LOOPBACK_BINDS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 export interface RunHandle {
   server: Server;

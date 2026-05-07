@@ -226,6 +226,13 @@ interface PendingPermission {
  *   - `sessionUpdate` notifications publish onto the session's EventBus; SSE
  *     subscribers (`GET /session/:id/events`) drain it.
  *   - File reads/writes proxy to local fs (daemon and agent share the host).
+ *
+ * Stage 1 trust model: the spawned `qwen --acp` child runs as the same user
+ * as the daemon, so the file-proxy methods do NOT enforce a workspace-cwd
+ * sandbox. The agent could already read or write the same files via its
+ * built-in tools (e.g. shell). Restricting the bridge here would be
+ * theatre. Stage 4+ remote-sandbox deployments swap this `Client` for a
+ * sandbox-aware variant — see issue #3803 §11.
  */
 class BridgeClient implements Client {
   constructor(
@@ -298,6 +305,12 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   // Daemon-wide pending permission table; requestIds are UUIDs so collisions
   // across sessions are infeasible in practice.
   const pendingPermissions = new Map<string, PendingPermission>();
+  // Coalesces concurrent `spawnOrAttach` calls for the same workspace under
+  // single-scope. Without this, two parallel callers would both pass the
+  // `byWorkspace.get` check, both spawn, and one entry would be orphaned
+  // (in `byId` but not in `byWorkspace`) — violating the
+  // "at most one session per workspace" invariant.
+  const inFlightSpawns = new Map<string, Promise<BridgeSession>>();
 
   const registerPending = (p: PendingPermission) => {
     pendingPermissions.set(p.requestId, p);
@@ -331,6 +344,56 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     pending.resolve(response);
     return true;
   };
+
+  async function doSpawn(workspaceKey: string): Promise<BridgeSession> {
+    const channel = await channelFactory(workspaceKey);
+    let entry: SessionEntry | undefined;
+    const client = new BridgeClient(() => entry, registerPending);
+    const connection = new ClientSideConnection(() => client, channel.stream);
+
+    try {
+      await withTimeout(
+        connection.initialize({
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+          },
+          clientInfo: { name: 'qwen-serve-bridge', version: '0' },
+        }),
+        initTimeoutMs,
+        'initialize',
+      );
+      const newSessionResp = await withTimeout(
+        connection.newSession({
+          cwd: workspaceKey,
+          mcpServers: [],
+        }),
+        initTimeoutMs,
+        'newSession',
+      );
+
+      entry = {
+        sessionId: newSessionResp.sessionId,
+        workspaceCwd: workspaceKey,
+        channel,
+        connection,
+        events: new EventBus(),
+        promptQueue: Promise.resolve(),
+        pendingPermissionIds: new Set(),
+      };
+      byWorkspace.set(workspaceKey, entry);
+      byId.set(entry.sessionId, entry);
+
+      return {
+        sessionId: entry.sessionId,
+        workspaceCwd: entry.workspaceCwd,
+        attached: false,
+      };
+    } catch (err) {
+      await channel.kill().catch(() => {});
+      throw err;
+    }
+  }
 
   /** Resolve every pending request belonging to one session as cancelled. */
   const cancelPendingForSession = (sessionId: string) => {
@@ -369,54 +432,29 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
             attached: true,
           };
         }
+        // Coalesce: if another caller is already mid-spawn for this same
+        // workspace, await their result. The reporter's call appears as an
+        // attach (the spawn was someone else's, not theirs).
+        const inFlight = inFlightSpawns.get(workspaceKey);
+        if (inFlight) {
+          const session = await inFlight;
+          return { ...session, attached: true };
+        }
       }
 
-      const channel = await channelFactory(workspaceKey);
-      let entry: SessionEntry | undefined;
-      const client = new BridgeClient(() => entry, registerPending);
-      const connection = new ClientSideConnection(() => client, channel.stream);
-
+      const promise = doSpawn(workspaceKey);
+      if (sessionScope === 'single') {
+        inFlightSpawns.set(workspaceKey, promise);
+      }
       try {
-        await withTimeout(
-          connection.initialize({
-            protocolVersion: PROTOCOL_VERSION,
-            clientCapabilities: {
-              fs: { readTextFile: true, writeTextFile: true },
-            },
-            clientInfo: { name: 'qwen-serve-bridge', version: '0' },
-          }),
-          initTimeoutMs,
-          'initialize',
-        );
-        const newSessionResp = await withTimeout(
-          connection.newSession({
-            cwd: workspaceKey,
-            mcpServers: [],
-          }),
-          initTimeoutMs,
-          'newSession',
-        );
-
-        entry = {
-          sessionId: newSessionResp.sessionId,
-          workspaceCwd: workspaceKey,
-          channel,
-          connection,
-          events: new EventBus(),
-          promptQueue: Promise.resolve(),
-          pendingPermissionIds: new Set(),
-        };
-        byWorkspace.set(workspaceKey, entry);
-        byId.set(entry.sessionId, entry);
-
-        return {
-          sessionId: entry.sessionId,
-          workspaceCwd: entry.workspaceCwd,
-          attached: false,
-        };
-      } catch (err) {
-        await channel.kill().catch(() => {});
-        throw err;
+        return await promise;
+      } finally {
+        // Always clear the in-flight slot whether the spawn resolved or
+        // rejected — leaving a rejected promise behind would poison every
+        // future call for this workspace.
+        if (sessionScope === 'single') {
+          inFlightSpawns.delete(workspaceKey);
+        }
       }
     },
 
