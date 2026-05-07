@@ -271,6 +271,34 @@ describe('LogToSpanProcessor', () => {
     expect(ctx1.traceId).not.toBe(ctx2.traceId);
   });
 
+  it('drops the oldest spans when the buffer exceeds the configured limit', async () => {
+    await processor.shutdown();
+    processor = new LogToSpanProcessor(mockExporter, 60000, 2);
+
+    processor.onEmit({
+      body: 'event1',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord);
+    processor.onEmit({
+      body: 'event2',
+      hrTime: [1001, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord);
+    processor.onEmit({
+      body: 'event3',
+      hrTime: [1002, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord);
+
+    await processor.forceFlush();
+
+    expect(exportedSpans.map((span) => span.name)).toEqual([
+      'event2',
+      'event3',
+    ]);
+  });
+
   it('sets ERROR status for truthy error attributes', async () => {
     const logRecord = {
       body: 'api error',

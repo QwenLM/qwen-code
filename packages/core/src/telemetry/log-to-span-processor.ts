@@ -28,6 +28,7 @@ import {
 } from './trace-id-utils.js';
 
 const EXPORT_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_BUFFER_SIZE = 10_000;
 const MAX_SPAN_NAME_LENGTH = 128;
 const SENSITIVE_ATTRIBUTE_KEYS = new Set([
   'prompt',
@@ -59,6 +60,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   constructor(
     private readonly spanExporter: SpanExporter,
     flushIntervalMs = 5000,
+    private readonly maxBufferSize = DEFAULT_MAX_BUFFER_SIZE,
   ) {
     this.flushIntervalMs = flushIntervalMs;
     this.flushTimer = setInterval(() => {
@@ -152,6 +154,9 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       droppedLinksCount: 0,
       recordException: () => {},
     });
+    if (this.buffer.length > this.maxBufferSize) {
+      this.buffer.splice(0, this.buffer.length - this.maxBufferSize);
+    }
   }
 
   private flush(): Promise<void> {
