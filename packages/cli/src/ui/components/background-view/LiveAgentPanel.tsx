@@ -279,6 +279,21 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
             endTime: snap.endTime ?? missingSince,
           };
         }
+        // Snap is already terminal but the registry forgot. Canonical
+        // case: a foreground subagent that was cancelled / failed
+        // (`cancel` / `fail` set `endTime` and emit statusChange) and
+        // then `unregisterForeground`'d. The snap carries the real
+        // `endTime`, so keep showing it — the visibleAgents filter
+        // below evicts it once `now - endTime > TERMINAL_VISIBLE_MS`.
+        // Without this branch cancelled / failed foreground tasks
+        // would disappear instantly, contradicting the panel's "brief
+        // terminal visibility" contract the synthesized-completion
+        // path relies on.
+        if (snap.endTime !== undefined) return snap;
+        // Defensive fallback: terminal snap with no endTime is an
+        // invariant violation upstream (complete / fail / cancel
+        // always stamp endTime). Drop rather than render an entry
+        // the visibility window has no way to evict.
         return null;
       })
       .filter((e): e is AgentDialogEntry => e !== null);

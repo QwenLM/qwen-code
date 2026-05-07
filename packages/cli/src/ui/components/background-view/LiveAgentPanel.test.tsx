@@ -156,6 +156,81 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('5s');
   });
 
+  it('elides the default `general-purpose` subagent type from the row', () => {
+    // The DEFAULT_BUILTIN_SUBAGENT_TYPE elision suppresses the
+    // redundant `general-purpose: ` prefix on rows where the type
+    // adds no identity beyond the description. A future regression
+    // that flipped the comparison (or hard-coded the wrong literal)
+    // would silently re-introduce the prefix without failing
+    // existing cases.
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'gp-1',
+          subagentType: 'general-purpose',
+          description: 'investigate the change in component layer',
+        }),
+      ],
+    });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('investigate the change');
+    expect(frame).not.toContain('general-purpose:');
+  });
+
+  it('truncates the description tail when the panel width is too narrow', () => {
+    // The width prop is plumbed all the way down to the row's outer
+    // Box; without exercising a narrow case the truncation behavior
+    // (left flex-shrink + truncate-end) is uncovered. Anchor the
+    // test on the right-pinned tail (` · Ns`) which must remain
+    // visible regardless of how aggressive the truncation gets.
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'narrow-1',
+          subagentType: 'researcher',
+          description:
+            'researcher: scan the entire repository for occurrences of TODO and FIXME markers and triage them by area',
+          startTime: -3_000,
+        }),
+      ],
+      width: 50,
+    });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('…');
+    // Right column still intact at the tail.
+    expect(frame).toContain('▶ 3s');
+  });
+
+  it('clears the 1s tick interval when unmounted with live work in flight', () => {
+    // The closest existing case (`tears the 1s tick down when the
+    // bg-tasks dialog opens`) short-circuits BEFORE the interval is
+    // ever scheduled. This case mounts with a running agent — the
+    // interval IS scheduled — and asserts unmount tears it down so
+    // setNow can't fire on a discarded fiber.
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    const running = agentEntry({
+      agentId: 'unmount-1',
+      subagentType: 'researcher',
+      description: 'researcher: investigate',
+      startTime: -1_000,
+    });
+    const { config } = makeRegistryConfig([running]);
+    const { unmount } = renderPanel({ entries: [running], config });
+    // Interval scheduled because there's running work.
+    expect(setIntervalSpy).toHaveBeenCalled();
+    const intervalIdsBefore = setIntervalSpy.mock.results
+      .map((r) => r.value)
+      .filter(Boolean);
+    act(() => unmount());
+    // Each interval the panel scheduled should be cleared on unmount.
+    for (const id of intervalIdsBefore) {
+      expect(clearIntervalSpy).toHaveBeenCalledWith(id);
+    }
+    setIntervalSpy.mockRestore();
+    clearIntervalSpy.mockRestore();
+  });
+
   it('maps internal tool names to user-facing display names in the activity field', () => {
     // `recentActivities[].name` carries the internal tool name from
     // AgentToolCallEvent (e.g. `run_shell_command`, `glob`). Without
@@ -399,19 +474,51 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toBe('');
   });
 
-  it('still drops rows where snapshot is already terminal AND registry is empty', () => {
-    // No useful state to keep showing — the snap is already terminal
-    // (so the user already saw the result) and the registry forgot
-    // about it (so we can't update activity / stats). Drop.
-    const stale = agentEntry({
-      agentId: 'stale-1',
+  it('keeps terminal snapshots visible until the TTL even when the registry forgot them', () => {
+    // Cancelled / failed foreground subagents go through
+    // `cancel`/`fail` (which stamp `endTime` and emit statusChange)
+    // followed by `unregisterForeground` (which deletes silently).
+    // The snap captures the real `endTime`, so the panel must keep
+    // it on screen until the visibility window expires — dropping
+    // immediately would contradict the "brief terminal visibility"
+    // contract the synthesized-completion path also relies on.
+    const cancelled = agentEntry({
+      agentId: 'cancelled-1',
       subagentType: 'researcher',
-      description: 'researcher: stale terminal entry',
-      status: 'completed',
-      endTime: 0,
+      description: 'researcher: was cancelled then unregistered',
+      status: 'cancelled',
+      startTime: -2_000,
+      endTime: 0, // fresh terminal at fake-time 0
     });
     const { config } = makeRegistryConfig([]);
-    const { lastFrame } = renderPanel({ entries: [stale], config });
+    const { lastFrame } = renderPanel({ entries: [cancelled], config });
+    let frame = lastFrame() ?? '';
+    // Within the window the row stays on screen with the cancelled
+    // glyph (✖, warning color routing — see status-icon test).
+    expect(frame).toContain('was cancelled');
+    expect(frame).toContain('✖');
+    // After TERMINAL_VISIBLE_MS the row evicts and the panel hides.
+    act(() => {
+      vi.advanceTimersByTime(9000);
+    });
+    frame = lastFrame() ?? '';
+    expect(frame).toBe('');
+  });
+
+  it('drops rows where the snapshot is terminal AND has no endTime', () => {
+    // Defensive: terminal status without endTime is an upstream
+    // invariant violation (`complete`/`fail`/`cancel` always stamp
+    // endTime). Drop rather than render an entry the visibility
+    // window has no way to evict.
+    const broken = agentEntry({
+      agentId: 'broken-1',
+      subagentType: 'researcher',
+      description: 'researcher: malformed snapshot',
+      status: 'failed',
+      endTime: undefined,
+    });
+    const { config } = makeRegistryConfig([]);
+    const { lastFrame } = renderPanel({ entries: [broken], config });
     expect(lastFrame() ?? '').toBe('');
   });
 
