@@ -48,8 +48,15 @@ export interface SetModelResult {
 
 /** A frame in the SSE event stream. */
 export interface DaemonEvent {
-  /** Monotonic per-session id; pass back as `Last-Event-ID` to resume. */
-  id: number;
+  /**
+   * Monotonic per-session id; pass back as `Last-Event-ID` to resume.
+   *
+   * Optional because terminal/synthetic frames (notably `stream_error`)
+   * are emitted without an `id` line so they don't pollute the
+   * Last-Event-ID sequence the client uses for resume tracking. Consumers
+   * persisting the last-seen id should ignore frames where `id === undefined`.
+   */
+  id?: number;
   /** Schema version; clients should ignore frames whose `v` they don't understand. */
   v: 1;
   /** Frame discriminator: `session_update`, `permission_request`, etc. */

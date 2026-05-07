@@ -825,7 +825,54 @@ describe('createHttpAcpBridge', () => {
         }),
       ).rejects.toBeTruthy();
       // Failed spawn must NOT leave the half-initialized session in the maps.
+      // (The entry's EventBus is also closed in the same teardown — it has
+      // no externally-reachable subscriber and the bus's internal `closed`
+      // flag prevents future GC-blocking publishes from the in-flight
+      // ClientSideConnection observer chain.)
       expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('a retry after a model-rejection failure uses a fresh EventBus', async () => {
+      // Regression for the leak path: after a setSessionModel failure we
+      // tear down the half-initialized session. A subsequent retry must
+      // create a *new* entry (not silently reuse the old one), and old
+      // events must not bleed into the new subscriber.
+      let attempt = 0;
+      const { bridge } = setup({
+        setModelImpl: async () => {
+          attempt += 1;
+          if (attempt === 1) throw new Error('first attempt rejected');
+        },
+      });
+
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: '/work/a',
+          modelServiceId: 'try-1',
+        }),
+      ).rejects.toBeTruthy();
+      expect(bridge.sessionCount).toBe(0);
+
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: '/work/a',
+        modelServiceId: 'try-2',
+      });
+      expect(session.attached).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Subscribe to the live session — should see no events from the
+      // failed attempt.
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const it = iter[Symbol.asyncIterator]();
+      // No events have been published yet; aborting closes the queue.
+      abort.abort();
+      const next = await it.next();
+      expect(next.done).toBe(true);
+
       await bridge.shutdown();
     });
   });

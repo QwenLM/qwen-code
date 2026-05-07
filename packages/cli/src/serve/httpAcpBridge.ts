@@ -434,8 +434,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           // The session is half-initialized — a known sessionId on a real
           // child but pointing at the wrong model. Tear it down so the
           // caller can retry cleanly instead of inheriting silent drift.
+          // Close the EventBus too: the agent may have published session_
+          // update frames during init that are now orphaned (no subscriber
+          // can ever reach them — the caller never received the sessionId
+          // they would need to subscribe). Without an explicit close the
+          // bus + ring buffer linger until the next GC cycle.
           byWorkspace.delete(workspaceKey);
           byId.delete(entry.sessionId);
+          entry.events.close();
           throw err;
         }
       }
