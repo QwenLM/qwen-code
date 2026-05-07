@@ -156,6 +156,29 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('5s');
   });
 
+  it('maps internal tool names to user-facing display names in the activity field', () => {
+    // `recentActivities[].name` carries the internal tool name from
+    // AgentToolCallEvent (e.g. `run_shell_command`, `glob`). Without
+    // mapping through ToolDisplayNames the panel would surface those
+    // raw identifiers while BackgroundTasksDialog shows `Shell` /
+    // `Glob` — vocabulary drift between two views of the same data.
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'shell-1',
+          subagentType: 'researcher',
+          description: 'researcher: scan repo',
+          recentActivities: [
+            { name: 'run_shell_command', description: 'rg TODO', at: 0 },
+          ],
+        }),
+      ],
+    });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Shell');
+    expect(frame).not.toContain('run_shell_command');
+  });
+
   it('renders elapsed + token count for completed agents with stats', () => {
     // Locks in the cost-visibility win the panel is partly motivated
     // by — completed entries should surface `▶ Ns · Nk tokens`. Using

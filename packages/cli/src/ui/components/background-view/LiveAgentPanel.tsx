@@ -29,7 +29,11 @@
 import type React from 'react';
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
-import { DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
+import {
+  DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE,
+  ToolDisplayNames,
+  ToolNames,
+} from '@qwen-code/qwen-code-core';
 import { useBackgroundTaskViewState } from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
@@ -100,11 +104,25 @@ function statusIcon(entry: AgentDialogEntry): { glyph: string; color: string } {
   }
 }
 
+// Internal-tool-name → user-facing display-name lookup
+// (`run_shell_command` → `Shell`, `glob` → `Glob`, …). Mirrors the
+// same map BackgroundTasksDialog uses so the two surfaces stay
+// vocabulary-consistent — without it the panel would surface raw
+// internal identifiers like `run_shell_command` while the dialog
+// shows `Shell` for the same agent.
+const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
+  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
+    ToolNames[key],
+    ToolDisplayNames[key],
+  ]),
+);
+
 function activityLabel(entry: AgentDialogEntry): string {
   const last = entry.recentActivities?.at(-1);
   if (!last) return '';
+  const display = TOOL_DISPLAY_BY_NAME[last.name] ?? last.name;
   const desc = last.description?.replace(/\s*\n\s*/g, ' ').trim();
-  return desc ? `${last.name} ${desc}` : last.name;
+  return desc ? `${display} ${desc}` : display;
 }
 
 /**
