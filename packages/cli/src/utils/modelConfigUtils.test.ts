@@ -699,7 +699,10 @@ describe('modelConfigUtils', () => {
 
       expect(result.warnings).toHaveLength(2);
       expect(result.warnings[0]).toBe('Resolver warning');
-      expect(result.warnings[1]).toContain('model.generationConfig.modalities');
+      expect(result.warnings[1]).toContain(
+        'model.generationConfig.modalities is ignored',
+      );
+      expect(result.warnings[1]).toContain('Move this field');
     });
 
     it('should use custom env when provided', () => {

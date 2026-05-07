@@ -26,25 +26,6 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.QWEN_OAUTH]: [],
 };
 
-const GENERATION_CONFIG_WARNING_FIELDS = [
-  'samplingParams',
-  'timeout',
-  'maxRetries',
-  'retryErrorCodes',
-  'enableCacheControl',
-  'schemaCompliance',
-  'reasoning',
-  'contextWindowSize',
-  'customHeaders',
-  'extra_body',
-  'modalities',
-  'splitToolMedia',
-] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
-
-function hasOwn(object: object, key: PropertyKey): boolean {
-  return Object.prototype.hasOwnProperty.call(object, key);
-}
-
 function getIgnoredTopLevelGenerationConfigFields(
   settingsGenerationConfig: Partial<ContentGeneratorConfig> | undefined,
   modelProvider: ProviderModelConfig | undefined,
@@ -54,10 +35,8 @@ function getIgnoredTopLevelGenerationConfigFields(
   }
 
   const providerGenerationConfig = modelProvider.generationConfig ?? {};
-  return GENERATION_CONFIG_WARNING_FIELDS.filter(
-    (field) =>
-      hasOwn(settingsGenerationConfig, field) &&
-      !hasOwn(providerGenerationConfig, field),
+  return Object.keys(settingsGenerationConfig).filter(
+    (field) => !Object.hasOwn(providerGenerationConfig, field),
   );
 }
 
@@ -73,14 +52,12 @@ function buildIgnoredTopLevelGenerationConfigWarning(
   const fieldList = ignoredFields
     .map((field) => `model.generationConfig.${field}`)
     .join(', ');
+  const isSingular = ignoredFields.length === 1;
+  const verb = isSingular ? 'is' : 'are';
+  const fieldReference = isSingular ? 'this field' : 'these fields';
+  const pronoun = isSingular ? 'it' : 'them';
 
-  return `Warning: ${fieldList} ${
-    ignoredFields.length === 1 ? 'is' : 'are'
-  } ignored for provider model "${modelProvider.id}" from modelProviders.${authType}. Move ${
-    ignoredFields.length === 1 ? 'this field' : 'these fields'
-  } to modelProviders.${authType}[].generationConfig for that model if you want ${
-    ignoredFields.length === 1 ? 'it' : 'them'
-  } to apply.`;
+  return `Warning: ${fieldList} ${verb} ignored for provider model "${modelProvider.id}" from modelProviders.${authType}. Move ${fieldReference} to modelProviders.${authType}[].generationConfig for that model if you want ${pronoun} to apply.`;
 }
 
 export interface CliGenerationConfigInputs {
@@ -245,6 +222,8 @@ export function resolveCliGenerationConfig(
 
   const resolved = resolveModelConfig(configSources);
 
+  // Provider-backed models are synced again during Config.refreshAuth(), which
+  // reapplies provider defaults after the initial resolver fallback.
   const ignoredGenerationConfigWarning =
     authType && modelProvider
       ? buildIgnoredTopLevelGenerationConfigWarning(
