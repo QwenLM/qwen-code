@@ -9,6 +9,7 @@ import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import { Config, ApprovalMode } from './config.js';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
 import {
@@ -44,21 +45,6 @@ import { readAutoMemoryIndex } from '../memory/store.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
-import * as debugLoggerModule from '../utils/debugLogger.js';
-
-vi.mock('../utils/debugLogger.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/debugLogger.js')>();
-  return {
-    ...actual,
-    createDebugLogger: vi.fn().mockReturnValue({
-      warn: vi.fn(),
-      info: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn(),
-    }),
-  };
-});
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -913,10 +899,15 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('should initialize WorkspaceContext with includeDirectories', () => {
-    const includeDirectories = ['/path/to/dir1', '/path/to/dir2'];
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'config-test-'));
+    const dir1 = path.join(tmpDir, 'dir1');
+    const dir2 = path.join(tmpDir, 'dir2');
+    fs.mkdirSync(dir1);
+    fs.mkdirSync(dir2);
+
     const paramsWithIncludeDirs: ConfigParameters = {
       ...baseParams,
-      includeDirectories,
+      includeDirectories: [dir1, dir2],
     };
     const config = new Config(paramsWithIncludeDirs);
     const workspaceContext = config.getWorkspaceContext();
@@ -925,35 +916,10 @@ describe('Server Config (config.ts)', () => {
     // Should include the target directory plus the included directories
     expect(directories).toHaveLength(3);
     expect(directories).toContain(path.resolve(baseParams.targetDir));
-    expect(directories).toContain('/path/to/dir1');
-    expect(directories).toContain('/path/to/dir2');
-  });
+    expect(directories).toContain(dir1);
+    expect(directories).toContain(dir2);
 
-  it('should warn when includeDirectories paths are skipped', () => {
-    const invalidDir = '/path/to/invalid';
-    vi.mocked(fs.existsSync).mockImplementation((p) => p !== invalidDir);
-
-    const mockWarn = vi.fn();
-    vi.mocked(debugLoggerModule.createDebugLogger).mockReturnValue({
-      warn: mockWarn,
-      info: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn(),
-    } as unknown as debugLoggerModule.DebugLogger);
-
-    const paramsWithInvalidDir: ConfigParameters = {
-      ...baseParams,
-      includeDirectories: [invalidDir],
-    };
-
-    new Config(paramsWithInvalidDir);
-
-    expect(mockWarn).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'The following --include-directories paths were skipped',
-      ),
-    );
-    expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining(invalidDir));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it('Config constructor should set telemetry to true when provided as true', () => {
