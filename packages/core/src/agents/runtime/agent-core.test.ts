@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { AgentCore } from './agent-core.js';
 import {
   getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
@@ -131,5 +132,80 @@ describe('AgentCore.runInAgentFrames', () => {
 
     expect(observedView).toBeUndefined();
     expect(observedName).toBe('inherit-agent');
+  });
+
+  it('uses inheritedView for deferred-approval continuation when the agent owns no view', async () => {
+    // A nested `model: inherit` child under a runtime-view-bearing parent
+    // owns no view of its own, but its tool bodies (e.g. `read_file`
+    // checking modalities) need the parent's view. The reasoning loop
+    // sees it via ALS, but the deferred-approval `respond` callback runs
+    // from a fresh async chain where that frame is gone — so the agent
+    // must capture it at emit time and pass it back through.
+    const parentView: RuntimeContentGeneratorView = {
+      contentGenerator: {
+        generateContentStream: () => Promise.resolve(),
+      } as unknown as ContentGenerator,
+      contentGeneratorConfig: {
+        model: 'parent-model',
+        authType: 'anthropic',
+      } as ContentGeneratorConfig,
+    };
+    const inheritingCore = makeCore('inherit-agent');
+
+    let respondClosure: (() => Promise<void>) | undefined;
+    let observedView: RuntimeContentGeneratorView | undefined;
+    let observedName: string | undefined;
+    const onConfirm = async () => {
+      observedView = getRuntimeContentGenerator();
+      observedName = subagentNameContext.getStore();
+    };
+
+    // Simulate the parent's loop frame being live at emit time.
+    await runWithRuntimeContentGenerator(parentView, async () => {
+      const inheritedView = getRuntimeContentGenerator();
+      respondClosure = () =>
+        inheritingCore.runInAgentFrames(onConfirm, inheritedView);
+    });
+
+    // Parent frame is gone; jump to a fresh microtask chain to be sure.
+    expect(getRuntimeContentGenerator()).toBeUndefined();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await respondClosure!();
+
+    expect(observedView).toBe(parentView);
+    expect(observedName).toBe('inherit-agent');
+  });
+
+  it("prefers the agent's own view over inheritedView when both are present", async () => {
+    // Defensive: if a future caller wires both, the agent's explicit view
+    // wins — we never want a captured snapshot to override the agent's
+    // declared view.
+    const ownView: RuntimeContentGeneratorView = {
+      contentGenerator: {
+        generateContentStream: () => Promise.resolve(),
+      } as unknown as ContentGenerator,
+      contentGeneratorConfig: {
+        model: 'own-model',
+        authType: 'anthropic',
+      } as ContentGeneratorConfig,
+    };
+    const otherView: RuntimeContentGeneratorView = {
+      contentGenerator: {
+        generateContentStream: () => Promise.resolve(),
+      } as unknown as ContentGenerator,
+      contentGeneratorConfig: {
+        model: 'other-model',
+        authType: 'openai',
+      } as ContentGeneratorConfig,
+    };
+    const core = makeCore('own-view-agent', ownView);
+
+    let observed: RuntimeContentGeneratorView | undefined;
+    await core.runInAgentFrames(async () => {
+      observed = getRuntimeContentGenerator();
+    }, otherView);
+
+    expect(observed).toBe(ownView);
   });
 });
