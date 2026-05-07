@@ -1677,6 +1677,39 @@ describe('ShellTool', () => {
         expect(result.error).toBeUndefined();
       });
 
+      it("entry.abortController is a FRESH controller (not the already-aborted promote controller) so task_stop's abort() actually fires kill listeners", async () => {
+        // Real-bug regression: if `entry.abortController` were the
+        // same `promoteAbortController` that triggered the promote,
+        // it would already be in the `aborted: true` state by the time
+        // it landed in the registry. `task_stop bg_xxx` calls
+        // `entry.abortController.abort()` which is a no-op on an
+        // already-aborted controller, AND `ShellExecutionService` has
+        // detached its abort listener as part of the promote handoff,
+        // so the still-running child would survive task_stop forever.
+        // Pin: entry.abortController.signal.aborted === false at
+        // registration.
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockReturnValue(undefined);
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 77777,
+        });
+        await promise;
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(entry.abortController.signal.aborted).toBe(false);
+      });
+
       it('survives a snapshot write failure — registry entry still registered', async () => {
         const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
         writeFileSyncSpy.mockImplementation(() => {

@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { spawn as cpSpawn } from 'node:child_process';
 import type { Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
@@ -51,6 +52,15 @@ const debugLogger = createDebugLogger('SHELL');
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
+
+/**
+ * Time we give SIGTERM to settle a promoted-then-cancelled child
+ * before escalating to SIGKILL. Mirrors `SIGKILL_TIMEOUT_MS` inside
+ * `ShellExecutionService` (which runs the same SIGTERM-then-SIGKILL
+ * pattern on the non-promote cancel path) but kept as a separate
+ * constant here so tuning one doesn't silently change the other.
+ */
+const PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS = 200;
 
 // Long-run advisory threshold: half the EFFECTIVE foreground timeout
 // (not the default), computed per-invocation by `longRunThresholdFor`.
@@ -1025,6 +1035,63 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     const startTime = Date.now();
+    const registry = this.config.getBackgroundShellRegistry();
+    // Create a FRESH AbortController for the registry entry. Using the
+    // promote AbortController directly (which is already in the
+    // `aborted` state — that's what triggered the promote) would be
+    // a real bug: `task_stop bg_xxx` calls `entry.abortController.abort()`
+    // which is a no-op on an already-aborted controller, AND
+    // `ShellExecutionService` has detached its abort listener as part
+    // of the promote handoff (PR-1's ownership-transfer contract), so
+    // there's nobody left to translate the abort into an actual signal
+    // to the still-running child. Instead, the entry gets a new
+    // controller, and we wire the abort listener directly to send
+    // SIGTERM → SIGKILL ourselves (mirroring the kill semantics
+    // `ShellExecutionService.execute()`'s abort handler uses for the
+    // non-promote path) and to mark the registry entry `cancelled`.
+    const entryAc = new AbortController();
+    const cancelChild = async () => {
+      const pid = result.pid;
+      if (pid !== undefined) {
+        if (os.platform() === 'win32') {
+          try {
+            cpSpawn('taskkill', ['/pid', String(pid), '/f', '/t']);
+          } catch (e) {
+            debugLogger.warn(
+              `promote: taskkill on ${pid} threw: ${getErrorMessage(e)}`,
+            );
+          }
+        } else {
+          try {
+            // Negative pid → kill the whole process group; matches the
+            // `detached: !isWindows` spawn the foreground path uses.
+            process.kill(-pid, 'SIGTERM');
+            await new Promise((res) =>
+              setTimeout(res, PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS),
+            );
+            try {
+              process.kill(-pid, 'SIGKILL');
+            } catch {
+              // Already dead before SIGKILL — happy path.
+            }
+          } catch (e) {
+            debugLogger.warn(
+              `promote: process.kill on -${pid} threw: ${getErrorMessage(e)}`,
+            );
+          }
+        }
+      }
+      // Sync-mark the registry entry `cancelled` so /tasks reflects the
+      // user intent immediately. (Recursive note: `registry.cancel`
+      // calls `entry.abortController.abort()` internally, but our
+      // entryAc is already aborted by the time we got here, so that
+      // call is a no-op + our listener was `{ once: true }` and has
+      // already detached.)
+      registry.cancel(shellId, Date.now());
+    };
+    entryAc.signal.addEventListener('abort', () => void cancelChild(), {
+      once: true,
+    });
     const entry: BackgroundShellEntry = {
       shellId,
       command: this.params.command,
@@ -1033,14 +1100,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
       status: 'running',
       startTime,
       outputPath,
-      // The same AbortController we wired into the live child via
-      // combinedSignal — `task_stop bg_xxx` and the dialog's `x` key
-      // route through `entry.abortController.abort()` and will land on
-      // the still-running process, killing it as expected.
-      abortController,
+      abortController: entryAc,
     };
+    // Reference `abortController` so it's not unused — the parameter
+    // is kept on the signature so a future PR-2.5 that needs to
+    // double-link the original promote signal can read it without
+    // re-plumbing.
+    void abortController;
 
-    const registry = this.config.getBackgroundShellRegistry();
     registry.register(entry);
 
     const llmContent = [
