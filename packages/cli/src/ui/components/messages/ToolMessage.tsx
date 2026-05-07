@@ -33,7 +33,11 @@ import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { useCompactMode } from '../../contexts/CompactModeContext.js';
-import { getCachedStringWidth, toCodePoints } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  getCachedStringWidth,
+  toCodePoints,
+} from '../../utils/textUtils.js';
 
 import {
   ToolStatusIndicator,
@@ -376,18 +380,28 @@ const SubagentScrollbackSummary: React.FC<{
   if (stats?.totalTokens && stats.totalTokens > 0) {
     parts.push(`${formatTokenCount(stats.totalTokens)} tokens`);
   }
+  // Sanitize every user/LLM-controlled string before it reaches Ink.
+  // `subagentName` is subagent config (user-authored or model-chosen),
+  // `taskDescription` is LLM-generated, `terminateReason` is whatever
+  // the agent emitted on failure. All can carry terminal control
+  // sequences that would otherwise bleed through Ink's `<Text>` and
+  // corrupt scrollback chrome — same threat model as the panel rows
+  // and HistoryItemDisplay's user-facing content.
   const tail = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
-  const typePrefix = data.subagentName ? `${data.subagentName}: ` : '';
+  const typePrefix = data.subagentName
+    ? `${escapeAnsiCtrlCodes(data.subagentName)}: `
+    : '';
+  const safeDescription = escapeAnsiCtrlCodes(data.taskDescription ?? '');
   const reason =
     data.status !== 'completed' && data.terminateReason
-      ? ` · ${data.terminateReason}`
+      ? ` · ${escapeAnsiCtrlCodes(data.terminateReason)}`
       : '';
   return (
     <Box paddingLeft={1}>
       <Text wrap="truncate-end">
         <Text color={color}>{`${glyph} `}</Text>
         <Text bold>{typePrefix}</Text>
-        <Text color={theme.text.secondary}>{data.taskDescription}</Text>
+        <Text color={theme.text.secondary}>{safeDescription}</Text>
         <Text color={theme.text.secondary}>{tail}</Text>
         <Text color={theme.text.secondary}>{reason}</Text>
       </Text>

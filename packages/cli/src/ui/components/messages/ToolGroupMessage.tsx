@@ -43,13 +43,16 @@ function isRunningAgent(
 }
 
 /**
- * Tool entry whose live (`isPending=true`) display would duplicate
- * the LiveAgentPanel row. Used to hide the inline tool-group entry
- * during the live phase so the panel is the single source of truth;
- * once the parent turn commits (`isPending=false`) the entry returns,
- * carrying the SubagentScrollbackSummary as its persistent record.
+ * Predicate: tool entry whose `resultDisplay` is an `AgentResultDisplay`
+ * (i.e. a `task_execution` subagent invocation). Used by the group
+ * body to:
+ *   - hide such entries during the live phase (LiveAgentPanel owns
+ *     the row, so leaving them inline duplicates the display)
+ *   - force-expand a committed compact group containing one with a
+ *     terminal status, so SubagentScrollbackSummary lands in the
+ *     persistent record
  */
-function isLiveSubagentTool(tool: IndividualToolCallDisplay): boolean {
+function isSubagentToolEntry(tool: IndividualToolCallDisplay): boolean {
   const rd = tool.resultDisplay;
   return (
     typeof rd === 'object' &&
@@ -69,13 +72,24 @@ interface ToolGroupMessageProps {
    * True when this tool group is being rendered live (in
    * `pendingHistoryItems`). False once it commits to Ink's `<Static>`.
    *
-   * Read by the group body to (1) force-expand a compact group when
-   * it has just committed AND carries a terminal subagent, so
-   * `SubagentScrollbackSummary` lands in the persistent record, and
-   * (2) forward to `ToolMessage` so the same renderer can decide
-   * whether to emit the inline summary or stay panel-only. Live
-   * progress / drill-down for running subagents themselves still
-   * happens via `LiveAgentPanel` + `BackgroundTasksDialog`.
+   * Read by the group body to:
+   *   1. Hide the entire group when every tool entry is a panel-owned
+   *      subagent (`task_execution` without pending approval) — the
+   *      LiveAgentPanel below the composer is the single source of
+   *      truth for in-flight subagents. Group reappears once the parent
+   *      turn commits with the SubagentScrollbackSummary as the
+   *      persistent audit trail.
+   *   2. Force-expand a compact group when committed AND carrying a
+   *      terminal subagent, so `SubagentScrollbackSummary` actually
+   *      lands in the persistent record (CompactToolGroupDisplay is
+   *      otherwise unaware of `task_execution` results).
+   *   3. Filter individual subagent entries out of the inline list
+   *      during the live phase — same panel-ownership rule as #1, but
+   *      applies per-tool when the group is mixed (subagent + sibling
+   *      tools), so siblings keep rendering normally.
+   *   4. Forward to `ToolMessage` so the same renderer can decide
+   *      whether to emit the inline scrollback summary or stay
+   *      panel-only.
    */
   isPending?: boolean;
   activeShellPtyId?: number | null;
@@ -172,9 +186,17 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   const focusedSubagentCallId = focusedSubagentRef.current;
   // When no subagent has a pending confirmation, fall back to the *first*
-  // running subagent for Ctrl+E/Ctrl+F shortcut focus. "First" (array order)
-  // is the oldest — the one most likely to have accumulated tool calls and
-  // display the "+N more (ctrl+e to expand)" hint.
+  // running subagent for keyboard focus. "First" (array order) is the
+  // oldest — the one most likely to be the focal subagent. The legacy
+  // Ctrl+E / Ctrl+F display shortcuts retired with the inline frame, so
+  // the fallback is now mostly inert; it stays here so a future
+  // re-introduction of inline keyboard surfaces has a focus target.
+  // Note: during the live phase running subagent entries are filtered
+  // out of the rendered map (`isPending && isSubagentToolEntry &&
+  // !pending`), so this id can point at a hidden tool. That's harmless
+  // — `isSubagentFocused` is only read inside the map iteration which
+  // already returned `null` for the hidden entry, so no focus prop
+  // ever reaches a missing DOM node.
   const runningSubagentCallId = useMemo(
     () =>
       toolCalls.find((tc) => isRunningAgent(tc.resultDisplay))?.callId ?? null,
@@ -183,6 +205,24 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // Pending confirmation takes strict priority over running fallback.
   const keyboardFocusedSubagentCallId =
     focusedSubagentCallId ?? runningSubagentCallId;
+
+  // Decide whether the entire group is panel-owned during the live
+  // phase: a pure-task_execution batch with no pending approval has
+  // nothing inline left to render once the subagent rows themselves
+  // are filtered out (LiveAgentPanel handles them). Hide the whole
+  // group so the bordered container / compact summary line don't
+  // float above the panel as a duplicate.
+  const allEntriesPanelOwned =
+    isPending &&
+    toolCalls.length > 0 &&
+    toolCalls.every(
+      (tool) =>
+        isSubagentToolEntry(tool) &&
+        !isAgentWithPendingConfirmation(tool.resultDisplay),
+    );
+  if (allEntriesPanelOwned) {
+    return null;
+  }
 
   // Compact mode: entire group → single line summary
   // Force-expand when: user must interact (Confirming or subagent pending
@@ -197,16 +237,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
   const hasCommittedTerminalSubagent =
     !isPending &&
-    toolCalls.some((t) => {
-      const display = t.resultDisplay;
-      if (!display || typeof display !== 'object') return false;
-      if (!('type' in display) || display.type !== 'task_execution')
-        return false;
-      const status = (display as { status?: string }).status;
-      return (
-        status === 'completed' || status === 'failed' || status === 'cancelled'
-      );
-    });
+    toolCalls.some(
+      (t) =>
+        isSubagentToolEntry(t) &&
+        ((t.resultDisplay as AgentResultDisplay).status === 'completed' ||
+          (t.resultDisplay as AgentResultDisplay).status === 'failed' ||
+          (t.resultDisplay as AgentResultDisplay).status === 'cancelled'),
+    );
   const showCompact =
     compactMode &&
     !hasConfirmingTool &&
@@ -224,24 +261,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         compactLabel={compactLabel}
       />
     );
-  }
-
-  // Live phase: if every tool in the group is a panel-owned subagent
-  // call (no pending approval to gate on), skip the entire group
-  // container — otherwise the bordered Box would render empty under
-  // the panel. Once the parent turn commits the call sites stop
-  // passing `isPending=true` and the group reappears with the
-  // committed audit trail.
-  const allEntriesPanelOwned =
-    isPending &&
-    toolCalls.length > 0 &&
-    toolCalls.every(
-      (tool) =>
-        isLiveSubagentTool(tool) &&
-        !isAgentWithPendingConfirmation(tool.resultDisplay),
-    );
-  if (allEntriesPanelOwned) {
-    return null;
   }
 
   // Full expanded view
@@ -348,21 +367,16 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         })()}
       {toolCalls.map((tool) => {
         // Live phase: hide subagent (`task_execution`) tool entries
-        // entirely so LiveAgentPanel below the composer is the single
-        // source of truth for in-flight subagents. Otherwise the
-        // user sees the same agent twice — once as the parent tool
-        // group's row, once as the panel row. Once the parent turn
-        // commits (`isPending=false`) the row reappears so the
-        // SubagentScrollbackSummary lands inside the parent's tool
-        // group and the audit trail stays intact.
-        //
-        // EXCEPT when the subagent has a pending approval: the
-        // ToolMessage path renders the focus-routed banner / queued
-        // marker, which is the only way the user can answer the
-        // prompt without opening the dialog.
+        // unless the subagent is awaiting user approval. The inline
+        // banner / queued marker is the only way the user can answer
+        // the approval prompt without opening the dialog, so those
+        // entries always render. Other subagent entries are hidden
+        // because LiveAgentPanel below the composer paints them; the
+        // entry returns once the parent turn commits and carries the
+        // SubagentScrollbackSummary as the persistent audit trail.
         if (
           isPending &&
-          isLiveSubagentTool(tool) &&
+          isSubagentToolEntry(tool) &&
           !isAgentWithPendingConfirmation(tool.resultDisplay)
         ) {
           return null;
