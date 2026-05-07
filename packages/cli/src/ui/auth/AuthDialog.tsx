@@ -123,15 +123,15 @@ function providerToItem(config: ProviderConfig) {
 // ---------------------------------------------------------------------------
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
-  if (step === 'protocol') return 'Protocol';
+  if (step === 'protocol') return t('Protocol');
   if (step === 'baseUrl') {
-    if (p.uiLabels?.baseUrlStepTitle) return p.uiLabels.baseUrlStepTitle;
-    return Array.isArray(p.baseUrl) ? 'Endpoint' : 'Base URL';
+    if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
+    return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
   }
-  if (step === 'apiKey') return 'API Key';
-  if (step === 'models') return 'Model IDs';
-  if (step === 'advancedConfig') return 'Advanced Config';
-  if (step === 'review') return 'Review';
+  if (step === 'apiKey') return t('API Key');
+  if (step === 'models') return t('Model IDs');
+  if (step === 'advancedConfig') return t('Advanced Config');
+  if (step === 'review') return t('Review');
   return '';
 }
 

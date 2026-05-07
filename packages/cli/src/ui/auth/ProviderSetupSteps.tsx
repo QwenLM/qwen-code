@@ -358,23 +358,23 @@ function ReviewStep({ flow }: { flow: ProviderSetupFlow }): React.JSX.Element {
 const PROTOCOL_ITEMS = [
   {
     key: AuthType.USE_OPENAI,
-    title: 'OpenAI-compatible',
-    label: 'OpenAI-compatible',
-    description: 'Standard OpenAI API format (most common)',
+    title: t('OpenAI-compatible'),
+    label: t('OpenAI-compatible'),
+    description: t('Standard OpenAI API format (most common)'),
     value: AuthType.USE_OPENAI,
   },
   {
     key: AuthType.USE_ANTHROPIC,
-    title: 'Anthropic-compatible',
-    label: 'Anthropic-compatible',
-    description: 'Anthropic Messages API format',
+    title: t('Anthropic-compatible'),
+    label: t('Anthropic-compatible'),
+    description: t('Anthropic Messages API format'),
     value: AuthType.USE_ANTHROPIC,
   },
   {
     key: AuthType.USE_GEMINI,
-    title: 'Gemini-compatible',
-    label: 'Gemini-compatible',
-    description: 'Google Gemini API format',
+    title: t('Gemini-compatible'),
+    label: t('Gemini-compatible'),
+    description: t('Google Gemini API format'),
     value: AuthType.USE_GEMINI,
   },
 ];

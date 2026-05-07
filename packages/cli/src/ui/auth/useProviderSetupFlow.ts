@@ -471,7 +471,7 @@ export function useProviderSetupFlow(
     modalityPdf,
     contextWindowSize,
     focusedConfigIndex,
-    previewJson: getPreviewJson(),
+    previewJson: currentStep === 'review' ? getPreviewJson() : '',
   };
 
   return {

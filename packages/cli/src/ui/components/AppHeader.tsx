@@ -27,14 +27,14 @@ function getAuthDisplayType(
   authType?: AuthType,
   baseUrl?: string,
   apiKeyEnvKey?: string,
-): AuthDisplayType {
+): AuthDisplayType | string {
   if (!authType) {
     return AuthDisplayType.UNKNOWN;
   }
 
   const matched = findProviderByCredentials(baseUrl, apiKeyEnvKey);
   if (matched && resolveMetadataKey(matched)) {
-    return AuthDisplayType.CODING_PLAN;
+    return matched.label;
   }
 
   switch (authType) {
