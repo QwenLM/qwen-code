@@ -40,6 +40,17 @@ const SESSION_FILE_DIFF_AGGREGATE_CHAR_LIMIT = 100_000;
 const SESSION_FILE_DIFF_CHAR_LIMIT = 50_000;
 const SESSION_FILE_CONTENT_CHAR_LIMIT = 16_000;
 
+/**
+ * Re-append a fresh `custom_title` record to EOF once this many bytes
+ * of other JSONL content have been written since the last title
+ * anchor. Half of the picker's 64KB tail-read window so that even an
+ * oversized record landing right at the threshold keeps the title
+ * within scan range. Lifting this above 64KB would let the title
+ * fall out of the tail window between re-anchors; lowering it
+ * trades extra writes for a tighter safety margin.
+ */
+const TITLE_REANCHOR_BYTES = 32 * 1024;
+
 function isFileDiffDisplay(resultDisplay: unknown): resultDisplay is FileDiff {
   if (
     typeof resultDisplay !== 'object' ||
@@ -466,6 +477,20 @@ export class ChatRecordingService {
    */
   private autoTitleController: AbortController | undefined;
 
+  /**
+   * Approximate bytes of JSONL content appended since the last
+   * `custom_title` record landed in this file. Used by the title
+   * re-anchor invariant: once enough non-title content accumulates
+   * past the last anchor, {@link appendRecord} re-appends a fresh
+   * `custom_title` to EOF so the picker's tail-window scan
+   * ({@link readSessionTitleFromFile}) keeps finding it.
+   *
+   * Without this, a long agentic turn that streams >64KB of tool
+   * output could push the only `custom_title` record past the 64KB
+   * tail window, forcing the picker into a full-file fallback.
+   */
+  private bytesSinceTitleAnchor = 0;
+
   constructor(config: Config) {
     this.config = config;
     this.lastRecordUuid =
@@ -627,6 +652,65 @@ export class ChatRecordingService {
       .catch((err) => {
         debugLogger.error('Error appending record (async):', err);
       });
+    this.updateTitleAnchorTracking(record);
+  }
+
+  /**
+   * Maintain the "title is always in the tail window" invariant by
+   * counting bytes appended since the last `custom_title` record and
+   * re-anchoring once enough non-title content has been written.
+   *
+   * - A `custom_title` record IS the new anchor — reset the counter.
+   * - Without a current title (never set), the counter is irrelevant.
+   * - Otherwise accumulate this record's serialized size; if the
+   *   running total breaches the threshold, re-append a fresh
+   *   `custom_title` to EOF. The recursive `appendRecord` call will
+   *   land this branch's first arm (subtype === 'custom_title') and
+   *   reset the counter to 0.
+   *
+   * Size estimate uses `JSON.stringify` for parity with the actual
+   * write path (`jsonl.writeLine` serializes the same way). It's an
+   * extra serialize per record, but appendRecord is already gated by
+   * an async I/O write whose cost dominates by orders of magnitude.
+   */
+  private updateTitleAnchorTracking(record: ChatRecord): void {
+    if (record.type === 'system' && record.subtype === 'custom_title') {
+      this.bytesSinceTitleAnchor = 0;
+      return;
+    }
+    if (!this.currentCustomTitle) return;
+    // +1 for the trailing newline jsonl.writeLine appends.
+    this.bytesSinceTitleAnchor += JSON.stringify(record).length + 1;
+    if (this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES) {
+      this.reanchorTitle();
+    }
+  }
+
+  /**
+   * Append a fresh `custom_title` record to EOF using the in-memory
+   * cached title. Mirrors {@link finalize}'s record shape — invoked
+   * mid-session (every {@link TITLE_REANCHOR_BYTES} of other writes)
+   * so the picker's tail-window scan never has to fall back to
+   * scanning the middle of the file.
+   */
+  private reanchorTitle(): void {
+    if (!this.currentCustomTitle) return;
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: {
+          customTitle: this.currentCustomTitle,
+          ...(this.currentTitleSource
+            ? { titleSource: this.currentTitleSource }
+            : {}),
+        },
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error re-anchoring custom title:', error);
+    }
   }
 
   /**

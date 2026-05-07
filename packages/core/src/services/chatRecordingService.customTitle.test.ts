@@ -177,4 +177,81 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       });
     });
   });
+
+  describe('title re-anchor invariant', () => {
+    it('re-anchors the title once enough non-title bytes accumulate', async () => {
+      // Write a title, then keep appending bulky messages until the
+      // running tally crosses the 32KB threshold. The first non-title
+      // record after the threshold should provoke a fresh
+      // custom_title append at EOF — keeping the title within the
+      // 64KB tail window the picker scans even if no lifecycle event
+      // (finalize) has fired.
+      chatRecordingService.recordCustomTitle('long-running-task');
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      // Each user message carries ~2KB of text — 20 of them put well
+      // over 32KB on the wire (counting the ~200B per-record envelope).
+      const bulkText = 'x'.repeat(2000);
+      for (let i = 0; i < 20; i++) {
+        chatRecordingService.recordUserMessage([{ text: bulkText }]);
+      }
+      await chatRecordingService.flush();
+
+      const writes = vi.mocked(jsonl.writeLine).mock.calls;
+      const titleAppendsAfterClear = writes.filter(([, record]) => {
+        const r = record as ChatRecord;
+        return r.type === 'system' && r.subtype === 'custom_title';
+      });
+
+      expect(titleAppendsAfterClear.length).toBeGreaterThanOrEqual(1);
+      // The re-anchored record must carry the same title + source as
+      // the original — it's a copy, not a fresh rename.
+      const reanchored = titleAppendsAfterClear[0][1] as ChatRecord;
+      expect(reanchored.systemPayload).toEqual({
+        customTitle: 'long-running-task',
+        titleSource: 'manual',
+      });
+    });
+
+    it('does not re-anchor when no title has been set', async () => {
+      // The counter only matters when there's a title to keep alive;
+      // sessions that never set one shouldn't pay for spurious writes.
+      const bulkText = 'x'.repeat(2000);
+      for (let i = 0; i < 30; i++) {
+        chatRecordingService.recordUserMessage([{ text: bulkText }]);
+      }
+      await chatRecordingService.flush();
+
+      const titleAppends = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.filter(([, record]) => {
+          const r = record as ChatRecord;
+          return r.type === 'system' && r.subtype === 'custom_title';
+        });
+      expect(titleAppends).toHaveLength(0);
+    });
+
+    it('does not re-anchor on small write bursts under threshold', async () => {
+      // A handful of small messages must not trigger a re-anchor —
+      // the cost would defeat the whole point. Threshold is 32KB;
+      // five 200B user messages stay safely under it.
+      chatRecordingService.recordCustomTitle('quick-session');
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      for (let i = 0; i < 5; i++) {
+        chatRecordingService.recordUserMessage([{ text: 'short' }]);
+      }
+      await chatRecordingService.flush();
+
+      const titleAppends = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.filter(([, record]) => {
+          const r = record as ChatRecord;
+          return r.type === 'system' && r.subtype === 'custom_title';
+        });
+      expect(titleAppends).toHaveLength(0);
+    });
+  });
 });

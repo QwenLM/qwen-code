@@ -201,14 +201,16 @@ describe('sessionStorageUtils', () => {
       ).toBe('new');
     });
 
-    it('falls back to full-file scan when tail has no match (Phase 2)', () => {
-      // Build a file whose custom_title record is near the start, followed by
-      // enough filler bytes (> LITE_READ_BUF_SIZE) that the tail window is
-      // entirely filler. The old head+tail reader would have hit this via the
-      // head window; this test verifies the new tail-first + full-scan
-      // strategy still resolves it.
+    it('falls back to head window when tail has no match', () => {
+      // Tail-first + head-fallback strategy: the title record sits in
+      // the first 64KB but is pushed out of the last 64KB by enough
+      // filler. The reader resolves it via the head scan without ever
+      // touching the middle of the file — bounded I/O regardless of
+      // file size. (Modern sessions don't reach this branch; the
+      // ChatRecordingService re-anchor invariant keeps the title in
+      // the tail. This is the legacy / pre-invariant safety net.)
       const titleLine =
-        '{"subtype":"custom_title","customTitle":"buried-in-middle"}';
+        '{"subtype":"custom_title","customTitle":"in-head-window"}';
       const filler = '{"type":"user","message":"' + 'x'.repeat(256) + '"}';
       // ~4x the tail window, guaranteed to push the title line out of tail.
       const fillerCount = Math.ceil((LITE_READ_BUF_SIZE * 4) / filler.length);
@@ -218,32 +220,45 @@ describe('sessionStorageUtils', () => {
         Array.from({ length: fillerCount }, () => filler).join('\n') +
         '\n';
 
-      const p = writeFile('phase2.jsonl', content);
+      const p = writeFile('head-fallback.jsonl', content);
       expect(fs.statSync(p).size).toBeGreaterThan(LITE_READ_BUF_SIZE * 3);
 
       expect(
         readLastJsonStringFieldSync(p, 'customTitle', 'custom_title'),
-      ).toBe('buried-in-middle');
+      ).toBe('in-head-window');
     });
 
-    it('returns the last occurrence even when multiple land in the full-scan region', () => {
-      const early = '{"subtype":"custom_title","customTitle":"first-rename"}';
-      const middle = '{"subtype":"custom_title","customTitle":"second-rename"}';
-      const filler = '{"type":"user","message":"' + 'x'.repeat(256) + '"}';
-      const fillerCount = Math.ceil((LITE_READ_BUF_SIZE * 3) / filler.length);
+    it('returns undefined when title is buried beyond both head and tail windows', () => {
+      // Anti-test for the previous Phase-2 full-file scan: a title
+      // record stranded in the middle of a >2× tail-window file is
+      // intentionally NOT found. The contract changed — listing
+      // latency is bounded to 2 × LITE_READ_BUF_SIZE per file at the
+      // cost of giving up on legacy sessions whose writer never
+      // re-anchored the title. Callers downgrade to firstPrompt.
+      const padTo = (label: string, byteCount: number) => {
+        const filler =
+          '{"type":"user","message":"' +
+          'x'.repeat(Math.max(0, byteCount - 30)) +
+          '"}';
+        return label + '\n' + filler + '\n';
+      };
 
+      // Layout: 80KB filler, then the title (>= LITE_READ_BUF_SIZE
+      // from offset 0), then 80KB more filler (>= LITE_READ_BUF_SIZE
+      // from EOF). Title falls in neither window.
+      const buryWindow = LITE_READ_BUF_SIZE + 16 * 1024;
+      const titleLine =
+        '{"subtype":"custom_title","customTitle":"buried-out-of-reach"}';
       const content =
-        early +
+        padTo('{"type":"user"}', buryWindow) +
+        titleLine +
         '\n' +
-        middle +
-        '\n' +
-        Array.from({ length: fillerCount }, () => filler).join('\n') +
-        '\n';
+        padTo('{"type":"user"}', buryWindow);
 
-      const p = writeFile('phase2-multi.jsonl', content);
+      const p = writeFile('buried.jsonl', content);
       expect(
         readLastJsonStringFieldSync(p, 'customTitle', 'custom_title'),
-      ).toBe('second-rename');
+      ).toBeUndefined();
     });
 
     it('respects the lineContains filter when scanning', () => {
@@ -260,7 +275,11 @@ describe('sessionStorageUtils', () => {
       ).toBe('legit');
     });
 
-    it('returns undefined when neither phase finds the field', () => {
+    it('returns undefined when neither head nor tail contains the field', () => {
+      // Same shape as the legacy "no title anywhere" case — the
+      // file is a long stream of user records with no metadata.
+      // Both windows scan in vain; we return undefined cheaply
+      // instead of paying for a full-file scan.
       const line = '{"type":"user","message":"' + 'x'.repeat(512) + '"}';
       const lineCount = Math.ceil((LITE_READ_BUF_SIZE * 3) / line.length);
       const content =
@@ -282,13 +301,14 @@ describe('sessionStorageUtils', () => {
       ).toBe('last');
     });
 
-    it('reuses a caller-provided scratch tail buffer', () => {
+    it('reuses a caller-provided scratch buffer across tail and head reads', () => {
       // Smoke test for the buffer-pool plumbing: when the caller hands
       // in a scratch buffer (as `listSessions` does on every page), the
       // function must produce the same result as the no-buffer path.
-      // Crucially, multiple calls must reuse the same buffer without
-      // bleeding state — values from an earlier file must not leak
-      // into a smaller subsequent file's tail decode.
+      // The same buffer backs the tail read AND the head fallback, so
+      // a tail-then-head sequence on different file sizes must not
+      // leak data between reads — bytes-read bounds the decode, never
+      // the buffer's full capacity.
       const big = writeFile(
         'big.jsonl',
         '{"subtype":"custom_title","customTitle":"big-file"}\n',
@@ -483,13 +503,16 @@ describe('sessionStorageUtils', () => {
       ).toEqual({ customTitle: 'A', titleSource: 'auto' });
     });
 
-    it('falls through to full-file scan when tail has no match and finds the pair', () => {
-      // Primary+secondary near start, filler > LITE_READ_BUF_SIZE, nothing in tail.
+    it('falls through to head window when tail has no match and finds the pair', () => {
+      // Primary+secondary near start, filler > LITE_READ_BUF_SIZE
+      // pushes them out of the tail. The head window catches the
+      // pair atomically — both fields come from the same line, the
+      // whole point of the multi-field variant.
       const header =
         '{"subtype":"custom_title","customTitle":"X","titleSource":"auto"}\n';
       const filler =
         '{"type":"user","message":"' + 'x'.repeat(LITE_READ_BUF_SIZE) + '"}\n';
-      const p = writeFile('phase2.jsonl', header + filler);
+      const p = writeFile('head-fallback.jsonl', header + filler);
       expect(
         readLastJsonStringFieldsSync(
           p,
@@ -498,50 +521,6 @@ describe('sessionStorageUtils', () => {
           'custom_title',
         ),
       ).toEqual({ customTitle: 'X', titleSource: 'auto' });
-    });
-
-    it('handles records straddling a Phase-2 chunk boundary', () => {
-      // Goal: place the winning custom_title record so it begins in Phase-2
-      // chunk N and ends in chunk N+1. That exercises the `carry` logic in
-      // readLastJsonStringFieldsSync — without it, the partial first chunk
-      // wouldn't contain the closing quote and the match would be missed.
-      //
-      // Layout:
-      //   [padA bytes..............][custom_title line][padB bytes................]
-      // with padA + fixed header bytes + half of the title line <
-      // LITE_READ_BUF_SIZE, and the rest of the title line spilling into
-      // the next chunk. padB is >> tail window so Phase-2 fires (tail miss).
-      const titleLine =
-        '{"subtype":"custom_title","customTitle":"spanner","titleSource":"manual"}';
-      const userHeader = '{"type":"user","message":"';
-      const userFooter = '"}\n';
-      // Position the title line so its middle lands on the chunk boundary.
-      const padALen =
-        LITE_READ_BUF_SIZE -
-        userHeader.length -
-        userFooter.length -
-        Math.floor(titleLine.length / 2);
-      const padA = 'a'.repeat(padALen);
-      const padB = 'b'.repeat(LITE_READ_BUF_SIZE * 2);
-      const p = writeFile(
-        'straddle.jsonl',
-        userHeader +
-          padA +
-          userFooter +
-          titleLine +
-          '\n' +
-          userHeader +
-          padB +
-          userFooter,
-      );
-      expect(
-        readLastJsonStringFieldsSync(
-          p,
-          'customTitle',
-          ['titleSource'],
-          'custom_title',
-        ),
-      ).toEqual({ customTitle: 'spanner', titleSource: 'manual' });
     });
 
     it('does not let a truncated trailing partial record win', () => {
