@@ -49,10 +49,11 @@ flowchart TD
 
   it('strips terminal control sequences from rendered labels', () => {
     const escape = String.fromCharCode(27);
+    const c1Control = `${String.fromCharCode(0x9b)}31m`;
     const preview = renderMermaidVisual(
       `
 flowchart TD
-  A[${escape}[2JStart] -->|${escape}[31mYes${escape}[0m| B[Done]
+  A[${escape}[2J${c1Control}Start] -->|${escape}[31mYes${escape}[0m| B[Done]
 `,
       80,
     );
@@ -62,16 +63,18 @@ flowchart TD
     expect(output).toContain('Yes');
     expect(output).toContain('Done');
     expect(output).not.toContain(escape);
+    expect(output).not.toContain(c1Control);
     expect(output).not.toContain('[2J');
     expect(output).not.toContain('[31m');
   });
 
   it('strips terminal control sequences from source fallback', () => {
     const escape = String.fromCharCode(27);
+    const c1Control = `${String.fromCharCode(0x9b)}31m`;
     const preview = renderMermaidVisual(
       `
 unknownDiagram
-  ${escape}[2Junsafe fallback
+  ${escape}[2J${c1Control}unsafe fallback
 `,
       80,
     );
@@ -80,6 +83,7 @@ unknownDiagram
     expect(preview.title).toBe('Mermaid source (unknownDiagram)');
     expect(output).toContain('unsafe fallback');
     expect(output).not.toContain(escape);
+    expect(output).not.toContain(c1Control);
     expect(output).not.toContain('[2J');
   });
 });

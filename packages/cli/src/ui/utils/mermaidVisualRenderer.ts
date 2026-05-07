@@ -106,7 +106,13 @@ function sanitizeTerminalText(text: string): string {
   let result = '';
   for (const char of stripAnsi(text)) {
     const code = char.charCodeAt(0);
-    if ((code <= 31 && code !== 10) || code === 127) continue;
+    if (
+      (code <= 31 && code !== 10) ||
+      code === 127 ||
+      (code >= 128 && code <= 159)
+    ) {
+      continue;
+    }
     result += char;
   }
   return result;
