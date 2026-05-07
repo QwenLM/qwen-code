@@ -149,6 +149,11 @@ export default {
   'Configure authentication information for login': '配置登录认证信息',
   'Copy the last result or code snippet to clipboard':
     '将最后的结果或代码片段复制到剪贴板',
+  'Create a git commit with the given message. Stages all changes automatically.':
+    '使用给定消息创建 git 提交。自动暂存所有更改。',
+  'Commit message required. Usage: /commit <message>':
+    '需要提交消息。用法：/commit <消息>',
+  'Stage all changes and commit': '暂存所有更改并提交',
 
   // ============================================================================
   // Commands - Agents

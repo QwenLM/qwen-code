@@ -136,6 +136,11 @@ export default {
   'Configure authentication information for login': '配置登錄認證信息',
   'Copy the last result or code snippet to clipboard':
     '將最後的結果或代碼片段複製到剪貼板',
+  'Create a git commit with the given message. Stages all changes automatically.':
+    '使用給定訊息建立 git 提交。自動暫存所有變更。',
+  'Commit message required. Usage: /commit <message>':
+    '需要提交訊息。用法：/commit <訊息>',
+  'Stage all changes and commit': '暫存所有變更並提交',
   'Manage subagents for specialized task delegation.':
     '管理用於專門任務委派的子智能體',
   'Manage existing subagents (view, edit, delete).':
