@@ -1055,10 +1055,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (pid !== undefined) {
         if (os.platform() === 'win32') {
           try {
-            cpSpawn('taskkill', ['/pid', String(pid), '/f', '/t']);
+            const taskkillChild = cpSpawn('taskkill', [
+              '/pid',
+              String(pid),
+              '/f',
+              '/t',
+            ]);
+            // Without an 'error' listener on the spawned ChildProcess,
+            // a taskkill spawn failure (binary missing, permission
+            // denied, etc.) would emit 'error' with no listener — which
+            // crashes Node by default. Log + drop is the sane recovery:
+            // the registry entry still transitions via `registry.cancel`
+            // below; the still-running child is at worst an orphan,
+            // which Windows reaps when the CLI session ends.
+            taskkillChild.on('error', (err) => {
+              debugLogger.warn(
+                `promote: taskkill spawn failed for pid=${pid}: ${err.message}`,
+              );
+            });
           } catch (e) {
+            // cpSpawn itself throwing (sync) is rare but possible
+            // (e.g. EMFILE — too many open files) — same recovery.
             debugLogger.warn(
-              `promote: taskkill on ${pid} threw: ${getErrorMessage(e)}`,
+              `promote: cpSpawn('taskkill') threw for pid=${pid}: ${getErrorMessage(e)}`,
             );
           }
         } else {
