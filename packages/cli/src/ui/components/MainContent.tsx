@@ -291,8 +291,7 @@ export const MainContent = () => {
   // history items currently passed to <Static>. It catches up to
   // mergedHistory.length either in one shot (small lag) or chunk-by-chunk
   // through setImmediate (large lag, e.g., post-Ctrl+O remount of a 500-item
-  // session). The reset effect re-runs only when historyRemountKey changes,
-  // so normal runtime appends never restart the chunked replay.
+  // session).
   //
   // Note: source-copy offsets are computed across the FULL mergedHistory
   // above so each code block keeps its stable copy index even when only a
@@ -303,12 +302,20 @@ export const MainContent = () => {
   const mergedLengthRef = useRef(mergedHistory.length);
   mergedLengthRef.current = mergedHistory.length;
 
-  useEffect(() => {
-    // Intentionally only depends on historyRemountKey — we react to remount
-    // events, not to incremental history growth (handled by the next effect).
-    // mergedLengthRef is a ref so it doesn't need to be in deps.
+  // The reset MUST happen during render (not in an effect): historyRemountKey
+  // also drives the <Static> key below, and Ink remounts Static synchronously
+  // on its first render with the new key. If we reset replayCount in a
+  // useEffect, that first render would already feed the full history to the
+  // new <Static> and we'd hit the freeze the PR is trying to avoid. The
+  // canonical "store previous prop in state" pattern queues a re-render
+  // that discards this one before commit, so <Static> never sees the
+  // stale full slice. Refs alone won't work — they don't trigger a re-render.
+  // See: https://react.dev/reference/react/useState#storing-information-from-previous-renders
+  const [lastRemountKey, setLastRemountKey] = useState(historyRemountKey);
+  if (lastRemountKey !== historyRemountKey) {
+    setLastRemountKey(historyRemountKey);
     setReplayCount(initialReplayCount(mergedLengthRef.current));
-  }, [historyRemountKey]);
+  }
 
   useEffect(() => {
     if (replayCount >= mergedHistory.length) return;

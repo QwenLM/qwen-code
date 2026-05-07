@@ -347,4 +347,54 @@ describe('<MainContent />', () => {
     // After catch-up the full history must be present.
     expect(lengthAtLastCall()).toBe(TOTAL);
   });
+
+  it('synchronously resets to the first chunk on historyRemountKey change after a full catch-up (Ctrl+O regression, issue #3899)', async () => {
+    // Wenshao's review: with the previous useEffect-based reset, the FIRST
+    // render after a Ctrl+O-induced historyRemountKey bump would still feed
+    // <Static> the full (pre-reset) replayCount, causing the synchronous
+    // remount blocking the input thread that the PR is trying to fix. This
+    // test pins the synchronous-reset behavior.
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 200 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+    const TOTAL = 203;
+
+    const { rerender } = renderMainContent(
+      createUIState({ history, historyRemountKey: 1 }),
+    );
+
+    // Drive the chunked replay to completion.
+    for (let i = 0; i < 50; i++) {
+      const len = staticItemsSpy.mock.calls.at(-1)?.[0].length ?? 0;
+      if (len === TOTAL) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
+
+    // Re-render with a bumped key — analogous to refreshStatic() firing.
+    // The very next render must immediately drop back to the first chunk;
+    // if reset were deferred to useEffect, <Static> would receive 203 items
+    // first and Ink would do the synchronous full-history layout the PR is
+    // meant to avoid.
+    rerender(
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <CompactModeProvider value={{ compactMode: false }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({ history, historyRemountKey: 2 })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </CompactModeProvider>
+      </AppContext.Provider>,
+    );
+
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
+  });
 });
