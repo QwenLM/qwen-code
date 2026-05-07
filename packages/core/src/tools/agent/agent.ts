@@ -1434,10 +1434,27 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Background fork execution. Run under an AsyncLocalStorage frame so
         // nested `agent` tool calls by the fork's model can be detected.
         // Forks run async (return a placeholder); skip foreground registration.
+        // Wrap the fork body in try/finally so the per-subagent ToolRegistry
+        // is stopped after the fork finishes — the other three spawn paths
+        // (foreground non-fork, background fork, background non-fork) already
+        // do this in their finally blocks. Without it, every AgentTool /
+        // SkillTool the fork's model instantiates from this registry leaks
+        // its change-listener on shared SubagentManager / SkillManager.
         const runFramedFork = () =>
-          runWithAgentContext({ agentId: hookOpts.agentId }, () =>
-            this.runSubagentWithHooks(subagent, contextState, hookOpts),
-          );
+          runWithAgentContext({ agentId: hookOpts.agentId }, async () => {
+            try {
+              await this.runSubagentWithHooks(
+                subagent,
+                contextState,
+                hookOpts,
+              );
+            } finally {
+              void agentConfig
+                .getToolRegistry()
+                .stop()
+                .catch(() => {});
+            }
+          });
         void runInForkContext(runFramedFork);
         return {
           llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
