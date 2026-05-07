@@ -8,7 +8,11 @@ import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
 import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
-import { createHttpAcpBridge, type HttpAcpBridge } from './httpAcpBridge.js';
+import {
+  createHttpAcpBridge,
+  SessionNotFoundError,
+  type HttpAcpBridge,
+} from './httpAcpBridge.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
   STAGE1_FEATURES,
@@ -89,5 +93,59 @@ export function createServeApp(
     }
   });
 
+  app.post('/session/:id/prompt', async (req, res) => {
+    const sessionId = req.params['id'];
+    const body =
+      typeof req.body === 'object' && req.body !== null
+        ? (req.body as Record<string, unknown>)
+        : {};
+    const prompt = body['prompt'];
+    if (!Array.isArray(prompt)) {
+      res
+        .status(400)
+        .json({
+          error: '`prompt` is required and must be an array of content blocks',
+        });
+      return;
+    }
+    try {
+      const result = await bridge.sendPrompt(sessionId, {
+        ...(body as object),
+        sessionId,
+        prompt,
+      } as Parameters<HttpAcpBridge['sendPrompt']>[1]);
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err);
+    }
+  });
+
+  app.post('/session/:id/cancel', async (req, res) => {
+    const sessionId = req.params['id'];
+    const body =
+      typeof req.body === 'object' && req.body !== null
+        ? (req.body as Record<string, unknown>)
+        : {};
+    try {
+      await bridge.cancelSession(sessionId, {
+        ...(body as object),
+        sessionId,
+      } as Parameters<HttpAcpBridge['cancelSession']>[1]);
+      res.status(204).end();
+    } catch (err) {
+      sendBridgeError(res, err);
+    }
+  });
+
   return app;
+}
+
+function sendBridgeError(res: import('express').Response, err: unknown): void {
+  if (err instanceof SessionNotFoundError) {
+    res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    return;
+  }
+  res
+    .status(500)
+    .json({ error: err instanceof Error ? err.message : String(err) });
 }

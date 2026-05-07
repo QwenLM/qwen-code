@@ -30,6 +30,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   createHttpAcpBridge,
+  SessionNotFoundError,
   type AcpChannel,
   type ChannelFactory,
 } from './httpAcpBridge.js';
@@ -41,10 +42,20 @@ interface FakeAgentOpts {
   initializeDelayMs?: number;
   /** Force `initialize` to throw. */
   initializeThrows?: Error;
+  /**
+   * Custom prompt handler. Default returns `end_turn` synchronously. Useful
+   * for test cases that want to observe prompt ordering.
+   */
+  promptImpl?: (
+    p: PromptRequest,
+    self: FakeAgent,
+  ) => Promise<PromptResponse> | PromptResponse;
 }
 
 class FakeAgent implements Agent {
   newSessionCalls: NewSessionRequest[] = [];
+  promptCalls: PromptRequest[] = [];
+  cancelCalls: CancelNotification[] = [];
   constructor(private readonly opts: FakeAgentOpts = {}) {}
 
   async initialize(_p: InitializeRequest): Promise<InitializeResponse> {
@@ -72,10 +83,16 @@ class FakeAgent implements Agent {
   async authenticate(_p: AuthenticateRequest): Promise<AuthenticateResponse> {
     throw new Error('not implemented in test fake');
   }
-  async prompt(_p: PromptRequest): Promise<PromptResponse> {
+  async prompt(p: PromptRequest): Promise<PromptResponse> {
+    this.promptCalls.push(p);
+    if (this.opts.promptImpl) {
+      return this.opts.promptImpl(p, this);
+    }
     return { stopReason: 'end_turn' };
   }
-  async cancel(_p: CancelNotification): Promise<void> {}
+  async cancel(p: CancelNotification): Promise<void> {
+    this.cancelCalls.push(p);
+  }
   async setSessionMode(
     _p: SetSessionModeRequest,
   ): Promise<SetSessionModeResponse> {
@@ -306,5 +323,189 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
     expect(handles.every((h) => h.killed)).toBe(true);
     expect(bridge.sessionCount).toBe(0);
+  });
+
+  describe('sendPrompt', () => {
+    it('forwards a prompt and returns the agent response', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({
+          promptImpl: () => ({ stopReason: 'max_tokens' }),
+        });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      const result = await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+      expect(result).toEqual({ stopReason: 'max_tokens' });
+      expect(handles[0]?.agent.promptCalls).toHaveLength(1);
+
+      await bridge.shutdown();
+    });
+
+    it('overrides a stale sessionId in the body with the routing id', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      await bridge.sendPrompt(session.sessionId, {
+        // Body claims a different sessionId — bridge must not honor it.
+        sessionId: 'spoofed',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+      expect(handles[0]?.agent.promptCalls[0]?.sessionId).toBe(
+        session.sessionId,
+      );
+
+      await bridge.shutdown();
+    });
+
+    it('FIFO-serializes concurrent prompts on the same session', async () => {
+      const order: string[] = [];
+      let resolveFirst: (() => void) | undefined;
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({
+          promptImpl: async (p) => {
+            const tag =
+              (p.prompt[0] as { text?: string } | undefined)?.text ?? '?';
+            order.push(`start:${tag}`);
+            if (tag === 'first') {
+              await new Promise<void>((res) => {
+                resolveFirst = res;
+              });
+            }
+            order.push(`end:${tag}`);
+            return { stopReason: 'end_turn' };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      const p1 = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      const p2 = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+
+      // Give the event loop a chance to run the agent's start handler.
+      await new Promise((r) => setTimeout(r, 10));
+      // The second prompt MUST NOT have started before the first ended.
+      expect(order).toEqual(['start:first']);
+
+      resolveFirst!();
+      await Promise.all([p1, p2]);
+      expect(order).toEqual([
+        'start:first',
+        'end:first',
+        'start:second',
+        'end:second',
+      ]);
+
+      await bridge.shutdown();
+    });
+
+    it('a failed prompt does not poison the queue for subsequent prompts', async () => {
+      let promptCount = 0;
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({
+          promptImpl: async () => {
+            promptCount += 1;
+            if (promptCount === 1) {
+              throw new Error('first prompt boom');
+            }
+            return { stopReason: 'end_turn' };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      const failed = await bridge
+        .sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'a' }],
+        })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(failed).not.toBeNull();
+
+      const ok = await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'b' }],
+      });
+      expect(ok).toEqual({ stopReason: 'end_turn' });
+
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown session ids', async () => {
+      const bridge = createHttpAcpBridge({
+        channelFactory: async () => {
+          throw new Error('factory should not be called');
+        },
+      });
+      await expect(
+        bridge.sendPrompt('unknown', {
+          sessionId: 'unknown',
+          prompt: [{ type: 'text', text: 'x' }],
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
+  });
+
+  describe('cancelSession', () => {
+    it('forwards a cancel notification with the routing id', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      await bridge.cancelSession(session.sessionId);
+      // Cancel is a notification — let it propagate before observing.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
+      expect(handles[0]?.agent.cancelCalls[0]?.sessionId).toBe(
+        session.sessionId,
+      );
+
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown session ids', async () => {
+      const bridge = createHttpAcpBridge({
+        channelFactory: async () => {
+          throw new Error('factory should not be called');
+        },
+      });
+      await expect(bridge.cancelSession('unknown')).rejects.toBeInstanceOf(
+        SessionNotFoundError,
+      );
+    });
   });
 });

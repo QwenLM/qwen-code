@@ -14,7 +14,10 @@ import {
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
 import type {
+  CancelNotification,
   Client,
+  PromptRequest,
+  PromptResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestPermissionRequest,
@@ -63,11 +66,40 @@ export interface HttpAcpBridge {
    */
   spawnOrAttach(req: BridgeSpawnRequest): Promise<BridgeSession>;
 
+  /**
+   * Forward a prompt to the agent. Concurrent prompts against the same
+   * session FIFO-serialize through a per-session queue (ACP guarantees
+   * "one active prompt per session"). Throws `SessionNotFoundError` when
+   * the id is unknown.
+   */
+  sendPrompt(sessionId: string, req: PromptRequest): Promise<PromptResponse>;
+
+  /**
+   * Cancel the in-flight prompt on the session. ACP-side this is a
+   * notification, not a request — the agent acknowledges by resolving the
+   * active `prompt()` with a `cancelled` stop reason. Throws
+   * `SessionNotFoundError` when the id is unknown.
+   */
+  cancelSession(sessionId: string, req?: CancelNotification): Promise<void>;
+
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
 
   /** Close all live child processes; called on daemon shutdown. */
   shutdown(): Promise<void>;
+}
+
+/**
+ * Routes catch this to map to HTTP 404. Distinct from generic Error so the
+ * route layer doesn't have to brittle-match on message text.
+ */
+export class SessionNotFoundError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(`No session with id "${sessionId}"`);
+    this.name = 'SessionNotFoundError';
+    this.sessionId = sessionId;
+  }
 }
 
 /**
@@ -102,6 +134,14 @@ interface SessionEntry {
   connection: ClientSideConnection;
   /** Stage 1 buffer; consumed by SSE wiring in the next PR. */
   notifications: SessionNotification[];
+  /**
+   * Tail of the per-session prompt queue. Each new prompt chains off the
+   * resolved (or rejected) state of this promise so prompts run one at a
+   * time in arrival order. Always resolves — failures are swallowed at the
+   * tail so a prior failure doesn't block subsequent prompts; the original
+   * caller still observes the rejection on its own returned promise.
+   */
+  promptQueue: Promise<void>;
 }
 
 /**
@@ -218,6 +258,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           channel,
           connection,
           notifications: [],
+          promptQueue: Promise.resolve(),
         };
         byWorkspace.set(workspaceKey, entry);
         byId.set(entry.sessionId, entry);
@@ -231,6 +272,37 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         await channel.kill().catch(() => {});
         throw err;
       }
+    },
+
+    async sendPrompt(sessionId, req) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Force the body's sessionId to match the routing id — a client that
+      // sent a stale id in the body would otherwise be dispatched to the
+      // wrong agent process.
+      const normalized: PromptRequest = { ...req, sessionId };
+      const result = entry.promptQueue.then(() =>
+        entry.connection.prompt(normalized),
+      );
+      // Tail swallows failures so subsequent prompts still run. The caller
+      // still sees rejections on its own `result` reference.
+      entry.promptQueue = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    },
+
+    async cancelSession(sessionId, req) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Cancel intentionally bypasses the prompt queue: it's a notification
+      // that the agent uses to wind down the *currently active* prompt, not
+      // something to wait behind queued work.
+      const notif: CancelNotification = req
+        ? { ...req, sessionId }
+        : { sessionId };
+      await entry.connection.cancel(notif);
     },
 
     async shutdown() {
