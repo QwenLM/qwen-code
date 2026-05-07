@@ -51,8 +51,10 @@ export const STAGE1_FEATURES: readonly string[] = [
   'health',
   'capabilities',
   'session_create',
+  'session_list',
   'session_prompt',
   'session_cancel',
   'session_events',
+  'session_set_model',
   'permission_vote',
 ] as const;

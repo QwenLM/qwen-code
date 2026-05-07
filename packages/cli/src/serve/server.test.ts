@@ -13,10 +13,13 @@ import type {
   PromptRequest,
   PromptResponse,
   RequestPermissionResponse,
+  SetSessionModelRequest,
+  SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
 import {
   SessionNotFoundError,
   type BridgeSession,
+  type BridgeSessionSummary,
   type BridgeSpawnRequest,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
@@ -48,6 +51,11 @@ interface FakeBridgeOpts {
     requestId: string,
     response: RequestPermissionResponse,
   ) => boolean;
+  listImpl?: (workspaceCwd: string) => BridgeSessionSummary[];
+  setModelImpl?: (
+    sessionId: string,
+    req: SetSessionModelRequest,
+  ) => Promise<SetSessionModelResponse>;
 }
 
 interface FakeBridge extends HttpAcpBridge {
@@ -58,6 +66,8 @@ interface FakeBridge extends HttpAcpBridge {
     requestId: string;
     response: RequestPermissionResponse;
   }>;
+  listCalls: string[];
+  setModelCalls: Array<{ sessionId: string; req: SetSessionModelRequest }>;
   shutdownCalls: number;
 }
 
@@ -66,6 +76,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const promptCalls: FakeBridge['promptCalls'] = [];
   const cancelCalls: FakeBridge['cancelCalls'] = [];
   const permissionVotes: FakeBridge['permissionVotes'] = [];
+  const listCalls: string[] = [];
+  const setModelCalls: FakeBridge['setModelCalls'] = [];
   let shutdownCalls = 0;
   const spawnImpl =
     opts.spawnImpl ??
@@ -78,11 +90,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.promptImpl ?? (async () => ({ stopReason: 'end_turn' }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
   const respondImpl = opts.respondImpl ?? (() => true);
+  const listImpl = opts.listImpl ?? (() => []);
+  const setModelImpl = opts.setModelImpl ?? (async () => ({}));
   return {
     calls,
     promptCalls,
     cancelCalls,
     permissionVotes,
+    listCalls,
+    setModelCalls,
     get shutdownCalls() {
       return shutdownCalls;
     },
@@ -116,6 +132,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       const accepted = respondImpl(requestId, response);
       permissionVotes.push({ requestId, response });
       return accepted;
+    },
+    listWorkspaceSessions(workspaceCwd) {
+      listCalls.push(workspaceCwd);
+      return listImpl(workspaceCwd);
+    },
+    async setSessionModel(sessionId, req) {
+      setModelCalls.push({ sessionId, req });
+      return setModelImpl(sessionId, req);
     },
     async shutdown() {
       shutdownCalls += 1;
@@ -283,6 +307,100 @@ describe('createServeApp', () => {
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: 'agent crashed' });
+    });
+  });
+
+  describe('GET /workspace/:id/sessions', () => {
+    it('returns the list returned by the bridge', async () => {
+      const bridge = fakeBridge({
+        listImpl: () => [
+          { sessionId: 's-1', workspaceCwd: '/work/a' },
+          { sessionId: 's-2', workspaceCwd: '/work/a' },
+        ],
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent('/work/a')}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(2);
+      expect(bridge.listCalls).toEqual(['/work/a']);
+    });
+
+    it('returns an empty array when no sessions exist for the workspace', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent('/work/idle')}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ sessions: [] });
+    });
+
+    it('400 when :id does not decode to an absolute path', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent('relative/path')}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(400);
+      expect(bridge.listCalls).toHaveLength(0);
+    });
+  });
+
+  describe('POST /session/:id/model', () => {
+    it('200 with the agent response on success', async () => {
+      const bridge = fakeBridge({
+        setModelImpl: async () => ({ _meta: { applied: true } }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/model')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ modelId: 'qwen3-coder', sessionId: 'spoofed-B' });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ _meta: { applied: true } });
+      expect(bridge.setModelCalls).toHaveLength(1);
+      expect(bridge.setModelCalls[0]?.sessionId).toBe('session-A');
+      expect(bridge.setModelCalls[0]?.req.sessionId).toBe('session-A');
+      expect(bridge.setModelCalls[0]?.req.modelId).toBe('qwen3-coder');
+    });
+
+    it('400 when modelId is missing', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/model')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(bridge.setModelCalls).toHaveLength(0);
+    });
+
+    it('400 when modelId is not a non-empty string', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/model')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ modelId: '' });
+      expect(res.status).toBe(400);
+      expect(bridge.setModelCalls).toHaveLength(0);
+    });
+
+    it('404 when bridge reports unknown session', async () => {
+      const bridge = fakeBridge({
+        setModelImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/model')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ modelId: 'qwen3-coder' });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
     });
   });
 

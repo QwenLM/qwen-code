@@ -298,6 +298,59 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('listWorkspaceSessions', () => {
+    it('GETs /workspace/:id/sessions and returns the array', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [
+            { sessionId: 's-1', workspaceCwd: '/work/a' },
+            { sessionId: 's-2', workspaceCwd: '/work/a' },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const sessions = await client.listWorkspaceSessions('/work/a');
+      expect(sessions).toHaveLength(2);
+      // The cwd must be URL-encoded so the slashes don't collide with the
+      // route segments.
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/%2Fwork%2Fa/sessions',
+      );
+    });
+
+    it('throws on non-2xx (e.g. 400 from a relative path)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: 'must be absolute' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.listWorkspaceSessions('relative'),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+  });
+
+  describe('setSessionModel', () => {
+    it('POSTs the modelId in the body and returns the agent response', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.setSessionModel('s-1', 'qwen3-coder');
+      expect(result).toEqual({});
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/model');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ modelId: 'qwen3-coder' });
+    });
+
+    it('throws on 404 (unknown session)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.setSessionModel('s-1', 'qwen3-coder'),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
   describe('baseUrl normalization', () => {
     it('strips trailing slashes', async () => {
       const { fetch, calls } = recordingFetch(() =>

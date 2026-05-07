@@ -755,6 +755,146 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('listWorkspaceSessions', () => {
+    it('returns sessions matching the canonical workspace cwd', async () => {
+      let n = 0;
+      const factory: ChannelFactory = async () => {
+        // Distinct sessionIdPrefix per spawn so two thread-scope sessions
+        // in the same workspace get distinct ids (the FakeAgent encodes the
+        // cwd into the id otherwise → collision).
+        const h = makeChannel({ sessionIdPrefix: `s${n++}` });
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({
+        sessionScope: 'thread',
+        channelFactory: factory,
+      });
+
+      const a1 = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const a2 = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      await bridge.spawnOrAttach({ workspaceCwd: '/work/b' });
+
+      const aList = bridge.listWorkspaceSessions('/work/a');
+      expect(aList).toHaveLength(2);
+      expect(aList.map((s) => s.sessionId).sort()).toEqual(
+        [a1.sessionId, a2.sessionId].sort(),
+      );
+      const bList = bridge.listWorkspaceSessions('/work/b');
+      expect(bList).toHaveLength(1);
+      const idleList = bridge.listWorkspaceSessions('/work/c');
+      expect(idleList).toEqual([]);
+
+      await bridge.shutdown();
+    });
+
+    it('canonicalizes the lookup path', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      const list = bridge.listWorkspaceSessions('/work/./a');
+      expect(list).toHaveLength(1);
+      expect(list[0]?.workspaceCwd).toBe('/work/a');
+
+      await bridge.shutdown();
+    });
+
+    it('returns empty for relative paths instead of throwing', async () => {
+      const bridge = createHttpAcpBridge({
+        channelFactory: async () => {
+          throw new Error('factory should not be called');
+        },
+      });
+      expect(bridge.listWorkspaceSessions('relative/path')).toEqual([]);
+    });
+  });
+
+  describe('setSessionModel', () => {
+    /** Set up a channel where the agent records setSessionModel calls. */
+    async function setup() {
+      const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+      const factory: ChannelFactory = async () => {
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const fakeAgent = new FakeAgent();
+        // Augment the agent with the unstable model setter via a proxy so we
+        // don't need to extend the FakeAgent class with optional methods.
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async (req: { sessionId: string; modelId: string }) => {
+                setModelCalls.push({
+                  sessionId: req.sessionId,
+                  modelId: req.modelId,
+                });
+                return {};
+              };
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          kill: async () => {},
+        };
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      return { bridge, session, setModelCalls };
+    }
+
+    it('forwards modelId to the agent and overrides body sessionId', async () => {
+      const { bridge, session, setModelCalls } = await setup();
+      const response = await bridge.setSessionModel(session.sessionId, {
+        sessionId: 'spoofed',
+        modelId: 'qwen3-coder',
+      });
+      expect(response).toEqual({});
+      expect(setModelCalls[0]?.sessionId).toBe(session.sessionId);
+      expect(setModelCalls[0]?.modelId).toBe('qwen3-coder');
+      await bridge.shutdown();
+    });
+
+    it('publishes a model_switched event on success', async () => {
+      const { bridge, session } = await setup();
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      await bridge.setSessionModel(session.sessionId, {
+        sessionId: session.sessionId,
+        modelId: 'qwen3-coder',
+      });
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      expect(next.value?.type).toBe('model_switched');
+      expect(next.value?.data).toEqual({
+        sessionId: session.sessionId,
+        modelId: 'qwen3-coder',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown session ids', async () => {
+      const bridge = createHttpAcpBridge({
+        channelFactory: async () => {
+          throw new Error('factory should not be called');
+        },
+      });
+      await expect(
+        bridge.setSessionModel('unknown', {
+          sessionId: 'unknown',
+          modelId: 'qwen3-coder',
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
+  });
+
   describe('subscribeEvents', () => {
     it('throws SessionNotFoundError for unknown session ids', () => {
       const bridge = createHttpAcpBridge({

@@ -35,6 +35,17 @@ export interface DaemonSession {
   attached: boolean;
 }
 
+/** Sparse session record returned by `GET /workspace/:id/sessions`. */
+export interface DaemonSessionSummary {
+  sessionId: string;
+  workspaceCwd: string;
+}
+
+/** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
+export interface SetModelResult {
+  [key: string]: unknown;
+}
+
 /** A frame in the SSE event stream. */
 export interface DaemonEvent {
   /** Monotonic per-session id; pass back as `Last-Event-ID` to resume. */

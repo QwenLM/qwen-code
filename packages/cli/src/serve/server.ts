@@ -88,9 +88,7 @@ export function createServeApp(
       });
       res.status(200).json(session);
     } catch (err) {
-      res
-        .status(500)
-        .json({ error: err instanceof Error ? err.message : String(err) });
+      res.status(500).json({ error: errorMessage(err) });
     }
   });
 
@@ -131,6 +129,46 @@ export function createServeApp(
         sessionId,
       } as Parameters<HttpAcpBridge['cancelSession']>[1]);
       res.status(204).end();
+    } catch (err) {
+      sendBridgeError(res, err);
+    }
+  });
+
+  app.get('/workspace/:id/sessions', (req, res) => {
+    // Express decodes URL-encoded path params automatically; clients pass
+    // the absolute workspace cwd encoded (e.g.
+    // GET /workspace/%2Fwork%2Fa/sessions).
+    const workspaceCwd = req.params['id'] ?? '';
+    if (!path.isAbsolute(workspaceCwd)) {
+      res
+        .status(400)
+        .json({ error: '`:id` must decode to an absolute workspace path' });
+      return;
+    }
+    const sessions = bridge.listWorkspaceSessions(workspaceCwd);
+    res.status(200).json({ sessions });
+  });
+
+  app.post('/session/:id/model', async (req, res) => {
+    const sessionId = req.params['id'];
+    const body =
+      typeof req.body === 'object' && req.body !== null
+        ? (req.body as Record<string, unknown>)
+        : {};
+    const modelId = body['modelId'];
+    if (typeof modelId !== 'string' || !modelId) {
+      res.status(400).json({
+        error: '`modelId` is required and must be a non-empty string',
+      });
+      return;
+    }
+    try {
+      const response = await bridge.setSessionModel(sessionId, {
+        ...(body as object),
+        sessionId,
+        modelId,
+      } as Parameters<HttpAcpBridge['setSessionModel']>[1]);
+      res.status(200).json(response);
     } catch (err) {
       sendBridgeError(res, err);
     }
@@ -264,7 +302,25 @@ function sendBridgeError(res: import('express').Response, err: unknown): void {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;
   }
-  res
-    .status(500)
-    .json({ error: err instanceof Error ? err.message : String(err) });
+  res.status(500).json({ error: errorMessage(err) });
+}
+
+/**
+ * Coerce an arbitrary thrown value to a useful string. Plain `String(err)`
+ * yields `[object Object]` for JSON-RPC-shaped errors (`{code, message,
+ * data}`) which are exactly what the ACP SDK forwards from the agent. Try
+ * the `message` field first, fall back to JSON-stringify, then `String`.
+ */
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === 'object') {
+    const maybe = (err as { message?: unknown }).message;
+    if (typeof maybe === 'string' && maybe.length > 0) return maybe;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      /* fall through */
+    }
+  }
+  return String(err);
 }

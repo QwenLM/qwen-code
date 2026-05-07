@@ -18,6 +18,7 @@ export type {
   DaemonEvent,
   DaemonMode,
   DaemonSession,
+  DaemonSessionSummary,
   PermissionOutcome,
   PermissionOutcomeCancelled,
   PermissionOutcomeSelected,
@@ -25,4 +26,5 @@ export type {
   PromptContentBlock,
   PromptResult,
   PromptTextContent,
+  SetModelResult,
 } from './types.js';

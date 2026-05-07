@@ -29,6 +29,8 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SetSessionModelRequest,
+  SetSessionModelResponse,
   Stream,
   WriteTextFileRequest,
   WriteTextFileResponse,
@@ -63,6 +65,12 @@ export interface BridgeSession {
   workspaceCwd: string;
   /** True if this attach reused an existing session under `sessionScope: 'single'`. */
   attached: boolean;
+}
+
+/** Sparse summary used by `GET /workspace/:id/sessions`. */
+export interface BridgeSessionSummary {
+  sessionId: string;
+  workspaceCwd: string;
 }
 
 export interface HttpAcpBridge {
@@ -108,6 +116,24 @@ export interface HttpAcpBridge {
     requestId: string,
     response: RequestPermissionResponse,
   ): boolean;
+
+  /**
+   * List all live sessions whose canonical workspace path matches the
+   * supplied cwd. Empty array (not throw) when no sessions exist —
+   * a session-picker UI shouldn't 404 just because the workspace is idle.
+   */
+  listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
+
+  /**
+   * Switch the active model service for a session. Forwards through ACP's
+   * (currently unstable) `unstable_setSessionModel` and broadcasts a
+   * `model_switched` event so cross-client UIs reflect the change.
+   * Throws `SessionNotFoundError` for unknown ids.
+   */
+  setSessionModel(
+    sessionId: string,
+    req: SetSessionModelRequest,
+  ): Promise<SetSessionModelResponse>;
 
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
@@ -438,6 +464,46 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
 
     respondToPermission(requestId, response) {
       return resolvePending(requestId, response);
+    },
+
+    listWorkspaceSessions(workspaceCwd) {
+      if (!path.isAbsolute(workspaceCwd)) return [];
+      const key = path.resolve(workspaceCwd);
+      const out: BridgeSessionSummary[] = [];
+      for (const entry of byId.values()) {
+        if (entry.workspaceCwd === key) {
+          out.push({
+            sessionId: entry.sessionId,
+            workspaceCwd: entry.workspaceCwd,
+          });
+        }
+      }
+      return out;
+    },
+
+    async setSessionModel(sessionId, req) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const normalized: SetSessionModelRequest = { ...req, sessionId };
+      // The ACP SDK marks setSessionModel as unstable (not in spec yet); the
+      // method on AgentSideConnection is `unstable_setSessionModel`. Cast
+      // through the shape we know rather than couple to the prefix in case
+      // it's renamed when the spec stabilizes.
+      const conn = entry.connection as unknown as {
+        unstable_setSessionModel(
+          p: SetSessionModelRequest,
+        ): Promise<SetSessionModelResponse>;
+      };
+      const response = await conn.unstable_setSessionModel(normalized);
+      try {
+        entry.events.publish({
+          type: 'model_switched',
+          data: { sessionId: entry.sessionId, modelId: req.modelId },
+        });
+      } catch {
+        /* bus closed */
+      }
+      return response;
     },
 
     async shutdown() {

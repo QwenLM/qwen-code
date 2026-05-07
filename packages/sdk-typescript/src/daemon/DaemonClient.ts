@@ -9,9 +9,11 @@ import type {
   DaemonCapabilities,
   DaemonEvent,
   DaemonSession,
+  DaemonSessionSummary,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  SetModelResult,
 } from './types.js';
 
 /**
@@ -148,6 +150,45 @@ export class DaemonClient {
     });
     if (!res.ok) throw await this.failOnError(res, 'POST /session');
     return (await res.json()) as DaemonSession;
+  }
+
+  /**
+   * Enumerate live sessions in the given workspace. Used by session-picker
+   * UIs. Returns an empty list (not 404) when the workspace has no sessions.
+   */
+  async listWorkspaceSessions(
+    workspaceCwd: string,
+  ): Promise<DaemonSessionSummary[]> {
+    const res = await this._fetch(
+      `${this.baseUrl}/workspace/${encodeURIComponent(workspaceCwd)}/sessions`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) {
+      throw await this.failOnError(res, 'GET /workspace/:id/sessions');
+    }
+    const body = (await res.json()) as { sessions: DaemonSessionSummary[] };
+    return body.sessions;
+  }
+
+  /**
+   * Switch the active model for a session. Backed by ACP's currently-unstable
+   * `unstable_setSessionModel`; the daemon also publishes a `model_switched`
+   * event so cross-client UIs can update.
+   */
+  async setSessionModel(
+    sessionId: string,
+    modelId: string,
+  ): Promise<SetModelResult> {
+    const res = await this._fetch(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/model`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ modelId }),
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/model');
+    return (await res.json()) as SetModelResult;
   }
 
   async prompt(sessionId: string, req: PromptRequest): Promise<PromptResult> {

@@ -14,6 +14,7 @@ export {
   type DaemonEvent,
   type DaemonMode,
   type DaemonSession,
+  type DaemonSessionSummary,
   type PermissionOutcome,
   type PermissionOutcomeCancelled,
   type PermissionOutcomeSelected,
@@ -22,6 +23,7 @@ export {
   type PromptRequest as DaemonPromptRequest,
   type PromptResult,
   type PromptTextContent,
+  type SetModelResult,
   type SubscribeOptions as DaemonSubscribeOptions,
 } from './daemon/index.js';
 
