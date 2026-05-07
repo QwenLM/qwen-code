@@ -117,6 +117,12 @@ export class EventBus {
    * generator-style implementation would defer registration to the first
    * `next()` call, which races with publishes that happen before the
    * consumer's first await.)
+   *
+   * The returned iterator is NOT safe to drive from concurrent callers —
+   * two simultaneous `.next()` calls would race for the same event from
+   * the underlying queue. Daemon usage is sequential (`for await ... of`
+   * inside the SSE route), so this is safe in production. Callers that
+   * fan an iterator out to multiple consumers must serialize themselves.
    */
   subscribe(opts: SubscribeOptions = {}): AsyncIterable<BridgeEvent> {
     if (this.closed) {

@@ -311,6 +311,12 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   }
 
   // Single-scope reuse keyed by canonical workspace path.
+  // KNOWN GAP: there is currently no path that removes a session from these
+  // maps when its child process crashes between requests. The next prompt
+  // against the dead session will fail (channel writes throw / responses
+  // never arrive within `initTimeoutMs`), so the failure is surfaced — but
+  // the entry stays in the maps as garbage until daemon shutdown. Stage 2's
+  // in-process bridge eliminates the spawned-child failure mode entirely.
   const byWorkspace = new Map<string, SessionEntry>();
   const byId = new Map<string, SessionEntry>();
   // Daemon-wide pending permission table; requestIds are UUIDs so collisions
@@ -607,6 +613,13 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
       'Cannot determine CLI entry path for spawning the ACP child (process.argv[1] is empty).',
     );
   }
+  // Each session takes ~3 file descriptors (stdin/stdout/stderr) for the
+  // child plus a few sockets. Operators running many concurrent sessions
+  // should bump `ulimit -n` accordingly. Stage 1 doesn't pre-flight FD
+  // headroom — Stage 2 in-process drops the per-session FD cost entirely.
+  // Child stderr is `inherit`ed so it lands in the daemon's stderr; this
+  // is interleaved across sessions and hard to debug. Stage 4+ remote
+  // sandboxes will isolate.
   const child = spawn(process.execPath, [cliEntry, '--acp'], {
     cwd: workspaceCwd,
     stdio: ['pipe', 'pipe', 'inherit'],

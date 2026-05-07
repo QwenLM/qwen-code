@@ -26,7 +26,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('port', {
         type: 'number',
         default: 4170,
-        description: 'TCP port to bind',
+        description:
+          'TCP port to bind (use 0 for an OS-assigned ephemeral port)',
       })
       .option('hostname', {
         type: 'string',

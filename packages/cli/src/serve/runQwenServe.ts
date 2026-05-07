@@ -118,7 +118,7 @@ export async function runQwenServe(
               );
               // Force-destroy every still-open connection on the listener.
               // This unblocks `server.close` which then resolves naturally.
-              server.closeAllConnections?.();
+              server.closeAllConnections();
               setTimeout(() => finish(), 100).unref();
             }, SHUTDOWN_FORCE_CLOSE_MS);
             forceTimer.unref();
