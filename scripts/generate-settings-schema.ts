@@ -39,6 +39,9 @@ interface JsonSchemaProperty {
   default?: unknown;
   additionalProperties?: boolean | JsonSchemaProperty;
   required?: string[];
+  oneOf?: JsonSchemaProperty[];
+  anyOf?: JsonSchemaProperty[];
+  allOf?: JsonSchemaProperty[];
 }
 
 function convertItemDefinitionToJsonSchema(
@@ -94,6 +97,18 @@ function convertItemDefinitionToJsonSchema(
 function convertSettingToJsonSchema(
   setting: SettingDefinition,
 ): JsonSchemaProperty {
+  // Escape hatch: a SettingDefinition can supply a verbatim JSON Schema
+  // fragment for cases the `type` field cannot express (most commonly
+  // unions). The description is carried forward from the SettingDefinition
+  // so we don't have to restate it in the override.
+  if (setting.jsonSchemaOverride) {
+    const override = { ...setting.jsonSchemaOverride } as JsonSchemaProperty;
+    if (setting.description && override.description === undefined) {
+      override.description = setting.description;
+    }
+    return override;
+  }
+
   const schema: JsonSchemaProperty = {};
 
   if (setting.description) {
