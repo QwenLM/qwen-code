@@ -58,6 +58,17 @@ describe('BackgroundAgentResumeService', () => {
       fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
       fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
     };
+    // Stub registry exposed on both `parent.getToolRegistry()` and the
+    // override built by `createApprovalModeOverride` (which now rebuilds
+    // the tool registry on the resumed agent's Config so bound tools
+    // resolve to the resumed agent — see PR #3873). Without these
+    // mocks the override helper throws and every resume test fails.
+    const stubToolRegistry = {
+      copyDiscoveredToolsFrom: vi.fn(),
+      getAllTools: vi.fn().mockReturnValue([]),
+      getAllToolNames: vi.fn().mockReturnValue([]),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
     const config = {
       storage: {
         getProjectDir: () => tempDir,
@@ -72,6 +83,8 @@ describe('BackgroundAgentResumeService', () => {
       getGeminiClient: () => undefined,
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),
+      getToolRegistry: () => stubToolRegistry,
+      createToolRegistry: vi.fn().mockResolvedValue(stubToolRegistry),
     } as unknown as Config;
 
     return {
