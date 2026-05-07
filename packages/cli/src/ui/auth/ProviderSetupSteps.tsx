@@ -224,9 +224,20 @@ function AdvancedConfigStep({
 }: {
   flow: ProviderSetupFlow;
 }): React.JSX.Element {
-  const { focusedConfigIndex, thinkingEnabled, modalityEnabled } = flow.state;
+  const {
+    focusedConfigIndex,
+    thinkingEnabled,
+    modalityEnabled,
+    modalityImage,
+    modalityVideo,
+    modalityAudio,
+    modalityPdf,
+    contextWindowSize,
+  } = flow.state;
   const checkmark = (v: boolean) => (v ? '◉' : '○');
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
+
+  const ctxIdx = modalityEnabled ? 6 : 2;
 
   return (
     <Box marginTop={1} flexDirection="column">
@@ -258,7 +269,51 @@ function AdvancedConfigStep({
       </Box>
       <Box marginTop={0} marginLeft={4}>
         <Text color={theme.text.secondary}>
-          {t('Enables image, video, and audio input/output capabilities.')}
+          {t('Enables multimodal input capabilities (image, video, etc.).')}
+        </Text>
+      </Box>
+      {modalityEnabled && (
+        <Box marginTop={0} marginLeft={6}>
+          <Text
+            color={focusedConfigIndex === 2 ? theme.status.success : undefined}
+          >
+            {cursor(2)} {checkmark(modalityImage)} {'Image  '}
+          </Text>
+          <Text
+            color={focusedConfigIndex === 3 ? theme.status.success : undefined}
+          >
+            {cursor(3)} {checkmark(modalityVideo)} {'Video  '}
+          </Text>
+          <Text
+            color={focusedConfigIndex === 4 ? theme.status.success : undefined}
+          >
+            {cursor(4)} {checkmark(modalityAudio)} {'Audio  '}
+          </Text>
+          <Text
+            color={focusedConfigIndex === 5 ? theme.status.success : undefined}
+          >
+            {cursor(5)} {checkmark(modalityPdf)} {'PDF'}
+          </Text>
+        </Box>
+      )}
+      <Box marginTop={1} marginLeft={2}>
+        <Text
+          color={
+            focusedConfigIndex === ctxIdx ? theme.status.success : undefined
+          }
+        >
+          {cursor(ctxIdx)} {t('Context window')}:{' '}
+        </Text>
+        <TextInput
+          value={contextWindowSize}
+          onChange={flow.changeContextWindowSize}
+          placeholder="auto"
+          isActive={focusedConfigIndex === ctxIdx}
+        />
+      </Box>
+      <Box marginTop={0} marginLeft={4}>
+        <Text color={theme.text.secondary}>
+          {t('Max input tokens (leave empty to auto-detect from model name).')}
         </Text>
       </Box>
       <Box marginTop={1}>

@@ -19,15 +19,26 @@ export const CODING_PLAN_GLOBAL_BASE_URL =
   'https://coding-intl.dashscope.aliyuncs.com/v1';
 
 const MODELSTUDIO_MODELS: ModelSpec[] = [
-  { id: 'qwen3.5-plus', contextWindowSize: 1000000, enableThinking: true },
+  {
+    id: 'qwen3.5-plus',
+    contextWindowSize: 1000000,
+    enableThinking: true,
+    modalities: { image: true, video: true },
+  },
   {
     id: 'qwen3.6-plus',
     description: 'Currently available to Pro subscribers only.',
     contextWindowSize: 1000000,
     enableThinking: true,
+    modalities: { image: true, video: true },
   },
   { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
-  { id: 'kimi-k2.5', contextWindowSize: 262144, enableThinking: true },
+  {
+    id: 'kimi-k2.5',
+    contextWindowSize: 262144,
+    enableThinking: true,
+    modalities: { image: true, video: true },
+  },
   { id: 'MiniMax-M2.5', contextWindowSize: 196608, enableThinking: true },
   { id: 'qwen3-coder-plus', contextWindowSize: 1000000 },
   { id: 'qwen3-coder-next', contextWindowSize: 262144 },

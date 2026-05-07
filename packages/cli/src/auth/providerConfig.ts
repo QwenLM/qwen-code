@@ -5,7 +5,11 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { AuthType, ProviderModelConfig } from '@qwen-code/qwen-code-core';
+import type {
+  AuthType,
+  InputModalities,
+  ProviderModelConfig,
+} from '@qwen-code/qwen-code-core';
 import type { ProviderInstallPlan, ProviderInstallState } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -16,6 +20,7 @@ export interface ModelSpec {
   id: string;
   contextWindowSize?: number;
   enableThinking?: boolean;
+  modalities?: InputModalities;
   description?: string;
 }
 
@@ -129,7 +134,8 @@ export interface ProviderSetupInputs {
   prebuiltModels?: ProviderModelConfig[];
   advancedConfig?: {
     enableThinking?: boolean;
-    multimodal?: { image?: boolean; video?: boolean; audio?: boolean };
+    multimodal?: InputModalities;
+    contextWindowSize?: number;
     maxTokens?: number;
   };
 }
@@ -178,7 +184,7 @@ function resolveOwnsModel(
 }
 
 function buildGenerationConfig(
-  spec: Pick<ModelSpec, 'enableThinking' | 'contextWindowSize'>,
+  spec: Pick<ModelSpec, 'enableThinking' | 'contextWindowSize' | 'modalities'>,
 ): ProviderModelConfig['generationConfig'] | undefined {
   const parts: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
@@ -188,6 +194,10 @@ function buildGenerationConfig(
   }
   if (spec.contextWindowSize) {
     parts.contextWindowSize = spec.contextWindowSize;
+    hasAny = true;
+  }
+  if (spec.modalities && Object.values(spec.modalities).some(Boolean)) {
+    parts.modalities = spec.modalities;
     hasAny = true;
   }
   return hasAny ? parts : undefined;
@@ -253,12 +263,12 @@ function buildModelConfigs(
       cfg.extra_body = { enable_thinking: true };
       hasAny = true;
     }
-    if (advCfg?.multimodal) {
-      cfg.modalities = {
-        image: advCfg.multimodal.image ?? false,
-        video: advCfg.multimodal.video ?? false,
-        audio: advCfg.multimodal.audio ?? false,
-      };
+    if (advCfg?.multimodal && Object.values(advCfg.multimodal).some(Boolean)) {
+      cfg.modalities = advCfg.multimodal;
+      hasAny = true;
+    }
+    if (advCfg?.contextWindowSize && advCfg.contextWindowSize > 0) {
+      cfg.contextWindowSize = advCfg.contextWindowSize;
       hasAny = true;
     }
     if (advCfg?.maxTokens && advCfg.maxTokens > 0) {

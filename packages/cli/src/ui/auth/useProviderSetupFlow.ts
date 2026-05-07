@@ -6,6 +6,7 @@
 
 import { useState, useCallback } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
+import type { InputModalities } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
 const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
@@ -79,6 +80,11 @@ export interface ProviderSetupState {
   // Advanced config
   thinkingEnabled: boolean;
   modalityEnabled: boolean;
+  modalityImage: boolean;
+  modalityVideo: boolean;
+  modalityAudio: boolean;
+  modalityPdf: boolean;
+  contextWindowSize: string;
   focusedConfigIndex: number;
 
   // Preview
@@ -109,6 +115,11 @@ export function useProviderSetupFlow(
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [modalityEnabled, setModalityEnabled] = useState(false);
+  const [modalityImage, setModalityImage] = useState(true);
+  const [modalityVideo, setModalityVideo] = useState(true);
+  const [modalityAudio, setModalityAudio] = useState(true);
+  const [modalityPdf, setModalityPdf] = useState(false);
+  const [contextWindowSize, setContextWindowSize] = useState('');
   const [focusedConfigIndex, setFocusedConfigIndex] = useState(0);
 
   const currentStep = visibleSteps[stepIndex] ?? null;
@@ -149,6 +160,11 @@ export function useProviderSetupFlow(
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);
+      setModalityImage(true);
+      setModalityVideo(true);
+      setModalityAudio(true);
+      setModalityPdf(false);
+      setContextWindowSize('');
       setFocusedConfigIndex(0);
     },
     [],
@@ -289,19 +305,38 @@ export function useProviderSetupFlow(
     return true;
   }, [modelIds, submitOrNext]);
 
+  const advancedOptionCount = modalityEnabled ? 7 : 3;
+
   const moveAdvancedFocusUp = useCallback(() => {
-    setFocusedConfigIndex((v) => (v <= 0 ? 1 : v - 1));
-  }, []);
+    setFocusedConfigIndex((v) => (v <= 0 ? advancedOptionCount - 1 : v - 1));
+  }, [advancedOptionCount]);
 
   const moveAdvancedFocusDown = useCallback(() => {
-    setFocusedConfigIndex((v) => (v >= 1 ? 0 : v + 1));
-  }, []);
+    setFocusedConfigIndex((v) => (v >= advancedOptionCount - 1 ? 0 : v + 1));
+  }, [advancedOptionCount]);
 
   const toggleFocusedAdvancedOption = useCallback(() => {
-    if (focusedConfigIndex === 0) {
-      setThinkingEnabled((v) => !v);
-    } else {
-      setModalityEnabled((v) => !v);
+    switch (focusedConfigIndex) {
+      case 0:
+        setThinkingEnabled((v) => !v);
+        break;
+      case 1:
+        setModalityEnabled((v) => !v);
+        break;
+      case 2:
+        setModalityImage((v) => !v);
+        break;
+      case 3:
+        setModalityVideo((v) => !v);
+        break;
+      case 4:
+        setModalityAudio((v) => !v);
+        break;
+      case 5:
+        setModalityPdf((v) => !v);
+        break;
+      default:
+        break;
     }
   }, [focusedConfigIndex]);
 
@@ -311,22 +346,41 @@ export function useProviderSetupFlow(
 
   // -- Final submit ---------------------------------------------------------
 
+  const changeContextWindowSize = useCallback((value: string) => {
+    setContextWindowSize(value.replace(/[^0-9]/g, ''));
+  }, []);
+
   const submit = useCallback(() => {
     if (!provider) return;
-    const advancedConfig =
-      thinkingEnabled || modalityEnabled
-        ? {
-            enableThinking: thinkingEnabled || undefined,
-            multimodal: modalityEnabled
-              ? { image: true, video: true, audio: true }
-              : undefined,
-          }
-        : undefined;
+    const multimodal: InputModalities | undefined = modalityEnabled
+      ? {
+          image: modalityImage || undefined,
+          video: modalityVideo || undefined,
+          audio: modalityAudio || undefined,
+          pdf: modalityPdf || undefined,
+        }
+      : undefined;
+    const ctxSize = parseInt(contextWindowSize, 10);
+    const hasAdvanced =
+      thinkingEnabled || modalityEnabled || (ctxSize > 0 && !isNaN(ctxSize));
+    const advancedConfig = hasAdvanced
+      ? {
+          enableThinking: thinkingEnabled || undefined,
+          multimodal,
+          contextWindowSize:
+            ctxSize > 0 && !isNaN(ctxSize) ? ctxSize : undefined,
+        }
+      : undefined;
     void onSubmit(provider, buildCurrentInputs({ advancedConfig }));
   }, [
     provider,
     thinkingEnabled,
     modalityEnabled,
+    modalityImage,
+    modalityVideo,
+    modalityAudio,
+    modalityPdf,
+    contextWindowSize,
     onSubmit,
     buildCurrentInputs,
   ]);
@@ -344,8 +398,17 @@ export function useProviderSetupFlow(
 
     const genConfig: Record<string, unknown> = {};
     if (thinkingEnabled) genConfig['extra_body'] = { enable_thinking: true };
-    if (modalityEnabled)
-      genConfig['modalities'] = { image: true, video: true, audio: true };
+    if (modalityEnabled) {
+      const mod: Record<string, boolean> = {};
+      if (modalityImage) mod['image'] = true;
+      if (modalityVideo) mod['video'] = true;
+      if (modalityAudio) mod['audio'] = true;
+      if (modalityPdf) mod['pdf'] = true;
+      if (Object.keys(mod).length > 0) genConfig['modalities'] = mod;
+    }
+    const ctxSize = parseInt(contextWindowSize, 10);
+    if (ctxSize > 0 && !isNaN(ctxSize))
+      genConfig['contextWindowSize'] = ctxSize;
     const hasGenConfig = Object.keys(genConfig).length > 0;
 
     const models = normalizedIds.map((id) => {
@@ -377,6 +440,11 @@ export function useProviderSetupFlow(
     modelIds,
     thinkingEnabled,
     modalityEnabled,
+    modalityImage,
+    modalityVideo,
+    modalityAudio,
+    modalityPdf,
+    contextWindowSize,
   ]);
 
   // -- State ----------------------------------------------------------------
@@ -396,6 +464,11 @@ export function useProviderSetupFlow(
     modelIdsError,
     thinkingEnabled,
     modalityEnabled,
+    modalityImage,
+    modalityVideo,
+    modalityAudio,
+    modalityPdf,
+    contextWindowSize,
     focusedConfigIndex,
     previewJson: getPreviewJson(),
   };
@@ -417,6 +490,7 @@ export function useProviderSetupFlow(
     moveAdvancedFocusUp,
     moveAdvancedFocusDown,
     toggleFocusedAdvancedOption,
+    changeContextWindowSize,
     submitAdvancedConfig,
     submit,
   };
