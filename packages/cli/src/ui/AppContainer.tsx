@@ -11,6 +11,8 @@ import {
   useEffect,
   useRef,
   useLayoutEffect,
+  type Dispatch,
+  type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
 import { App } from './App.js';
@@ -132,6 +134,11 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import {
+  RenderModeProvider,
+  type RenderMode,
+} from './contexts/RenderModeContext.js';
+import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -160,6 +167,29 @@ import {
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
+
+export function isRenderModeToggleKey(key: Key): boolean {
+  return (
+    keyMatchers[Command.TOGGLE_RENDER_MODE](key) ||
+    (key.name === 'm' && key.meta && !key.ctrl && !key.paste)
+  );
+}
+
+export function getNextRenderMode(current: RenderMode): RenderMode {
+  return current === 'render' ? 'raw' : 'render';
+}
+
+export function handleRenderModeToggleKey(
+  key: Key,
+  setRenderMode: Dispatch<SetStateAction<RenderMode>>,
+): boolean {
+  if (!isRenderModeToggleKey(key)) {
+    return false;
+  }
+
+  setRenderMode(getNextRenderMode);
+  return true;
+}
 
 function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   return pendingHistoryItems.some((item) => {
@@ -1567,6 +1597,28 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
+  const configuredRenderMode = settings.merged.ui?.renderMode;
+  const [renderMode, setRenderMode] = useState<RenderMode>(
+    configuredRenderMode === 'raw' ? 'raw' : 'render',
+  );
+  const renderModeConfigMountedRef = useRef(false);
+  useEffect(() => {
+    if (!renderModeConfigMountedRef.current) {
+      renderModeConfigMountedRef.current = true;
+      return;
+    }
+
+    setRenderMode(configuredRenderMode === 'raw' ? 'raw' : 'render');
+  }, [configuredRenderMode]);
+  const renderModeMountedRef = useRef(false);
+  useEffect(() => {
+    if (!renderModeMountedRef.current) {
+      renderModeMountedRef.current = true;
+      return;
+    }
+
+    refreshStatic();
+  }, [renderMode, refreshStatic]);
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -2157,7 +2209,9 @@ export const AppContainer = (props: AppContainerProps) => {
         setConstrainHeight(true);
       }
 
-      if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
+      if (handleRenderModeToggleKey(key, setRenderMode)) {
+        return;
+      } else if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
         const newValue = !showToolDescriptions;
         setShowToolDescriptions(newValue);
 
@@ -2220,6 +2274,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
+      setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
     ],
@@ -2699,6 +2754,10 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({ compactMode, setCompactMode }),
     [compactMode, setCompactMode],
   );
+  const renderModeValue = useMemo(
+    () => ({ renderMode, setRenderMode }),
+    [renderMode, setRenderMode],
+  );
 
   return (
     <UIStateContext.Provider value={uiState}>
@@ -2711,9 +2770,13 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <CompactModeProvider value={compactModeValue}>
-              <ShellFocusContext.Provider value={isFocused}>
-                <App />
-              </ShellFocusContext.Provider>
+              <RenderModeProvider value={renderModeValue}>
+                <TerminalOutputProvider value={writeRaw}>
+                  <ShellFocusContext.Provider value={isFocused}>
+                    <App />
+                  </ShellFocusContext.Provider>
+                </TerminalOutputProvider>
+              </RenderModeProvider>
             </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>

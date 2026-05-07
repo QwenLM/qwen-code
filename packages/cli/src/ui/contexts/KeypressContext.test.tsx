@@ -91,6 +91,37 @@ describe('KeypressContext - Kitty Protocol', () => {
   });
 
   describe('Enter key handling', () => {
+    it('preserves typed µ as printable text', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper,
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.pressKey({
+          name: 'µ',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: 'µ',
+        });
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'µ',
+          meta: false,
+          sequence: 'µ',
+        }),
+      );
+    });
+
     it('should recognize regular enter key (keycode 13) in kitty protocol', async () => {
       const keyHandler = vi.fn();
 
