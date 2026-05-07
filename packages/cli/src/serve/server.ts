@@ -403,6 +403,14 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // terminal/synthetic frames (e.g. daemon-side `stream_error`) must not
   // burn a slot in the per-session monotonic sequence the client uses for
   // `Last-Event-ID` reconnect tracking.
+  //
+  // We always emit the payload as a single `data:` line. The EventSource
+  // spec also allows a frame to span multiple `data:` lines (which a
+  // conformant parser joins with `\n`); we don't emit that form because
+  // our payload is JSON without embedded newlines after `JSON.stringify`.
+  // The SDK parser at `sdk-typescript/src/daemon/sse.ts` handles the
+  // multi-line variant on the receive side — input/output asymmetry is
+  // intentional.
   const dataJson = JSON.stringify(event);
   const idLine =
     'id' in event && event.id !== undefined ? `id: ${event.id}\n` : '';
