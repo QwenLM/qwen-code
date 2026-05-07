@@ -15,6 +15,11 @@ describe('latexRenderer', () => {
     expect(renderInlineLatex(String.raw`\sum_{i=1}^{n} x_i`)).toBe('Σᵢ₌₁ⁿ xᵢ');
   });
 
+  it('renders nested fractions and invisible left/right delimiters', () => {
+    expect(renderInlineLatex(String.raw`\frac{\frac{1}{2}}{3}`)).toBe('1/2/3');
+    expect(renderInlineLatex(String.raw`\left.\frac{a}{b}\right.`)).toBe('a/b');
+  });
+
   it('preserves unknown commands instead of stripping command markers', () => {
     expect(renderInlineLatex(String.raw`\mathcal{O}(n)`)).toBe(
       String.raw`\mathcal{O}(n)`,

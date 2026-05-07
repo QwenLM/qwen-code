@@ -17,6 +17,7 @@ export interface MermaidImageRenderOptions {
   contentWidth: number;
   availableTerminalHeight?: number;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }
 
 export interface MermaidTerminalImageResult {
@@ -233,10 +234,8 @@ export function detectTerminalImageProtocol(
   }
 
   const forced = env['QWEN_CODE_MERMAID_IMAGE_PROTOCOL']?.toLowerCase();
-  if (forced) {
-    if (forced === 'kitty') return 'kitty';
-    if (forced === 'iterm' || forced === 'iterm2') return 'iterm2';
-    if (forced === 'off' || forced === 'none' || forced === '0') return null;
+  if (forced === 'off' || forced === 'none' || forced === '0') {
+    return null;
   }
 
   if (
@@ -246,6 +245,11 @@ export function detectTerminalImageProtocol(
     env['SSH_CLIENT']
   ) {
     return null;
+  }
+
+  if (forced) {
+    if (forced === 'kitty') return 'kitty';
+    if (forced === 'iterm' || forced === 'iterm2') return 'iterm2';
   }
 
   const term = env['TERM']?.toLowerCase() ?? '';
@@ -508,6 +512,7 @@ export async function renderMermaidImageAsync({
   contentWidth,
   availableTerminalHeight,
   env = process.env,
+  signal,
 }: MermaidImageRenderOptions): Promise<MermaidImageRenderResult> {
   if (isMermaidImageRenderingDisabled(env)) {
     return unavailableImageRenderingDisabled();
@@ -568,10 +573,25 @@ export async function renderMermaidImageAsync({
 
   const pngCacheKey = createPngCacheKey(source, mmdc, env);
   const cachedPng = getPngCache(pngCacheKey);
-  const rendered =
-    cachedPng ??
-    rememberPng(pngCacheKey, await renderPngWithMmdcAsync(source, mmdc, env));
+  let rendered = cachedPng;
+  if (!rendered) {
+    const nextRendered = await renderPngWithMmdcAsync(
+      source,
+      mmdc,
+      env,
+      signal,
+    );
+    rendered = signal?.aborted
+      ? nextRendered
+      : rememberPng(pngCacheKey, nextRendered);
+  }
   if (!rendered.ok) {
+    if (signal?.aborted) {
+      return {
+        kind: 'unavailable',
+        reason: rendered.error,
+      };
+    }
     return remember(cacheKey, {
       kind: 'unavailable',
       reason: rendered.error,
@@ -634,8 +654,15 @@ export async function renderMermaidImageAsync({
     imageShape.rows,
     chafa!,
     env,
+    signal,
   );
   if (!ansi.ok) {
+    if (signal?.aborted) {
+      return {
+        kind: 'unavailable',
+        reason: ansi.error,
+      };
+    }
     return remember(cacheKey, {
       kind: 'unavailable',
       reason: ansi.error,
@@ -958,6 +985,7 @@ async function renderPngWithMmdcAsync(
   source: string,
   mmdc: string,
   env: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; png: Buffer } | { ok: false; error: string }> {
   const tempDir = await fs.promises.mkdtemp(
     path.join(os.tmpdir(), 'qwen-mermaid-'),
@@ -988,6 +1016,7 @@ async function renderPngWithMmdcAsync(
       env: createRendererChildEnv(env),
       shell: shouldRunThroughShell(command),
       timeout: getMermaidRenderTimeout(env),
+      signal,
     });
 
     if (result.error) {
@@ -1116,6 +1145,7 @@ async function renderPngWithChafaAsync(
   rows: number,
   chafa: string,
   env: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
   const tempDir = await fs.promises.mkdtemp(
     path.join(os.tmpdir(), 'qwen-mermaid-'),
@@ -1137,6 +1167,7 @@ async function renderPngWithChafaAsync(
         env: createRendererChildEnv(env),
         shell: shouldRunThroughShell(chafa),
         timeout: getMermaidRenderTimeout(env),
+        signal,
       },
     );
 
@@ -1176,9 +1207,20 @@ function runCommand(
     env: NodeJS.ProcessEnv;
     shell?: boolean;
     timeout: number;
+    signal?: AbortSignal;
   },
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
+    if (options.signal?.aborted) {
+      resolve({
+        status: null,
+        stdout: '',
+        stderr: '',
+        error: 'Command cancelled.',
+      });
+      return;
+    }
+
     const child = spawn(command, args, {
       env: options.env,
       shell: options.shell,
@@ -1187,17 +1229,43 @@ function runCommand(
     let stdout: BoundedRendererOutput = { text: '', truncated: false };
     let stderr: BoundedRendererOutput = { text: '', truncated: false };
     let settled = false;
-    const timer = setTimeout(() => {
+    let killTimer: NodeJS.Timeout | undefined;
+    let terminationRequested = false;
+    const finish = (result: CommandResult) => {
       if (settled) return;
       settled = true;
-      child.kill();
-      resolve({
+      clearTimeout(timer);
+      if (!terminationRequested && killTimer) clearTimeout(killTimer);
+      options.signal?.removeEventListener('abort', handleAbort);
+      resolve(result);
+    };
+    const terminateChild = () => {
+      terminationRequested = true;
+      child.kill('SIGTERM');
+      killTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, 1000);
+      killTimer.unref?.();
+    };
+    const handleAbort = () => {
+      terminateChild();
+      finish({
+        status: null,
+        stdout: finalizeBoundedRendererOutput(stdout),
+        stderr: finalizeBoundedRendererOutput(stderr),
+        error: 'Command cancelled.',
+      });
+    };
+    const timer = setTimeout(() => {
+      terminateChild();
+      finish({
         status: null,
         stdout: finalizeBoundedRendererOutput(stdout),
         stderr: finalizeBoundedRendererOutput(stderr),
         error: `Command timed out after ${options.timeout}ms.`,
       });
     }, options.timeout);
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
 
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
@@ -1208,10 +1276,7 @@ function runCommand(
       stderr = appendBoundedRendererOutput(stderr, chunk);
     });
     child.on('error', (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({
+      finish({
         status: null,
         stdout: finalizeBoundedRendererOutput(stdout),
         stderr: finalizeBoundedRendererOutput(stderr),
@@ -1219,10 +1284,7 @@ function runCommand(
       });
     });
     child.on('close', (status) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({
+      finish({
         status,
         stdout: finalizeBoundedRendererOutput(stdout),
         stderr: finalizeBoundedRendererOutput(stderr),

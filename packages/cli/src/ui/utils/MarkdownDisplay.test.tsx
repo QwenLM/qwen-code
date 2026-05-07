@@ -376,6 +376,24 @@ Another paragraph.
       expect(output).toContain('○ Todo');
     });
 
+    it('keeps pipes inside markdown table code spans in the same cell', () => {
+      const text = `
+| Expr | Meaning |
+|------|---------|
+| \`a|b\` | code pipe |
+| escaped\\|pipe | literal pipe |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+
+      expect(output).toContain('a|b');
+      expect(output).toContain('escaped|pipe');
+      expect(output).toContain('code pipe');
+      expect(output).toContain('literal pipe');
+    });
+
     it('renders blockquotes as quoted text', () => {
       const text = '> Important **note**'.replace(/\n/g, eol);
       const { lastFrame } = renderWithProviders(

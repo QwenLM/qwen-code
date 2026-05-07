@@ -115,18 +115,101 @@ function convertScript(value: string, map: Record<string, string>): string {
   return [...value].map((char) => map[char] ?? char).join('');
 }
 
+function findBalancedGroup(
+  input: string,
+  openBraceIndex: number,
+): { value: string; end: number } | null {
+  if (input[openBraceIndex] !== '{') {
+    return null;
+  }
+
+  let depth = 0;
+  for (let index = openBraceIndex; index < input.length; index++) {
+    const char = input[index];
+    if (char === '\\') {
+      index += 1;
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char !== '}') {
+      continue;
+    }
+
+    depth -= 1;
+    if (depth === 0) {
+      return {
+        value: input.slice(openBraceIndex + 1, index),
+        end: index + 1,
+      };
+    }
+  }
+
+  return null;
+}
+
+function replaceBraceCommand(
+  input: string,
+  command: string,
+  groupCount: number,
+  render: (groups: string[]) => string,
+): string {
+  const marker = `\\${command}`;
+  let output = '';
+  let index = 0;
+
+  while (index < input.length) {
+    if (!input.startsWith(marker, index)) {
+      output += input[index];
+      index += 1;
+      continue;
+    }
+
+    const groups: string[] = [];
+    let cursor = index + marker.length;
+    for (let groupIndex = 0; groupIndex < groupCount; groupIndex++) {
+      const group = findBalancedGroup(input, cursor);
+      if (!group) {
+        groups.length = 0;
+        break;
+      }
+      groups.push(group.value);
+      cursor = group.end;
+    }
+
+    if (groups.length !== groupCount) {
+      output += input[index];
+      index += 1;
+      continue;
+    }
+
+    output += render(groups);
+    index = cursor;
+  }
+
+  return output;
+}
+
 export function renderInlineLatex(input: string): string {
   let output = input.trim();
 
-  output = output.replace(
-    /\\frac\{([^{}]+)\}\{([^{}]+)\}/g,
-    (_match, numerator: string, denominator: string) =>
-      `${renderInlineLatex(numerator)}/${renderInlineLatex(denominator)}`,
+  output = replaceBraceCommand(
+    output,
+    'frac',
+    2,
+    ([numerator, denominator]) =>
+      `${renderInlineLatex(numerator ?? '')}/${renderInlineLatex(
+        denominator ?? '',
+      )}`,
   );
 
-  output = output.replace(
-    /\\sqrt\{([^{}]+)\}/g,
-    (_match, radicand: string) => `√(${renderInlineLatex(radicand)})`,
+  output = replaceBraceCommand(
+    output,
+    'sqrt',
+    1,
+    ([radicand]) => `√(${renderInlineLatex(radicand ?? '')})`,
   );
 
   output = output.replace(
@@ -147,6 +230,7 @@ export function renderInlineLatex(input: string): string {
   );
 
   return output
+    .replace(/\\(?:left|right)\./g, '')
     .replace(/\\left|\\right/g, '')
     .replace(/\\,/g, ' ')
     .replace(/\s+/g, ' ')

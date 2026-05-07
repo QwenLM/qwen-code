@@ -91,7 +91,7 @@ describe('KeypressContext - Kitty Protocol', () => {
   });
 
   describe('Enter key handling', () => {
-    it('normalizes macOS option-m text into a meta-m shortcut event', () => {
+    it('preserves typed µ as printable text', () => {
       const keyHandler = vi.fn();
 
       const { result } = renderHook(() => useKeypressContext(), {
@@ -115,8 +115,8 @@ describe('KeypressContext - Kitty Protocol', () => {
 
       expect(keyHandler).toHaveBeenCalledWith(
         expect.objectContaining({
-          name: 'm',
-          meta: true,
+          name: 'µ',
+          meta: false,
           sequence: 'µ',
         }),
       );

@@ -195,7 +195,7 @@
           "default": true
         },
         "renderMode": {
-          "description": "Default Markdown display mode. Use \"render\" for rich visual previews, or \"raw\" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M. Options: render, raw",
+          "description": "Default Markdown display mode. Use \"render\" for rich visual previews, or \"raw\" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M; on macOS the terminal must send Option as Meta. Options: render, raw",
           "enum": [
             "render",
             "raw"

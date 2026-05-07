@@ -64,10 +64,12 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
     }
 
     let cancelled = false;
+    const abortController = new AbortController();
     void renderMermaidImageAsync({
       source,
       contentWidth: innerWidth,
       availableTerminalHeight,
+      signal: abortController.signal,
     }).then(
       (result) => {
         if (!cancelled) {
@@ -89,6 +91,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
 
     return () => {
       cancelled = true;
+      abortController.abort();
     };
   }, [availableTerminalHeight, imageKey, innerWidth, isPending, source]);
 

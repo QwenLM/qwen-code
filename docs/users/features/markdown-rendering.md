@@ -17,7 +17,9 @@ visual previews where possible:
 - inline and block LaTeX math
 - fenced code blocks with syntax highlighting
 
-Press `Alt/Option+M` to toggle the current session between:
+Press `Alt/Option+M` to toggle the current session between modes. On macOS,
+the terminal must send Option as Meta for this shortcut; otherwise Option+M is
+treated as normal text input.
 
 - `render`: show rich terminal previews for supported Markdown.
 - `raw`: show source-oriented Markdown for visual blocks such as Mermaid,
@@ -133,7 +135,8 @@ Use these commands to copy LaTeX source from the last AI response:
 
 Inline LaTeX does not show a per-expression copy hint in rendered text to avoid
 making prose noisy. Switch to raw mode with `Alt/Option+M` when you want to
-inspect inline source in place.
+inspect inline source in place; on macOS this requires Option-as-Meta terminal
+input.
 
 ## General Code Copy
 

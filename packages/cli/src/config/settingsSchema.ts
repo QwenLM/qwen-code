@@ -608,7 +608,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 'render',
         description:
-          'Default Markdown display mode. Use "render" for rich visual previews, or "raw" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M.',
+          'Default Markdown display mode. Use "render" for rich visual previews, or "raw" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M; on macOS the terminal must send Option as Meta.',
         showInDialog: true,
         options: [
           { value: 'render', label: 'Render visual previews' },

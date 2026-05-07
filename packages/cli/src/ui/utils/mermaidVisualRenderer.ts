@@ -68,6 +68,8 @@ const MAX_PREVIEW_SOURCE_LINE_LENGTH = 1000;
 const MIN_CANVAS_WIDTH = 24;
 const NODE_GAP_X = 4;
 const NODE_GAP_Y = 4;
+const FLOW_EDGE_OPERATOR_RE =
+  /\s*(?:-->\|([^|]+)\||--\s+(.+?)\s+-->|(?:-->|---|==>|-\.->|--x|--o))\s*/g;
 
 function truncateToWidth(text: string, width: number): string {
   if (width <= 0 || stringWidth(text) <= width) return text;
@@ -248,6 +250,42 @@ function parseFlowEdge(line: string): FlowEdge | null {
   }
 
   return null;
+}
+
+function parseFlowEdges(line: string): FlowEdge[] {
+  const singleEdge = parseFlowEdge(line);
+  const operators = [...line.matchAll(FLOW_EDGE_OPERATOR_RE)];
+  if (operators.length <= 1) return singleEdge ? [singleEdge] : [];
+
+  const tokens: string[] = [];
+  const labels: Array<string | undefined> = [];
+  let cursor = 0;
+  for (const operator of operators) {
+    tokens.push(line.slice(cursor, operator.index).trim());
+    labels.push(
+      stripMermaidPunctuation(operator[1] ?? operator[2] ?? '') || undefined,
+    );
+    cursor = operator.index + operator[0].length;
+  }
+  tokens.push(line.slice(cursor).trim());
+  if (tokens.length !== operators.length + 1) {
+    return [];
+  }
+
+  const nodes = tokens.map(parseNodeToken);
+  if (nodes.some((node) => node === null)) {
+    return [];
+  }
+
+  const edges: FlowEdge[] = [];
+  for (let index = 0; index < nodes.length - 1; index++) {
+    edges.push({
+      from: nodes[index]!,
+      to: nodes[index + 1]!,
+      label: labels[index],
+    });
+  }
+  return edges;
 }
 
 function normalizeFlowNodeLabels(edges: FlowEdge[]): FlowEdge[] {
@@ -449,6 +487,8 @@ function createCanvas(width: number, height: number): string[][] {
 }
 
 function mergeCanvasChar(existing: string, next: string): string {
+  if (existing === '') return existing;
+  if (next === '') return existing;
   if (existing === ' ' || existing === next) return next;
   if ('▼▲◀▶→←↩'.includes(existing)) return existing;
   if ('▼▲◀▶→←↩'.includes(next)) return next;
@@ -890,9 +930,7 @@ function renderFlowchart(
     }
     if (edgeBudgetExceeded) break;
   }
-  const edges = edgeLines
-    .map(parseFlowEdge)
-    .filter((edge): edge is FlowEdge => edge !== null);
+  const edges = edgeLines.flatMap(parseFlowEdges);
   const normalizedEdges = normalizeFlowNodeLabels(edges);
 
   if (normalizedEdges.length === 0) {

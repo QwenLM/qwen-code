@@ -171,8 +171,7 @@ const debugLogger = createDebugLogger('APP_CONTAINER');
 export function isRenderModeToggleKey(key: Key): boolean {
   return (
     keyMatchers[Command.TOGGLE_RENDER_MODE](key) ||
-    (key.name === 'm' && key.meta && !key.ctrl && !key.paste) ||
-    (key.sequence === 'µ' && !key.ctrl && !key.paste)
+    (key.name === 'm' && key.meta && !key.ctrl && !key.paste)
   );
 }
 

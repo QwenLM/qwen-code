@@ -175,8 +175,6 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
   [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
-  // macOS Option+M can arrive as a printable µ in some terminals. The
-  // KeypressContext normalizes that sequence to meta+m before matching.
   [Command.TOGGLE_RENDER_MODE]: [{ key: 'm', meta: true }],
 
   // Shell commands

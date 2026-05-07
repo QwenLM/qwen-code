@@ -82,4 +82,16 @@ describe('BaseTextInput', () => {
 
     expect(buffer.handleInput).toHaveBeenCalledWith(pastedKey);
   });
+
+  it('passes typed µ text through to the buffer', () => {
+    const buffer = createBuffer();
+
+    render(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);
+
+    const handler = captureKeypressHandler();
+    const typedKey = makeKey({ name: 'µ', sequence: 'µ' });
+    handler(typedKey);
+
+    expect(buffer.handleInput).toHaveBeenCalledWith(typedKey);
+  });
 });

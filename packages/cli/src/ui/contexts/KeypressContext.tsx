@@ -652,21 +652,9 @@ export function KeypressProvider({
       };
     };
 
-    const normalizeKey = (key: Key): Key => {
-      if (key.sequence === 'µ' && !key.ctrl && !key.meta && !key.paste) {
-        return {
-          ...key,
-          name: 'm',
-          meta: true,
-        };
-      }
-      return key;
-    };
-
     const broadcast = (key: Key) => {
-      const normalizedKey = normalizeKey(key);
       for (const handler of subscribers) {
-        handler(normalizedKey);
+        handler(key);
       }
     };
 

@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildKittyPlaceholder,
   detectTerminalImageProtocol,
@@ -25,6 +25,17 @@ const PNG_1X1 = Buffer.from(
 );
 
 const tempDirs: string[] = [];
+const originalStdoutIsTTY = Object.getOwnPropertyDescriptor(
+  process.stdout,
+  'isTTY',
+);
+
+function setStdoutIsTTY(value: boolean): void {
+  Object.defineProperty(process.stdout, 'isTTY', {
+    configurable: true,
+    value,
+  });
+}
 
 function createFakeMmdc(binDir: string, bodyLines?: string[]): void {
   const fakeMmdcScript = path.join(binDir, 'fake-mmdc.cjs');
@@ -76,7 +87,16 @@ function createFakeChafa(binDir: string, bodyLines?: string[]): void {
   fs.chmodSync(fakeChafa, 0o755);
 }
 
+beforeEach(() => {
+  setStdoutIsTTY(true);
+});
+
 afterEach(() => {
+  if (originalStdoutIsTTY) {
+    Object.defineProperty(process.stdout, 'isTTY', originalStdoutIsTTY);
+  } else {
+    delete (process.stdout as { isTTY?: boolean }).isTTY;
+  }
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -185,6 +205,21 @@ describe('mermaid image renderer', () => {
       detectTerminalImageProtocol({
         QWEN_CODE_DISABLE_MERMAID_IMAGES: '1',
         QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+      }),
+    ).toBeNull();
+  });
+
+  it('does not force terminal image protocols when stdout is not a TTY', () => {
+    setStdoutIsTTY(false);
+
+    expect(
+      detectTerminalImageProtocol({
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+      }),
+    ).toBeNull();
+    expect(
+      detectTerminalImageProtocol({
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'iterm2',
       }),
     ).toBeNull();
   });
@@ -512,6 +547,47 @@ describe('mermaid image renderer', () => {
     expect(result.kind === 'unavailable' && result.reason).toContain(
       'renderer output truncated',
     );
+  });
+
+  it('cancels async Mermaid CLI rendering when the caller aborts', async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir, ['setTimeout(() => {}, 60_000);']);
+
+    const abortController = new AbortController();
+    const resultPromise = renderMermaidImageAsync({
+      source: 'flowchart TD\n  A[Start] --> B[Abort]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      signal: abortController.signal,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+      },
+    });
+
+    abortController.abort();
+    const result = await resultPromise;
+
+    expect(result.kind).toBe('unavailable');
+    expect(result.kind === 'unavailable' && result.reason).toContain(
+      'cancelled',
+    );
+
+    createFakeMmdc(binDir);
+    const retry = await renderMermaidImageAsync({
+      source: 'flowchart TD\n  A[Start] --> B[Abort]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+      },
+    });
+
+    expect(retry.kind).toBe('terminal-image');
   });
 
   it('renders Kitty terminal images as virtual placements', () => {

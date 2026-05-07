@@ -96,6 +96,52 @@ const LIST_ITEM_TEXT_FLEX_GROW = 1;
 const BLOCKQUOTE_PREFIX_PADDING = 1;
 const MATH_BLOCK_PREFIX_PADDING = 1;
 
+function splitMarkdownTableRow(row: string): string[] {
+  const cells: string[] = [];
+  let current = '';
+  let activeCodeFenceLength = 0;
+
+  for (let index = 0; index < row.length; index++) {
+    const char = row[index]!;
+    if (char === '\\') {
+      const next = row[index + 1];
+      if (next === '|') {
+        current += '|';
+        index += 1;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+
+    if (char === '`') {
+      let runLength = 1;
+      while (row[index + runLength] === '`') {
+        runLength += 1;
+      }
+      if (activeCodeFenceLength === 0) {
+        activeCodeFenceLength = runLength;
+      } else if (runLength === activeCodeFenceLength) {
+        activeCodeFenceLength = 0;
+      }
+      current += '`'.repeat(runLength);
+      index += runLength - 1;
+      continue;
+    }
+
+    if (char === '|' && activeCodeFenceLength === 0) {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  cells.push(current.trim());
+  return cells;
+}
+
 const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   text,
   isPending,
@@ -122,9 +168,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
 
   /** Parse column alignments from a markdown table separator like `|:---|:---:|---:|` */
   const parseTableAligns = (line: string): ColumnAlign[] =>
-    line
-      .split(/(?<!\\)\|/)
-      .map((cell) => cell.trim())
+    splitMarkdownTableRow(line)
       .filter((cell) => cell.length > 0)
       .map((cell) => {
         const startsWithColon = cell.startsWith(':');
@@ -249,16 +293,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       mathBlockContent = [];
     } else if (tableRowMatch && !inTable && renderVisualBlocks) {
       // Potential table start - check if next line is separator with matching column count
-      const potentialHeaders = tableRowMatch[1]
-        .split(/(?<!\\)\|/)
-        .map((cell) => cell.trim().replaceAll('\\|', '|'));
+      const potentialHeaders = splitMarkdownTableRow(tableRowMatch[1]);
       const nextLine = index + 1 < lines.length ? lines[index + 1]! : '';
       const sepMatch = nextLine.match(tableSeparatorRegex);
       const sepColCount = sepMatch
-        ? nextLine
-            .split(/(?<!\\)\|/)
-            .map((c) => c.trim())
-            .filter((c) => c.length > 0).length
+        ? splitMarkdownTableRow(nextLine).filter((c) => c.length > 0).length
         : 0;
 
       if (sepMatch && sepColCount === potentialHeaders.length) {
@@ -284,9 +323,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       tableAligns = parseTableAligns(line);
     } else if (inTable && tableRowMatch) {
       // Add table row
-      const cells = tableRowMatch[1]
-        .split(/(?<!\\)\|/)
-        .map((cell) => cell.trim().replaceAll('\\|', '|'));
+      const cells = splitMarkdownTableRow(tableRowMatch[1]);
       // Ensure row has same column count as headers
       while (cells.length < tableHeaders.length) {
         cells.push('');
