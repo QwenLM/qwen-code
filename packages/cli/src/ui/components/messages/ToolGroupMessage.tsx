@@ -58,18 +58,23 @@ function isSubagentToolEntry(tool: IndividualToolCallDisplay): boolean {
 
 /**
  * Predicate: subagent tool entry whose live UI is owned by
- * `LiveAgentPanel`. Only running / paused / background entries
- * should be hidden during the live phase — terminal entries (the
- * subagent already finished while the parent turn is still
- * running) are NOT panel-owned: the panel snapshot drops them on
+ * `LiveAgentPanel`. Only running / background entries should be
+ * hidden during the live phase — terminal entries (the subagent
+ * already finished while the parent turn is still running) are NOT
+ * panel-owned: the panel snapshot drops them on
  * `unregisterForeground`'s post-delete emit, so the inline path
  * needs to render `SubagentScrollbackSummary` immediately so the
  * user keeps a record of the run instead of seeing nothing.
+ *
+ * Note: `AgentResultDisplay.status` does NOT carry `'paused'` — that
+ * status lives on the registry-side `BackgroundTaskStatus` and is
+ * surfaced through the panel directly, never through a tool-result
+ * `task_execution` payload. So this predicate has no `paused` arm.
  */
 function isPanelOwnedSubagentTool(tool: IndividualToolCallDisplay): boolean {
   if (!isSubagentToolEntry(tool)) return false;
   const status = (tool.resultDisplay as AgentResultDisplay).status;
-  return status === 'running' || status === 'paused' || status === 'background';
+  return status === 'running' || status === 'background';
 }
 
 /**
