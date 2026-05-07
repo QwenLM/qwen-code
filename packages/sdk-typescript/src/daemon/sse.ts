@@ -10,14 +10,18 @@ import type { DaemonEvent } from './types.js';
  * Parse an SSE-encoded event-stream `Response.body` into a stream of
  * `DaemonEvent`s.
  *
- * Field handling follows the EventSource spec subset that the daemon emits
+ * Field handling follows the EventSource spec subset the daemon emits
  * (`packages/cli/src/serve/server.ts` `formatSseFrame`):
- *   - Frames are separated by a blank line (`\n\n`).
+ *   - Frames are separated by a blank line. Both `\n\n` and `\r\n\r\n`
+ *     are accepted; CRLF can show up when an intermediary (corporate
+ *     proxy, some Node http servers) normalizes line endings.
  *   - Comment lines (`: ...`) and the `retry:` directive are ignored.
- *   - The `id`, `event`, `data` fields are recognized; the `data` field is
- *     parsed as JSON and yielded as the event payload.
- *   - Malformed frames (non-JSON `data`, missing `data`) are skipped silently
- *     so a single bad frame can't poison the iterator.
+ *   - The `data` field is parsed as JSON and yielded as the event payload;
+ *     `id` and `event` fields are encoded redundantly inside the JSON
+ *     data payload by the daemon, so we don't need to surface them
+ *     separately.
+ *   - Malformed frames (non-JSON `data`, missing `data`) are skipped
+ *     silently so a single bad frame can't poison the iterator.
  *
  * The reader is released in `finally` so `for await … break` paths and
  * AbortSignal cancellation both clean up cleanly.
@@ -33,21 +37,28 @@ export async function* parseSseStream(
     while (true) {
       const { value, done } = await reader.read();
       if (done) {
-        // Flush any trailing complete frame.
+        // Flush any bytes the decoder is still holding for an incomplete
+        // multi-byte UTF-8 sequence at the tail. Without this, the last
+        // character of the last frame can be silently dropped.
+        buf += decoder.decode();
         if (buf.length > 0) {
-          const frame = parseFrame(buf);
-          if (frame) yield frame;
+          // Normalize CRLF in any trailing fragment too.
+          for (const raw of splitFrames(buf)) {
+            const frame = parseFrame(raw);
+            if (frame) yield frame;
+          }
         }
         return;
       }
       buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf('\n\n')) !== -1) {
-        const raw = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        const frame = parseFrame(raw);
-        if (frame) yield frame;
+      const consumed = consumeFrames(buf);
+      if (consumed.frames.length > 0) {
+        for (const raw of consumed.frames) {
+          const frame = parseFrame(raw);
+          if (frame) yield frame;
+        }
       }
+      buf = consumed.tail;
     }
   } finally {
     try {
@@ -58,15 +69,51 @@ export async function* parseSseStream(
   }
 }
 
+/**
+ * Walk `buf` and pull off every complete frame (either `\n\n` or
+ * `\r\n\r\n` separator). Returns the frames + the unconsumed tail.
+ */
+function consumeFrames(buf: string): { frames: string[]; tail: string } {
+  const frames: string[] = [];
+  let cursor = 0;
+  while (cursor < buf.length) {
+    const lf = buf.indexOf('\n\n', cursor);
+    const crlf = buf.indexOf('\r\n\r\n', cursor);
+    let sepIdx: number;
+    let sepLen: number;
+    if (lf === -1 && crlf === -1) break;
+    if (lf === -1) {
+      sepIdx = crlf;
+      sepLen = 4;
+    } else if (crlf === -1) {
+      sepIdx = lf;
+      sepLen = 2;
+    } else if (crlf < lf) {
+      sepIdx = crlf;
+      sepLen = 4;
+    } else {
+      sepIdx = lf;
+      sepLen = 2;
+    }
+    frames.push(buf.slice(cursor, sepIdx));
+    cursor = sepIdx + sepLen;
+  }
+  return { frames, tail: buf.slice(cursor) };
+}
+
+/** Used for trailing fragments that lack a separator but contain a frame. */
+function splitFrames(raw: string): string[] {
+  // No more separators expected; the whole tail is at most one frame.
+  return [raw];
+}
+
 function parseFrame(raw: string): DaemonEvent | undefined {
   if (!raw) return undefined;
   if (raw.startsWith(':') || raw.startsWith('retry:')) return undefined;
   let dataLine: string | undefined;
-  for (const line of raw.split('\n')) {
+  // Split on either CRLF or LF — same forgiving stance as frame boundaries.
+  for (const line of raw.split(/\r?\n/)) {
     if (line.startsWith('data: ')) dataLine = line.slice(6);
-    // `id:` and `event:` are encoded redundantly inside the JSON `data`
-    // payload (see `formatSseFrame`) so we don't need to surface them
-    // separately on the parsed object.
   }
   if (!dataLine) return undefined;
   try {

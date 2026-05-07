@@ -109,4 +109,45 @@ describe('parseSseStream', () => {
     const events = await collect(parseSseStream(stream));
     expect(events).toEqual([]);
   });
+
+  it('parses CRLF-delimited frames', async () => {
+    // Some proxies / Node http servers normalize line endings to CRLF.
+    const stream = bodyFromString(
+      'id: 1\r\nevent: x\r\ndata: {"id":1,"v":1,"type":"x","data":1}\r\n\r\n' +
+        'id: 2\r\nevent: x\r\ndata: {"id":2,"v":1,"type":"x","data":2}\r\n\r\n',
+    );
+    const events = await collect(parseSseStream(stream));
+    expect(events.map((e) => e.id)).toEqual([1, 2]);
+  });
+
+  it('parses a mix of LF and CRLF frame separators', async () => {
+    const stream = bodyFromString(
+      'id: 1\nevent: x\ndata: {"id":1,"v":1,"type":"x","data":1}\n\n' +
+        'id: 2\r\nevent: x\r\ndata: {"id":2,"v":1,"type":"x","data":2}\r\n\r\n',
+    );
+    const events = await collect(parseSseStream(stream));
+    expect(events.map((e) => e.id)).toEqual([1, 2]);
+  });
+
+  it('flushes the TextDecoder on stream close so the last UTF-8 char is preserved', async () => {
+    // "中" is 3 bytes in UTF-8 (0xE4 0xB8 0xAD). Split the byte stream
+    // mid-character to simulate a chunk boundary that lands inside the
+    // multi-byte sequence; without `decoder.decode()` flush at end-of-
+    // stream the trailing byte would be dropped and the JSON parse would
+    // fail.
+    const fullFrame =
+      'id: 1\nevent: x\ndata: {"id":1,"v":1,"type":"x","data":"中"}';
+    const bytes = new TextEncoder().encode(fullFrame);
+    const splitAt = bytes.length - 1; // chop off the last byte
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, splitAt));
+        controller.enqueue(bytes.slice(splitAt));
+        controller.close();
+      },
+    });
+    const events = await collect(parseSseStream(stream));
+    expect(events).toHaveLength(1);
+    expect(events[0]?.data as string).toBe('中');
+  });
 });

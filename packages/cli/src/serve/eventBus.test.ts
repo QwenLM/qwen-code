@@ -151,6 +151,55 @@ describe('EventBus', () => {
     expect(bus.subscriberCount).toBe(0);
   });
 
+  it('force-pushes replay events past maxQueued so Last-Event-ID is honored', async () => {
+    const bus = new EventBus();
+    for (let i = 1; i <= 10; i++) bus.publish({ type: 'foo', data: i });
+
+    const abort = new AbortController();
+    // Subscribe with maxQueued:2 — way smaller than the replay backlog.
+    // Replay must NOT be silently truncated (a generic queue.push would
+    // drop entries 4-10), otherwise the consumer thinks they caught up
+    // when they didn't.
+    const iter = bus.subscribe({
+      lastEventId: 0,
+      maxQueued: 2,
+      signal: abort.signal,
+    });
+    const events: BridgeEvent[] = [];
+    for await (const e of iter) {
+      events.push(e);
+      if (events.length === 10) break;
+    }
+    expect(events.map((e) => e.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    abort.abort();
+  });
+
+  it('disposes the subscription immediately when the abort signal fires', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const iter = bus.subscribe({ signal: abort.signal });
+    expect(bus.subscriberCount).toBe(1);
+
+    abort.abort();
+    // Without an explicit dispose-on-abort path, the subscriber would
+    // linger in `bus.subs` until the consumer drove next() or return().
+    // Here the consumer never iterates — the abort alone must clean up.
+    expect(bus.subscriberCount).toBe(0);
+
+    // The iterator still resolves cleanly when it eventually runs.
+    const events: BridgeEvent[] = [];
+    for await (const e of iter) events.push(e);
+    expect(events).toEqual([]);
+  });
+
+  it('disposes immediately when the signal is already aborted at subscribe', () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    abort.abort();
+    bus.subscribe({ signal: abort.signal });
+    expect(bus.subscriberCount).toBe(0);
+  });
+
   it('drops the oldest events from the ring beyond ringSize', () => {
     const bus = new EventBus(3);
     for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });

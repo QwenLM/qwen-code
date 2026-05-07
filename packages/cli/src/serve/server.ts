@@ -229,14 +229,59 @@ export function createServeApp(
     res.setHeader('X-Accel-Buffering', 'no');
     // Always present in Node >= 20, which `engines` requires.
     res.flushHeaders();
-    // Tell EventSource to retry after 3s on disconnect.
-    res.write('retry: 3000\n\n');
+
+    // Backpressure helper: `res.write` returns false when the kernel send
+    // buffer is full. Without awaiting `drain` Node accumulates the
+    // payload in user-space memory unboundedly — a slow consumer on a
+    // chatty session can balloon daemon RSS. Wait for `drain` (or
+    // close/error) before scheduling the next write.
+    const writeWithBackpressure = (chunk: string): Promise<void> =>
+      new Promise((resolve, reject) => {
+        if (res.writableEnded) {
+          resolve();
+          return;
+        }
+        const ok = res.write(chunk, (err) => {
+          if (err) reject(err);
+        });
+        if (ok) {
+          resolve();
+          return;
+        }
+        const onDrain = () => {
+          res.off('close', onClose);
+          res.off('error', onError);
+          resolve();
+        };
+        const onClose = () => {
+          res.off('drain', onDrain);
+          res.off('error', onError);
+          resolve();
+        };
+        const onError = (err: Error) => {
+          res.off('drain', onDrain);
+          res.off('close', onClose);
+          reject(err);
+        };
+        res.once('drain', onDrain);
+        res.once('close', onClose);
+        res.once('error', onError);
+      });
+
+    // Tell EventSource to retry after 3s on disconnect. Awaiting drain on
+    // the very first write is overkill but cheap — `ok` is true the
+    // overwhelming majority of the time.
+    void writeWithBackpressure('retry: 3000\n\n');
 
     // Heartbeat keeps NAT/proxy connections alive and lets the server
     // notice a dead client through write-back-pressure. Comment frame is
     // ignored by EventSource.
     const heartbeatTimer = setInterval(() => {
-      if (!res.writableEnded) res.write(': heartbeat\n\n');
+      if (!res.writableEnded) {
+        // Heartbeat writes are best-effort; failure swallowed via the
+        // `res.on('error')` hook below.
+        void writeWithBackpressure(': heartbeat\n\n').catch(() => {});
+      }
     }, 15_000);
     heartbeatTimer.unref();
 
@@ -260,7 +305,7 @@ export function createServeApp(
           const next = await iter!.next();
           if (next.done) break;
           if (res.writableEnded) break;
-          res.write(formatSseFrame(next.value));
+          await writeWithBackpressure(formatSseFrame(next.value));
         }
       } catch (err) {
         if (!res.writableEnded) {
@@ -270,13 +315,13 @@ export function createServeApp(
           // hard-coded `id: 0` would regress the client's `Last-Event-ID`
           // tracker. `formatSseFrame` omits the `id:` line when the input
           // event has no id.
-          res.write(
+          await writeWithBackpressure(
             formatSseFrame({
               v: 1,
               type: 'stream_error',
               data: { error: errorMessage(err) },
             }),
-          );
+          ).catch(() => {});
         }
       } finally {
         cleanup();
@@ -302,7 +347,10 @@ function parseLastEventId(raw: unknown): number | undefined {
   // values like "1abc" or "1.5e10z" silently parsing to 1.
   if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
   const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n)) return undefined;
+  // Reject values that lose precision as a JS `number`. The bus's monotonic
+  // ids are bounded by `Number.MAX_SAFE_INTEGER` (2^53 - 1); a client that
+  // tries to resume from beyond that is either malicious or broken.
+  if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) return undefined;
   return n;
 }
 

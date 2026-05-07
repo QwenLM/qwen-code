@@ -132,28 +132,45 @@ export class EventBus {
       opts.maxQueued ?? DEFAULT_MAX_QUEUED,
     );
 
-    if (opts.lastEventId !== undefined) {
-      for (const e of this.ring) {
-        if (e.id > opts.lastEventId) queue.push(e);
-      }
-    }
-
     const sub: InternalSub = { queue, evicted: false };
     this.subs.add(sub);
 
-    const onAbort = () => queue.close();
+    if (opts.lastEventId !== undefined) {
+      // Force-push replay frames so they bypass the per-subscriber size
+      // cap. The cap protects against a slow live consumer; replay is
+      // already historical and silently dropping it would undermine the
+      // `Last-Event-ID` resume contract (the consumer would think they
+      // caught up). If the gap really is enormous, the queue will be
+      // primed with a long backlog the consumer drains at its own pace.
+      for (const e of this.ring) {
+        if (e.id > opts.lastEventId) queue.forcePush(e);
+      }
+    }
+
+    let disposed = false;
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      this.subs.delete(sub);
+      opts.signal?.removeEventListener('abort', onAbort);
+    };
+
+    // Abort tears the subscription down immediately, even if the consumer
+    // never iterates again — without this the entry would linger in
+    // `this.subs` until somebody called `next()`/`return()`. Idempotent
+    // through `disposed`, so a double-abort or race with `return()` is
+    // safe.
+    const onAbort = () => {
+      queue.close();
+      dispose();
+    };
     if (opts.signal) {
       if (opts.signal.aborted) {
-        queue.close();
+        onAbort();
       } else {
         opts.signal.addEventListener('abort', onAbort, { once: true });
       }
     }
-
-    const dispose = () => {
-      this.subs.delete(sub);
-      opts.signal?.removeEventListener('abort', onAbort);
-    };
 
     return {
       [Symbol.asyncIterator]: (): AsyncIterator<BridgeEvent> => ({
@@ -238,9 +255,12 @@ class BoundedAsyncQueue<T> {
   }
 
   next(): Promise<IteratorResult<T>> {
-    const buffered = this.buf.shift();
-    if (buffered !== undefined) {
-      return Promise.resolve({ value: buffered, done: false });
+    // Length check first — `buf.shift() !== undefined` would mis-handle a
+    // queue whose element type legitimately includes `undefined`. The bus
+    // never pushes undefined today, but the queue is generic.
+    if (this.buf.length > 0) {
+      const value = this.buf.shift() as T;
+      return Promise.resolve({ value, done: false });
     }
     if (this.closed) {
       return Promise.resolve({
