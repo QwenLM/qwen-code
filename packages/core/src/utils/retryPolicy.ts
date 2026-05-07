@@ -45,11 +45,12 @@ export function getRetryDelayMs(options: RetryDelayPolicyOptions): number {
 
   if (retryAfterMs !== null && retryAfterMs > 0) {
     const retryAfterCapMs = options.retryAfterMaxDelayMs ?? options.maxDelayMs;
+    const cappedRetryAfterMs = Math.min(retryAfterMs, retryAfterCapMs);
     const baseDelayMs =
       retryAfterMode === 'minimum'
-        ? Math.max(cappedExponentialDelayMs, retryAfterMs)
-        : retryAfterMs;
-    return Math.min(baseDelayMs, retryAfterCapMs);
+        ? Math.max(cappedExponentialDelayMs, cappedRetryAfterMs)
+        : cappedRetryAfterMs;
+    return baseDelayMs;
   }
 
   const jitterRatio = options.jitterRatio ?? 0;

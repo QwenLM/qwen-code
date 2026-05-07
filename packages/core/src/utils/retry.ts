@@ -88,10 +88,30 @@ export function isUnattendedMode(): boolean {
 /**
  * Delays execution for a specified number of milliseconds.
  * @param ms The number of milliseconds to delay.
+ * @param signal Optional signal used to abort the delay.
  * @returns A promise that resolves after the delay.
  */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error('Retry aborted by signal'));
+  }
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+    };
+    function onAbort() {
+      clearTimeout(timeout);
+      cleanup();
+      reject(new Error('Retry aborted by signal'));
+    }
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -116,7 +136,7 @@ async function sleepWithHeartbeat(
     }
 
     const chunk = Math.max(1, Math.min(remaining, ctx.heartbeatInterval));
-    await delay(chunk);
+    await delay(chunk, ctx.signal);
     remaining -= chunk;
 
     if (remaining > 0 && ctx.heartbeatFn) {
@@ -192,7 +212,7 @@ export async function retryWithBackoff<T>(
           maxDelayMs,
           jitterRatio: 0.3,
         });
-        await delay(delayMs);
+        await delay(delayMs, signal);
         currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         continue;
       }
@@ -280,7 +300,7 @@ export async function retryWithBackoff<T>(
             `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
             error,
           );
-          await delay(retryAfterMs);
+          await delay(retryAfterMs, signal);
           currentDelay = initialDelayMs;
         } else {
           logRetryAttempt(attempt, error, errorStatus);
@@ -290,7 +310,7 @@ export async function retryWithBackoff<T>(
             maxDelayMs,
             jitterRatio: 0.3,
           });
-          await delay(delayMs);
+          await delay(delayMs, signal);
           currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         }
       }

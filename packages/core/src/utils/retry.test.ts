@@ -1020,6 +1020,29 @@ describe('retryWithBackoff - Retry-After handling in normal mode', () => {
     expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(600_000);
     expect(fn).toHaveBeenCalledTimes(2);
   });
+
+  it('should abort normal Retry-After waits when signal is aborted', async () => {
+    const controller = new AbortController();
+    const error = Object.assign(new Error('Rate limited'), {
+      status: 429,
+      headers: { 'retry-after': '600' },
+    });
+    const fn = vi.fn().mockRejectedValueOnce(error).mockResolvedValue('ok');
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 2,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 100);
+
+    // eslint-disable-next-line vitest/valid-expect
+    const assertionPromise = expect(promise).rejects.toThrow(
+      'Retry aborted by signal',
+    );
+    await vi.runAllTimersAsync();
+    await assertionPromise;
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('getErrorStatus', () => {

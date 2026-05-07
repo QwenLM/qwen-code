@@ -79,6 +79,24 @@ describe('getRetryDelayMs', () => {
     ).toBe(300_000);
   });
 
+  it('should not cap the exponential floor with retryAfterMaxDelayMs in minimum mode', () => {
+    const error = Object.assign(new Error('Too many requests'), {
+      status: 429,
+      headers: { 'retry-after': '30' },
+    });
+
+    expect(
+      getRetryDelayMs({
+        attempt: 4,
+        initialDelayMs: 60_000,
+        maxDelayMs: 300_000,
+        retryAfterMode: 'minimum',
+        retryAfterMaxDelayMs: 100_000,
+        error,
+      }),
+    ).toBe(300_000);
+  });
+
   it('should prefer Retry-After for HTTP request retry policy', () => {
     const error = Object.assign(new Error('Too many requests'), {
       status: 429,
