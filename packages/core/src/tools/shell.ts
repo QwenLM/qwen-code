@@ -2866,6 +2866,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // substitution and break the shell command. Recognising
       // `$(` is enough — if it's there we can't safely rewrite
       // without a real shell parser.
+      //
+      // We do NOT bail on a bare backtick: while `\`cmd "with" quotes\``
+      // suffers the same regex-truncation bug, the common markdown-
+      // style `\`func()\`` in a commit body has no inner `"` and works
+      // fine. Bailing on any backtick would lose attribution for the
+      // common case to defend against a near-zero-traffic pathological
+      // case where the user typed raw backticks INSIDE a double-quoted
+      // body and put inner double-quotes inside the backtick span.
+      // bash itself would interpret that as command substitution
+      // anyway — almost certainly a user error rather than a real
+      // commit message — so the rewrite is at most one of several
+      // things that go wrong.
       if (existingMessage.includes('$(')) {
         return command;
       }
