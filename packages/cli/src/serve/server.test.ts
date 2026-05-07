@@ -41,6 +41,7 @@ interface FakeBridgeOpts {
   promptImpl?: (
     sessionId: string,
     req: PromptRequest,
+    signal?: AbortSignal,
   ) => Promise<PromptResponse>;
   cancelImpl?: (sessionId: string, req?: CancelNotification) => Promise<void>;
   subscribeImpl?: (
@@ -60,7 +61,11 @@ interface FakeBridgeOpts {
 
 interface FakeBridge extends HttpAcpBridge {
   calls: BridgeSpawnRequest[];
-  promptCalls: Array<{ sessionId: string; req: PromptRequest }>;
+  promptCalls: Array<{
+    sessionId: string;
+    req: PromptRequest;
+    signal?: AbortSignal;
+  }>;
   cancelCalls: Array<{ sessionId: string; req?: CancelNotification }>;
   permissionVotes: Array<{
     requestId: string;
@@ -113,9 +118,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       calls.push(req);
       return result;
     },
-    async sendPrompt(sessionId, req) {
-      promptCalls.push({ sessionId, req });
-      return promptImpl(sessionId, req);
+    async sendPrompt(sessionId, req, signal) {
+      promptCalls.push({ sessionId, req, signal });
+      return promptImpl(sessionId, req, signal);
     },
     async cancelSession(sessionId, req) {
       cancelCalls.push({ sessionId, req });
@@ -188,6 +193,30 @@ describe('createServeApp', () => {
         .get('/health')
         .set('Host', `host.docker.internal:${baseOpts.port}`);
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe('middleware order — auth runs before body parser', () => {
+    it('rejects unauthorized POST without parsing the (possibly huge) body', async () => {
+      // If auth ran AFTER body-parsing, an unauthenticated client could
+      // force the daemon to JSON.parse a 10MB payload before the 401.
+      // This test verifies the 401 fires regardless of body content
+      // (no 413 / no parse error / no validation error).
+      const bridge = fakeBridge();
+      const tokenedOpts: ServeOptions = {
+        ...baseOpts,
+        token: 'real-secret',
+      };
+      const app = createServeApp(tokenedOpts, undefined, { bridge });
+      const fakeBigBody = JSON.stringify({ filler: 'x'.repeat(100_000) });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('content-type', 'application/json')
+        .send(fakeBigBody);
+      expect(res.status).toBe(401);
+      // Bridge must NOT have been touched — auth short-circuited.
+      expect(bridge.calls).toHaveLength(0);
     });
   });
 
@@ -340,6 +369,86 @@ describe('createServeApp', () => {
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: 'agent crashed' });
+    });
+
+    it('passes an AbortSignal into bridge.sendPrompt', async () => {
+      let signalDefined = false;
+      let abortedAtCall = false;
+      const bridge = fakeBridge({
+        promptImpl: async (_sid, _req, signal) => {
+          signalDefined = signal !== undefined;
+          abortedAtCall = signal?.aborted ?? false;
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+      expect(res.status).toBe(200);
+      // The route always supplies a signal — the AbortController it wires
+      // to req.on('close'). The bridge must receive it so a future client
+      // disconnect can be routed into an ACP cancel. (Capture happens at
+      // call time; supertest's later connection close would flip the
+      // signal's `aborted` flag if asserted post-hoc.)
+      expect(signalDefined).toBe(true);
+      expect(abortedAtCall).toBe(false);
+    });
+
+    it('aborting the signal mid-prompt asks the bridge to wind down', async () => {
+      // Bridge waits forever unless aborted, then resolves with a
+      // cancelled stop reason. Verifies the route's
+      // req.on('close') → abort.abort() flow propagates.
+      let promptStarted: (() => void) | undefined;
+      const promptStartedPromise = new Promise<void>((r) => {
+        promptStarted = r;
+      });
+      const bridge = fakeBridge({
+        promptImpl: async (_sid, _req, signal) =>
+          new Promise((resolve) => {
+            promptStarted!();
+            const onAbort = () => resolve({ stopReason: 'cancelled' });
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
+          }),
+      });
+      const localHandle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge },
+      );
+      try {
+        const port = (localHandle.server.address() as { port: number }).port;
+        // Use Node's `http` directly — vitest's jsdom env replaces
+        // AbortController with a polyfill that undici's fetch rejects.
+        const http = await import('node:http');
+        const reqBody = JSON.stringify({
+          prompt: [{ type: 'text', text: 'hi' }],
+        });
+        const httpReq = http.request({
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: '/session/sess/prompt',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(reqBody),
+          },
+        });
+        // Swallow ECONNRESET / socket-hangup that the destroy below emits.
+        httpReq.on('error', () => {});
+        httpReq.write(reqBody);
+        httpReq.end();
+        // Wait for the bridge to receive the prompt before destroying.
+        await promptStartedPromise;
+        httpReq.destroy();
+        // Give the daemon a moment to register the close → propagate.
+        await new Promise((r) => setTimeout(r, 100));
+        expect(bridge.promptCalls).toHaveLength(1);
+        expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
+      } finally {
+        await localHandle.close();
+      }
     });
   });
 

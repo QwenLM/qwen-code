@@ -54,10 +54,14 @@ export function createServeApp(
   const app = express();
   const bridge = deps.bridge ?? createHttpAcpBridge();
 
-  app.use(express.json({ limit: '10mb' }));
+  // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
+  // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
+  // gets a full 10MB `JSON.parse` before the 401 fires — a trivially
+  // amplified CPU/memory cost from any wrong-token client.
   app.use(denyBrowserOriginCors);
   app.use(hostAllowlist(opts.hostname, getPort));
   app.use(bearerAuth(opts.token));
+  app.use(express.json({ limit: '10mb' }));
 
   app.get('/health', (_req, res) => {
     res.status(200).json({ status: 'ok' });
@@ -113,15 +117,27 @@ export function createServeApp(
       });
       return;
     }
+    // Propagate HTTP-client disconnect to an ACP cancel notification so
+    // the agent winds down promptly and the per-session FIFO doesn't
+    // stay blocked on a dead client. Detached after the prompt settles.
+    const abort = new AbortController();
+    const onClientClose = () => abort.abort();
+    req.on('close', onClientClose);
     try {
-      const result = await bridge.sendPrompt(sessionId, {
-        ...(body as object),
+      const result = await bridge.sendPrompt(
         sessionId,
-        prompt,
-      } as Parameters<HttpAcpBridge['sendPrompt']>[1]);
+        {
+          ...(body as object),
+          sessionId,
+          prompt,
+        } as Parameters<HttpAcpBridge['sendPrompt']>[1],
+        abort.signal,
+      );
       res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err);
+    } finally {
+      req.off('close', onClientClose);
     }
   });
 

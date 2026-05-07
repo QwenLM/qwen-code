@@ -85,8 +85,18 @@ export interface HttpAcpBridge {
    * session FIFO-serialize through a per-session queue (ACP guarantees
    * "one active prompt per session"). Throws `SessionNotFoundError` when
    * the id is unknown.
+   *
+   * Optional `signal` — abort cancels the in-flight prompt by sending an
+   * ACP `cancel` notification to the agent (which causes the agent to
+   * resolve its `prompt()` with `stopReason: 'cancelled'`). Used by the
+   * SSE route to propagate `req.on('close')` so a disconnected HTTP
+   * client unblocks the per-session FIFO instead of poisoning it.
    */
-  sendPrompt(sessionId: string, req: PromptRequest): Promise<PromptResponse>;
+  sendPrompt(
+    sessionId: string,
+    req: PromptRequest,
+    signal?: AbortSignal,
+  ): Promise<PromptResponse>;
 
   /**
    * Cancel the in-flight prompt on the session. ACP-side this is a
@@ -555,16 +565,42 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       }
     },
 
-    async sendPrompt(sessionId, req) {
+    async sendPrompt(sessionId, req, signal) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
       const normalized: PromptRequest = { ...req, sessionId };
-      const result = entry.promptQueue.then(() =>
-        entry.connection.prompt(normalized),
-      );
+      const result = entry.promptQueue.then(() => {
+        // If the caller aborted while we were queued behind earlier
+        // prompts, don't even start this one.
+        if (signal?.aborted) {
+          throw new DOMException('Prompt aborted', 'AbortError');
+        }
+        const promptPromise = entry.connection.prompt(normalized);
+        if (!signal) return promptPromise;
+        // Wire the abort: when the signal fires (e.g. SSE route's
+        // req.on('close')), tell the agent to wind down. ACP cancel is a
+        // notification — the active prompt resolves with
+        // stopReason: 'cancelled', then the next queued prompt can run.
+        const onAbort = () => {
+          entry.connection.cancel({ sessionId }).catch(() => {
+            // Cancel is fire-and-forget; the agent may already be dead.
+          });
+        };
+        if (signal.aborted) {
+          onAbort();
+        } else {
+          signal.addEventListener('abort', onAbort, { once: true });
+          // Detach the listener once the prompt resolves so the
+          // AbortController can be GC'd.
+          promptPromise.finally(() =>
+            signal.removeEventListener('abort', onAbort),
+          );
+        }
+        return promptPromise;
+      });
       // Tail swallows failures so subsequent prompts still run. The caller
       // still sees rejections on its own `result` reference.
       entry.promptQueue = result.then(
@@ -715,10 +751,18 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // is a `.ts` file Node can't run; users should `npm run build` before
   // `qwen serve` or set `process.execPath` to a tsx-aware shim. Stage 1
   // accepts this — the daemon is meant for built deployments.
+  // Strip the daemon's bearer token from the child's environment. The
+  // child runs as the same UID with shell-tool access, but it's also
+  // executing user-supplied prompts — leaving `QWEN_SERVER_TOKEN` in
+  // its env would let prompt injection turn the agent into an
+  // authenticated client of its own daemon. The agent doesn't need
+  // the token (it speaks to the daemon over stdio, not HTTP).
+  const childEnv: NodeJS.ProcessEnv = { ...process.env };
+  delete childEnv['QWEN_SERVER_TOKEN'];
   const child = spawn(process.execPath, [cliEntry, '--acp'], {
     cwd: workspaceCwd,
     stdio: ['pipe', 'pipe', 'inherit'],
-    env: process.env,
+    env: childEnv,
   });
 
   // Build the `exited` promise BEFORE checking stdin/stdout so the listener

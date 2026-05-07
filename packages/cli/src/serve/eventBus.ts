@@ -80,10 +80,19 @@ export class EventBus {
     return this.subs.size;
   }
 
-  publish(input: Omit<BridgeEvent, 'id' | 'v'>): BridgeEvent {
-    if (this.closed) {
-      throw new Error('EventBus is closed; cannot publish');
-    }
+  publish(input: Omit<BridgeEvent, 'id' | 'v'>): BridgeEvent | undefined {
+    // Publishing against a closed bus is a no-op rather than a throw.
+    // The shutdown path closes per-session buses *before* awaiting
+    // `channel.kill()`, which leaves a small window where the agent can
+    // still emit a `sessionUpdate` notification or fire a
+    // `requestPermission`. Throwing here would force every call site to
+    // wrap publish in try/catch — and would corrupt state in
+    // `BridgeClient.requestPermission`, where the daemon-wide pending
+    // map mutation runs *before* the publish (see executor in
+    // `httpAcpBridge.ts`). Returning undefined keeps callers
+    // straightforward; nobody can observe a frame nobody can subscribe
+    // to anyway.
+    if (this.closed) return undefined;
     const event: BridgeEvent = {
       id: this.nextId++,
       v: EVENT_SCHEMA_VERSION,
@@ -216,11 +225,27 @@ function emptyAsyncIterable<T>(): AsyncIterable<T> {
  * Promise-based bounded queue. `push` returns false (instead of blocking or
  * throwing) when full so callers can decide how to react — the EventBus uses
  * that signal to evict slow subscribers.
+ *
+ * The cap (`maxSize`) applies only to LIVE items pushed via `push()`. Items
+ * inserted via `forcePush()` (the `Last-Event-ID` replay path on subscribe
+ * and the terminal `client_evicted` frame) are tracked separately and don't
+ * count toward the cap. Without this split, a reconnect with a large
+ * backlog would force-push ~ringSize entries into `buf`, push `buf.length`
+ * past `maxSize`, and the very next live publish would evict the
+ * just-resumed subscriber — defeating the resume contract.
  */
 class BoundedAsyncQueue<T> {
   private readonly buf: T[] = [];
   private readonly resolvers: Array<(v: IteratorResult<T>) => void> = [];
   private closed = false;
+  /**
+   * Number of force-pushed items still in `buf`. Force-pushed entries
+   * always land at the front (the EventBus only force-pushes during
+   * subscribe-time replay, before any live `push()` can run for this
+   * subscriber), so the next `next()` shift drains a force-pushed item
+   * iff `forcedInBuf > 0` and decrements the counter.
+   */
+  private forcedInBuf = 0;
 
   constructor(private readonly maxSize: number) {}
 
@@ -232,12 +257,13 @@ class BoundedAsyncQueue<T> {
       r({ value, done: false });
       return true;
     }
-    if (this.buf.length >= this.maxSize) return false;
+    // Cap is on the LIVE backlog only.
+    if (this.buf.length - this.forcedInBuf >= this.maxSize) return false;
     this.buf.push(value);
     return true;
   }
 
-  /** Bypasses the size cap. Used for terminal eviction frames. */
+  /** Bypasses the size cap. Used for replay frames and terminal eviction. */
   forcePush(value: T): void {
     if (this.closed) return;
     const r = this.resolvers.shift();
@@ -246,6 +272,7 @@ class BoundedAsyncQueue<T> {
       return;
     }
     this.buf.push(value);
+    this.forcedInBuf += 1;
   }
 
   close(): void {
@@ -265,6 +292,10 @@ class BoundedAsyncQueue<T> {
     // never pushes undefined today, but the queue is generic.
     if (this.buf.length > 0) {
       const value = this.buf.shift() as T;
+      // Force-pushed entries are FIFO at the front of `buf` (forcePush
+      // only happens at subscribe time, before any live push). So as long
+      // as `forcedInBuf > 0` the shifted item is a replay frame.
+      if (this.forcedInBuf > 0) this.forcedInBuf -= 1;
       return Promise.resolve({ value, done: false });
     }
     if (this.closed) {

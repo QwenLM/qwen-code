@@ -5,7 +5,11 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
-import { runQwenServe } from '../serve/index.js';
+// Type-only imports — no runtime cost. The serve module pulls in express +
+// body-parser + qs + the daemon transport stack; static-importing it from
+// here would tax every `qwen` invocation (interactive, mcp, channel, etc.)
+// with ~50ms of cold ESM resolution. The runtime import is deferred to the
+// handler below so it only loads when the user actually runs `qwen serve`.
 import type { ServeMode } from '../serve/types.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
@@ -57,6 +61,20 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'falling back to http-bridge.',
       );
     }
+    if (argv.token) {
+      // `--token` is visible to any local user via `/proc/<pid>/cmdline`
+      // (Linux default; only suppressed under `hidepid=2`). Steer
+      // operators toward the env-var path which uses
+      // `/proc/<pid>/environ` (owner-only).
+      writeStderrLine(
+        'qwen serve: --token is visible in the process command line; ' +
+          'prefer the QWEN_SERVER_TOKEN env var for any non-trivial ' +
+          'deployment.',
+      );
+    }
+    // Lazy-load the serve module so non-serve invocations don't pay for
+    // express + body-parser + qs in their startup path.
+    const { runQwenServe } = await import('../serve/index.js');
     try {
       await runQwenServe({
         port: argv.port,

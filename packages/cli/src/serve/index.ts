@@ -16,6 +16,7 @@ export {
   type CapabilitiesEnvelope,
   type ServeMode,
   type ServeOptions,
+  type Stage1Feature,
 } from './types.js';
 export {
   createHttpAcpBridge,

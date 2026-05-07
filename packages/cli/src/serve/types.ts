@@ -46,8 +46,13 @@ export const CAPABILITIES_SCHEMA_VERSION = 1 as const;
  * Stage 1 ships only the routes wired in `server.ts`. As routes land in
  * follow-up PRs, append the corresponding feature tag here so clients can
  * progressively enable UI affordances.
+ *
+ * The annotation is intentionally absent: `as const` widens to
+ * `readonly ['health', 'capabilities', ...]` and the derived
+ * `Stage1Feature` union catches typos at compile time. Annotating as
+ * `readonly string[]` would erase the literal information.
  */
-export const STAGE1_FEATURES: readonly string[] = [
+export const STAGE1_FEATURES = [
   'health',
   'capabilities',
   'session_create',
@@ -58,3 +63,6 @@ export const STAGE1_FEATURES: readonly string[] = [
   'session_set_model',
   'permission_vote',
 ] as const;
+
+/** Compile-time-checked feature identifier — element of STAGE1_FEATURES. */
+export type Stage1Feature = (typeof STAGE1_FEATURES)[number];

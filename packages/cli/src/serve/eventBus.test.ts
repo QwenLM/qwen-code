@@ -28,9 +28,9 @@ describe('EventBus', () => {
     const bus = new EventBus();
     const a = bus.publish({ type: 'foo', data: 1 });
     const b = bus.publish({ type: 'foo', data: 2 });
-    expect(a.id).toBe(1);
-    expect(b.id).toBe(2);
-    expect(a.v).toBe(EVENT_SCHEMA_VERSION);
+    expect(a?.id).toBe(1);
+    expect(b?.id).toBe(2);
+    expect(a?.v).toBe(EVENT_SCHEMA_VERSION);
     expect(bus.lastEventId).toBe(2);
   });
 
@@ -172,6 +172,67 @@ describe('EventBus', () => {
     }
     expect(events.map((e) => e.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     abort.abort();
+  });
+
+  it('a live publish AFTER a large replay does NOT evict the resumed subscriber', async () => {
+    // Regression: the original `forcePush` impl bypassed the cap, but the
+    // very next live `push()` saw `buf.length >= maxSize` and triggered
+    // the eviction path — which is exactly the contract `Last-Event-ID`
+    // is supposed to honor. The fix tracks force-pushed items separately
+    // so the cap applies only to the LIVE backlog.
+    const bus = new EventBus();
+    for (let i = 1; i <= 10; i++) bus.publish({ type: 'replay', data: i });
+
+    const abort = new AbortController();
+    // Replay backlog (10) is well above the cap (2). Without the fix,
+    // the next live publish below would evict the subscriber.
+    const iter = bus.subscribe({
+      lastEventId: 0,
+      maxQueued: 2,
+      signal: abort.signal,
+    });
+
+    // Now publish a LIVE event. Reviewer's concrete sequence:
+    //   - push() check `buf.length - forcedInBuf >= maxSize`
+    //   - = (10 - 10) >= 2 → false → push accepted, buf becomes 11.
+    bus.publish({ type: 'live', data: 'after-replay' });
+
+    const events: BridgeEvent[] = [];
+    for await (const e of iter) {
+      events.push(e);
+      if (events.length === 11) break;
+    }
+    // The live frame must arrive — NOT a `client_evicted` terminal.
+    expect(events.find((e) => e.type === 'client_evicted')).toBeUndefined();
+    expect(events.at(-1)?.type).toBe('live');
+    expect(events.filter((e) => e.type === 'replay')).toHaveLength(10);
+    abort.abort();
+  });
+
+  it('drops live publishes only after the LIVE backlog (excluding replay) hits maxQueued', async () => {
+    const bus = new EventBus();
+    for (let i = 1; i <= 5; i++) bus.publish({ type: 'replay', data: i });
+
+    const abort = new AbortController();
+    const iter = bus.subscribe({
+      lastEventId: 0,
+      maxQueued: 2,
+      signal: abort.signal,
+    });
+
+    // Two live pushes fit (live cap = 2); the third overflows the LIVE
+    // cap (5 replay don't count) and triggers eviction.
+    bus.publish({ type: 'live', data: 'a' });
+    bus.publish({ type: 'live', data: 'b' });
+    bus.publish({ type: 'live', data: 'c' });
+
+    const events: BridgeEvent[] = [];
+    for await (const e of iter) events.push(e);
+    // 5 replay + 2 live + 1 eviction terminal = 8 frames; the third live
+    // is the one that triggered overflow.
+    expect(events.find((e) => e.type === 'client_evicted')).toBeDefined();
+    const liveCount = events.filter((e) => e.type === 'live').length;
+    expect(liveCount).toBe(2);
   });
 
   it('disposes the subscription immediately when the abort signal fires', async () => {
