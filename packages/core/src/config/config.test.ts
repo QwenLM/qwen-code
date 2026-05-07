@@ -9,6 +9,7 @@ import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import { Config, ApprovalMode } from './config.js';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
 import {
@@ -913,10 +914,15 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('should initialize WorkspaceContext with includeDirectories', () => {
-    const includeDirectories = ['/path/to/dir1', '/path/to/dir2'];
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'config-test-'));
+    const dir1 = path.join(tmpDir, 'dir1');
+    const dir2 = path.join(tmpDir, 'dir2');
+    fs.mkdirSync(dir1);
+    fs.mkdirSync(dir2);
+
     const paramsWithIncludeDirs: ConfigParameters = {
       ...baseParams,
-      includeDirectories,
+      includeDirectories: [dir1, dir2],
     };
     const config = new Config(paramsWithIncludeDirs);
     const workspaceContext = config.getWorkspaceContext();
@@ -925,15 +931,22 @@ describe('Server Config (config.ts)', () => {
     // Should include the target directory plus the included directories
     expect(directories).toHaveLength(3);
     expect(directories).toContain(path.resolve(baseParams.targetDir));
-    expect(directories).toContain(path.resolve('/path/to/dir1'));
-    expect(directories).toContain(path.resolve('/path/to/dir2'));
+    expect(directories).toContain(dir1);
+    expect(directories).toContain(dir2);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it('should warn when includeDirectories paths are skipped', () => {
-    const invalidDir = '/path/to/invalid';
-    const resolvedInvalidDir = path.resolve(invalidDir);
+    const nonExistentDir = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'config-skip-test-')),
+      'nonexistent',
+    );
+
+    // Override existsSync to return false only for the non-existent dir,
+    // while keeping the default true for everything else.
     vi.mocked(fs.existsSync).mockImplementation(
-      (p) => p.toString() !== resolvedInvalidDir,
+      (p) => p.toString() !== nonExistentDir,
     );
 
     const mockWarn = vi.fn();
@@ -946,7 +959,7 @@ describe('Server Config (config.ts)', () => {
 
     const paramsWithInvalidDir: ConfigParameters = {
       ...baseParams,
-      includeDirectories: [invalidDir],
+      includeDirectories: [nonExistentDir],
     };
 
     new Config(paramsWithInvalidDir);
@@ -957,7 +970,7 @@ describe('Server Config (config.ts)', () => {
       ),
     );
     expect(mockWarn).toHaveBeenCalledWith(
-      expect.stringContaining(path.normalize(invalidDir)),
+      expect.stringContaining(nonExistentDir),
     );
   });
 
