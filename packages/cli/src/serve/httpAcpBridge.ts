@@ -13,6 +13,11 @@ import {
   PROTOCOL_VERSION,
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
+import {
+  EventBus,
+  type BridgeEvent,
+  type SubscribeOptions,
+} from './eventBus.js';
 import type {
   CancelNotification,
   Client,
@@ -82,6 +87,17 @@ export interface HttpAcpBridge {
    */
   cancelSession(sessionId: string, req?: CancelNotification): Promise<void>;
 
+  /**
+   * Subscribe to the session's event stream. Returns an AsyncIterable that
+   * yields published events; supports `Last-Event-ID` reconnect through
+   * `opts.lastEventId`. Throws `SessionNotFoundError` when the id is
+   * unknown.
+   */
+  subscribeEvents(
+    sessionId: string,
+    opts?: SubscribeOptions,
+  ): AsyncIterable<BridgeEvent>;
+
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
 
@@ -132,8 +148,8 @@ interface SessionEntry {
   workspaceCwd: string;
   channel: AcpChannel;
   connection: ClientSideConnection;
-  /** Stage 1 buffer; consumed by SSE wiring in the next PR. */
-  notifications: SessionNotification[];
+  /** Per-session event bus drives `GET /session/:id/events`. */
+  events: EventBus;
   /**
    * Tail of the per-session prompt queue. Each new prompt chains off the
    * resolved (or rejected) state of this promise so prompts run one at a
@@ -150,10 +166,10 @@ interface SessionEntry {
  *
  * Stage 1 behavior:
  *   - `requestPermission` denies by default. The HTTP `/permission/:requestId`
- *     route in the next PR will let any attached client cast the deciding
+ *     route in a follow-up will let any attached client cast the deciding
  *     vote (first-responder wins).
- *   - `sessionUpdate` notifications are buffered on the session entry; the
- *     next PR drains the buffer through SSE.
+ *   - `sessionUpdate` notifications publish onto the session's EventBus; SSE
+ *     subscribers (`GET /session/:id/events`) drain it.
  *   - File reads/writes proxy to local fs (daemon and agent share the host).
  */
 class BridgeClient implements Client {
@@ -167,7 +183,8 @@ class BridgeClient implements Client {
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
     const entry = this.resolveEntry();
-    if (entry) entry.notifications.push(params);
+    if (!entry) return;
+    entry.events.publish({ type: 'session_update', data: params });
   }
 
   async writeTextFile(
@@ -257,7 +274,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           workspaceCwd: workspaceKey,
           channel,
           connection,
-          notifications: [],
+          events: new EventBus(),
           promptQueue: Promise.resolve(),
         };
         byWorkspace.set(workspaceKey, entry);
@@ -305,10 +322,17 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       await entry.connection.cancel(notif);
     },
 
+    subscribeEvents(sessionId, subOpts) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.events.subscribe(subOpts);
+    },
+
     async shutdown() {
       const entries = Array.from(byId.values());
       byWorkspace.clear();
       byId.clear();
+      for (const e of entries) e.events.close();
       await Promise.all(entries.map((e) => e.channel.kill().catch(() => {})));
     },
   };

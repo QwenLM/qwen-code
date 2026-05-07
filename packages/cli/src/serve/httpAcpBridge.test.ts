@@ -508,4 +508,89 @@ describe('createHttpAcpBridge', () => {
       );
     });
   });
+
+  describe('subscribeEvents', () => {
+    it('throws SessionNotFoundError for unknown session ids', () => {
+      const bridge = createHttpAcpBridge({
+        channelFactory: async () => {
+          throw new Error('factory should not be called');
+        },
+      });
+      expect(() => bridge.subscribeEvents('unknown')).toThrow(
+        SessionNotFoundError,
+      );
+    });
+
+    it('publishes session_update events to subscribers when the agent sends them', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        // Build a channel pair where we capture the agent-side connection
+        // so we can drive sessionUpdate notifications from the test.
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          kill: async () => {},
+        };
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Send a sessionUpdate from the agent side (fire-and-forget).
+      void capturedConn!.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hi' },
+        },
+      });
+
+      const collected: Array<{ id: number; type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ id: e.id, type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('session_update');
+      expect(collected[0]?.id).toBe(1);
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('shutdown closes live event subscriptions', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      const drain = (async () => {
+        const events: unknown[] = [];
+        for await (const e of iter) {
+          events.push(e);
+        }
+        return events;
+      })();
+
+      // Give the subscriber a tick to register.
+      await new Promise((r) => setTimeout(r, 10));
+      await bridge.shutdown();
+
+      // Subscriber must unwind to completion (no events ever published).
+      const events = await drain;
+      expect(events).toEqual([]);
+    });
+  });
 });

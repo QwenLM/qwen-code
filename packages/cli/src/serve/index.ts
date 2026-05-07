@@ -20,6 +20,7 @@ export {
 export {
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
+  SessionNotFoundError,
   type AcpChannel,
   type BridgeOptions,
   type BridgeSession,
@@ -27,3 +28,9 @@ export {
   type ChannelFactory,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
+export {
+  EventBus,
+  EVENT_SCHEMA_VERSION,
+  type BridgeEvent,
+  type SubscribeOptions,
+} from './eventBus.js';

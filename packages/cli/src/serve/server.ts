@@ -13,6 +13,7 @@ import {
   SessionNotFoundError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
+import type { BridgeEvent } from './eventBus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
   STAGE1_FEATURES,
@@ -101,11 +102,9 @@ export function createServeApp(
         : {};
     const prompt = body['prompt'];
     if (!Array.isArray(prompt)) {
-      res
-        .status(400)
-        .json({
-          error: '`prompt` is required and must be an array of content blocks',
-        });
+      res.status(400).json({
+        error: '`prompt` is required and must be an array of content blocks',
+      });
       return;
     }
     try {
@@ -137,7 +136,89 @@ export function createServeApp(
     }
   });
 
+  app.get('/session/:id/events', (req, res) => {
+    const sessionId = req.params['id'];
+    const lastEventId = parseLastEventId(req.headers['last-event-id']);
+
+    let iter: AsyncIterator<BridgeEvent> | undefined;
+    const abort = new AbortController();
+    try {
+      const iterable = bridge.subscribeEvents(sessionId, {
+        signal: abort.signal,
+        lastEventId,
+      });
+      iter = iterable[Symbol.asyncIterator]();
+    } catch (err) {
+      sendBridgeError(res, err);
+      return;
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    // Disable proxy buffering (nginx); event-stream content type alone
+    // doesn't always reach the client through every proxy.
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+    // Tell EventSource to retry after 3s on disconnect.
+    res.write('retry: 3000\n\n');
+
+    // Heartbeat keeps NAT/proxy connections alive and lets the server
+    // notice a dead client through write-back-pressure. Comment frame is
+    // ignored by EventSource.
+    const heartbeatTimer = setInterval(() => {
+      if (!res.writableEnded) res.write(': heartbeat\n\n');
+    }, 15_000);
+    heartbeatTimer.unref?.();
+
+    const cleanup = () => {
+      clearInterval(heartbeatTimer);
+      abort.abort();
+    };
+    req.on('close', cleanup);
+
+    void (async () => {
+      try {
+        while (true) {
+          const next = await iter!.next();
+          if (next.done) break;
+          if (res.writableEnded) break;
+          res.write(formatSseFrame(next.value));
+        }
+      } catch (err) {
+        if (!res.writableEnded) {
+          res.write(
+            formatSseFrame({
+              id: 0,
+              v: 1,
+              type: 'stream_error',
+              data: { error: err instanceof Error ? err.message : String(err) },
+            }),
+          );
+        }
+      } finally {
+        cleanup();
+        if (!res.writableEnded) res.end();
+      }
+    })();
+  });
+
   return app;
+}
+
+function parseLastEventId(raw: unknown): number | undefined {
+  if (typeof raw !== 'string' || !raw) return undefined;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return n;
+}
+
+function formatSseFrame(event: BridgeEvent): string {
+  // SSE format: id (optional), event (optional), data, blank line.
+  // Splitting `data` on newlines lets browsers reassemble multi-line JSON.
+  const dataJson = JSON.stringify(event);
+  return `id: ${event.id}\nevent: ${event.type}\ndata: ${dataJson}\n\n`;
 }
 
 function sendBridgeError(res: import('express').Response, err: unknown): void {

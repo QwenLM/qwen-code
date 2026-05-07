@@ -50,4 +50,8 @@ export const CAPABILITIES_SCHEMA_VERSION = 1 as const;
 export const STAGE1_FEATURES: readonly string[] = [
   'health',
   'capabilities',
+  'session_create',
+  'session_prompt',
+  'session_cancel',
+  'session_events',
 ] as const;

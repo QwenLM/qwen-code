@@ -19,6 +19,7 @@ import {
   type BridgeSpawnRequest,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
+import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
   STAGE1_FEATURES,
@@ -38,6 +39,10 @@ interface FakeBridgeOpts {
     req: PromptRequest,
   ) => Promise<PromptResponse>;
   cancelImpl?: (sessionId: string, req?: CancelNotification) => Promise<void>;
+  subscribeImpl?: (
+    sessionId: string,
+    opts?: SubscribeOptions,
+  ) => AsyncIterable<BridgeEvent>;
 }
 
 interface FakeBridge extends HttpAcpBridge {
@@ -84,6 +89,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async cancelSession(sessionId, req) {
       cancelCalls.push({ sessionId, req });
       return cancelImpl(sessionId, req);
+    },
+    subscribeEvents(sessionId, subOpts) {
+      if (opts.subscribeImpl) return opts.subscribeImpl(sessionId, subOpts);
+      // Default: empty stream
+      return (async function* () {
+        // empty
+      })();
     },
     async shutdown() {
       shutdownCalls += 1;
@@ -395,6 +407,164 @@ describe('runQwenServe', () => {
     await handle.close();
     handle = undefined;
     expect(bridge.shutdownCalls).toBe(1);
+  });
+});
+
+describe('GET /session/:id/events (SSE)', () => {
+  let handle: RunHandle | undefined;
+
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+  });
+
+  async function readSseFrames(
+    body: ReadableStream<Uint8Array>,
+    minFrames: number,
+  ): Promise<Array<{ id?: string; event?: string; data?: string }>> {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    const frames: Array<{ id?: string; event?: string; data?: string }> = [];
+    while (frames.length < minFrames) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
+        const frame: { id?: string; event?: string; data?: string } = {};
+        for (const line of raw.split('\n')) {
+          if (line.startsWith('id: ')) frame.id = line.slice(4);
+          else if (line.startsWith('event: ')) frame.event = line.slice(7);
+          else if (line.startsWith('data: ')) frame.data = line.slice(6);
+        }
+        frames.push(frame);
+      }
+    }
+    await reader.cancel();
+    return frames;
+  }
+
+  it('streams events from the bridge as SSE frames', async () => {
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { foo: 'bar' },
+        };
+        yield { id: 2, v: 1, type: 'session_update', data: { foo: 'baz' } };
+        // No more events; the stream stays open until the caller aborts.
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+
+    const frames = await readSseFrames(res.body!, 2);
+
+    expect(frames).toHaveLength(2);
+    expect(frames[0]?.id).toBe('1');
+    expect(frames[0]?.event).toBe('session_update');
+    expect(JSON.parse(frames[0]!.data!)).toEqual({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: { foo: 'bar' },
+    });
+    expect(frames[1]?.id).toBe('2');
+  });
+
+  it('forwards Last-Event-ID to the bridge', async () => {
+    const seen: number[] = [];
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, opts) {
+        seen.push(opts?.lastEventId ?? -1);
+        yield { id: 42, v: 1, type: 'session_update', data: 'replay' };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`, {
+      headers: { 'Last-Event-ID': '17' },
+    });
+    const frames = await readSseFrames(res.body!, 1);
+
+    expect(seen).toEqual([17]);
+    expect(frames[0]?.id).toBe('42');
+  });
+
+  it('returns 404 when the bridge reports unknown session', async () => {
+    const bridge = fakeBridge({
+      subscribeImpl: (sessionId) => {
+        throw new SessionNotFoundError(sessionId);
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/missing/events`);
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.sessionId).toBe('missing');
+  });
+
+  it('aborts the bridge subscription when the client disconnects', async () => {
+    const aborted = { value: false };
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, opts) {
+        opts?.signal?.addEventListener(
+          'abort',
+          () => {
+            aborted.value = true;
+          },
+          { once: true },
+        );
+        yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+        await new Promise<void>((resolve) => {
+          opts?.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    const frames = await readSseFrames(res.body!, 1);
+    expect(frames).toHaveLength(1);
+    // readSseFrames calls reader.cancel() once the requested frame count is
+    // reached, which severs the underlying connection — the daemon's
+    // `req.on('close')` handler then aborts the bridge subscription.
+
+    // Wait briefly for the close handler to propagate to the bridge.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(aborted.value).toBe(true);
   });
 });
 
