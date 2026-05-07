@@ -217,6 +217,22 @@ interface SessionEntry {
    */
   promptQueue: Promise<void>;
   /**
+   * Per-session model-change FIFO. Prevents two concurrent
+   * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
+   * model requests) from racing into `unstable_setSessionModel` and
+   * leaving the agent in non-deterministic state. Always resolves —
+   * failures swallowed at the tail like `promptQueue`.
+   */
+  modelChangeQueue: Promise<void>;
+  /**
+   * Cached "transport closed" promise. The first `sendPrompt` on a
+   * session lazy-builds this from `channel.exited.then(throw)`; every
+   * subsequent prompt's race uses the SAME promise so the listener
+   * count on `channel.exited` stays at one regardless of how many
+   * prompts run on the session over its lifetime.
+   */
+  transportClosedReject?: Promise<never>;
+  /**
    * Permission requestIds belonging to this session, kept so cancelSession
    * + shutdown can resolve them as `cancelled` per ACP requirement
    * (cancelled prompt MUST resolve outstanding requestPermission with
@@ -436,6 +452,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         connection,
         events: new EventBus(),
         promptQueue: Promise.resolve(),
+        modelChangeQueue: Promise.resolve(),
         pendingPermissionIds: new Set(),
       };
       byWorkspace.set(workspaceKey, entry);
@@ -521,6 +538,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
    * event. Used at create-session time (via doSpawn) AND on attach when
    * the caller passes a modelServiceId — the existing session may be
    * running a different model.
+   *
+   * Serialized through `entry.modelChangeQueue` so two concurrent
+   * attach-with-different-model requests can't race into the agent.
+   * On failure, publishes a `model_switch_failed` event for cross-client
+   * observability and re-throws so the HTTP caller sees the error
+   * (session keeps running its previous model — that's the safer
+   * default than tearing down a shared session because one client
+   * asked for an unknown model).
    */
   async function applyModelServiceId(
     entry: SessionEntry,
@@ -533,15 +558,42 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         modelId: string;
       }): Promise<unknown>;
     };
-    await withTimeout(
-      conn.unstable_setSessionModel({ sessionId: entry.sessionId, modelId }),
-      timeoutMs,
-      'setSessionModel',
-    );
-    entry.events.publish({
-      type: 'model_switched',
-      data: { sessionId: entry.sessionId, modelId },
+    const work = entry.modelChangeQueue.then(async () => {
+      try {
+        await withTimeout(
+          conn.unstable_setSessionModel({
+            sessionId: entry.sessionId,
+            modelId,
+          }),
+          timeoutMs,
+          'setSessionModel',
+        );
+        entry.events.publish({
+          type: 'model_switched',
+          data: { sessionId: entry.sessionId, modelId },
+        });
+      } catch (err) {
+        // Surface the failure to ALL attached clients, not just the
+        // caller — a shared session swallowing a denied model change
+        // silently would surprise the others.
+        entry.events.publish({
+          type: 'model_switch_failed',
+          data: {
+            sessionId: entry.sessionId,
+            requestedModelId: modelId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        });
+        throw err;
+      }
     });
+    // Tail swallows failures so subsequent model changes still run; the
+    // original caller still observes the rejection on `work`.
+    entry.modelChangeQueue = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    return work;
   }
 
   /** Resolve every pending request belonging to one session as cancelled. */
@@ -654,12 +706,23 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         // wire never delivers a response. Make the prompt fail-fast in
         // that case so the per-session FIFO doesn't poison the next
         // queued prompt with an unbounded await.
-        const transportClosed = entry.channel.exited.then(() => {
-          throw new Error(
-            `agent channel closed while prompt was in flight (session ${sessionId})`,
-          );
-        });
-        const racedPromise = Promise.race([promptPromise, transportClosed]);
+        //
+        // Cache the rejection promise on the entry so we attach exactly
+        // ONE listener to `channel.exited` over the session's lifetime
+        // (lazy-init on first prompt). A naive per-call
+        // `entry.channel.exited.then(...)` would grow the listener list
+        // linearly with prompt count — a slow leak on chatty sessions.
+        if (!entry.transportClosedReject) {
+          entry.transportClosedReject = entry.channel.exited.then(() => {
+            throw new Error(
+              `agent channel closed while prompt was in flight (session ${entry.sessionId})`,
+            );
+          });
+        }
+        const racedPromise = Promise.race([
+          promptPromise,
+          entry.transportClosedReject,
+        ]);
 
         if (!signal) return racedPromise;
         // Wire the abort: when the signal fires (e.g. SSE route's
@@ -840,14 +903,20 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // the token (it speaks to the daemon over stdio, not HTTP).
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
   delete childEnv['QWEN_SERVER_TOKEN'];
-  // CodeQL `js/path-injection`: `workspaceCwd` is operator-controlled HTTP
-  // input flowing into `spawn({ cwd })`. Stage 1 trust model accepts this
-  // — see the function-level comment above. Defense-in-depth: the cwd is
-  // canonicalized via `path.resolve()` upstream in `spawnOrAttach` (line
-  // ~531), and `spawn`'s `cwd` only changes the child's working directory,
-  // it doesn't pass through any shell. Suppress the alert with the
-  // matching query id.
-  // lgtm [js/path-injection]
+  // CodeQL `js/path-injection` flags the `cwd: workspaceCwd` flow.
+  // Stage 1 trust model accepts this — see the function-level comment
+  // above for the design rationale. Defense-in-depth: the cwd is
+  // canonicalized via `path.resolve()` upstream in `spawnOrAttach`,
+  // and `spawn`'s `cwd` only changes the child's working directory,
+  // it doesn't pass through any shell.
+  //
+  // NOTE: GitHub Code Scanning does NOT honor inline `// lgtm` /
+  // `// codeql` annotations (LGTM.com retired in 2021). Suppressing
+  // this alert requires either (a) UI dismissal as "won't fix" with
+  // the rationale above, or (b) a repo-level
+  // `.github/codeql/codeql-config.yml` query exclusion. Both are
+  // out of scope for a code-only PR; flagging here for the human
+  // reviewer.
   const child = spawn(process.execPath, [cliEntry, '--acp'], {
     cwd: workspaceCwd,
     stdio: ['pipe', 'pipe', 'inherit'],

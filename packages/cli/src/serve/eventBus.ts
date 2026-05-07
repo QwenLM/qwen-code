@@ -239,11 +239,23 @@ class BoundedAsyncQueue<T> {
   private readonly resolvers: Array<(v: IteratorResult<T>) => void> = [];
   private closed = false;
   /**
-   * Number of force-pushed items still in `buf`. Force-pushed entries
-   * always land at the front (the EventBus only force-pushes during
-   * subscribe-time replay, before any live `push()` can run for this
-   * subscriber), so the next `next()` shift drains a force-pushed item
-   * iff `forcedInBuf > 0` and decrements the counter.
+   * Number of force-pushed items still in `buf`. The cap check in
+   * `push()` only applies to LIVE items; this counter tells us how
+   * many slots in `buf` are replay-injected and shouldn't count.
+   *
+   * Position invariant: under the bus's two callers,
+   *   1. subscribe-time replay (`Last-Event-ID` resume) — forcePush
+   *      fires BEFORE any live `push()`, so replay items are at the
+   *      front of `buf`;
+   *   2. eviction terminal frame — forcePush fires AFTER `push()`
+   *      rejection, then `close()` is called immediately, so the
+   *      eviction frame is at the BACK of `buf`.
+   *
+   * `next()` decrements `forcedInBuf` whenever the counter is > 0 on
+   * shift, which is correct for case (1). For case (2) it slightly
+   * misaccounts (decrements on the first live shift), but that's
+   * harmless: the queue is closed so no `push()` runs the cap check
+   * again. The counter only matters for live cap enforcement.
    */
   private forcedInBuf = 0;
 

@@ -963,6 +963,138 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('model-change FIFO + failure recovery', () => {
+    it('publishes model_switch_failed and surfaces the error when the agent rejects', async () => {
+      let attempts = 0;
+      const factory: ChannelFactory = async () => {
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const fakeAgent = new FakeAgent();
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async () => {
+                attempts += 1;
+                if (attempts > 1) throw new Error('agent denied');
+                return {};
+              };
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<void>(() => {}),
+          kill: async () => {},
+        };
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: '/work/a',
+        modelServiceId: 'first',
+      });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Second attach with a NEW model — agent rejects.
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: '/work/a',
+          modelServiceId: 'rejected',
+        }),
+      ).rejects.toBeTruthy();
+
+      // Crucially: the session is still alive (we didn't tear it down
+      // because it's a SHARED session). Other clients keep working.
+      expect(bridge.sessionCount).toBe(1);
+
+      // And cross-client observability: a model_switch_failed event
+      // surfaced on the bus so attached clients learn the agent denied
+      // the model change. (We subscribed AFTER the first spawn, so the
+      // initial `model_switched` from spawn-time isn't in this iter
+      // unless we'd passed lastEventId=0; the failed switch is the only
+      // event we expect to observe live.)
+      const it = iter[Symbol.asyncIterator]();
+      const failed = await it.next();
+      expect(failed.value?.type).toBe('model_switch_failed');
+      expect(
+        (failed.value?.data as { requestedModelId?: string })?.requestedModelId,
+      ).toBe('rejected');
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('serializes concurrent model-change calls (FIFO)', async () => {
+      const callOrder: string[] = [];
+      const factory: ChannelFactory = async () => {
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const fakeAgent = new FakeAgent();
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async (req: { modelId: string }) => {
+                callOrder.push(`enter:${req.modelId}`);
+                // Simulate an agent that takes time to apply.
+                await new Promise((r) => setTimeout(r, 30));
+                callOrder.push(`exit:${req.modelId}`);
+                return {};
+              };
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<void>(() => {}),
+          kill: async () => {},
+        };
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      // First call spawns the session AND applies model "A".
+      await bridge.spawnOrAttach({
+        workspaceCwd: '/work/a',
+        modelServiceId: 'A',
+      });
+
+      // Two concurrent attaches with different models. Without the FIFO
+      // they'd interleave (enter:B, enter:C, exit:B, exit:C).
+      await Promise.all([
+        bridge.spawnOrAttach({
+          workspaceCwd: '/work/a',
+          modelServiceId: 'B',
+        }),
+        bridge.spawnOrAttach({
+          workspaceCwd: '/work/a',
+          modelServiceId: 'C',
+        }),
+      ]);
+
+      // Strict sequencing: each `setSessionModel` exits before the next
+      // one enters.
+      const noEnter = callOrder.findIndex(
+        (s, i) =>
+          s.startsWith('enter:') &&
+          i > 0 &&
+          callOrder[i - 1]!.startsWith('enter:'),
+      );
+      expect(noEnter).toBe(-1);
+      await bridge.shutdown();
+    });
+  });
+
   describe('attach honors modelServiceId on existing session', () => {
     /** Channel + agent factory that records every set-model call. */
     function setupRecording() {

@@ -775,6 +775,21 @@ describe('runQwenServe', () => {
     }
   });
 
+  it('rejects `[host]:port` syntax in --hostname with a useful error', async () => {
+    // Operators typing `--hostname [2001:db8::1]:8080` are conflating the
+    // URL form with the bind args. The previous bracket-strip would have
+    // mangled to `2001:db8::1]:8080` and let Node ENOTFOUND. Catch it
+    // upstream with a clear error pointing at the right separation.
+    await expect(
+      runQwenServe({
+        hostname: '[2001:db8::1]:8080',
+        port: 0,
+        mode: 'http-bridge',
+        token: 'irrelevant',
+      }),
+    ).rejects.toThrow(/Invalid --hostname/);
+  });
+
   it('drains the bridge before closing the listener', async () => {
     const bridge = fakeBridge();
     handle = await runQwenServe(

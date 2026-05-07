@@ -62,10 +62,27 @@ export async function runQwenServe(
   // bind-time, keep them for the printed URL — without this fixup
   // `qwen serve --hostname [::1]` would pass the loopback/token check
   // and then fail to start with ENOTFOUND.
-  const listenHostname =
-    opts.hostname.startsWith('[') && opts.hostname.endsWith(']')
-      ? opts.hostname.slice(1, -1)
-      : opts.hostname;
+  //
+  // Only accept *pure* bracketed forms: `[…]` with no trailing `:port`
+  // suffix. `[2001:db8::1]:8080` is operator-error (port goes through
+  // `--port`, not the hostname) — fail loudly with a useful error
+  // instead of silently stripping to a malformed `2001:db8::1]:8080`.
+  let listenHostname = opts.hostname;
+  if (opts.hostname.startsWith('[')) {
+    if (
+      opts.hostname.endsWith(']') &&
+      !opts.hostname.slice(1, -1).includes(']')
+    ) {
+      listenHostname = opts.hostname.slice(1, -1);
+    } else {
+      throw new Error(
+        `Invalid --hostname "${opts.hostname}": brackets indicate an ` +
+          `IPv6 literal but the value isn't a clean [addr] form. Pass the ` +
+          `address without a trailing :port (use --port for that), e.g. ` +
+          `"--hostname [::1] --port 4170".`,
+      );
+    }
+  }
 
   return await new Promise<RunHandle>((resolve, reject) => {
     const server = app.listen(opts.port, listenHostname, () => {
