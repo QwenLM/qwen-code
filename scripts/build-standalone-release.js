@@ -101,9 +101,9 @@ async function main() {
     await downloadFile(`${nodeDistUrl}/SHASUMS256.txt`, checksumsPath);
     const checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
 
-    await Promise.all(
-      RELEASE_TARGETS.map((target) =>
-        packageTarget({
+    const targetResults = await Promise.allSettled(
+      RELEASE_TARGETS.map(async (target) => {
+        await packageTarget({
           ...target,
           nodeDistUrl,
           nodeVersion,
@@ -111,9 +111,23 @@ async function main() {
           releaseVersion: args.version,
           runtimeDir,
           checksums,
-        }),
-      ),
+        });
+        return target.qwenTarget;
+      }),
     );
+    const failures = targetResults.flatMap((result, index) =>
+      result.status === 'rejected'
+        ? [
+            `${RELEASE_TARGETS[index].qwenTarget}: ${formatErrorReason(
+              result.reason,
+            )}`,
+          ]
+        : [],
+    );
+
+    if (failures.length > 0) {
+      fail(`Failed to package standalone target(s): ${failures.join('; ')}`);
+    }
 
     await writeSha256Sums(outDir);
     assertStandaloneOutput(outDir);
@@ -157,6 +171,13 @@ async function packageTarget({
     cwd: rootDir,
     stdio: 'inherit',
   });
+}
+
+function formatErrorReason(reason) {
+  if (reason instanceof Error) {
+    return reason.message;
+  }
+  return String(reason);
 }
 
 async function downloadFile(url, destination) {

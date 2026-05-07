@@ -215,6 +215,8 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'Standalone install failed. Retry with --method npm',
     );
+    expect(script).toContain('ERROR: Unknown option.');
+    expect(script).not.toContain('ERROR: Unknown option: %~1');
     expect(script).toContain('qwen-code\\node\\node.exe');
     expect(script).toContain('Archive contains symlinks or reparse points');
     expect(script).toContain('WARNING: Failed to restore previous install');
@@ -286,6 +288,7 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain('scripts/create-standalone-package.js');
     expect(releaseScript).toContain('--skip-checksums');
     expect(releaseScript).toContain('writeSha256Sums(outDir)');
+    expect(releaseScript).toContain('Promise.allSettled(');
     expect(releaseScript).toContain(
       "import { isStandaloneArchiveName } from './release-asset-config.js';",
     );
@@ -518,6 +521,18 @@ describe('standalone release packaging', () => {
       writeFileSync(installSh, 'tampered');
       await expect(assertInstallationAssetChecksums(tmpDir)).rejects.toThrow(
         /Checksum verification failed for install-qwen\.sh/,
+      );
+
+      writeFileSync(
+        installSh,
+        readScript('scripts/installation/install-qwen-with-source.sh'),
+      );
+      writeFileSync(
+        path.join(tmpDir, 'qwen-code-linux-x64.tar.gz'),
+        'tampered',
+      );
+      await expect(assertInstallationAssetChecksums(tmpDir)).rejects.toThrow(
+        /Checksum verification failed for qwen-code-linux-x64\.tar\.gz/,
       );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -765,6 +780,44 @@ describe('standalone release packaging', () => {
       restoreDist();
     }
   });
+
+  it('ignores non-runtime esbuild metadata in dist', () => {
+    const restoreDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const outDir = path.join(tmpDir, 'out');
+      writeFileSync('dist/esbuild.json', '{}\n');
+
+      execFileSync(
+        'node',
+        [
+          'scripts/create-standalone-package.js',
+          '--target',
+          'win-x64',
+          '--node-archive',
+          createFakeWindowsNodeArchive(tmpDir),
+          '--out-dir',
+          outDir,
+          '--version',
+          '0.0.0-test',
+        ],
+        { stdio: 'pipe' },
+      );
+
+      const archive = path.join(outDir, 'qwen-code-win-x64.zip');
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      extractZipForTest(archive, extractDir);
+
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'esbuild.json')),
+      ).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreDist();
+    }
+  }, 30_000);
 
   it('uploads standalone archives during release', () => {
     const workflow = readScript('.github/workflows/release.yml');

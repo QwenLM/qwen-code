@@ -55,6 +55,7 @@ const DIST_ALLOWED_ENTRIES = new Set([
 const DIST_ALLOWED_ENTRY_PATTERNS = [
   /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,
 ];
+const DIST_IGNORED_ENTRIES = new Set(['.DS_Store', 'esbuild.json']);
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
 const CLI_OPTIONS = {
   '--help': { name: 'help', type: 'boolean' },
@@ -199,7 +200,7 @@ function copyRuntimeAssets(packageRoot, outDir) {
   fs.mkdirSync(libDir, { recursive: true });
 
   for (const entry of fs.readdirSync(distDir)) {
-    if (entry === skippedDistEntry || entry === '.DS_Store') {
+    if (entry === skippedDistEntry || DIST_IGNORED_ENTRIES.has(entry)) {
       continue;
     }
     if (!isAllowedDistEntry(entry)) {

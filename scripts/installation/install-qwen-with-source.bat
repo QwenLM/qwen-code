@@ -115,7 +115,7 @@ if /i "%~1"=="--registry" (
 if /i "%~1"=="-h" goto usage
 if /i "%~1"=="--help" goto usage
 
-echo ERROR: Unknown option: %~1
+echo ERROR: Unknown option.
 echo.
 goto usage_error
 

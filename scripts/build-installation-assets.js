@@ -140,15 +140,34 @@ async function assertInstallationAssetChecksums(
   }
 
   const checksums = parseSha256Sums(fs.readFileSync(checksumPath, 'utf8'));
+  if (checksums.size === 0) {
+    fail(`SHA256SUMS did not contain any checksum entries.`);
+  }
+
   for (const { output } of assets) {
     const expected = checksums.get(output);
     if (!expected) {
       fail(`Checksum entry for ${output} not found.`);
     }
+  }
 
-    const actual = await sha256File(path.join(outDir, output));
+  for (const [entry, expected] of checksums) {
+    const filePath = path.join(outDir, entry);
+    const relativePath = path.relative(outDir, filePath);
+    if (
+      relativePath === '' ||
+      relativePath.startsWith('..') ||
+      path.isAbsolute(relativePath)
+    ) {
+      fail(`Invalid checksum entry path: ${entry}.`);
+    }
+    if (!fs.existsSync(filePath)) {
+      fail(`Checksum target for ${entry} not found.`);
+    }
+
+    const actual = await sha256File(filePath);
     if (actual !== expected) {
-      fail(`Checksum verification failed for ${output}.`);
+      fail(`Checksum verification failed for ${entry}.`);
     }
   }
 }
