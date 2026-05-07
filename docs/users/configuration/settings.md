@@ -199,15 +199,20 @@ To override this behavior, either set `samplingParams.max_tokens` in your settin
 
 Overrides the default context window size for the selected model. Qwen Code determines the context window using built-in defaults based on model name matching, with a constant fallback value. Use this setting when a provider's effective context limit differs from Qwen Code's default. This value defines the model's assumed maximum context capacity, not a per-request token limit.
 
+When the selected model is defined in `modelProviders`, set
+`contextWindowSize` in that provider entry's `generationConfig` instead of the
+top-level `model.generationConfig`. Provider model entries are sealed, so
+top-level generation settings do not fill missing provider fields.
+
 **modalities:**
 
 Overrides the auto-detected input modalities for the selected model. Qwen Code automatically detects supported modalities (image, PDF, audio, video) based on model name pattern matching. Use this setting when the auto-detection is incorrect — for example, to enable `pdf` for a model that supports it but isn't recognized. Format: `{ "image": true, "pdf": true, "audio": true, "video": true }`. Omit a key or set it to `false` for unsupported types.
 
 **customHeaders:**
 
-Allows you to add custom HTTP headers to all API requests. This is useful for request tracing, monitoring, API gateway routing, or when different models require different headers. If `customHeaders` is defined in `modelProviders[].generationConfig.customHeaders`, it will be used directly; otherwise, headers from `model.generationConfig.customHeaders` will be used. No merging occurs between the two levels.
+Allows you to add custom HTTP headers to all API requests. This is useful for request tracing, monitoring, API gateway routing, or when different models require different headers. For provider models, define `customHeaders` in `modelProviders[].generationConfig.customHeaders`. For runtime models without a matching provider entry, define it in `model.generationConfig.customHeaders`. No merging occurs between the two levels.
 
-The `extra_body` field allows you to add custom parameters to the request body sent to the API. This is useful for provider-specific options that are not covered by the standard configuration fields. **Note: This field is only supported for OpenAI-compatible providers (`openai`, `qwen-oauth`). It is ignored for Anthropic and Gemini providers.** If `extra_body` is defined in `modelProviders[].generationConfig.extra_body`, it will be used directly; otherwise, values from `model.generationConfig.extra_body` will be used.
+The `extra_body` field allows you to add custom parameters to the request body sent to the API. This is useful for provider-specific options that are not covered by the standard configuration fields. **Note: This field is only supported for OpenAI-compatible providers (`openai`, `qwen-oauth`). It is ignored for Anthropic and Gemini providers.** For provider models, define `extra_body` in `modelProviders[].generationConfig.extra_body`. For runtime models without a matching provider entry, define it in `model.generationConfig.extra_body`.
 
 **model.openAILoggingDir examples:**
 
