@@ -207,20 +207,58 @@ export function renderDiffModelText(model: DiffRenderModel): string {
   return lines.length > 0 ? `${header}\n${lines.join('\n')}${capNote}` : header;
 }
 
+// Match standalone C0 controls (incl. TAB/CR/LF/BEL/BS), DEL, and C1 controls.
+// `escapeAnsiCtrlCodes` only neutralizes multi-byte ANSI sequences, so a
+// filename like `bad\nINJECTED.txt` or `bad\roverwrite.txt` would otherwise
+// still break layout in the non-interactive / ACP rendering path.
+// eslint-disable-next-line no-control-regex
+const FILENAME_CONTROL_CHARS_REGEX = /[\x00-\x1f\x7f-\x9f]/g;
+
+function escapeControlChar(ch: string): string {
+  switch (ch) {
+    case '\b':
+      return '\\b';
+    case '\t':
+      return '\\t';
+    case '\n':
+      return '\\n';
+    case '\f':
+      return '\\f';
+    case '\r':
+      return '\\r';
+    default: {
+      // JSON.stringify only escapes 0x00-0x1F (and `"` / `\`); DEL (0x7F) and
+      // C1 controls (0x80-0x9F) are returned as raw bytes, which is exactly
+      // what we are trying to keep out of the rendered output. Hand-roll the
+      // \uXXXX escape so every matched code point becomes printable.
+      const code = ch.charCodeAt(0);
+      return `\\u${code.toString(16).padStart(4, '0')}`;
+    }
+  }
+}
+
+function sanitizeFilenameForDisplay(name: string): string {
+  return escapeAnsiCtrlCodes(name).replace(
+    FILENAME_CONTROL_CHARS_REGEX,
+    escapeControlChar,
+  );
+}
+
 function formatRowsText(rows: DiffRenderRow[]): string[] {
   if (rows.length === 0) return [];
   const { addWidth, remWidth, statColumnWidth } = computeDiffColumnWidths(rows);
 
   const out: string[] = [];
   for (const r of rows) {
-    // Escape ANSI / control-byte sequences in the filename. Git permits
-    // bytes like `\x1b` in tracked / untracked paths, and the
-    // non-interactive (and ACP) text path streams straight to stdout / logs
-    // / transports without going through the interactive history's
-    // `escapeAnsiCtrlCodes(item)` sanitizer in `HistoryItemDisplay`. Without
-    // this hop, a hostile filename could inject color resets, cursor moves,
-    // or full screen clears into CI logs and any consumer's terminal.
-    const safeName = escapeAnsiCtrlCodes(r.filename);
+    // Escape ANSI sequences AND standalone control bytes in the filename. Git
+    // permits raw bytes like `\x1b`, `\n`, `\r`, BEL, BS in tracked / untracked
+    // paths, and the non-interactive (and ACP) text path streams straight to
+    // stdout / logs / transports without going through the interactive
+    // history's `escapeAnsiCtrlCodes(item)` sanitizer in `HistoryItemDisplay`.
+    // Without this hop, a hostile filename could inject color resets, cursor
+    // moves, full screen clears, or layout-breaking newlines into CI logs and
+    // any consumer's terminal.
+    const safeName = sanitizeFilenameForDisplay(r.filename);
     if (r.isBinary) {
       const suffix = r.isUntracked
         ? ` ${t('(binary, new)')}`

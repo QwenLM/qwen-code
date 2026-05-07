@@ -501,16 +501,23 @@ function unquoteCStylePath(s: string): string {
   if (!s.startsWith('"') || !s.endsWith('"') || s.length < 2) return s;
   const inner = s.slice(1, -1);
   // Build raw bytes first so octal `\NNN` sequences (each one byte of a
-  // potentially multi-byte UTF-8 character) reassemble correctly.
+  // potentially multi-byte UTF-8 character) reassemble correctly. We walk by
+  // Unicode code points (not UTF-16 code units), so non-BMP characters such as
+  // emoji that may appear inside a quoted path under `core.quotepath=false`
+  // round-trip through UTF-8 instead of being split into lone surrogates.
   const bytes: number[] = [];
   let i = 0;
   while (i < inner.length) {
     const c = inner.charCodeAt(i);
     if (c !== 0x5c /* '\' */) {
-      // Encode this character (which may be a multi-byte UTF-8 char from
-      // the input string) into bytes. JS strings are UTF-16; use a helper.
-      bytes.push(...Buffer.from(inner[i] ?? '', 'utf8'));
-      i++;
+      const cp = inner.codePointAt(i);
+      if (cp === undefined) {
+        i++;
+        continue;
+      }
+      const ch = String.fromCodePoint(cp);
+      bytes.push(...Buffer.from(ch, 'utf8'));
+      i += ch.length;
       continue;
     }
     const next = inner[i + 1];
@@ -520,6 +527,22 @@ function unquoteCStylePath(s: string): string {
       continue;
     }
     switch (next) {
+      case 'a':
+        bytes.push(0x07);
+        i += 2;
+        break;
+      case 'b':
+        bytes.push(0x08);
+        i += 2;
+        break;
+      case 'f':
+        bytes.push(0x0c);
+        i += 2;
+        break;
+      case 'v':
+        bytes.push(0x0b);
+        i += 2;
+        break;
       case 't':
         bytes.push(0x09);
         i += 2;

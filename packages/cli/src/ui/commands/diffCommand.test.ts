@@ -526,4 +526,34 @@ describe('renderDiffModelText filename sanitization', () => {
     expect(content).toContain('(new)');
     expect(content).toContain('(deleted)');
   });
+
+  it('escapes standalone control bytes that ansi-regex does not match', async () => {
+    // Filenames git permits but that aren't part of an ANSI escape sequence:
+    // raw newline, carriage return, backspace, BEL, and DEL. Each one would
+    // otherwise reorder, overwrite, or beep its way through the rendered
+    // diff in the non-interactive / ACP path.
+    const newline = 'bad\nINJECTED.txt';
+    const cr = 'bad\roverwrite.txt';
+    const bs = 'noisy\x08\x08\x08gone.txt';
+    const bel = 'beep\x07.txt';
+    const del = 'tail\x7f.txt';
+    const content = await renderText(
+      new Map<string, unknown>([
+        [newline, { added: 1, removed: 0, isBinary: false }],
+        [cr, { added: 1, removed: 0, isBinary: false }],
+        [bs, { added: 1, removed: 0, isBinary: false }],
+        [bel, { added: 1, removed: 0, isBinary: false }],
+        [del, { added: 1, removed: 0, isBinary: false }],
+      ]),
+    );
+    // None of the raw control bytes should survive into the rendered text.
+    expect(content).not.toContain('\n\nINJECTED.txt');
+    expect(content).not.toMatch(/\roverwrite\.txt/);
+    expect(content).not.toContain('\x08');
+    expect(content).not.toContain('\x07');
+    expect(content).not.toContain('\x7f');
+    // The escaped forms (JSON-style) are what we render instead.
+    expect(content).toContain('bad\\nINJECTED.txt');
+    expect(content).toContain('bad\\roverwrite.txt');
+  });
 });

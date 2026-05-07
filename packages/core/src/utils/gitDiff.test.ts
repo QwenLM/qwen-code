@@ -496,6 +496,67 @@ index 1111111..2222222 100644
     const result = parseGitDiff(diff);
     expect([...result.keys()]).toEqual(['文.txt']);
   });
+
+  it('preserves non-BMP code points in quoted paths instead of splitting surrogates', () => {
+    // Reproduces wenshao Critical (PR #3491 line 504): the previous walker
+    // advanced one UTF-16 code unit at a time, so a non-BMP codepoint such
+    // as the rocket emoji 🚀 (U+1F680) coexisting with a forced-quoting byte
+    // (here a TAB) was decoded as two lone surrogates → two replacement
+    // characters, corrupting the hunk key.
+    const diff = `diff --git "a/\\t🚀.txt" "b/\\t🚀.txt"
+index 1111111..2222222 100644
+--- "a/\\t🚀.txt"
++++ "b/\\t🚀.txt"
+@@ -1 +1 @@
+-x
++y
+`;
+    const result = parseGitDiff(diff);
+    expect([...result.keys()]).toEqual(['\t🚀.txt']);
+  });
+
+  it('decodes the remaining C-style escapes (\\a, \\b, \\f, \\v)', () => {
+    // Reproduces wenshao Critical (PR #3491 line 552): the previous switch
+    // dropped the leading backslash for these escapes, turning `\a` / `\b`
+    // / `\f` / `\v` into ordinary `a` / `b` / `f` / `v` and yielding a
+    // hunk key that did not match the real on-disk filename.
+    const diff = `diff --git "a/bell\\afile.txt" "b/bell\\afile.txt"
+index 1111111..2222222 100644
+--- "a/bell\\afile.txt"
++++ "b/bell\\afile.txt"
+@@ -1 +1 @@
+-x
++y
+diff --git "a/back\\bspace.txt" "b/back\\bspace.txt"
+index 3333333..4444444 100644
+--- "a/back\\bspace.txt"
++++ "b/back\\bspace.txt"
+@@ -1 +1 @@
+-x
++y
+diff --git "a/form\\ffeed.txt" "b/form\\ffeed.txt"
+index 5555555..6666666 100644
+--- "a/form\\ffeed.txt"
++++ "b/form\\ffeed.txt"
+@@ -1 +1 @@
+-x
++y
+diff --git "a/vert\\vtab.txt" "b/vert\\vtab.txt"
+index 7777777..8888888 100644
+--- "a/vert\\vtab.txt"
++++ "b/vert\\vtab.txt"
+@@ -1 +1 @@
+-x
++y
+`;
+    const result = parseGitDiff(diff);
+    expect([...result.keys()]).toEqual([
+      'bell\x07file.txt',
+      'back\x08space.txt',
+      'form\x0cfeed.txt',
+      'vert\x0btab.txt',
+    ]);
+  });
 });
 
 describe('parseGitDiff path disambiguation', () => {
