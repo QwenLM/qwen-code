@@ -445,7 +445,7 @@ describe('<LiveAgentPanel />', () => {
     expect(lastFrame() ?? '').toBe('');
   });
 
-  it('reconciles snapshots the live registry no longer knows about as just-finished', () => {
+  it('reconciles snapshots the live registry no longer knows about as neutral-finished', () => {
     // `unregisterForeground` calls `emitStatusChange(entry)` BEFORE
     // it deletes the entry, so a snapshot taken on that callback
     // captures the agent as "still running" while the very next
@@ -455,6 +455,13 @@ describe('<LiveAgentPanel />', () => {
     // and the user loses the "what just finished?" beat. Synthesize
     // a terminal version so the 8s visibility window gives feedback
     // and then evicts the row cleanly.
+    //
+    // The synthesis MUST use a neutral glyph rather than the success
+    // ✔ — foreground subagents do not transition through
+    // `complete`/`fail`/`cancel` on the registry before unregister,
+    // so the panel cannot tell whether the run succeeded or failed.
+    // Showing ✔ for 8s on a run the user just saw fail (via the
+    // inline tool result) would be a confusing lie.
     const ghost = agentEntry({
       agentId: 'ghost-1',
       subagentType: 'editor',
@@ -463,20 +470,42 @@ describe('<LiveAgentPanel />', () => {
     });
     const { config } = makeRegistryConfig([]);
     const { lastFrame } = renderPanel({ entries: [ghost], config });
-    // First frame: synthesized completion, row still on screen.
     let frame = lastFrame() ?? '';
     expect(frame).toContain('editor');
     expect(frame).toContain('long-gone foreground task');
-    // The synthesis sets status='completed', so the running tally
-    // should be 0/1 and the bullet should switch to the success ✔.
+    // The synthesis sets status='completed' for the visibility-window
+    // logic but flags `synthesized: true` so the row renders the
+    // neutral `·` glyph instead of the success `✔`.
     expect(frame).toContain('(0/1)');
-    expect(frame).toContain('✔');
+    expect(frame).not.toContain('✔');
+    expect(frame).toContain('·');
     // After the visibility window the row evicts and the panel hides.
     act(() => {
       vi.advanceTimersByTime(9000);
     });
     frame = lastFrame() ?? '';
     expect(frame).toBe('');
+  });
+
+  it('keeps the success glyph for entries the registry still tracks (non-synthesized)', () => {
+    // Sibling assertion to the synthesized case above — when the
+    // registry HAS the entry (an authentic completed transition,
+    // e.g. a background subagent reaching `complete()`), the panel
+    // should keep rendering the green ✔. The neutral glyph is
+    // synthesis-only.
+    const real = agentEntry({
+      agentId: 'real-1',
+      subagentType: 'researcher',
+      description: 'researcher: real completion',
+      status: 'completed',
+      startTime: -3_000,
+      endTime: 0,
+    });
+    const { config } = makeRegistryConfig([real]);
+    const { lastFrame } = renderPanel({ entries: [real], config });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('✔');
+    expect(frame).not.toContain('·');
   });
 
   it('keeps terminal snapshots visible until the TTL even when the registry forgot them', () => {

@@ -77,6 +77,16 @@ const DEFAULT_SUBAGENT_TYPE = CORE_DEFAULT_SUBAGENT_TYPE;
 type LivePanelEntry = AgentDialogEntry & {
   /** True when the row is past its terminal-visibility window. */
   expired: boolean;
+  /**
+   * True when the row was synthesized because the registry forgot
+   * the entry — we know the agent is no longer running but NOT
+   * whether it succeeded, failed, or was cancelled (foreground
+   * subagents don't transition through `complete`/`fail`/`cancel`
+   * before `unregisterForeground`). Renders with a neutral glyph
+   * and color so the panel never claims a green ✔ on a run that
+   * the user just saw fail in the inline tool result.
+   */
+  synthesized?: boolean;
 };
 
 function isAgentEntry(entry: DialogEntry): entry is AgentDialogEntry {
@@ -87,7 +97,16 @@ function isAgentEntry(entry: DialogEntry): entry is AgentDialogEntry {
 // active slots (running / paused) so the row reads as a uniform list,
 // terminal states keep distinct check / cross marks so they're easy
 // to scan at a glance.
-function statusIcon(entry: AgentDialogEntry): { glyph: string; color: string } {
+function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
+  glyph: string;
+  color: string;
+} {
+  if (entry.synthesized) {
+    // Outcome unknown — registry forgot the entry without going
+    // through complete / fail / cancel. Use a neutral marker so
+    // we don't lie about success.
+    return { glyph: '·', color: theme.text.secondary };
+  }
   switch (entry.status) {
     case 'running':
       return { glyph: '○', color: theme.status.warning };
@@ -273,11 +292,20 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
             missingSince = reconcileAt;
             missingSinceRef.current.set(snap.agentId, missingSince);
           }
+          // Mark synthesized so the row renders with a neutral glyph
+          // — we know the agent is no longer running but cannot tell
+          // whether it succeeded, failed, or was cancelled (foreground
+          // subagents are unregistered without transitioning through
+          // complete / fail / cancel on the registry). Status stays
+          // `'completed'` purely so the visibility-window filter
+          // treats the row as terminal; `synthesized` overrides the
+          // glyph + color in `statusIcon`.
           return {
             ...snap,
             status: 'completed' as const,
             endTime: snap.endTime ?? missingSince,
-          };
+            synthesized: true,
+          } as AgentDialogEntry;
         }
         // Snap is already terminal but the registry forgot. Canonical
         // case: a foreground subagent that was cancelled / failed

@@ -291,12 +291,14 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         })()}
       {toolCalls.map((tool) => {
         const isConfirming = toolAwaitingApproval?.callId === tool.callId;
-        // A subagent's inline confirmation should only receive keyboard focus
-        // when (1) there is no direct tool-level confirmation active, and (2)
-        // this tool currently holds the subagent keyboard focus. Pending
-        // confirmations keep the existing first-come focus lock; otherwise the
-        // first running subagent owns Ctrl+E/Ctrl+F so the compact hint remains
-        // actionable without making parallel subagents toggle in lock-step.
+        // A subagent's inline approval prompt should only receive keyboard
+        // focus when (1) there is no direct tool-level confirmation active
+        // and (2) this tool currently holds the subagent keyboard focus.
+        // Pending confirmations keep the first-come focus lock so users
+        // answer one approval at a time; LiveAgentPanel + BackgroundTasksDialog
+        // own all live progress / drill-down (the legacy Ctrl+E / Ctrl+F
+        // shortcuts on the inline AgentExecutionDisplay frame were retired
+        // alongside the frame itself).
         const isSubagentFocused =
           isFocused &&
           !toolAwaitingApproval &&
