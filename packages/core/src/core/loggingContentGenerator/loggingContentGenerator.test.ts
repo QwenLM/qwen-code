@@ -108,6 +108,9 @@ const createResponse = (
   return response;
 };
 
+const MAX_RESPONSE_TEXT_LENGTH = 4096;
+const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
+
 describe('LoggingContentGenerator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -230,6 +233,69 @@ describe('LoggingContentGenerator', () => {
       choices: [],
     });
     expect(openaiError).toBeUndefined();
+  });
+
+  it('truncates long response text in API response telemetry', async () => {
+    const longText = 'x'.repeat(MAX_RESPONSE_TEXT_LENGTH + 100);
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-long', 'test-model', [{ text: longText }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-long');
+
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toHaveLength(MAX_RESPONSE_TEXT_LENGTH);
+    expect(responseEvent.response_text).toBe(
+      `${longText.slice(
+        0,
+        MAX_RESPONSE_TEXT_LENGTH - RESPONSE_TEXT_TRUNCATION_SUFFIX.length,
+      )}${RESPONSE_TEXT_TRUNCATION_SUFFIX}`,
+    );
+  });
+
+  it.each([
+    ['thought-only', [{ text: 'hidden thought', thought: true }]],
+    [
+      'functionCall-only',
+      [{ functionCall: { id: 'call-1', name: 'tool', args: '{}' } }],
+    ],
+  ])('omits response_text for %s API responses', async (_name, parts) => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(createResponse('resp-empty', 'test-model', parts)),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-empty');
+
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toBeUndefined();
   });
 
   it('logs errors with status code and request id, then rethrows', async () => {

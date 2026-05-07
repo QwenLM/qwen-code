@@ -47,6 +47,11 @@ import {
   getErrorType,
 } from '../../utils/errors.js';
 
+const MAX_RESPONSE_TEXT_LENGTH = 4096;
+const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
+const MAX_RESPONSE_TEXT_PREFIX_LENGTH =
+  MAX_RESPONSE_TEXT_LENGTH - RESPONSE_TEXT_TRUNCATION_SUFFIX.length;
+
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
  */
@@ -485,10 +490,26 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     let text = '';
     let hasText = false;
+    let truncated = false;
+    const appendText = (partText: string) => {
+      hasText = true;
+      if (truncated) {
+        return;
+      }
+
+      const remaining = MAX_RESPONSE_TEXT_PREFIX_LENGTH - text.length;
+      if (partText.length <= remaining) {
+        text += partText;
+        return;
+      }
+
+      text += partText.slice(0, Math.max(0, remaining));
+      truncated = true;
+    };
+
     for (const part of parts as Part[]) {
       if (typeof part === 'string') {
-        text += part;
-        hasText = true;
+        appendText(part);
         continue;
       }
 
@@ -497,12 +518,15 @@ export class LoggingContentGenerator implements ContentGenerator {
         typeof part.text === 'string' &&
         !('thought' in part && part.thought)
       ) {
-        text += part.text;
-        hasText = true;
+        appendText(part.text);
       }
     }
 
-    return hasText ? text : undefined;
+    if (!hasText) {
+      return undefined;
+    }
+
+    return truncated ? `${text}${RESPONSE_TEXT_TRUNCATION_SUFFIX}` : text;
   }
 
   async countTokens(req: CountTokensParameters): Promise<CountTokensResponse> {
