@@ -17,10 +17,6 @@ const debugLogger = createDebugLogger('RETRY');
 const PERSISTENT_MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes — single retry backoff cap
 const PERSISTENT_CAP_MS = 6 * 60 * 60 * 1000; // 6 hours — absolute single wait cap
 const HEARTBEAT_INTERVAL_MS = 30_000; // 30 seconds
-// Retry-After cap for normal HTTP retries. Shares the persistent-mode
-// single-wait ceiling — both reflect the longest delay an interactive
-// session should be parked for in one retry.
-const INTERACTIVE_RETRY_AFTER_CAP_MS = PERSISTENT_MAX_BACKOFF_MS;
 
 export interface HttpError extends Error {
   status?: number;
@@ -280,12 +276,11 @@ export async function retryWithBackoff<T>(
           errorStatus === 429 ? getRetryAfterDelayMs(error) : null;
 
         if (retryAfterMs !== null && retryAfterMs > 0) {
-          const delayMs = Math.min(retryAfterMs, INTERACTIVE_RETRY_AFTER_CAP_MS);
           debugLogger.warn(
-            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${delayMs}ms...`,
+            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
             error,
           );
-          await delay(delayMs);
+          await delay(retryAfterMs);
           currentDelay = initialDelayMs;
         } else {
           logRetryAttempt(attempt, error, errorStatus);

@@ -1000,7 +1000,7 @@ describe('retryWithBackoff - Retry-After handling in normal mode', () => {
     expect(fn).toHaveBeenCalledTimes(2);
   });
 
-  it('should cap oversized Retry-After values for interactive retries', async () => {
+  it('should respect oversized Retry-After values for normal retries', async () => {
     const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
     const error = Object.assign(new Error('Rate limited'), {
       status: 429,
@@ -1017,7 +1017,7 @@ describe('retryWithBackoff - Retry-After handling in normal mode', () => {
     await vi.runAllTimersAsync();
     await expect(promise).resolves.toBe('ok');
 
-    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(300_000);
+    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(600_000);
     expect(fn).toHaveBeenCalledTimes(2);
   });
 });
