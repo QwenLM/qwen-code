@@ -725,9 +725,26 @@ function findGhPrCreateSegment(
   return null;
 }
 
-/** Approximate characters per text line for the diff-size estimate. */
+/**
+ * Approximate characters per text line for the diff-size proxy.
+ * `numstat` reports added+deleted line counts; we multiply by this
+ * constant to get a coarse "change magnitude" the per-file AI
+ * accumulator can be clamped against. The downstream `aiChars` /
+ * `humanChars` fields in the git-notes payload are literally
+ * (lines × this constant) — they are NOT real character counts.
+ * See the `FileAttributionDetail` interface doc for the consequences
+ * for consumers that aggregate the raw values.
+ */
 const APPROX_CHARS_PER_LINE = 40;
-/** Fallback char estimate when --numstat reports `-` (binary file). */
+/**
+ * Fallback diff-size proxy for binary files. `numstat` reports `-`
+ * (instead of integer counts) for any non-text blob, so we can't
+ * compute a per-line estimate; this flat value lets the entry
+ * survive into the payload at a consistent (if coarse) size.
+ * Same heuristic-not-literal caveat as `APPROX_CHARS_PER_LINE` —
+ * a 5 MB image change and a 1-byte binary tweak both report this
+ * value.
+ */
 const BINARY_DIFF_SIZE_FALLBACK = 1024;
 
 /**
@@ -1929,27 +1946,39 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Count the commits between `preHead` (exclusive) and `HEAD`
-   * (inclusive). Returns 0 if either side is unreadable. Goes through
-   * `child_process.execFile` with argv to stay independent of the
-   * mockable `ShellExecutionService`.
+   * Count the commits between `preHead` (exclusive) and `postHead`
+   * (inclusive). SHA-pinned on both ends so a post-commit hook moving
+   * HEAD between this check and the note write can't change the
+   * answer (`HEAD~1..HEAD` here would race the same TOCTOU window
+   * the diff calls were just pinned against). Returns 0 if either
+   * side is unreadable. Goes through `child_process.execFile` with
+   * argv to stay independent of the mockable `ShellExecutionService`.
    */
   private async countCommitsAfter(
     cwd: string,
     preHead: string,
+    postHead: string,
   ): Promise<number> {
-    return this.runGitCount(cwd, ['rev-list', '--count', `${preHead}..HEAD`]);
+    return this.runGitCount(cwd, [
+      'rev-list',
+      '--count',
+      `${preHead}..${postHead}`,
+    ]);
   }
 
   /**
-   * Count commits reachable from HEAD when the repo had no prior
+   * Count commits reachable from `postHead` when the repo had no prior
    * HEAD before the user's command — i.e. the very first commit (or
    * compound `init && commit && commit ...`). Without this fallback
    * the multi-commit guard would be skipped on a brand-new repo and
-   * mis-attribute combined data to the final commit.
+   * mis-attribute combined data to the final commit. SHA-pinned for
+   * the same reason as `countCommitsAfter`.
    */
-  private async countCommitsFromRoot(cwd: string): Promise<number> {
-    return this.runGitCount(cwd, ['rev-list', '--count', 'HEAD']);
+  private async countCommitsFromRoot(
+    cwd: string,
+    postHead: string,
+  ): Promise<number> {
+    return this.runGitCount(cwd, ['rev-list', '--count', postHead]);
   }
 
   /** Shared helper for the two `rev-list --count` invocations. */
@@ -2094,8 +2123,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // commit b` chain still gets caught.
     const commitCount =
       preHead !== null
-        ? await this.countCommitsAfter(cwd, preHead)
-        : await this.countCommitsFromRoot(cwd);
+        ? await this.countCommitsAfter(cwd, preHead, postHead)
+        : await this.countCommitsFromRoot(cwd, postHead);
     // commitCreated has already established that HEAD moved, so we
     // expect exactly 1 commit. Anything else is suspicious:
     // - >1: actual multi-commit chain we can't partition
@@ -2142,9 +2171,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let shouldClear: Set<string> | null = null;
     let warning: string | null = null;
     try {
-      // Analyze the just-committed files by diffing HEAD against its parent.
-      // The commit already happened, so we diff HEAD~1..HEAD instead of --cached.
-      const stagedInfo = await this.getCommittedFileInfo(cwd, isAmend);
+      // Analyze the just-committed files by diffing the captured
+      // `postHead` against its parent (or `preHead` for amend). All
+      // diff calls are SHA-pinned so a post-commit hook / chained
+      // `git tag` / parallel git process moving HEAD between the
+      // analysis phase and the note write can't leave the note
+      // attached to commit A but describing commit B.
+      const stagedInfo = await this.getCommittedFileInfo(
+        cwd,
+        isAmend,
+        postHead,
+        preHead,
+      );
 
       // null = analysis failed (shallow clone, --amend without reflog,
       // partial diff failure, etc.). Leave `committedAbsolutePaths`
@@ -2437,6 +2475,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
   private async getCommittedFileInfo(
     cwd: string,
     isAmend: boolean,
+    postHead: string,
+    preHead: string | null,
   ): Promise<StagedFileInfo | null> {
     const empty: StagedFileInfo = {
       files: [],
@@ -2467,51 +2507,65 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
 
     try {
+      // SHA-pin every probe and diff to the captured `postHead` (and
+      // `preHead` for amend). Using symbolic `HEAD` here would re-open
+      // the same TOCTOU class that the `git notes` write was already
+      // pinned against: between this analysis phase and the note write,
+      // a post-commit hook (husky/lefthook auto-amend, sign-off, signed
+      // commits adjustment), a chained `git tag -m ...`, or a parallel
+      // git process can advance HEAD — and then `HEAD~1..HEAD` /
+      // `diff-tree HEAD` would describe whatever commit HEAD now
+      // points at, while the note still attaches to the original
+      // `postHead`. The result is a note on commit A whose contents
+      // describe commit B. Pinning to `postHead` keeps the analysis
+      // and the note consistent.
+      //
       // The three calls are independent — fan out so we don't pay the
       // spawn latency serially. Same for the three diff calls below
       // once we know which form to use.
-      // - `rev-parse --verify HEAD~1`: probe whether the parent OBJECT
-      //   is locally available (fails in shallow clones where the
-      //   parent was pruned).
-      // - `log -1 --pretty=%P HEAD`: read the parent SHA from HEAD's
-      //   commit metadata. Works regardless of shallow status because
-      //   the parent SHA is recorded on the commit itself, not derived
-      //   by walking. Empty output = HEAD is a true root commit.
-      //   Non-empty output = HEAD has a parent (whether or not its
-      //   object is locally available).
-      // - `rev-parse --show-toplevel`: capture the repo root.
+      // - `rev-parse --verify ${postHead}~1`: probe whether the parent
+      //   OBJECT is locally available (fails in shallow clones where
+      //   the parent was pruned).
+      // - `log -1 --pretty=%P ${postHead}`: read the parent SHA from
+      //   the commit metadata. Works regardless of shallow status
+      //   because the parent SHA is recorded on the commit itself, not
+      //   derived by walking. Empty output = postHead is a true root
+      //   commit. Non-empty output = postHead has a parent (whether or
+      //   not its object is locally available).
+      // - `rev-parse --show-toplevel`: capture the repo root (HEAD-
+      //   independent).
       //
-      // `rev-list --count HEAD` looks tempting as a "is this a root
+      // `rev-list --count` looks tempting as a "is this a root
       // commit?" probe but it returns 1 in a depth-1 shallow clone
       // (only the local object is reachable), aliasing the shallow
       // and root cases. The parent-SHA approach disambiguates them
       // correctly.
       const [hasParentOutput, parentShaOutput, repoRootOutput] =
         await Promise.all([
-          runGit('rev-parse --verify HEAD~1'),
-          runGit('log -1 --pretty=%P HEAD'),
+          runGit(`rev-parse --verify ${postHead}~1`),
+          runGit(`log -1 --pretty=%P ${postHead}`),
           runGit('rev-parse --show-toplevel'),
         ]);
-      // `rev-parse --verify HEAD~1` is allowed to fail (shallow
+      // `rev-parse --verify <sha>~1` is allowed to fail (shallow
       // clone, true root commit) — treat null and '' uniformly.
       const hasParent = hasParentOutput !== null && hasParentOutput.length > 0;
-      // `log -1 --pretty=%P HEAD` MUST succeed; if git can't read the
-      // current HEAD's metadata we have no way to tell shallow apart
-      // from a real root commit. Bail.
+      // `log -1 --pretty=%P <sha>` MUST succeed; if git can't read
+      // postHead's metadata we have no way to tell shallow apart from
+      // a real root commit. Bail.
       if (parentShaOutput === null) {
         debugLogger.warn(
-          'getCommittedFileInfo: log -1 --pretty=%P HEAD failed; ' +
+          'getCommittedFileInfo: log -1 --pretty=%P <postHead> failed; ' +
             'cannot distinguish shallow clone from true root commit.',
         );
         return null;
       }
       const isTrueRootCommit = parentShaOutput.trim().length === 0;
-      // Shallow clone: HEAD has a parent recorded but the object
+      // Shallow clone: postHead has a parent recorded but the object
       // isn't local. Bail rather than over-attribute via --root.
       if (!hasParent && !isTrueRootCommit) {
         debugLogger.warn(
-          'getCommittedFileInfo: HEAD~1 unreadable but commit is not the ' +
-            'true root (shallow clone?); skipping attribution to avoid ' +
+          'getCommittedFileInfo: <postHead>~1 unreadable but commit is not ' +
+            'the true root (shallow clone?); skipping attribution to avoid ' +
             'attributing the entire commit contents.',
         );
         return null;
@@ -2525,45 +2579,62 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const repoRoot = (repoRootOutput ?? '').trim();
 
       // Choose the diff range:
-      // - amend: `HEAD@{1}..HEAD` — the actual amend delta. The
-      //   pre-amend HEAD is in the reflog and points at the original
-      //   commit; diffing against the *amended* HEAD captures only
-      //   what changed in this amend operation, not the entire commit
-      //   contents (which `HEAD~1..HEAD` would falsely include).
-      // - has parent: `HEAD~1..HEAD` — standard parent diff.
-      // - root commit: `diff-tree --root` against the empty tree.
+      // - amend: `${preHead}..${postHead}` — the actual amend delta.
+      //   `preHead` was captured BEFORE the user's command ran and so
+      //   points at the original (pre-amend) commit. The amend rewrote
+      //   that commit into postHead; diffing them captures only what
+      //   changed in this amend, not the entire amended commit's
+      //   contents (which `${postHead}~1..${postHead}` would falsely
+      //   include — postHead's parent is the original's parent, so
+      //   diffing against it spans both commits' worth of changes).
+      // - has parent: `${postHead}~1..${postHead}` — pin both ends.
+      //   We do NOT use `${preHead}..${postHead}` here: in chains like
+      //   `git reset HEAD~3 && git commit`, preHead points well above
+      //   postHead's parent and the diff would include the reset-away
+      //   commits as deletions, dramatically over-attributing.
+      // - root commit: `diff-tree --root <postHead>` against the empty
+      //   tree.
       let diffArgs: { name: string; status: string; numstat: string };
       if (isAmend) {
-        // Verify HEAD@{1} actually exists; reflogs can be GC'd.
-        const reflogProbe = await runGit('rev-parse --verify HEAD@{1}');
-        const hasReflog = reflogProbe !== null && reflogProbe.length > 0;
-        if (!hasReflog) {
-          // Without a pre-amend snapshot we can't compute the amend
-          // delta; emitting `HEAD~1..HEAD` would over-attribute.
+        // For amend, the pre-amend SHA we need is `preHead`. It must
+        // be non-null (caller's `attributableInCwd` gate already
+        // captured it for any commit attempt); a missing preHead means
+        // a brand-new repo where amend isn't meaningful anyway.
+        if (preHead === null) {
           debugLogger.warn(
-            'getCommittedFileInfo: --amend with empty reflog; skipping ' +
+            'getCommittedFileInfo: --amend with no preHead; skipping ' +
+              'attribution note (cannot determine amend delta).',
+          );
+          return null;
+        }
+        // Verify the pre-amend SHA still resolves. preHead is captured
+        // synchronously before spawn, but a concurrent `git gc` /
+        // `git prune` could in principle remove the object before we
+        // try to diff against it.
+        const preHeadProbe = await runGit(`rev-parse --verify ${preHead}`);
+        if (preHeadProbe === null || preHeadProbe.length === 0) {
+          debugLogger.warn(
+            'getCommittedFileInfo: --amend preHead unresolvable; skipping ' +
               'attribution note (cannot determine amend delta).',
           );
           return null;
         }
         diffArgs = {
-          name: 'diff --find-renames --name-only HEAD@{1} HEAD',
-          status: 'diff --find-renames --name-status HEAD@{1} HEAD',
-          numstat: 'diff --find-renames --numstat HEAD@{1} HEAD',
+          name: `diff --find-renames --name-only ${preHead} ${postHead}`,
+          status: `diff --find-renames --name-status ${preHead} ${postHead}`,
+          numstat: `diff --find-renames --numstat ${preHead} ${postHead}`,
         };
       } else if (hasParent) {
         diffArgs = {
-          name: 'diff --find-renames --name-only HEAD~1 HEAD',
-          status: 'diff --find-renames --name-status HEAD~1 HEAD',
-          numstat: 'diff --find-renames --numstat HEAD~1 HEAD',
+          name: `diff --find-renames --name-only ${postHead}~1 ${postHead}`,
+          status: `diff --find-renames --name-status ${postHead}~1 ${postHead}`,
+          numstat: `diff --find-renames --numstat ${postHead}~1 ${postHead}`,
         };
       } else {
         diffArgs = {
-          name: 'diff-tree --root --find-renames --no-commit-id -r --name-only HEAD',
-          status:
-            'diff-tree --root --find-renames --no-commit-id -r --name-status HEAD',
-          numstat:
-            'diff-tree --root --find-renames --no-commit-id -r --numstat HEAD',
+          name: `diff-tree --root --find-renames --no-commit-id -r --name-only ${postHead}`,
+          status: `diff-tree --root --find-renames --no-commit-id -r --name-status ${postHead}`,
+          numstat: `diff-tree --root --find-renames --no-commit-id -r --numstat ${postHead}`,
         };
       }
       const [nameOutput, statusOutput, numstatOutput] = await Promise.all([

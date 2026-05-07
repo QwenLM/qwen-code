@@ -115,22 +115,64 @@ export interface FileAttribution {
   contentHash: string;
 }
 
-/** Per-file attribution detail in the git notes payload. */
+/**
+ * Per-file attribution detail in the git notes payload.
+ *
+ * Field naming caveat: `aiChars` and `humanChars` look like literal
+ * UTF-16/UTF-8 character counts, but they are NOT. Both are
+ * heuristic diff-size proxies derived from `git diff --numstat`:
+ * for text files the value is `(addedLines + deletedLines) × 40`
+ * (the 40-char/line heuristic), and for binary files both sides
+ * are reported as a flat `1024`. The per-file AI accumulator from
+ * `recordEdit` is then clamped against this same line-based ceiling.
+ *
+ * Practical consequence: a commit adding 1000 one-character lines
+ * and one adding 1000 thousand-character lines both report
+ * `aiChars = 40000`; a 5 MB image change and a 1-byte binary tweak
+ * both report `1024`. `percent` (and `summary.aiPercent`) is
+ * largely insulated from this — both numerator and denominator use
+ * the same heuristic — but consumers aggregating raw
+ * `aiChars`/`humanChars` for compliance reporting will get
+ * systematically biased numbers and should treat these fields as
+ * "approximate change size in proxy-chars" rather than literal
+ * char counts.
+ */
 export interface FileAttributionDetail {
+  /** Heuristic diff-size proxy (NOT a literal char count — see interface doc). */
   aiChars: number;
+  /** Heuristic diff-size proxy (NOT a literal char count — see interface doc). */
   humanChars: number;
+  /**
+   * AI share of the per-file diff, rounded to integer percent.
+   * Robust against the heuristic in `aiChars`/`humanChars` because
+   * both sides of the ratio use the same proxy; safe to aggregate.
+   */
   percent: number;
   surface?: string;
 }
 
-/** Full attribution payload stored as git notes JSON. */
+/**
+ * Full attribution payload stored as git notes JSON.
+ *
+ * Same `aiChars`/`humanChars` caveat as `FileAttributionDetail`:
+ * those summed totals are sums of heuristic diff-size proxies, not
+ * literal character counts. `aiPercent` (and per-file `percent`)
+ * use the same proxy on both sides of the ratio, so the percentage
+ * is the field consumers should rely on for cross-commit
+ * aggregation; the raw chars values are useful for ordering
+ * commits within the same payload but should not be summed across
+ * unrelated commits as if they were byte counts.
+ */
 export interface CommitAttributionNote {
   version: 1;
   generator: string;
   files: Record<string, FileAttributionDetail>;
   summary: {
+    /** AI share of the whole commit, rounded to integer percent. */
     aiPercent: number;
+    /** Sum of per-file `aiChars` heuristic proxies (see FileAttributionDetail). */
     aiChars: number;
+    /** Sum of per-file `humanChars` heuristic proxies (see FileAttributionDetail). */
     humanChars: number;
     totalFilesTouched: number;
     surfaces: string[];
