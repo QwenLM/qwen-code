@@ -487,6 +487,35 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toBe('');
   });
 
+  it('escapes ANSI control codes in user-controlled strings', () => {
+    // `subagentType` (subagent config) and `recentActivities[].description`
+    // (LLM-generated) can carry ANSI escape sequences. Without
+    // sanitization they bleed through Ink's <Text> and corrupt the
+    // panel chrome (color overrides, cursor moves, screen clears).
+    // HistoryItemDisplay applies `escapeAnsiCtrlCodes` for the same
+    // reason; the panel must do the same.
+    const malicious = '[31mEVIL[0m';
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'ansi-1',
+          subagentType: malicious,
+          description: `${malicious}: scan ${malicious} repo`,
+          recentActivities: [{ name: 'Glob', description: malicious, at: 0 }],
+        }),
+      ],
+    });
+    const frame = lastFrame() ?? '';
+    // Raw escape sequence MUST NOT appear; the JSON-string-escaped
+    // form (visible literal ``) is acceptable since it's
+    // inert at the terminal level.
+    expect(frame).not.toContain('[31m');
+    expect(frame).not.toContain('[0m');
+    // The visible word survives the escaping (the wrapper became
+    // visible literals, the payload didn't disappear).
+    expect(frame).toContain('EVIL');
+  });
+
   it('keeps the success glyph for entries the registry still tracks (non-synthesized)', () => {
     // Sibling assertion to the synthesized case above — when the
     // registry HAS the entry (an authentic completed transition,

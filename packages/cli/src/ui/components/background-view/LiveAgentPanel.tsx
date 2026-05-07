@@ -38,6 +38,7 @@ import { useBackgroundTaskViewState } from '../../contexts/BackgroundTaskViewCon
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
+import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
 import type {
   AgentDialogEntry,
   DialogEntry,
@@ -429,7 +430,14 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
   now,
 }) => {
   const { glyph, color } = statusIcon(entry);
-  const label = descriptionWithoutPrefix(entry);
+  // ANSI sanitize every user-controlled string before it reaches Ink.
+  // `subagentType` comes from subagent config (user-authored or model-
+  // chosen) and `recentActivities[].description` is LLM-generated;
+  // both can carry terminal control sequences that would otherwise
+  // bleed through Ink's `<Text>` and corrupt the panel chrome.
+  // HistoryItemDisplay applies the same `escapeAnsiCtrlCodes` to its
+  // user-facing content for the same reason.
+  const label = escapeAnsiCtrlCodes(descriptionWithoutPrefix(entry));
   // Note: foreground vs background is intentionally not surfaced here.
   // BackgroundTasksDialog tags foreground rows with `[blocking]`
   // (formerly `[in turn]`) to warn that cancelling will end the
@@ -437,11 +445,14 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
   // cancel. The glance panel has no cancel surface, so the marker
   // reads as ambient noise. Keep the dialog as the place that
   // surfaces the flavor distinction.
-  const activity = activityLabel(entry);
+  const activity = escapeAnsiCtrlCodes(activityLabel(entry));
   const elapsed = elapsedLabel(entry, now);
   const showType =
     entry.subagentType !== undefined &&
     entry.subagentType !== DEFAULT_SUBAGENT_TYPE;
+  const safeSubagentType = showType
+    ? escapeAnsiCtrlCodes(entry.subagentType ?? '')
+    : '';
   const tokenSuffix =
     entry.stats?.totalTokens && entry.stats.totalTokens > 0
       ? ` · ${formatTokenCount(entry.stats.totalTokens)} tokens`
@@ -473,7 +484,7 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
           <Text color={color}>{`${glyph} `}</Text>
           {showType && (
             <>
-              <Text bold>{entry.subagentType}</Text>
+              <Text bold>{safeSubagentType}</Text>
               <Text color={theme.text.secondary}>{': '}</Text>
             </>
           )}

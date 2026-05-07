@@ -312,8 +312,9 @@ describe('<ToolMessage />', () => {
         subagentName: string;
         taskDescription: string;
         taskPrompt: string;
-        status: 'running' | 'completed';
+        status: 'running' | 'completed' | 'failed' | 'cancelled';
         pendingConfirmation?: object;
+        terminateReason?: string;
       };
       isFocused?: boolean;
     }): ToolMessageProps => {
@@ -354,9 +355,12 @@ describe('<ToolMessage />', () => {
       expect(output).not.toContain('Queued approval:');
     });
 
-    it('completed subagent → no inline frame', () => {
-      // Committed subagents now live exclusively in BackgroundTasksDialog;
-      // the inline scrollback no longer paints a verbose summary.
+    it('completed subagent → renders a one-line scrollback summary', () => {
+      // The verbose 15-row inline frame is retired (it caused
+      // scrollback flicker), but the conversation history needs to
+      // keep a permanent record after the panel's 8s window expires
+      // and the dialog closes. A single line preserves the history
+      // without re-introducing the flicker.
       const { lastFrame } = renderWithContext(
         <ToolMessage
           {...buildProps({
@@ -371,8 +375,35 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
       const output = lastFrame() ?? '';
-      expect(output).not.toContain('committed-agent');
+      // One-line summary: success glyph + agent name + description.
+      expect(output).toContain('✔');
+      expect(output).toContain('committed-agent');
+      expect(output).toContain('Already done');
+      // No approval prompt — completed subagents don't sit on the
+      // focus lock.
       expect(output).not.toContain('MockApprovalPrompt');
+    });
+
+    it('failed subagent → renders summary with terminate reason', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'failed-agent',
+              taskDescription: 'Crashed early',
+              taskPrompt: 'Crashed early',
+              status: 'failed',
+              terminateReason: 'Network timeout',
+            },
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('✖');
+      expect(output).toContain('failed-agent');
+      expect(output).toContain('Crashed early');
+      expect(output).toContain('Network timeout');
     });
 
     it('pendingConfirmation && isFocused → renders banner with agent label', () => {

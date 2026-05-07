@@ -28,6 +28,7 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
@@ -249,18 +250,18 @@ const PlanResultRenderer: React.FC<{
 /**
  * Component to render subagent execution results.
  *
- * The verbose inline frame has been retired in favour of the
- * always-on `LiveAgentPanel` (live roster, anchored beneath the input
- * footer) and `BackgroundTasksDialog` (Down-arrow detail view). This
- * renderer now only emits the focus-routed approval surfaces:
+ * The verbose inline frame has been retired. Three surfaces remain:
  *
- * - focus-holder: full inline approval prompt so the user can answer
- *   without context-switching into the dialog.
- * - queued sibling: a one-line marker so users know another subagent
- *   is waiting in line behind the focus-holder.
- *
- * All other agent state (running progress + completion summary) is
- * rendered exclusively by the panel + dialog pair.
+ * - **Live phase (running)**: nothing inline — `LiveAgentPanel` (the
+ *   always-on bottom roster) and `BackgroundTasksDialog` (Down-arrow
+ *   detail view) own progress reporting.
+ * - **Approval prompt (focus-locked)**: full inline approval banner so
+ *   the user can answer without context-switching into the dialog;
+ *   sibling subagents render a queued marker.
+ * - **Committed phase (terminal — completed / failed / cancelled)**: a
+ *   single-line scrollback summary so the conversation history retains
+ *   a permanent record after the panel's 8s window expires and the
+ *   dialog closes. Format: `<icon> <type>: <description> · N tools · Xs · Yk tokens`.
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -302,7 +303,76 @@ const SubagentExecutionRenderer: React.FC<{
       </Box>
     );
   }
+  // Terminal phase: render a single-line scrollback summary so the
+  // conversation history keeps a permanent record after the panel's
+  // 8s visibility window expires (LiveAgentPanel evicts terminal rows;
+  // BackgroundTasksDialog only retains them while open). Skip
+  // `running` / `background` since the panel + dialog cover those.
+  if (
+    data.status === 'completed' ||
+    data.status === 'failed' ||
+    data.status === 'cancelled'
+  ) {
+    return <SubagentScrollbackSummary data={data} />;
+  }
   return null;
+};
+
+/**
+ * One-line summary that lands in scrollback when a subagent reaches a
+ * terminal state. The verbose 15-row frame is retired (it caused
+ * scrollback flicker); this single line preserves the persistent
+ * record without re-introducing the flicker.
+ *
+ *   ✔ researcher: investigate import order · 5 tools · 12s · 2.4k tokens
+ */
+const SubagentScrollbackSummary: React.FC<{
+  data: AgentResultDisplay;
+}> = ({ data }) => {
+  const { glyph, color } = (() => {
+    switch (data.status) {
+      case 'completed':
+        return { glyph: '✔', color: theme.status.success };
+      case 'failed':
+        return { glyph: '✖', color: theme.status.error };
+      case 'cancelled':
+        return { glyph: '✖', color: theme.status.warning };
+      default:
+        return { glyph: '·', color: theme.text.secondary };
+    }
+  })();
+  const stats = data.executionSummary;
+  const parts: string[] = [];
+  if (stats?.totalToolCalls !== undefined) {
+    parts.push(
+      `${stats.totalToolCalls} tool${stats.totalToolCalls === 1 ? '' : 's'}`,
+    );
+  }
+  if (stats?.totalDurationMs !== undefined) {
+    parts.push(
+      formatDuration(stats.totalDurationMs, { hideTrailingZeros: true }),
+    );
+  }
+  if (stats?.totalTokens && stats.totalTokens > 0) {
+    parts.push(`${formatTokenCount(stats.totalTokens)} tokens`);
+  }
+  const tail = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
+  const typePrefix = data.subagentName ? `${data.subagentName}: ` : '';
+  const reason =
+    data.status !== 'completed' && data.terminateReason
+      ? ` · ${data.terminateReason}`
+      : '';
+  return (
+    <Box paddingLeft={1}>
+      <Text wrap="truncate-end">
+        <Text color={color}>{`${glyph} `}</Text>
+        <Text bold>{typePrefix}</Text>
+        <Text color={theme.text.secondary}>{data.taskDescription}</Text>
+        <Text color={theme.text.secondary}>{tail}</Text>
+        <Text color={theme.text.secondary}>{reason}</Text>
+      </Text>
+    </Box>
+  );
 };
 
 /**
