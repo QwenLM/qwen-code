@@ -217,6 +217,67 @@ describe('SessionRouter', () => {
       expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
       expect(router.getAll()).toEqual([]);
     });
+
+    it('preserves persist file for restoration on next start', async () => {
+      const { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } =
+        await import('node:fs');
+      const { join } = await import('node:path');
+      const tmpDir = join('/tmp', `test-cleara11-persist-${Date.now()}`);
+      mkdirSync(tmpDir, { recursive: true });
+
+      const persistFile = join(tmpDir, 'sessions.json');
+      const originalEntries = {
+        'telegram:alice:chat1': {
+          sessionId: 'session-xyz',
+          target: {
+            channelName: 'telegram',
+            senderId: 'alice',
+            chatId: 'chat1',
+          },
+          cwd: '/workspace',
+        },
+      };
+
+      try {
+        // Create a router, write a session, then clearAll
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
+        await router.resolve('telegram', 'alice', 'chat1');
+
+        // Populate the persist file with known data
+        writeFileSync(persistFile, JSON.stringify(originalEntries, null, 2));
+
+        router.clearAll();
+
+        // Memory should be cleared
+        expect(router.hasSession('telegram', 'alice', 'chat1')).toBe(false);
+        expect(router.getAll()).toEqual([]);
+
+        // Persist file should still exist with original content
+        expect(existsSync(persistFile)).toBe(true);
+        const onDisk = JSON.parse(readFileSync(persistFile, 'utf-8'));
+        expect(onDisk).toEqual(originalEntries);
+
+        // A fresh router should be able to restore from it
+        const freshRouter = new SessionRouter(
+          bridge,
+          '/tmp',
+          'user',
+          persistFile,
+        );
+        const result = await freshRouter.restoreSessions();
+
+        expect(result.restored).toBe(1);
+        expect(result.failed).toBe(0);
+        expect(freshRouter.hasSession('telegram', 'alice', 'chat1')).toBe(true);
+        expect(freshRouter.getTarget('session-xyz')).toEqual({
+          channelName: 'telegram',
+          senderId: 'alice',
+          chatId: 'chat1',
+        });
+      } finally {
+        rmSync(tmpDir, { recursive: true });
+      }
+    });
   });
 
   describe('setBridge', () => {

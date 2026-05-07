@@ -92,6 +92,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  Storage: {
+    runWithRuntimeBaseDir: vi.fn(
+      (_dir: unknown, _cwd: unknown, fn: () => unknown) => fn(),
+    ),
+  },
   tokenLimit: vi.fn(),
   SessionStartSource: {
     Startup: 'startup',
@@ -126,7 +131,11 @@ import {
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
-import { SessionEndReason, MCPServerConfig } from '@qwen-code/qwen-code-core';
+import {
+  SessionEndReason,
+  MCPServerConfig,
+  SessionService,
+} from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { loadSettings } from '../config/settings.js';
@@ -631,6 +640,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
+    loadSession: (args: Record<string, unknown>) => Promise<unknown>;
   };
 
   let mockConfig: Config;
@@ -889,6 +899,45 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       undefined,
       undefined,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession rejects when sessionExists returns false, skipping config load', async () => {
+    // Mock SessionService to report session does not exist
+    const sessionExistsStub = vi.fn().mockResolvedValue(false);
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          sessionExists: sessionExistsStub,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+
+    await setupSessionMocks('session-nonexistent');
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'nonexistent',
+      }),
+    ).rejects.toThrow('Session nonexistent does not exist at /tmp');
+
+    // Verify sessionExists was queried for the correct session
+    expect(sessionExistsStub).toHaveBeenCalledWith('nonexistent');
 
     mockConnectionState.resolve();
     await agentPromise;
