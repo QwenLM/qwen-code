@@ -71,8 +71,8 @@ describe('SessionStatsContext', () => {
             total: 300,
             cached: 50,
             thoughts: 20,
-            tool: 10,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -149,8 +149,8 @@ describe('SessionStatsContext', () => {
             total: 30,
             cached: 0,
             thoughts: 0,
-            tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -190,8 +190,8 @@ describe('SessionStatsContext', () => {
             total: 60,
             cached: 0,
             thoughts: 0,
-            tool: 0,
           },
+          bySource: {},
         },
       },
     };

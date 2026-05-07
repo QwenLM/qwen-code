@@ -38,9 +38,11 @@ vi.mock('../AnsiOutput.js', () => ({
   AnsiOutputText: function MockAnsiOutputText({
     data,
     maxWidth,
+    availableTerminalHeight,
   }: {
     data: AnsiOutput;
     maxWidth: number;
+    availableTerminalHeight?: number;
   }) {
     // Simple serialization for snapshot stability
     const serialized = data
@@ -48,8 +50,18 @@ vi.mock('../AnsiOutput.js', () => ({
       .join('\n');
     return (
       <Text>
-        MockAnsiOutput:{serialized}:width={maxWidth}
+        MockAnsiOutput:{serialized}:width={maxWidth}:height=
+        {availableTerminalHeight ?? 'undef'}
       </Text>
+    );
+  },
+  ShellStatsBar: function MockShellStatsBar({
+    displayHeight,
+  }: {
+    displayHeight?: number;
+  }) {
+    return (
+      <Text>MockShellStatsBar:displayHeight={displayHeight ?? 'undef'}</Text>
     );
   },
 }));
@@ -100,6 +112,13 @@ vi.mock('../subagents/index.js', () => ({
         🤖 {data.subagentName} • Task: {data.taskDescription}
       </Text>
     );
+  },
+}));
+vi.mock('./ToolConfirmationMessage.js', () => ({
+  ToolConfirmationMessage: function MockToolConfirmationMessage() {
+    // Sentinel string lets `isPending && pendingConfirmation` tests
+    // assert the banner renders (instead of being suppressed).
+    return <Text>MockApprovalPrompt</Text>;
   },
 }));
 
@@ -255,6 +274,27 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
+  it('renders a saved-session preview notice for truncated diff results', () => {
+    const diffResult = {
+      fileDiff: '--- file.txt\n+++ file.txt\n@@ -1 +1 @@\n-omitted\n+preview',
+      fileName: 'file.txt',
+      originalContent: 'old preview',
+      newContent: 'new preview',
+      truncatedForSession: true,
+      fileDiffLength: 123456,
+      fileDiffTruncated: true,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} resultDisplay={diffResult} />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain(
+      'Saved session preview only; full diff omitted from JSONL (123456 chars).',
+    );
+    expect(lastFrame()).toContain('MockDiff:--- file.txt');
+  });
+
   it('renders emphasis correctly', () => {
     const { lastFrame: highEmphasisFrame } = renderWithContext(
       <ToolMessage {...baseProps} emphasis="high" />,
@@ -304,6 +344,147 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('Search for files matching pattern'); // Actual task description
   });
 
+  describe('subagent live-render gating (isPending)', () => {
+    // The redesign hides the inline AgentExecutionDisplay while a
+    // foreground subagent runs (the pill+dialog handle drill-down).
+    // Only an active, focused approval prompt renders inline.
+    const buildProps = (overrides: {
+      data: {
+        subagentName: string;
+        taskDescription: string;
+        taskPrompt: string;
+        status: 'running' | 'completed';
+        pendingConfirmation?: object;
+      };
+      isPending?: boolean;
+      isFocused?: boolean;
+      isWaitingForOtherApproval?: boolean;
+    }): ToolMessageProps => {
+      // Spread the existing typed defaults so any future required field
+      // on `ToolMessageProps` becomes a compile-time miss instead of
+      // silently defaulting to undefined. Only the agent-specific
+      // `resultDisplay` shape uses a cast — its `pendingConfirmation`
+      // intentionally accepts a loose `object` fixture for these tests.
+      const resultDisplay = {
+        type: 'task_execution' as const,
+        ...overrides.data,
+      } as ToolMessageProps['resultDisplay'];
+      return {
+        ...baseProps,
+        name: 'task',
+        description: 'Delegate task to subagent',
+        resultDisplay,
+        status: ToolCallStatus.Executing,
+        callId: 'gated-task-call',
+        forceShowResult: true, // mirror ToolGroupMessage's forceShowResult
+        isPending: overrides.isPending,
+        isFocused: overrides.isFocused,
+        isWaitingForOtherApproval: overrides.isWaitingForOtherApproval,
+      };
+    };
+
+    it('isPending && no pendingConfirmation → no inline frame', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Search for files',
+              taskPrompt: 'Search',
+              status: 'running',
+            },
+            isPending: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      // The mocked AgentExecutionDisplay tags itself with '🤖' — its
+      // absence proves the inline frame was suppressed.
+      expect(output).not.toContain('🤖');
+      expect(output).not.toContain('MockApprovalPrompt');
+    });
+
+    it('isPending && pendingConfirmation && isFocused → renders banner with agent label', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Search for files',
+              taskPrompt: 'Search',
+              status: 'running',
+              pendingConfirmation: {} as object,
+            },
+            isPending: true,
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      // Banner shows up with the originating agent identified, and the
+      // approval prompt itself renders.
+      expect(output).toContain('Approval requested by');
+      expect(output).toContain('fg-agent');
+      expect(output).toContain('MockApprovalPrompt');
+      // The full agent frame (header / tool-call list) stays suppressed.
+      expect(output).not.toContain('🤖');
+    });
+
+    it('isPending && pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {
+      // Without this marker, a subagent waiting on another subagent's
+      // approval would be invisible in the main view — the user would
+      // have no inline signal that an approval is queued and would have
+      // to open the dialog to discover it.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'queued-agent',
+              taskDescription: 'Lint',
+              taskPrompt: 'Lint',
+              status: 'running',
+              pendingConfirmation: {} as object,
+            },
+            isPending: true,
+            isFocused: false,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Queued approval:');
+      expect(output).toContain('queued-agent');
+      // The full prompt + frame stay suppressed — only the focus-holder
+      // renders the active prompt above this row.
+      expect(output).not.toContain('Approval requested by');
+      expect(output).not.toContain('MockApprovalPrompt');
+      expect(output).not.toContain('🤖');
+    });
+
+    it('!isPending → committed render shows full inline frame', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'committed-agent',
+              taskDescription: 'Already done',
+              taskPrompt: 'Already done',
+              status: 'completed',
+            },
+            isPending: false,
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      // <Static>-rendered scrollback: full frame, no flicker concern.
+      expect(output).toContain('🤖');
+      expect(output).toContain('committed-agent');
+    });
+  });
+
   it('renders AnsiOutputText for AnsiOutput results', () => {
     const ansiResult: AnsiOutput = [
       [
@@ -326,6 +507,358 @@ describe('<ToolMessage />', () => {
     );
     expect(lastFrame()).toContain('MockAnsiOutput:hello');
     expect(lastFrame()).toContain('width=');
+  });
+
+  it('caps shell ANSI output to default 5 lines when not forced', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="Shell"
+        resultDisplay={ansiOutputDisplay}
+        availableTerminalHeight={100}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('height=5');
+    expect(output).toContain('MockShellStatsBar:displayHeight=5');
+  });
+
+  it('does not cap non-shell ANSI output', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        resultDisplay={ansiOutputDisplay}
+        availableTerminalHeight={100}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    // availableHeight = 100 - STATIC_HEIGHT(1) - RESERVED_LINE_COUNT(5) = 94
+    expect(output).toContain('height=94');
+  });
+
+  it('bypasses cap when forceShowResult is true', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="Shell"
+        resultDisplay={ansiOutputDisplay}
+        availableTerminalHeight={100}
+        forceShowResult={true}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    // availableHeight = 100 - STATIC_HEIGHT(1) - RESERVED_LINE_COUNT(5) = 94
+    expect(output).toContain('height=94');
+  });
+
+  it('disables cap when ui.shellOutputMaxLines is 0', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const settingsWithDisabledCap = {
+      merged: { ui: { shellOutputMaxLines: 0 } },
+    } as unknown as LoadedSettings;
+    const { lastFrame } = render(
+      <CompactModeProvider value={{ compactMode: false }}>
+        <SettingsContext.Provider value={settingsWithDisabledCap}>
+          <StreamingContext.Provider value={StreamingState.Idle}>
+            <ToolMessage
+              {...baseProps}
+              name="Shell"
+              resultDisplay={ansiOutputDisplay}
+              availableTerminalHeight={100}
+            />
+          </StreamingContext.Provider>
+        </SettingsContext.Provider>
+      </CompactModeProvider>,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('height=94');
+  });
+
+  it('respects user-configured cap value', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const settingsWithCustomCap = {
+      merged: { ui: { shellOutputMaxLines: 12 } },
+    } as unknown as LoadedSettings;
+    const { lastFrame } = render(
+      <CompactModeProvider value={{ compactMode: false }}>
+        <SettingsContext.Provider value={settingsWithCustomCap}>
+          <StreamingContext.Provider value={StreamingState.Idle}>
+            <ToolMessage
+              {...baseProps}
+              name="Shell"
+              resultDisplay={ansiOutputDisplay}
+              availableTerminalHeight={100}
+            />
+          </StreamingContext.Provider>
+        </SettingsContext.Provider>
+      </CompactModeProvider>,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('height=12');
+  });
+
+  it('caps shell completed string output (returnDisplayMessage path)', () => {
+    // shell.ts emits the final result as a plain string via
+    // `returnDisplayMessage = result.output`, so the completed shell
+    // tool flows through StringResultRenderer, not the ANSI branch.
+    // The cap must still apply.
+    const longString = Array.from(
+      { length: 30 },
+      (_, i) => `line ${i + 1}`,
+    ).join('\n');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="Shell"
+        resultDisplay={longString}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={100}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    // With cap=5, the string path should show the last 5 content rows
+    // (the +1 height compensates for MaxSizedBox's overflow banner row,
+    // matching the ANSI path's 5 content rows + stats bar).
+    expect(output).not.toContain('line 1\n');
+    expect(output).not.toContain('line 10');
+    expect(output).toContain('line 26');
+    expect(output).toContain('line 27');
+    expect(output).toContain('line 28');
+    expect(output).toContain('line 29');
+    expect(output).toContain('line 30');
+  });
+
+  it('pre-slices large non-shell string output before MaxSizedBox layout', () => {
+    const longString = Array.from(
+      { length: 5000 },
+      (_, i) => `line ${i + 1}`,
+    ).join('\n');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        resultDisplay={longString}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={12}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+
+    expect(output).toContain('... first 4995 lines hidden ...');
+    expect(output).not.toContain('line 4995');
+    expect(output).toContain('line 4996');
+    expect(output).toContain('line 4997');
+    expect(output).toContain('line 4998');
+    expect(output).toContain('line 4999');
+    expect(output).toContain('line 5000');
+  });
+
+  it('pre-slices single-line output by visual width before MaxSizedBox layout', () => {
+    const longSingleLine = Array.from({ length: 1000 }, (_, i) =>
+      String(i % 10),
+    ).join('');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        contentWidth={20}
+        resultDisplay={longSingleLine}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={12}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+
+    expect(output).toMatch(/\.\.\. first \d+ lin/);
+    expect(output).not.toContain(longSingleLine);
+    expect(output).toContain(longSingleLine.slice(-10));
+  });
+
+  it('does not pre-slice string output that exactly fits available height', () => {
+    const exactFitString = Array.from(
+      { length: 6 },
+      (_, i) => `line ${i + 1}`,
+    ).join('\n');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        resultDisplay={exactFitString}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={12}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+
+    expect(output).not.toContain('lines hidden');
+    expect(output).toContain('line 1');
+    expect(output).toContain('line 6');
+  });
+
+  it.each([
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['NaN-via-string', 'abc' as unknown as number],
+  ])('clamps %s shellOutputMaxLines to a safe value', (_label, badValue) => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const settingsWithBadCap = {
+      merged: { ui: { shellOutputMaxLines: badValue } },
+    } as unknown as LoadedSettings;
+    const { lastFrame } = render(
+      <CompactModeProvider value={{ compactMode: false }}>
+        <SettingsContext.Provider value={settingsWithBadCap}>
+          <StreamingContext.Provider value={StreamingState.Idle}>
+            <ToolMessage
+              {...baseProps}
+              name="Shell"
+              resultDisplay={ansiOutputDisplay}
+              availableTerminalHeight={100}
+            />
+          </StreamingContext.Provider>
+        </SettingsContext.Provider>
+      </CompactModeProvider>,
+    );
+    const output = lastFrame()!;
+    // -1 → 0 → cap disabled (height=94)
+    // 1.5 → 1 → cap to 1 (height=1)
+    // 'abc' → NaN → 0 → cap disabled (height=94)
+    if (
+      typeof badValue === 'number' &&
+      Number.isFinite(badValue) &&
+      badValue > 0
+    ) {
+      expect(output).toContain(`height=${Math.floor(badValue)}`);
+    } else {
+      expect(output).toContain('height=94');
+    }
+  });
+
+  it('does not cap non-shell string output', () => {
+    const longString = Array.from(
+      { length: 30 },
+      (_, i) => `line ${i + 1}`,
+    ).join('\n');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        resultDisplay={longString}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={100}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    // availableHeight = 94, well above 30 lines → all visible
+    expect(output).toContain('line 1');
+    expect(output).toContain('line 30');
   });
 
   it('renders rejected plan content with plan text still visible', () => {

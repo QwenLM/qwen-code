@@ -9,11 +9,7 @@ import { Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import stringWidth from 'string-width';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import {
-  renderInlineMathInText,
-  renderTerminalMathInline,
-  splitInlineMathSegments,
-} from './TerminalMathRenderer.js';
+import { renderInlineLatex } from './latexRenderer.js';
 
 // Constants for Markdown parsing
 const BOLD_MARKER_LENGTH = 2; // For "**"
@@ -22,68 +18,53 @@ const STRIKETHROUGH_MARKER_LENGTH = 2; // For "~~")
 const INLINE_CODE_MARKER_LENGTH = 1; // For "`"
 const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
+const INLINE_MATH_MARKER_LENGTH = 1; // For "$"
+const INLINE_MATH_MAX_CHARS = 1024;
+const INLINE_MATH_PATTERN = new RegExp(
+  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
+  'g',
+);
+const INLINE_MARKDOWN_REGEX =
+  /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|` +
+    String.raw`\`+.+?\`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)`,
+  'g',
+);
 
 const debugLogger = createDebugLogger('INLINE_MARKDOWN');
 
 interface RenderInlineProps {
   text: string;
   textColor?: string;
+  enableInlineMath?: boolean;
 }
 
 const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   text,
   textColor = theme.text.primary,
+  enableInlineMath = false,
 }) => {
-  const mathSegments = splitInlineMathSegments(text);
-  if (mathSegments.some((segment) => segment.type === 'math')) {
-    return (
-      <>
-        {mathSegments.map((segment, index) =>
-          segment.type === 'math' ? (
-            <Text key={`math-${index}`} color={theme.text.code}>
-              {renderTerminalMathInline(segment.text)}
-            </Text>
-          ) : (
-            <React.Fragment key={`text-${index}`}>
-              {renderInlineMarkdownNodes(
-                segment.text,
-                textColor,
-                `seg-${index}`,
-              )}
-            </React.Fragment>
-          ),
-        )}
-      </>
-    );
-  }
-
-  return <>{renderInlineMarkdownNodes(text, textColor, 'root')}</>;
-};
-
-function renderInlineMarkdownNodes(
-  text: string,
-  textColor: string,
-  keyPrefix: string,
-): React.ReactNode[] {
   // Early return for plain text without markdown or URLs
-  if (!/[*_~`<[https?:]/.test(text)) {
-    return [
-      <Text key={`${keyPrefix}-plain`} color={textColor}>
-        {text}
-      </Text>,
-    ];
+  if (
+    !/[*_~`<[]|https?:/.test(text) &&
+    !(enableInlineMath && text.includes('$'))
+  ) {
+    return <Text color={textColor}>{text}</Text>;
   }
 
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
-  const inlineRegex =
-    /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+  const inlineRegex = enableInlineMath
+    ? INLINE_MARKDOWN_WITH_MATH_REGEX
+    : INLINE_MARKDOWN_REGEX;
+  inlineRegex.lastIndex = 0;
   let match;
 
   while ((match = inlineRegex.exec(text)) !== null) {
     if (match.index > lastIndex) {
       nodes.push(
-        <Text key={`${keyPrefix}-t-${lastIndex}`}>
+        <Text key={`t-${lastIndex}`}>
           {text.slice(lastIndex, match.index)}
         </Text>,
       );
@@ -91,7 +72,7 @@ function renderInlineMarkdownNodes(
 
     const fullMatch = match[0];
     let renderedNode: React.ReactNode = null;
-    const key = `${keyPrefix}-m-${match.index}`;
+    const key = `m-${match.index}`;
 
     try {
       if (
@@ -178,6 +159,22 @@ function renderInlineMarkdownNodes(
             )}
           </Text>
         );
+      } else if (
+        enableInlineMath &&
+        fullMatch.startsWith('$') &&
+        fullMatch.endsWith('$') &&
+        fullMatch.length > INLINE_MATH_MARKER_LENGTH * 2
+      ) {
+        renderedNode = (
+          <Text key={key} color={theme.text.accent}>
+            {renderInlineLatex(
+              fullMatch.slice(
+                INLINE_MATH_MARKER_LENGTH,
+                -INLINE_MATH_MARKER_LENGTH,
+              ),
+            )}
+          </Text>
+        );
       } else if (fullMatch.match(/^https?:\/\//)) {
         renderedNode = (
           <Text key={key} color={theme.text.link}>
@@ -195,13 +192,11 @@ function renderInlineMarkdownNodes(
   }
 
   if (lastIndex < text.length) {
-    nodes.push(
-      <Text key={`${keyPrefix}-t-${lastIndex}`}>{text.slice(lastIndex)}</Text>,
-    );
+    nodes.push(<Text key={`t-${lastIndex}`}>{text.slice(lastIndex)}</Text>);
   }
 
-  return nodes.filter((node) => node !== null);
-}
+  return <>{nodes.filter((node) => node !== null)}</>;
+};
 
 export const RenderInline = React.memo(RenderInlineInternal);
 
@@ -209,13 +204,23 @@ export const RenderInline = React.memo(RenderInlineInternal);
  * Utility function to get the plain text length of a string with markdown formatting
  * This is useful for calculating column widths in tables
  */
-export const getPlainTextLength = (text: string): number => {
-  const cleanText = renderInlineMathInText(text)
+export const getPlainTextLength = (
+  text: string,
+  enableInlineMath = false,
+): number => {
+  const cleanText = text
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/_(.*?)_/g, '$1')
     .replace(/~~(.*?)~~/g, '$1')
     .replace(/`(.*?)`/g, '$1')
+    .replace(INLINE_MATH_PATTERN, (match: string) =>
+      enableInlineMath
+        ? renderInlineLatex(
+            match.slice(INLINE_MATH_MARKER_LENGTH, -INLINE_MATH_MARKER_LENGTH),
+          )
+        : match,
+    )
     .replace(/<u>(.*?)<\/u>/g, '$1')
     .replace(/.*\[(.*?)\]\(.*\)/g, '$1');
   return stringWidth(cleanText);

@@ -13,6 +13,7 @@ export const helpCommand: SlashCommand = {
   name: 'help',
   altNames: ['?'],
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
   get description() {
     return t('for help on Qwen Code');
   },

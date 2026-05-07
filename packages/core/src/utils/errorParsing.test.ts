@@ -115,4 +115,63 @@ describe('parseAndFormatApiError', () => {
     const expected = '[API Error: An unknown error occurred.]';
     expect(parseAndFormatApiError(error)).toBe(expected);
   });
+
+  // Idempotency — added after a customer report where a 4xx in non-interactive
+  // mode produced "[API Error: [API Error: ...]]". The non-interactive runner
+  // formats once, prints, then throws an Error whose .message is the formatted
+  // string; the top-level handleError used to call this function again on
+  // that string and double-wrap it. Returning already-formatted input
+  // unchanged is the safety net that keeps the symptom from coming back even
+  // if a future code path forgets to mark its throws.
+  describe('idempotency', () => {
+    it('returns an already-formatted plain string unchanged', () => {
+      const formatted =
+        '[API Error: 402 Model X is not available for billing.]';
+      expect(parseAndFormatApiError(formatted)).toBe(formatted);
+    });
+
+    it('returns an already-formatted 429 plain string with quota guidance unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded (Status: RESOURCE_EXHAUSTED)]\nPossible quota limitations in place or slow response times detected. Please wait and try again later.';
+      expect(parseAndFormatApiError(formatted)).toBe(formatted);
+    });
+
+    it('returns an already-formatted StructuredError.message unchanged', () => {
+      const formatted =
+        '[API Error: 402 Model X is not available for billing.]';
+      const error: StructuredError = { message: formatted, status: 402 };
+      expect(parseAndFormatApiError(error)).toBe(formatted);
+    });
+
+    it('returns an already-formatted 429 StructuredError.message with quota guidance unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded]\nPossible quota limitations in place or slow response times detected. Please wait and try again later.';
+      const error: StructuredError = { message: formatted, status: 429 };
+      expect(parseAndFormatApiError(error)).toBe(formatted);
+    });
+
+    it('returns an already-formatted 429 USE_GEMINI message unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded]\nPlease wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method';
+      expect(parseAndFormatApiError(formatted, AuthType.USE_GEMINI)).toBe(
+        formatted,
+      );
+    });
+
+    it('returns an already-formatted 429 VERTEX message unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded]\nPlease wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method';
+      expect(parseAndFormatApiError(formatted, AuthType.USE_VERTEX_AI)).toBe(
+        formatted,
+      );
+    });
+
+    it('still wraps a raw message that merely contains the prefix mid-string', () => {
+      // Defensive: the prefix check anchors at the start, so a message that
+      // simply mentions the literal "[API Error: " inside a longer sentence
+      // must still be wrapped (otherwise we'd silently drop the wrap).
+      const raw = 'see [API Error: 502] in the upstream log for details';
+      expect(parseAndFormatApiError(raw)).toBe(`[API Error: ${raw}]`);
+    });
+  });
 });

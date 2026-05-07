@@ -73,11 +73,13 @@ async function getGeminiMdFilePathsInternal(
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
+  implicitDiscoveryEnabled: boolean = true,
 ): Promise<string[]> {
-  const dirs = new Set<string>([
-    ...includeDirectoriesToReadGemini,
-    currentWorkingDirectory,
-  ]);
+  const dirs = new Set<string>(
+    implicitDiscoveryEnabled
+      ? [...includeDirectoriesToReadGemini, currentWorkingDirectory]
+      : [...includeDirectoriesToReadGemini],
+  );
 
   // Process directories in parallel with concurrency limit to prevent EMFILE errors
   const CONCURRENT_LIMIT = 10;
@@ -93,6 +95,7 @@ async function getGeminiMdFilePathsInternal(
         fileService,
         extensionContextFilePaths,
         folderTrust,
+        implicitDiscoveryEnabled,
       ),
     );
 
@@ -120,6 +123,7 @@ async function getGeminiMdFilePathsInternalForEachDir(
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
+  implicitDiscoveryEnabled: boolean = true,
 ): Promise<string[]> {
   const allPaths = new Set<string>();
   const geminiMdFilenames = getAllGeminiMdFilenames();
@@ -132,20 +136,37 @@ async function getGeminiMdFilePathsInternalForEachDir(
       geminiMdFilename,
     );
 
-    // This part that finds the global file always runs.
-    try {
-      await fs.access(globalMemoryPath, fsSync.constants.R_OK);
-      allPaths.add(globalMemoryPath);
-      logger.debug(
-        `Found readable global ${geminiMdFilename}: ${globalMemoryPath}`,
-      );
-    } catch {
-      // It's okay if it's not found.
-    }
-
     // Handle the case where we're in the home directory (dir is empty string or home path)
     const resolvedDir = dir ? path.resolve(dir) : resolvedHome;
     const isHomeDirectory = resolvedDir === resolvedHome;
+
+    if (!implicitDiscoveryEnabled) {
+      const explicitContextPath = path.join(resolvedDir, geminiMdFilename);
+      try {
+        await fs.access(explicitContextPath, fsSync.constants.R_OK);
+        allPaths.add(explicitContextPath);
+        logger.debug(
+          `Found readable explicit ${geminiMdFilename}: ${explicitContextPath}`,
+        );
+      } catch {
+        // Not found, which is okay for explicit-only discovery.
+      }
+    } else {
+      // This part that finds the global file always runs.
+      try {
+        await fs.access(globalMemoryPath, fsSync.constants.R_OK);
+        allPaths.add(globalMemoryPath);
+        logger.debug(
+          `Found readable global ${geminiMdFilename}: ${globalMemoryPath}`,
+        );
+      } catch {
+        // It's okay if it's not found.
+      }
+    }
+
+    if (!implicitDiscoveryEnabled) {
+      continue;
+    }
 
     if (isHomeDirectory) {
       // For home directory, only check for QWEN.md directly in the home directory
@@ -312,6 +333,10 @@ export interface LoadServerHierarchicalMemoryResponse {
   projectRoot: string;
 }
 
+export interface LoadServerHierarchicalMemoryOptions {
+  explicitOnly?: boolean;
+}
+
 /**
  * Loads hierarchical QWEN.md files and concatenates their content.
  * Also loads path-based context rules from `.qwen/rules/` directories.
@@ -327,10 +352,12 @@ export async function loadServerHierarchicalMemory(
   folderTrust: boolean,
   importFormat: 'flat' | 'tree' = 'tree',
   contextRuleExcludes: string[] = [],
+  options: LoadServerHierarchicalMemoryOptions = {},
 ): Promise<LoadServerHierarchicalMemoryResponse> {
   logger.debug(
     `Loading server hierarchical memory for CWD: ${currentWorkingDirectory} (importFormat: ${importFormat})`,
   );
+  const implicitDiscoveryEnabled = !options.explicitOnly;
 
   // For the server, homedir() refers to the server process's home.
   // This is consistent with how MemoryTool already finds the global path.
@@ -342,6 +369,7 @@ export async function loadServerHierarchicalMemory(
     fileService,
     extensionContextFilePaths,
     folderTrust,
+    implicitDiscoveryEnabled,
   );
 
   let combinedInstructions = '';
@@ -372,7 +400,9 @@ export async function loadServerHierarchicalMemory(
     content: rulesContent,
     ruleCount,
     conditionalRules,
-  } = await loadRules(effectiveRoot, folderTrust, contextRuleExcludes);
+  } = options.explicitOnly
+    ? { content: '', ruleCount: 0, conditionalRules: [] }
+    : await loadRules(effectiveRoot, folderTrust, contextRuleExcludes);
 
   // Baseline rules go into the system prompt
   let memoryContent = combinedInstructions;

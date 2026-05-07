@@ -17,6 +17,7 @@
  */
 
 import { reportError } from '../../utils/errorReporting.js';
+import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
 import { type ToolCallRequestInfo } from '../../core/turn.js';
 import {
@@ -28,8 +29,10 @@ import {
 import type {
   ToolConfirmationOutcome,
   ToolCallConfirmationDetails,
+  ToolResultDisplay,
 } from '../../tools/tools.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import { FinishReason } from '@google/genai';
 import type {
   Content,
   Part,
@@ -44,6 +47,7 @@ import type {
   ModelConfig,
   RunConfig,
   ToolConfig,
+  AgentMessage,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
 import type {
@@ -54,8 +58,9 @@ import type {
   AgentToolOutputUpdateEvent,
   AgentUsageEvent,
   AgentHooks,
+  AgentExternalMessageEvent,
 } from './agent-events.js';
-import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
+import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
@@ -69,14 +74,26 @@ import { type ContextState, templateString } from './agent-headless.js';
  * Tools that must never be available to subagents (including forked agents).
  * - AgentTool prevents recursive subagent spawning.
  * - Cron tools are session-scoped and should only run from the main session.
+ * - TaskStop and SendMessage are parent-side control-plane tools for managing
+ *   background subagents; subagents have no agent IDs to manage natively, so
+ *   exposing them only widens the surface for cross-agent interference if an
+ *   ID leaks via prompt or transcript.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
-  ToolNames.SWARM,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.TASK_STOP,
+  ToolNames.SEND_MESSAGE,
 ]);
+
+/**
+ * Prefix applied to each external message injected into a background agent's
+ * reasoning loop via getExternalMessages. Kept here so tests and any future
+ * parsers can import the same literal.
+ */
+export const EXTERNAL_MESSAGE_PREFIX = '[Message from parent agent]:';
 
 export interface ReasoningLoopResult {
   /** The final model text response (empty if terminated by abort/limits). */
@@ -97,6 +114,12 @@ export interface ReasoningLoopOptions {
   maxTimeMinutes?: number;
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
+  /**
+   * Optional callback to drain external messages between tool rounds.
+   * Called after processFunctionCalls completes. Returned strings are
+   * appended to the next model request as user-role content.
+   */
+  getExternalMessages?: () => string[];
 }
 
 /**
@@ -152,9 +175,25 @@ export class AgentCore {
   readonly modelConfig: ModelConfig;
   readonly runConfig: RunConfig;
   readonly toolConfig?: ToolConfig;
-  readonly eventEmitter?: AgentEventEmitter;
+  /**
+   * Event emitter for this agent. Always present — if the caller doesn't
+   * pass one, AgentCore allocates its own so the observable state below
+   * is populated regardless of who constructs the agent.
+   */
+  readonly eventEmitter: AgentEventEmitter;
   readonly hooks?: AgentHooks;
   readonly stats = new AgentStatistics();
+
+  // Observable state lives on Core (not a wrapper) so headless and
+  // background agents can be observed with the same accessors as
+  // interactive ones. Populated by listeners set up in the constructor.
+  private readonly messages: AgentMessage[] = [];
+  private readonly pendingApprovals = new Map<
+    string,
+    ToolCallConfirmationDetails
+  >();
+  private readonly liveOutputs = new Map<string, ToolResultDisplay>();
+  private readonly shellPids = new Map<string, number>();
 
   /**
    * Legacy execution stats maintained for aggregate tracking.
@@ -206,8 +245,9 @@ export class AgentCore {
     this.modelConfig = modelConfig;
     this.runConfig = runConfig;
     this.toolConfig = toolConfig;
-    this.eventEmitter = eventEmitter;
+    this.eventEmitter = eventEmitter ?? new AgentEventEmitter();
     this.hooks = hooks;
+    this.setupStateListeners();
   }
 
   // ─── Chat Creation ────────────────────────────────────────
@@ -277,11 +317,17 @@ export class AgentCore {
     }
 
     try {
-      return new GeminiChat(
+      const chat = new GeminiChat(
         this.runtimeContext,
         generationConfig,
         startHistory,
       );
+      // Seed the per-chat token count so the auto-compaction threshold
+      // gate sees the inherited history's true size on the first send.
+      // Without this, fork subagents start at 0 and the gate NOOPs even
+      // when `startHistory` is already huge — first API call can 400.
+      chat.setLastPromptTokenCount(this.lastPromptTokenCount);
+      return chat;
     } catch (error) {
       await reportError(
         error,
@@ -387,6 +433,28 @@ export class AgentCore {
     abortController: AbortController,
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
+    // Tag every API call emitted from this loop with the owning subagent's
+    // name so the `/stats` panel can attribute tokens/requests to the
+    // originating subagent. The store is read inside
+    // `LoggingContentGenerator` via `subagentNameContext.getStore()`.
+    return subagentNameContext.run(this.name, () =>
+      this._runReasoningLoopInner(
+        chat,
+        initialMessages,
+        toolsList,
+        abortController,
+        options,
+      ),
+    );
+  }
+
+  private async _runReasoningLoopInner(
+    chat: GeminiChat,
+    initialMessages: Content[],
+    toolsList: FunctionDeclaration[],
+    abortController: AbortController,
+    options?: ReasoningLoopOptions,
+  ): Promise<ReasoningLoopResult> {
     const startTime = options?.startTimeMs ?? Date.now();
     let currentMessages = initialMessages;
     let turnCounter = 0;
@@ -453,6 +521,7 @@ export class AgentCore {
       let lastUsage: GenerateContentResponseUsageMetadata | undefined =
         undefined;
       let currentResponseId: string | undefined = undefined;
+      let wasOutputTruncated = false;
 
       for await (const streamEvent of responseStream) {
         if (roundAbortController.signal.aborted) {
@@ -464,8 +533,28 @@ export class AgentCore {
           };
         }
 
-        // Handle retry events
+        // Handle retry events — reset all per-attempt state so a successful
+        // retry does not inherit stale data (e.g. wasOutputTruncated) from a
+        // previous attempt that may have hit MAX_TOKENS.
         if (streamEvent.type === 'retry') {
+          functionCalls.length = 0;
+          roundText = '';
+          roundThoughtText = '';
+          lastUsage = undefined;
+          currentResponseId = undefined;
+          wasOutputTruncated = false;
+          continue;
+        }
+
+        // GeminiChat already mutated its own history; surface to the debug
+        // log so subagent compactions show up alongside the main session's.
+        if (streamEvent.type === 'compressed') {
+          this.runtimeContext
+            .getDebugLogger()
+            .debug(
+              `[AGENT-COMPACT] subagent=${this.subagentId} round=${turnCounter} ` +
+                `tokens ${streamEvent.info.originalTokenCount} -> ${streamEvent.info.newTokenCount}`,
+            );
           continue;
         }
 
@@ -477,6 +566,9 @@ export class AgentCore {
             currentResponseId = resp.responseId;
           }
           if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+          if (resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS) {
+            wasOutputTruncated = true;
+          }
           const content = resp.candidates?.[0]?.content;
           const parts = content?.parts || [];
           for (const p of parts) {
@@ -530,7 +622,32 @@ export class AgentCore {
           turnCounter,
           toolsList,
           currentResponseId,
+          wasOutputTruncated,
         );
+
+        const externalMsgs = options?.getExternalMessages?.() ?? [];
+        if (externalMsgs.length > 0) {
+          // Append to the tool-response user message so external input rides
+          // alongside the tool results the model is about to see.
+          // processFunctionCalls always returns exactly one user-role entry.
+          const last = currentMessages[currentMessages.length - 1];
+          last.parts!.push(
+            ...externalMsgs.map((text) => ({
+              text: `\n${EXTERNAL_MESSAGE_PREFIX} ${text}`,
+            })),
+          );
+          // Emit one event per injection so observers (e.g. the JSONL
+          // transcript writer) can persist each external message as a
+          // user-role record. The framing prefix is stripped — the prefix
+          // is a model-facing detail, not part of the original message.
+          for (const text of externalMsgs) {
+            this.eventEmitter?.emit(AgentEventType.EXTERNAL_MESSAGE, {
+              subagentId: this.subagentId,
+              text,
+              timestamp: Date.now(),
+            });
+          }
+        }
       } else {
         // No tool calls — treat this as the model's final answer.
         if (roundText && roundText.trim().length > 0) {
@@ -597,6 +714,7 @@ export class AgentCore {
     currentRound: number,
     toolsList: FunctionDeclaration[],
     responseId?: string,
+    wasOutputTruncated = false,
   ): Promise<Content[]> {
     const toolResponseParts: Part[] = [];
 
@@ -665,6 +783,10 @@ export class AgentCore {
     // tool spawns a PTY. Shared with outputUpdateHandler via closure so the
     // PID is included in TOOL_OUTPUT_UPDATE events for interactive shell support.
     const pidMap = new Map<string, number>();
+    // Tracks calls that already had their executionStartTime broadcast, so
+    // onToolCallsUpdate only fires the transition event once per callId even
+    // though the callback runs repeatedly while the tool executes.
+    const executionStartedEmitted = new Set<string>();
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       outputUpdateHandler: (callId, outputChunk) => {
@@ -739,22 +861,36 @@ export class AgentCore {
         for (const call of calls) {
           // Track PTY PIDs so TOOL_OUTPUT_UPDATE events can carry them.
           if (call.status === 'executing') {
-            const pid = (call as ExecutingToolCall).pid;
+            const executing = call as ExecutingToolCall;
+            const pid = executing.pid;
+            const isNewPid =
+              pid !== undefined && !pidMap.has(call.request.callId);
             if (pid !== undefined) {
-              const isNewPid = !pidMap.has(call.request.callId);
               pidMap.set(call.request.callId, pid);
-              // Emit immediately so the UI can offer interactive shell
-              // focus (Ctrl+F) before the tool produces its first output.
-              if (isNewPid) {
-                this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-                  subagentId: this.subagentId,
-                  round: currentRound,
-                  callId: call.request.callId,
-                  outputChunk: (call as ExecutingToolCall).liveOutput ?? '',
-                  pid,
-                  timestamp: Date.now(),
-                } as AgentToolOutputUpdateEvent);
-              }
+            }
+
+            const needsExecutionStartEmit =
+              executing.executionStartTime !== undefined &&
+              !executionStartedEmitted.has(call.request.callId);
+            if (needsExecutionStartEmit) {
+              executionStartedEmitted.add(call.request.callId);
+            }
+
+            if (isNewPid || needsExecutionStartEmit) {
+              // Emit so the agent-view UI can (a) offer interactive shell
+              // focus (Ctrl+F) before the tool produces its first output,
+              // and (b) start the elapsed-time indicator from the
+              // executing-transition timestamp rather than the first output
+              // event.
+              this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+                subagentId: this.subagentId,
+                round: currentRound,
+                callId: call.request.callId,
+                outputChunk: executing.liveOutput ?? '',
+                pid,
+                executionStartTime: executing.executionStartTime,
+                timestamp: Date.now(),
+              } as AgentToolOutputUpdateEvent);
             }
           }
 
@@ -808,6 +944,7 @@ export class AgentCore {
         isClientInitiated: true,
         prompt_id: promptId,
         response_id: responseId,
+        wasOutputTruncated,
       };
 
       const description = this.getToolDescription(toolName, args);
@@ -901,9 +1038,67 @@ export class AgentCore {
     return [{ role: 'user', parts: toolResponseParts }];
   }
 
+  // ─── Observable state accessors ────────────────────────────
+
+  getMessages(): readonly AgentMessage[] {
+    return this.messages;
+  }
+
+  /**
+   * Tool calls currently awaiting user approval. Mutated by
+   * AgentInteractive's TOOL_WAITING_APPROVAL handler; headless agents
+   * never populate this because they run with
+   * `getShouldAvoidPermissionPrompts === true`.
+   */
+  getPendingApprovals(): ReadonlyMap<string, ToolCallConfirmationDetails> {
+    return this.pendingApprovals;
+  }
+
+  getLiveOutputs(): ReadonlyMap<string, ToolResultDisplay> {
+    return this.liveOutputs;
+  }
+
+  getShellPids(): ReadonlyMap<string, number> {
+    return this.shellPids;
+  }
+
+  pushMessage(
+    role: AgentMessage['role'],
+    content: string,
+    options?: { thought?: boolean; metadata?: Record<string, unknown> },
+  ): void {
+    const message: AgentMessage = {
+      role,
+      content,
+      timestamp: Date.now(),
+    };
+    if (options?.thought) {
+      message.thought = true;
+    }
+    if (options?.metadata) {
+      message.metadata = options.metadata;
+    }
+    this.messages.push(message);
+  }
+
+  setPendingApproval(
+    callId: string,
+    details: ToolCallConfirmationDetails,
+  ): void {
+    this.pendingApprovals.set(callId, details);
+  }
+
+  deletePendingApproval(callId: string): void {
+    this.pendingApprovals.delete(callId);
+  }
+
+  clearPendingApprovals(): void {
+    this.pendingApprovals.clear();
+  }
+
   // ─── Stats & Events ───────────────────────────────────────
 
-  getEventEmitter(): AgentEventEmitter | undefined {
+  getEventEmitter(): AgentEventEmitter {
     return this.eventEmitter;
   }
 
@@ -1015,6 +1210,81 @@ export class AgentCore {
   }
 
   // ─── Private Helpers ──────────────────────────────────────
+
+  /**
+   * TOOL_WAITING_APPROVAL is deliberately NOT listened to here because
+   * the correct response depends on whether the consumer is interactive
+   * (needs to wrap onConfirm with cancel-round behavior) or headless
+   * (approvals never fire). AgentInteractive owns that listener and
+   * writes into `pendingApprovals` via the public mutator API.
+   */
+  private setupStateListeners(): void {
+    const emitter = this.eventEmitter;
+
+    emitter.on(AgentEventType.ROUND_TEXT, (event: AgentRoundTextEvent) => {
+      if (event.thoughtText) {
+        this.pushMessage('assistant', event.thoughtText, { thought: true });
+      }
+      if (event.text) {
+        this.pushMessage('assistant', event.text);
+      }
+    });
+
+    emitter.on(AgentEventType.TOOL_CALL, (event: AgentToolCallEvent) => {
+      this.pushMessage('tool_call', `Tool call: ${event.name}`, {
+        metadata: {
+          callId: event.callId,
+          toolName: event.name,
+          args: event.args,
+          description: event.description,
+          renderOutputAsMarkdown: event.isOutputMarkdown,
+          round: event.round,
+        },
+      });
+    });
+
+    emitter.on(
+      AgentEventType.TOOL_OUTPUT_UPDATE,
+      (event: AgentToolOutputUpdateEvent) => {
+        this.liveOutputs.set(event.callId, event.outputChunk);
+        if (event.pid !== undefined) {
+          this.shellPids.set(event.callId, event.pid);
+        }
+      },
+    );
+
+    emitter.on(AgentEventType.TOOL_RESULT, (event: AgentToolResultEvent) => {
+      this.liveOutputs.delete(event.callId);
+      this.shellPids.delete(event.callId);
+      this.pendingApprovals.delete(event.callId);
+
+      const statusText = event.success ? 'succeeded' : 'failed';
+      const summary = event.error
+        ? `Tool ${event.name} ${statusText}: ${event.error}`
+        : `Tool ${event.name} ${statusText}`;
+      this.pushMessage('tool_result', summary, {
+        metadata: {
+          callId: event.callId,
+          toolName: event.name,
+          success: event.success,
+          resultDisplay: event.resultDisplay,
+          outputFile: event.outputFile,
+          round: event.round,
+        },
+      });
+    });
+
+    // Mirror send_message injections into the observable message stream so
+    // the TUI detail dialog shows parent→child messages alongside what the
+    // JSONL transcript records. The framing prefix is stripped — that's a
+    // model-facing detail, not what the user wants to see in the dialog.
+    emitter.on(
+      AgentEventType.EXTERNAL_MESSAGE,
+      (event: AgentExternalMessageEvent) => {
+        this.pushMessage('user', event.text);
+      },
+    );
+  }
 
   /**
    * Builds the system prompt with template substitution and optional

@@ -579,6 +579,12 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.extensions).toEqual(['ext1', 'ext2']);
   });
+
+  it('should parse --bare', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    expect(argv.bare).toBe(true);
+  });
 });
 
 describe('loadCliConfig', () => {
@@ -785,11 +791,44 @@ describe('loadCliConfig', () => {
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
 
+    it('should set proxy from settings when present', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'http://localhost:7890' };
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
+    it('should normalize proxy from settings when scheme is omitted', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'localhost:7890' };
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
+    it('should prioritize settings proxy over environment variable', async () => {
+      vi.stubEnv('HTTPS_PROXY', 'http://localhost:7891');
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'http://localhost:7890' };
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
     it('should prioritize CLI flag over environment variable for proxy (CLI http://localhost:7890, environment variable http://localhost:7891)', async () => {
       vi.stubEnv('http_proxy', 'http://localhost:7891');
       process.argv = ['node', 'script.js', '--proxy', 'http://localhost:7890'];
       const argv = await parseArguments();
       const settings: Settings = {};
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
+    it('should prioritize CLI flag over settings proxy', async () => {
+      process.argv = ['node', 'script.js', '--proxy', 'http://localhost:7890'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'http://localhost:7891' };
       const config = await loadCliConfig(settings, argv);
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
@@ -1020,6 +1059,7 @@ describe('loadCliConfig telemetry', () => {
 describe('mergeExcludeTools', () => {
   const defaultExcludes = [
     ToolNames.SHELL,
+    ToolNames.MONITOR,
     ToolNames.EDIT,
     ToolNames.WRITE_FILE,
   ];
@@ -1086,6 +1126,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1105,6 +1146,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1125,6 +1167,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1141,6 +1184,43 @@ describe('Approval mode tool exclusion logic', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should not exclude monitor when explicitly allowed in tools.allowed', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: [ToolNames.MONITOR],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should honor monitor aliases in tools.allowed for non-interactive exclusions', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: ['Monitor', 'Shell(git status)'],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.SHELL);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
@@ -1159,6 +1239,25 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should not exclude monitor when explicitly allowed in tools.core', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [ToolNames.MONITOR],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1179,6 +1278,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1199,6 +1299,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1212,6 +1313,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1237,9 +1339,22 @@ describe('Approval mode tool exclusion logic', () => {
 
       const excludedTools = config.getPermissionsDeny();
       expect(excludedTools).not.toContain(ToolNames.SHELL);
+      expect(excludedTools).not.toContain(ToolNames.MONITOR);
       expect(excludedTools).not.toContain(ToolNames.EDIT);
       expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
     }
+  });
+
+  it('should keep the bare toolset available in non-interactive bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare', '-p', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
+    expect(excludedTools).not.toContain(ToolNames.EDIT);
+    expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
 
   it('should merge approval mode exclusions with settings exclusions in auto-edit mode', async () => {
@@ -1258,6 +1373,7 @@ describe('Approval mode tool exclusion logic', () => {
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain('custom_tool'); // From settings
     expect(excludedTools).toContain(ToolNames.SHELL); // From approval mode
+    expect(excludedTools).toContain(ToolNames.MONITOR); // From approval mode
     expect(excludedTools).not.toContain(ToolNames.EDIT); // Should be allowed in auto-edit
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE); // Should be allowed in auto-edit
   });
@@ -1464,6 +1580,95 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
   });
 });
 
+describe('loadCliConfig with --mcp-config', () => {
+  const baseSettings: Settings = {
+    mcpServers: {
+      'settings-server': { url: 'http://localhost:9000' },
+    },
+  };
+
+  it('should parse inline JSON with mcpServers wrapper', async () => {
+    const mcpConfig = JSON.stringify({
+      mcpServers: {
+        'cli-server': { command: 'node', args: ['server.js'] },
+      },
+    });
+    process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
+
+    const mcpServers = config.getMcpServers();
+    expect(mcpServers['cli-server']).toEqual({
+      command: 'node',
+      args: ['server.js'],
+    });
+    // Settings server should still be present
+    expect(mcpServers['settings-server']).toEqual({
+      url: 'http://localhost:9000',
+    });
+  });
+
+  it('should parse inline JSON without wrapper', async () => {
+    const mcpConfig = JSON.stringify({
+      'direct-server': { url: 'http://localhost:8080' },
+    });
+    process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
+
+    expect(config.getMcpServers()['direct-server']).toEqual({
+      url: 'http://localhost:8080',
+    });
+  });
+
+  it('should override settings file servers with same name', async () => {
+    const mcpConfig = JSON.stringify({
+      'settings-server': { url: 'http://localhost:8888' }, // Override
+    });
+    process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
+
+    // CLI config should override settings
+    expect(config.getMcpServers()['settings-server']).toEqual({
+      url: 'http://localhost:8888',
+    });
+  });
+
+  it('should work with --allowed-mcp-server-names filter', async () => {
+    const mcpConfig = JSON.stringify({
+      server1: { url: 'http://localhost:8081' },
+      server2: { url: 'http://localhost:8082' },
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      '--mcp-config',
+      mcpConfig,
+      '--allowed-mcp-server-names',
+      'server1',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+
+    // Only server1 should be allowed
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8081' },
+    });
+  });
+
+  it('should handle empty mcp-config gracefully', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
+
+    // Should only have settings server
+    expect(config.getMcpServers()).toEqual({
+      'settings-server': { url: 'http://localhost:9000' },
+    });
+  });
+});
+
 describe('loadCliConfig model selection', () => {
   it.skip('selects a model from settings.json if provided', async () => {
     process.argv = ['node', 'script.js'];
@@ -1647,6 +1852,89 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getWorkspaceContext().getDirectories()).toHaveLength(
       expected.length,
     );
+  });
+
+  it('should ignore implicit startup context inputs in bare mode', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    const cliPath = path.resolve(path.sep, 'cli', 'path1');
+    const settingsPath = path.resolve(path.sep, 'settings', 'path1');
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--bare',
+      '--include-directories',
+      cliPath,
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        includeDirectories: [settingsPath],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getWorkspaceContext().getDirectories()).toEqual([
+      mockCwd,
+      cliPath,
+    ]);
+  });
+
+  it('should force minimal startup behavior in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [ToolNames.WEB_FETCH],
+        allowed: [ToolNames.WEB_FETCH],
+        exclude: [ToolNames.ASK_USER_QUESTION],
+      },
+      hooks: {
+        PreToolUse: [],
+      } as Record<string, unknown>,
+      memory: {
+        enableManagedAutoMemory: true,
+      },
+      security: {
+        allowedHttpHookUrls: ['https://hooks.example.com/*'],
+      },
+      mcp: {
+        allowed: ['test-server'],
+      },
+      mcpServers: {
+        'test-server': {
+          command: 'node',
+          args: ['server.js'],
+        },
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.EDIT,
+      ToolNames.SHELL,
+    ]);
+    expect(config.getDisableAllHooks()).toBe(true);
+    expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+    expect(config.getToolDiscoveryCommand()).toBeUndefined();
+    expect(config.getToolCallCommand()).toBeUndefined();
+    expect(config.getMcpServers()).toEqual({});
+    expect(config.isLspEnabled()).toBe(false);
+  });
+
+  it('should ignore coreTools overrides in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare', '--core-tools', 'web_fetch'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getCoreTools()).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.EDIT,
+      ToolNames.SHELL,
+    ]);
   });
 });
 

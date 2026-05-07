@@ -78,6 +78,8 @@ export type {
   AssistantMessageProps,
   AssistantMessageStatus,
 } from './components/messages/Assistant/AssistantMessage';
+export { InsightProgressCard } from './components/messages/InsightProgressCard.js';
+export type { InsightProgressCardProps } from './components/messages/InsightProgressCard.js';
 export {
   CollapsibleFileContent,
   parseContentWithFileReferences,
@@ -163,6 +165,7 @@ export {
   ReadToolCall,
   WebFetchToolCall,
   CheckboxDisplay,
+  getToolCallComponent,
 } from './components/toolcalls';
 export type {
   ToolCallContainerProps,
@@ -258,6 +261,10 @@ export type { CompletionItem, CompletionItemType } from './types/completion';
 // Utils
 export { groupSessionsByDate, getTimeAgo } from './utils/sessionGrouping';
 export type { SessionGroup } from './utils/sessionGrouping';
+export {
+  ZERO_WIDTH_SPACE,
+  stripZeroWidthSpaces,
+} from './utils/inputPlaceholder';
 
 // Adapters - for normalizing different data formats
 export {

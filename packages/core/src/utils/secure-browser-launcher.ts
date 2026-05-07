@@ -42,14 +42,14 @@ function validateUrl(url: string): void {
 }
 
 /**
- * Opens a URL in the default browser using platform-specific commands.
- * This implementation avoids shell injection vulnerabilities by:
- * 1. Validating the URL to ensure it's HTTP/HTTPS only
- * 2. Using execFile instead of exec to avoid shell interpretation
- * 3. Passing the URL as an argument rather than constructing a command string
+ * Opens a URL in the user's default browser securely.
  *
- * @param url The URL to open
- * @throws Error if the URL is invalid or if opening the browser fails
+ * On failure (e.g., missing browser binary or command), this function does NOT throw an error.
+ * Instead, it logs the URL to the console error stream so the user can open it manually,
+ * and resolves successfully to prevent application crashes.
+ *
+ * @param url - The URL to open.
+ * @returns A promise that resolves when the attempt is made (whether successful or logged).
  */
 export async function openBrowserSecurely(url: string): Promise<void> {
   // Validate the URL first
@@ -107,7 +107,7 @@ export async function openBrowserSecurely(url: string): Promise<void> {
 
   try {
     await execFileAsync(command, args, options);
-  } catch (error) {
+  } catch (_error) {
     // For Linux, try fallback commands if xdg-open fails
     if (
       (platformName === 'linux' ||
@@ -121,6 +121,7 @@ export async function openBrowserSecurely(url: string): Promise<void> {
         'firefox',
         'chromium',
         'google-chrome',
+        'microsoft-edge',
       ];
 
       for (const fallbackCommand of fallbackCommands) {
@@ -134,10 +135,13 @@ export async function openBrowserSecurely(url: string): Promise<void> {
       }
     }
 
-    // Re-throw the error if all attempts failed
-    throw new Error(
-      `Failed to open browser: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    // Log the URL so the user can open it manually instead of crashing.
+    /* eslint-disable no-console */
+    console.warn(
+      `Failed to open browser automatically. Please open this URL manually: ${url}`,
     );
+    /* eslint-enable no-console */
+    return;
   }
 }
 

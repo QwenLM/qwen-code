@@ -14,18 +14,21 @@ import {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
+  MiniMaxOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentGenerator } from './openaiContentGenerator.js';
-export { ContentGenerationPipeline, type PipelineConfig } from './pipeline.js';
+export { ContentGenerationPipeline } from './pipeline.js';
+export type { ErrorHandler, PipelineConfig, RequestContext } from './types.js';
 
 export {
   type OpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
+  MiniMaxOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
 } from './provider/index.js';
 
@@ -87,8 +90,16 @@ export function determineProvider(
     );
   }
 
+  // Check for MiniMax provider
+  if (MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config)) {
+    return new MiniMaxOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
   // Default provider for standard OpenAI-compatible APIs
   return new DefaultOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
 }
 
-export { type ErrorHandler, EnhancedErrorHandler } from './errorHandler.js';
+export { EnhancedErrorHandler } from './errorHandler.js';

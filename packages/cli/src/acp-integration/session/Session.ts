@@ -21,10 +21,13 @@ import type {
   HookExecutionRequest,
   HookExecutionResponse,
   MessageBus,
+  StreamEvent,
+  ChatCompressionInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
+  CompressionStatus,
   convertToFunctionResponse,
   createDebugLogger,
   DiscoveredMCPTool,
@@ -37,8 +40,6 @@ import {
   readManyFiles,
   Storage,
   ToolNames,
-  buildPermissionCheckContext,
-  evaluatePermissionRules,
   fireNotificationHook,
   firePermissionRequestHook,
   firePreToolUseHook,
@@ -50,6 +51,12 @@ import {
   createHookOutput,
   generateToolUseId,
   MessageBusType,
+  getPlanModeSystemReminder,
+  getSubagentSystemReminder,
+  getArenaSystemReminder,
+  evaluatePermissionFlow,
+  needsConfirmation,
+  isPlanModeBlocked,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -78,6 +85,7 @@ import {
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import { CommandKind } from '../../ui/commands/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 
@@ -102,6 +110,10 @@ import {
 } from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
+
+type AutoCompressionSendResult =
+  | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
+  | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
 /**
  * Session represents an active conversation session with the AI model.
@@ -129,6 +141,9 @@ export class Session implements SessionContext {
   private cronProcessing = false;
   private cronAbortController: AbortController | null = null;
   private cronCompletion: Promise<void> | null = null;
+  private cronDisabledByTokenLimit = false;
+  private lastPromptTokenCount = 0;
+  private lastPromptTokenCountChat: GeminiChat | null = null;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -144,7 +159,6 @@ export class Session implements SessionContext {
 
   constructor(
     id: string,
-    private readonly chat: GeminiChat,
     readonly config: Config,
     private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
@@ -291,7 +305,6 @@ export class Session implements SessionContext {
         // Increment turn counter for each user prompt
         this.turn += 1;
 
-        const chat = this.chat;
         const promptId = this.config.getSessionId() + '########' + this.turn;
 
         // Extract text from all text blocks to construct the full prompt text for logging
@@ -324,7 +337,7 @@ export class Session implements SessionContext {
         let parts: Part[] | null;
 
         if (isSlashCommand(inputText)) {
-          // Handle slash command - uses default allowed commands (init, summary, compress)
+          // Handle slash command in ACP mode using capability-based filtering
           const slashCommandResult = await handleSlashCommand(
             inputText,
             pendingSend,
@@ -393,11 +406,21 @@ export class Session implements SessionContext {
           }
         }
 
+        // Prepend session-level system reminders (plan mode / subagent /
+        // arena) so the model sees them, matching the behaviour of
+        // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+        // plan mode in ACP has no effect because the model never learns it
+        // should avoid edits (#1151).
+        const systemReminders = await this.#buildInitialSystemReminders();
+        if (systemReminders.length > 0) {
+          parts = [...systemReminders, ...parts];
+        }
+
         let nextMessage: Content | null = { role: 'user', parts };
 
         while (nextMessage !== null) {
           if (pendingSend.signal.aborted) {
-            chat.addHistory(nextMessage);
+            this.#getCurrentChat().addHistory(nextMessage);
             return { stopReason: 'cancelled' };
           }
 
@@ -406,16 +429,19 @@ export class Session implements SessionContext {
           const streamStartTime = Date.now();
 
           try {
-            const responseStream = await chat.sendMessageStream(
-              this.config.getModel(),
-              {
-                message: nextMessage?.parts ?? [],
-                config: {
-                  abortSignal: pendingSend.signal,
-                },
-              },
+            const sendResult = await this.#sendMessageStreamWithAutoCompression(
               promptId,
+              nextMessage?.parts ?? [],
+              pendingSend.signal,
             );
+            if (!sendResult.responseStream) {
+              this.#preserveUnsentMessageHistory(
+                nextMessage,
+                sendResult.stopReason === 'cancelled',
+              );
+              return { stopReason: sendResult.stopReason };
+            }
+            const responseStream = sendResult.responseStream;
             nextMessage = null;
 
             for await (const resp of responseStream) {
@@ -494,6 +520,7 @@ export class Session implements SessionContext {
           }
 
           if (usageMetadata) {
+            this.#recordPromptTokenCount(usageMetadata);
             // Kick off rewrite in background (non-blocking, runs parallel to tools)
             if (this.messageRewriter) {
               this.messageRewriter.flushTurn(pendingSend.signal);
@@ -508,17 +535,11 @@ export class Session implements SessionContext {
           }
 
           if (functionCalls.length > 0) {
-            const toolResponseParts: Part[] = [];
-
-            for (const fc of functionCalls) {
-              const response = await this.runTool(
-                pendingSend.signal,
-                promptId,
-                fc,
-              );
-              toolResponseParts.push(...response);
-            }
-
+            const toolResponseParts = await this.runToolCalls(
+              pendingSend.signal,
+              promptId,
+              functionCalls,
+            );
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
@@ -531,7 +552,6 @@ export class Session implements SessionContext {
         // Fire Stop hook loop (aligned with core path in client.ts)
         // This is triggered after model response completes with no pending tool calls
         return this.#handleStopHookLoop(
-          chat,
           pendingSend,
           promptId,
           hooksEnabled,
@@ -547,20 +567,18 @@ export class Session implements SessionContext {
    * If a Stop hook requests continuation, it sends a follow-up message and loops back.
    * Maximum iterations (100) prevent infinite loops.
    *
-   * @param chat - The GeminiChat instance
    * @param pendingSend - The abort controller for the current prompt
    * @param promptId - The prompt ID for tracking
    * @param hooksEnabled - Whether hooks are enabled
    * @param messageBus - The MessageBus for hook communication (may be undefined)
-   * @returns The stop reason ('end_turn' or 'cancelled')
+   * @returns The ACP stop reason for the prompt.
    */
   async #handleStopHookLoop(
-    chat: GeminiChat,
     pendingSend: AbortController,
     promptId: string,
     hooksEnabled: boolean,
     messageBus: MessageBus | undefined,
-  ): Promise<{ stopReason: 'end_turn' | 'cancelled' }> {
+  ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const MAX_STOP_HOOK_ITERATIONS = 100;
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
@@ -576,14 +594,14 @@ export class Session implements SessionContext {
       }
 
       // Get response text from the chat history
-      const history = chat.getHistory();
+      const history = this.#getCurrentChat().getHistory();
       const lastModelMessage = history
-        .filter((msg) => msg.role === 'model')
+        .filter((msg: Content) => msg.role === 'model')
         .pop();
       const responseText =
         lastModelMessage?.parts
-          ?.filter((p): p is { text: string } => 'text' in p)
-          .map((p) => p.text)
+          ?.filter((p: Part): p is { text: string } & Part => 'text' in p)
+          .map((p: { text: string }) => p.text)
           .join('') || '[no response text]';
 
       const response = await messageBus.request<
@@ -656,16 +674,21 @@ export class Session implements SessionContext {
           const streamStartTime = Date.now();
 
           try {
-            const continueResponseStream = await chat.sendMessageStream(
-              this.config.getModel(),
-              {
-                message: nextMessage?.parts ?? [],
-                config: {
-                  abortSignal: pendingSend.signal,
-                },
-              },
-              promptId + '_stop_hook_' + stopHookIterationCount,
-            );
+            const continueSendResult =
+              await this.#sendMessageStreamWithAutoCompression(
+                promptId + '_stop_hook_' + stopHookIterationCount,
+                nextMessage?.parts ?? [],
+                pendingSend.signal,
+                { skipCompression: stopHookIterationCount > 1 },
+              );
+            if (!continueSendResult.responseStream) {
+              this.#preserveUnsentMessageHistory(
+                nextMessage,
+                continueSendResult.stopReason === 'cancelled',
+              );
+              return { stopReason: continueSendResult.stopReason };
+            }
+            const continueResponseStream = continueSendResult.responseStream;
             nextMessage = null;
 
             for await (const resp of continueResponseStream) {
@@ -739,6 +762,7 @@ export class Session implements SessionContext {
           }
 
           if (usageMetadata) {
+            this.#recordPromptTokenCount(usageMetadata);
             const durationMs = Date.now() - streamStartTime;
             await this.messageEmitter.emitUsageMetadata(
               usageMetadata,
@@ -749,17 +773,11 @@ export class Session implements SessionContext {
 
           // Process tool calls from the follow-up message
           if (functionCalls.length > 0) {
-            const toolResponseParts: Part[] = [];
-
-            for (const fc of functionCalls) {
-              const toolResponse = await this.runTool(
-                pendingSend.signal,
-                promptId,
-                fc,
-              );
-              toolResponseParts.push(...toolResponse);
-            }
-
+            const toolResponseParts = await this.runToolCalls(
+              pendingSend.signal,
+              promptId,
+              functionCalls,
+            );
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
@@ -791,6 +809,245 @@ export class Session implements SessionContext {
     await this.client.sessionUpdate(params);
   }
 
+  #getCurrentChat(): GeminiChat {
+    return this.config.getGeminiClient()!.getChat();
+  }
+
+  /**
+   * Mirrors the core send path for ACP model sends.
+   *
+   * Attempts automatic chat compression first, checks the session token limit,
+   * emits an ACP-visible notice when compression succeeds, and returns the ACP
+   * stop reason when the provider send should be skipped because the request
+   * was cancelled or the session token limit was exceeded.
+   */
+  async #sendMessageStreamWithAutoCompression(
+    promptId: string,
+    message: Part[],
+    abortSignal: AbortSignal,
+    options: { skipCompression?: boolean } = {},
+  ): Promise<AutoCompressionSendResult> {
+    const geminiClient = this.config.getGeminiClient()!;
+    let compressionDiagnostic: string | null = null;
+    let compressionInfo: ChatCompressionInfo | null = null;
+    if (!options.skipCompression) {
+      try {
+        const compressed = await geminiClient.tryCompressChat(
+          promptId,
+          false,
+          abortSignal,
+        );
+        compressionInfo = compressed;
+        this.#recordCompressionTokenCount(compressed);
+        if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          compressionDiagnostic =
+            `IMPORTANT: This conversation approached the input token limit for ${this.config.getModel()}. ` +
+            `A compressed context will be sent for future messages (compressed from: ` +
+            `${compressed.originalTokenCount ?? 'unknown'} to ` +
+            `${compressed.newTokenCount ?? 'unknown'} tokens).`;
+        }
+      } catch (compressionError) {
+        if (abortSignal.aborted || this.#isAbortError(compressionError)) {
+          debugLogger.debug(`Auto-compression aborted for prompt ${promptId}`);
+          return { responseStream: null, stopReason: 'cancelled' };
+        }
+        debugLogger.warn(
+          `Auto-compression failed for prompt ${promptId}; proceeding without compression: ` +
+            this.#formatError(compressionError),
+        );
+      }
+    }
+
+    if (abortSignal.aborted) {
+      debugLogger.debug(`Auto-compression aborted for prompt ${promptId}`);
+      return { responseStream: null, stopReason: 'cancelled' };
+    }
+
+    if (!compressionInfo) {
+      this.#syncPromptTokenCountWithCurrentChat();
+    }
+
+    const sessionTokenLimit = this.config.getSessionTokenLimit();
+    if (sessionTokenLimit > 0) {
+      const lastPromptTokenCount =
+        this.#getPostCompressionTokenCount(compressionInfo);
+      if (lastPromptTokenCount > sessionTokenLimit) {
+        debugLogger.warn(
+          `Session token limit exceeded for prompt ${promptId}: ` +
+            `${lastPromptTokenCount} > ${sessionTokenLimit}. Send dropped.`,
+        );
+        await this.#emitAgentDiagnosticMessageSafely(
+          `Session token limit exceeded: ${lastPromptTokenCount} tokens > ${sessionTokenLimit} limit. ` +
+            'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+          `Failed to emit token limit diagnostic for prompt ${promptId}`,
+        );
+        return { responseStream: null, stopReason: 'max_tokens' };
+      }
+    }
+
+    if (compressionDiagnostic) {
+      await this.#emitAgentDiagnosticMessageSafely(
+        compressionDiagnostic,
+        `Failed to emit compression notification for prompt ${promptId}`,
+      );
+    }
+
+    if (abortSignal.aborted) {
+      debugLogger.debug(
+        `Send aborted after compression diagnostic for prompt ${promptId}`,
+      );
+      return { responseStream: null, stopReason: 'cancelled' };
+    }
+
+    const responseStream = await this.#getCurrentChat().sendMessageStream(
+      this.config.getModel(),
+      {
+        message,
+        config: {
+          abortSignal,
+        },
+      },
+      promptId,
+    );
+    return { responseStream };
+  }
+
+  #preserveUnsentMessageHistory(
+    message: Content | null,
+    preserveFullMessage: boolean,
+  ): void {
+    if (!message) return;
+
+    if (preserveFullMessage) {
+      this.#getCurrentChat().addHistory(message);
+      return;
+    }
+
+    const functionResponseParts =
+      message.parts?.filter(
+        (part: Part) => 'functionResponse' in part && part.functionResponse,
+      ) ?? [];
+    const droppedParts =
+      (message.parts?.length ?? 0) - functionResponseParts.length;
+    if (droppedParts > 0) {
+      debugLogger.debug(
+        `Dropping ${droppedParts} non-functionResponse part(s) from unsent ACP message after send was skipped.`,
+      );
+    }
+    if (functionResponseParts.length > 0) {
+      this.#getCurrentChat().addHistory({
+        ...message,
+        parts: functionResponseParts,
+      });
+    }
+  }
+
+  #recordCompressionTokenCount(info: ChatCompressionInfo): void {
+    this.#syncPromptTokenCountWithCurrentChat();
+    const tokenCount = this.#extractCompressionTokenCount(info);
+    if (tokenCount !== null && tokenCount > 0) {
+      this.lastPromptTokenCount = tokenCount;
+    }
+  }
+
+  #recordPromptTokenCount(
+    usageMetadata: GenerateContentResponseUsageMetadata,
+  ): void {
+    this.#syncPromptTokenCountWithCurrentChat();
+    const tokenCount =
+      usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
+    if (tokenCount !== undefined && tokenCount > 0) {
+      this.lastPromptTokenCount = tokenCount;
+    }
+  }
+
+  #getPostCompressionTokenCount(info: ChatCompressionInfo | null): number {
+    const tokenCount = this.#extractCompressionTokenCount(info);
+    if (tokenCount !== null) {
+      return tokenCount;
+    }
+
+    return this.lastPromptTokenCount;
+  }
+
+  #extractCompressionTokenCount(
+    info: ChatCompressionInfo | null,
+  ): number | null {
+    if (!info) {
+      return null;
+    }
+    if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      return info.newTokenCount > 0 ? info.newTokenCount : null;
+    }
+    const tokenCount = info.originalTokenCount ?? info.newTokenCount ?? null;
+    if (tokenCount === 0 && info.compressionStatus === CompressionStatus.NOOP) {
+      return null;
+    }
+    return tokenCount;
+  }
+
+  #syncPromptTokenCountWithCurrentChat(): void {
+    const chat = this.#getCurrentChat();
+    if (
+      this.lastPromptTokenCountChat &&
+      this.lastPromptTokenCountChat !== chat
+    ) {
+      this.lastPromptTokenCount = 0;
+    }
+    this.lastPromptTokenCountChat = chat;
+  }
+
+  #isAbortError(error: unknown): boolean {
+    return (
+      (error instanceof Error && error.name === 'AbortError') ||
+      (typeof DOMException !== 'undefined' &&
+        error instanceof DOMException &&
+        error.name === 'AbortError') ||
+      (typeof error === 'object' &&
+        error !== null &&
+        'name' in error &&
+        (error as { name?: unknown }).name === 'AbortError')
+    );
+  }
+
+  #formatError(error: unknown): string {
+    if (error instanceof Error) {
+      const parts = [error.message];
+      const cause = (error as Error & { cause?: unknown }).cause;
+      if (cause instanceof Error) {
+        parts.push(`cause: ${cause.message}`);
+      }
+      const status = (error as Error & { status?: unknown }).status;
+      if (status !== undefined) {
+        parts.push(`status: ${String(status)}`);
+      }
+      return parts.join(' | ');
+    }
+    try {
+      return JSON.stringify(error) ?? String(error);
+    } catch {
+      return String(error);
+    }
+  }
+
+  async #emitAgentDiagnosticMessageSafely(
+    text: string,
+    failureContext: string,
+  ): Promise<void> {
+    try {
+      await this.#emitAgentDiagnosticMessage(text);
+    } catch (notifyError) {
+      debugLogger.warn(`${failureContext}: ${this.#formatError(notifyError)}`);
+    }
+  }
+
+  async #emitAgentDiagnosticMessage(text: string): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text },
+    });
+  }
+
   /**
    * Starts the cron scheduler if cron is enabled and jobs exist.
    * The scheduler runs in the background, pushing fired prompts into
@@ -798,10 +1055,12 @@ export class Session implements SessionContext {
    */
   #startCronSchedulerIfNeeded(): void {
     if (!this.config.isCronEnabled()) return;
+    if (this.cronDisabledByTokenLimit) return;
     const scheduler = this.config.getCronScheduler();
     if (scheduler.size === 0) return;
 
     scheduler.start((job: { prompt: string }) => {
+      if (this.cronDisabledByTokenLimit) return;
       this.cronQueue.push(job.prompt);
       void this.#drainCronQueue();
     });
@@ -865,9 +1124,12 @@ export class Session implements SessionContext {
             _meta: { source: 'cron' },
           });
 
+          // Prepend session-level system reminders (same rationale as the
+          // user-query path in #executePrompt).
+          const cronReminders = await this.#buildInitialSystemReminders();
           let nextMessage: Content | null = {
             role: 'user',
-            parts: [{ text: prompt }],
+            parts: [...cronReminders, { text: prompt }],
           };
 
           while (nextMessage !== null) {
@@ -878,14 +1140,22 @@ export class Session implements SessionContext {
               null;
             const streamStartTime = Date.now();
 
-            const responseStream = await this.chat.sendMessageStream(
-              this.config.getModel(),
-              {
-                message: nextMessage.parts ?? [],
-                config: { abortSignal: ac.signal },
-              },
+            const sendResult = await this.#sendMessageStreamWithAutoCompression(
               promptId,
+              nextMessage.parts ?? [],
+              ac.signal,
             );
+            if (!sendResult.responseStream) {
+              this.#preserveUnsentMessageHistory(
+                nextMessage,
+                sendResult.stopReason === 'cancelled',
+              );
+              if (sendResult.stopReason === 'max_tokens') {
+                this.#stopCronAfterTokenLimit();
+              }
+              return;
+            }
+            const responseStream = sendResult.responseStream;
             nextMessage = null;
 
             for await (const resp of responseStream) {
@@ -923,6 +1193,7 @@ export class Session implements SessionContext {
             }
 
             if (usageMetadata) {
+              this.#recordPromptTokenCount(usageMetadata);
               // Kick off rewrite in background (non-blocking)
               if (this.messageRewriter) {
                 this.messageRewriter.flushTurn(ac.signal);
@@ -936,11 +1207,11 @@ export class Session implements SessionContext {
             }
 
             if (functionCalls.length > 0) {
-              const toolResponseParts: Part[] = [];
-              for (const fc of functionCalls) {
-                const response = await this.runTool(ac.signal, promptId, fc);
-                toolResponseParts.push(...response);
-              }
+              const toolResponseParts = await this.runToolCalls(
+                ac.signal,
+                promptId,
+                functionCalls,
+              );
               nextMessage = { role: 'user', parts: toolResponseParts };
             }
           }
@@ -958,27 +1229,71 @@ export class Session implements SessionContext {
     );
   }
 
+  #stopCronAfterTokenLimit(): void {
+    this.cronDisabledByTokenLimit = true;
+    this.cronQueue = [];
+    if (!this.config.isCronEnabled()) return;
+    this.config.getCronScheduler().stop();
+    void this.#emitAgentDiagnosticMessageSafely(
+      'Cron jobs disabled for the rest of this session due to token limit. Restart the session to re-enable.',
+      'Failed to emit cron-disabled diagnostic',
+    );
+  }
+
   async sendAvailableCommandsUpdate(): Promise<void> {
     const abortController = new AbortController();
     try {
-      // Use default allowed commands from getAvailableCommands
+      // Load commands available in ACP mode
       const slashCommands = await getAvailableCommands(
         this.config,
         abortController.signal,
+        'acp',
       );
 
-      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
-      const availableCommands: AvailableCommand[] = slashCommands.map(
-        (cmd) => ({
+      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol.
+      // Commands that accept arguments get input: { hint } so the client can
+      // let users type arguments before submitting.  Commands with no argument
+      // support get input: null so the client auto-submits them on selection.
+      //
+      // A command is considered to accept arguments when any of:
+      //   - it is not a BUILT_IN command (skills, file commands, etc.)
+      //   - it has a completion function
+      //   - it declares an argumentHint
+      //   - it has subCommands
+      const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
+        const acceptsInput =
+          cmd.kind !== CommandKind.BUILT_IN ||
+          cmd.completion != null ||
+          cmd.argumentHint != null ||
+          (cmd.subCommands != null && cmd.subCommands.length > 0);
+        return {
           name: cmd.name,
           description: cmd.description,
-          input: null,
-        }),
-      );
+          input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
+        };
+      });
+
+      let availableSkills: string[] | undefined;
+      try {
+        const skillManager = this.config.getSkillManager();
+        if (skillManager) {
+          const skills = await skillManager.listSkills();
+          availableSkills = skills.map((skill) => skill.name);
+        }
+      } catch (error) {
+        debugLogger.error('Error loading available skills:', error);
+      }
 
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
         availableCommands,
+        ...(availableSkills
+          ? {
+              _meta: {
+                availableSkills,
+              },
+            }
+          : {}),
       };
 
       await this.sendUpdate(update);
@@ -1082,6 +1397,124 @@ export class Session implements SessionContext {
     await this.sendUpdate(update);
   }
 
+  /**
+   * Execute a batch of model-returned tool calls, running Agent calls
+   * concurrently while keeping other tools sequential.
+   *
+   * Mirrors the partition logic in `coreToolScheduler.partitionToolCalls`:
+   * consecutive Agent calls form a parallel batch (they spawn independent
+   * sub-agents with no shared mutable state); any other tool forms its own
+   * sequential batch to preserve the implicit ordering the model may rely
+   * on. Response-part ordering matches the original `functionCalls` order.
+   */
+  private async runToolCalls(
+    abortSignal: AbortSignal,
+    promptId: string,
+    functionCalls: FunctionCall[],
+  ): Promise<Part[]> {
+    type Batch = { concurrent: boolean; calls: FunctionCall[] };
+    const batches: Batch[] = [];
+    for (const fc of functionCalls) {
+      const isAgent = fc.name === ToolNames.AGENT;
+      const last = batches[batches.length - 1];
+      if (isAgent && last?.concurrent) {
+        last.calls.push(fc);
+      } else {
+        batches.push({ concurrent: isAgent, calls: [fc] });
+      }
+    }
+
+    // Bounded-concurrency runner: matches core's `runConcurrently`
+    // behaviour (`coreToolScheduler.ts:1506`), capped by
+    // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
+    // in input order regardless of resolution order.
+    const runBounded = async (calls: FunctionCall[]): Promise<Part[][]> => {
+      const parsed = parseInt(
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+        10,
+      );
+      const maxConcurrency =
+        Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
+      const results: Part[][] = new Array(calls.length);
+      const executing = new Set<Promise<void>>();
+      for (let i = 0; i < calls.length; i++) {
+        const idx = i;
+        const p = this.runTool(abortSignal, promptId, calls[idx])
+          .then((r) => {
+            results[idx] = r;
+          })
+          .finally(() => {
+            executing.delete(p);
+          });
+        executing.add(p);
+        if (executing.size >= maxConcurrency) {
+          await Promise.race(executing);
+        }
+      }
+      await Promise.all(executing);
+      return results;
+    };
+
+    const parts: Part[] = [];
+    for (const batch of batches) {
+      if (batch.concurrent && batch.calls.length > 1) {
+        const results = await runBounded(batch.calls);
+        for (const r of results) parts.push(...r);
+      } else {
+        for (const fc of batch.calls) {
+          const r = await this.runTool(abortSignal, promptId, fc);
+          parts.push(...r);
+        }
+      }
+    }
+    return parts;
+  }
+
+  /**
+   * Assemble the per-turn system reminders the model needs to see at the
+   * start of a user query or cron fire. Mirrors the subagent/plan/arena
+   * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
+   * the ACP path bypasses that code, so without this helper plan mode is
+   * silently inert (#1151) and subagent/arena sessions lose context.
+   *
+   * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
+   * included here. Managed auto-memory requires a prefetch pipeline that
+   * lives in `GeminiClient`, and porting it into the ACP path is tracked
+   * separately as part of the broader middleware-alignment work.
+   */
+  async #buildInitialSystemReminders(): Promise<Part[]> {
+    const reminders: Part[] = [];
+
+    const hasAgentTool = await this.config
+      .getToolRegistry()
+      .ensureTool(ToolNames.AGENT);
+    const subagents = (await this.config.getSubagentManager().listSubagents())
+      .filter((subagent) => subagent.level !== 'builtin')
+      .map((subagent) => subagent.name);
+    if (hasAgentTool && subagents.length > 0) {
+      reminders.push({ text: getSubagentSystemReminder(subagents) });
+    }
+
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+      reminders.push({
+        text: getPlanModeSystemReminder(this.config.getSdkMode?.()),
+      });
+    }
+
+    const arenaManager = this.config.getArenaManager?.();
+    if (arenaManager) {
+      try {
+        const sessionDir = arenaManager.getArenaSessionDir();
+        const configPath = `${sessionDir}/config.json`;
+        reminders.push({ text: getArenaSystemReminder(configPath) });
+      } catch {
+        // Arena config not yet initialized — skip (matches client.ts).
+      }
+    }
+
+    return reminders;
+  }
+
   private async runTool(
     abortSignal: AbortSignal,
     promptId: string,
@@ -1181,14 +1614,19 @@ export class Session implements SessionContext {
     try {
       const invocation = tool.build(args);
 
-      if (isAgentTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from AgentTool invocation
-        const taskEventEmitter = (
-          invocation as {
-            eventEmitter: AgentEventEmitter;
-          }
-        ).eventEmitter;
-
+      // Production AgentTool always initializes `eventEmitter` on its
+      // invocation (`agent.ts:392`). Be defensive about the `undefined`
+      // case too so an incomplete/custom AgentTool invocation degrades
+      // gracefully (no sub-agent event forwarding) instead of throwing
+      // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+      // key-presence check passed for `{ eventEmitter: undefined }` and
+      // the ensuing `eventEmitter.on(...)` blew up.
+      const taskEventEmitter = (
+        invocation as {
+          eventEmitter?: AgentEventEmitter;
+        }
+      ).eventEmitter;
+      if (isAgentTool && taskEventEmitter) {
         // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
         const subagentType = (args['subagent_type'] as string) ?? '';
@@ -1218,39 +1656,22 @@ export class Session implements SessionContext {
       // The VS Code extension is just a UI layer for requestPermission.
       const isAskUserQuestionTool = fc.name === ToolNames.ASK_USER_QUESTION;
 
-      // ---- L3: Tool's default permission ----
-      // In YOLO mode, force 'allow' for everything except ask_user_question.
-      const defaultPermission =
-        this.config.getApprovalMode() !== ApprovalMode.YOLO ||
-        isAskUserQuestionTool
-          ? await invocation.getDefaultPermission()
-          : 'allow';
-
-      // ---- L4: PermissionManager override (if relevant rules exist) ----
+      // ---- L3→L4: Shared permission flow ----
       const toolParams = invocation.params as Record<string, unknown>;
-      const pmCtx = buildPermissionCheckContext(
+      const flowResult = await evaluatePermissionFlow(
+        this.config,
+        invocation,
         fc.name,
         toolParams,
-        this.config.getTargetDir?.() ?? '',
       );
-      const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
-        pm,
-        defaultPermission,
-        pmCtx,
-      );
-
-      const needsConfirmation = finalPermission === 'ask';
+      const { finalPermission, pmForcedAsk, pmCtx, denyMessage } = flowResult;
 
       // ---- L5: ApprovalMode overrides ----
       const isPlanMode = approvalMode === ApprovalMode.PLAN;
 
       if (finalPermission === 'deny') {
         return earlyErrorResponse(
-          new Error(
-            defaultPermission === 'deny'
-              ? `Tool "${fc.name}" is denied: command substitution is not allowed for security reasons.`
-              : `Tool "${fc.name}" is denied by permission rules.`,
-          ),
+          new Error(denyMessage ?? `Tool "${fc.name}" is denied.`),
           fc.name,
         );
       }
@@ -1258,7 +1679,7 @@ export class Session implements SessionContext {
       let didRequestPermission = false;
       let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
-      if (needsConfirmation) {
+      if (needsConfirmation(finalPermission, approvalMode, fc.name)) {
         confirmationDetails =
           await invocation.getConfirmationDetails(abortSignal);
 
@@ -1266,10 +1687,12 @@ export class Session implements SessionContext {
         injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
 
         if (
-          isPlanMode &&
-          !isExitPlanModeTool &&
-          !isAskUserQuestionTool &&
-          confirmationDetails.type !== 'info'
+          isPlanModeBlocked(
+            isPlanMode,
+            isExitPlanModeTool,
+            isAskUserQuestionTool,
+            confirmationDetails,
+          )
         ) {
           return earlyErrorResponse(
             new Error(
@@ -1690,44 +2113,59 @@ export class Session implements SessionContext {
         return normalizePartList(result.content);
 
       case 'message': {
-        await this.client.extNotification('_qwencode/slash_command', {
-          sessionId: this.sessionId,
-          command: originalPrompt
-            .filter((block) => block.type === 'text')
-            .map((block) => (block.type === 'text' ? block.text : ''))
-            .join(' '),
-          messageType: result.messageType,
-          message: result.content || '',
-        });
-
         if (result.messageType === 'error') {
           // Throw error to stop execution
           throw new Error(result.content || 'Slash command failed.');
         }
-        // For info messages, return null to indicate command was handled
+        // Emit the message as an agent message chunk so Zed renders it in the
+        // chat UI. extNotification only goes to the ACP debug log and is not
+        // rendered by Zed.
+        // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
+        // so Zed's Markdown renderer preserves the line structure.
+        const rendered = (result.content || '').replace(/\n/g, '  \n');
+        await this.messageEmitter.emitAgentMessage(rendered);
+        // Write a system/slash_command record so history replay on restart can
+        // re-emit this message. system records are skipped by
+        // buildApiHistoryFromConversation, so this won't pollute model context.
+        this.config.getChatRecordingService()?.recordSlashCommand({
+          phase: 'result',
+          rawCommand: originalPrompt
+            .filter((b) => b.type === 'text')
+            .map((b) => (b.type === 'text' ? b.text : ''))
+            .join(' '),
+          outputHistoryItems: [
+            { type: 'assistant', text: result.content || '' },
+          ],
+        });
         return null;
       }
 
       case 'stream_messages': {
         // Command returns multiple messages via async generator (ACP-preferred)
-        const command = originalPrompt
-          .filter((block) => block.type === 'text')
-          .map((block) => (block.type === 'text' ? block.text : ''))
-          .join(' ');
-
-        // Stream all messages to the client
+        // Stream all messages to the client as agent message chunks.
+        const chunks: string[] = [];
         for await (const msg of result.messages) {
-          await this.client.extNotification('_qwencode/slash_command', {
-            sessionId: this.sessionId,
-            command,
-            messageType: msg.messageType,
-            message: msg.content,
-          });
-
-          // If we encounter an error message, throw after sending
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
+          await this.messageEmitter.emitAgentMessage(
+            (msg.content || '').replace(/\n/g, '  \n'),
+          );
+          chunks.push(msg.content || '');
+        }
+        // Write a system/slash_command record for history replay (same reason as
+        // 'message' case — system records are invisible to model history).
+        if (chunks.length > 0) {
+          this.config.getChatRecordingService()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: originalPrompt
+              .filter((b) => b.type === 'text')
+              .map((b) => (b.type === 'text' ? b.text : ''))
+              .join(' '),
+            outputHistoryItems: [
+              { type: 'assistant', text: chunks.join('\n') },
+            ],
+          });
         }
 
         // All messages sent successfully, return null to indicate command was handled

@@ -849,6 +849,14 @@ class TeXParser {
       );
     }
 
+    if (command.length > 1 && this.input[this.position] === '{') {
+      const group = readBalanced(this.input, this.position, '{', '}');
+      if (group) {
+        this.position = group.end;
+        return textBox(`\\${command}{${group.content}}`);
+      }
+    }
+
     return textBox(command.length === 1 ? command : `\\${command}`);
   }
 

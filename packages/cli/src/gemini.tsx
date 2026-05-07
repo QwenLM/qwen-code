@@ -8,8 +8,11 @@ import {
   AuthType,
   InputFormat,
   isDebugLoggingDegraded,
+  isBareMode,
   logUserPrompt,
+  QWEN_CODE_SIMPLE_ENV_VAR,
   Storage,
+  SessionService,
   type Config,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -23,7 +26,11 @@ import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
-import { getSettingsWarnings, loadSettings } from './config/settings.js';
+import {
+  createMinimalSettings,
+  getSettingsWarnings,
+  loadSettings,
+} from './config/settings.js';
 import {
   initializeApp,
   type InitializationResult,
@@ -37,9 +44,13 @@ import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
+import { BackgroundTaskViewProvider } from './ui/contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
-import { themeManager } from './ui/themes/theme-manager.js';
-import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
+import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
+import {
+  detectAndEnableKittyProtocol,
+  disableKittyProtocol,
+} from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import {
   cleanupCheckpoints,
@@ -67,6 +78,7 @@ import {
   startEarlyInputCapture,
   stopAndGetCapturedInput,
 } from './utils/earlyInputCapture.js';
+import { preconnectApi } from './utils/apiPreconnect.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
@@ -75,6 +87,7 @@ import { DualOutputContext } from './dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
 import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
 import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
+import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -151,6 +164,48 @@ ${reason.stack}`
   });
 }
 
+function getSignalExitCode(signal: NodeJS.Signals): number {
+  return signal === 'SIGINT' ? 130 : 143;
+}
+
+function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
+  let cleanupStarted = false;
+
+  const handleSignal = (signal: NodeJS.Signals) => {
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(wasRaw);
+    }
+
+    if (cleanupStarted) {
+      return;
+    }
+    cleanupStarted = true;
+
+    void runExitCleanup()
+      .catch((error) => {
+        debugLogger.error(`Error during ${signal} cleanup:`, error);
+      })
+      .finally(() => {
+        process.exit(getSignalExitCode(signal));
+      });
+  };
+
+  const handleSigterm = () => {
+    handleSignal('SIGTERM');
+  };
+  const handleSigint = () => {
+    handleSignal('SIGINT');
+  };
+
+  process.once('SIGTERM', handleSigterm);
+  process.once('SIGINT', handleSigint);
+
+  return () => {
+    process.removeListener('SIGTERM', handleSigterm);
+    process.removeListener('SIGINT', handleSigint);
+  };
+}
+
 export async function startInteractiveUI(
   config: Config,
   settings: LoadedSettings,
@@ -163,6 +218,10 @@ export async function startInteractiveUI(
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
+      : () => {};
+  const restoreSynchronizedOutput =
+    process.stdout.isTTY && !config.getScreenReader()
+      ? installSynchronizedOutput(process.stdout)
       : () => {};
 
   // Create dual output bridge if --json-fd or --json-file is specified.
@@ -235,13 +294,15 @@ export async function startInteractiveUI(
               <SessionStatsProvider sessionId={config.getSessionId()}>
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
-                    <AppContainer
-                      config={config}
-                      settings={settings}
-                      startupWarnings={startupWarnings}
-                      version={version}
-                      initializationResult={initializationResult}
-                    />
+                    <BackgroundTaskViewProvider config={config}>
+                      <AppContainer
+                        config={config}
+                        settings={settings}
+                        startupWarnings={startupWarnings}
+                        version={version}
+                        initializationResult={initializationResult}
+                      />
+                    </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>
               </SessionStatsProvider>
@@ -282,7 +343,12 @@ export async function startInteractiveUI(
   registerCleanup(async () => {
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
+    // Explicitly disable the Kitty keyboard protocol before unmounting Ink so
+    // that the disable escape sequence is written while stdout is still fully
+    // operational, preventing garbled terminal output after the app exits.
+    disableKittyProtocol();
     instance.unmount();
+    restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
   });
 }
@@ -290,12 +356,23 @@ export async function startInteractiveUI(
 export async function main() {
   profileCheckpoint('main_entry');
   setupUnhandledRejectionHandler();
-  const settings = loadSettings();
-  await cleanupCheckpoints();
-  profileCheckpoint('after_load_settings');
+
+  if (process.argv.includes('--bare')) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
 
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
+
+  if (isBareMode(argv.bare)) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
+
+  const settings = isBareMode(argv.bare)
+    ? createMinimalSettings()
+    : loadSettings();
+  await cleanupCheckpoints();
+  profileCheckpoint('after_load_settings');
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
@@ -314,14 +391,21 @@ export async function main() {
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
-  if (settings.merged.ui?.theme) {
-    if (!themeManager.setActiveTheme(settings.merged.ui?.theme)) {
+  const configuredTheme = settings.merged.ui?.theme;
+  if (configuredTheme && configuredTheme !== AUTO_THEME_NAME) {
+    if (!themeManager.setActiveTheme(configuredTheme)) {
       // If the theme is not found during initial load, log a warning and continue.
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
-      writeStderrLine(
-        `Warning: Theme "${settings.merged.ui?.theme}" not found.`,
-      );
+      writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
+  } else {
+    // 'auto' or unset: resolve a synchronous baseline (COLORFGBG + macOS)
+    // so non-interactive runs and any pre-render UI (e.g. the --resume
+    // session picker) already have a sensible theme. The interactive
+    // startup block refines this with an OSC 11 probe later on, which is
+    // intentionally deferred to run inside the early-capture window so
+    // terminal response bytes cannot leak into the TUI input.
+    themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
 
   // hop into sandbox if we are outside and sandboxing is enabled
@@ -414,23 +498,52 @@ export async function main() {
     }
   }
 
-  // Handle --resume without a session ID by showing the session picker.
-  // Set the runtime output dir early so the picker can find sessions stored
-  // under a custom runtimeOutputDir (setRuntimeBaseDir is idempotent and will
-  // be called again inside loadCliConfig).
-  if (argv.resume === '') {
+  // Handle --resume without a session ID, or with a custom title, by showing
+  // the session picker. Set the runtime output dir early so the picker can find
+  // sessions stored under a custom runtimeOutputDir (setRuntimeBaseDir is
+  // idempotent and will be called again inside loadCliConfig).
+  if (argv.resume !== undefined) {
     Storage.setRuntimeBaseDir(
       settings.merged.advanced?.runtimeOutputDir,
       process.cwd(),
     );
-    const selectedSessionId = await showResumeSessionPicker();
-    if (!selectedSessionId) {
-      // User cancelled or no sessions available
-      process.exit(0);
+
+    let resolvedSessionId: string | undefined;
+
+    if (argv.resume === '') {
+      // No argument — show picker
+      resolvedSessionId = await showResumeSessionPicker();
+    } else if (!cliConfig.isValidSessionId(argv.resume)) {
+      // Non-UUID argument — treat as custom title search
+      const sessionService = new SessionService(process.cwd());
+      const matches = await sessionService.findSessionsByTitle(argv.resume);
+      if (matches.length === 1) {
+        resolvedSessionId = matches[0].sessionId;
+      } else if (matches.length > 1) {
+        // Multiple matches — show picker to let user choose
+        writeStderrLine(
+          `Multiple sessions found with title "${argv.resume}". Please select one:`,
+        );
+        resolvedSessionId = await showResumeSessionPicker(
+          process.cwd(),
+          matches,
+        );
+      }
+      // matches.length === 0 → resolvedSessionId stays undefined, handled below
     }
 
-    // Update argv with the selected session ID
-    argv = { ...argv, resume: selectedSessionId };
+    if (resolvedSessionId !== undefined) {
+      argv = { ...argv, resume: resolvedSessionId };
+    } else if (argv.resume === '' || !cliConfig.isValidSessionId(argv.resume)) {
+      // User cancelled the picker or no sessions found for the title
+      if (argv.resume !== '') {
+        writeStderrLine(`No saved session found with title "${argv.resume}".`);
+        process.exit(1);
+      } else {
+        process.exit(0);
+      }
+    }
+    // else: argv.resume is already a valid UUID, pass through to loadCliConfig
   }
 
   // We are now past the logic handling potentially launching a child process
@@ -439,7 +552,9 @@ export async function main() {
   profileCheckpoint('after_sandbox_check');
 
   // Initialize output language file before config loads to ensure it's included in context
-  initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  if (!isBareMode(argv.bare)) {
+    initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  }
 
   {
     const config = await loadCliConfig(
@@ -459,6 +574,21 @@ export async function main() {
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
 
+    // Startup optimization: preconnect API to warm TCP+TLS connection
+    // Fires early; cost is one HEAD request even for local-only commands
+    try {
+      const modelsConfig = config.getModelsConfig();
+      const authType = modelsConfig.getCurrentAuthType();
+      const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
+      const proxy = config.getProxy();
+      preconnectApi(authType, { resolvedBaseUrl, proxy });
+    } catch (error) {
+      // If we can't get authType, skip preconnect - it's optional optimization
+      debugLogger.debug(
+        `Preconnect skipped due to error getting authType: ${error}`,
+      );
+    }
+
     // FIXME: list extensions after the config initialize
     // if (config.getListExtensions()) {
     //   console.log('Installed extensions:');
@@ -470,6 +600,10 @@ export async function main() {
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
+    let themeAutoDetectionComplete: Promise<void> | undefined;
+    if (config.isInteractive()) {
+      registerCleanup(installInteractiveSignalHandlers(wasRaw));
+    }
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
@@ -480,16 +614,26 @@ export async function main() {
       // Ensure the stdin listener is removed on any exit path (error, signal, etc.)
       registerCleanup(() => stopAndGetCapturedInput());
 
-      // This cleanup isn't strictly needed but may help in certain situations.
-      process.on('SIGTERM', () => {
-        process.stdin.setRawMode(wasRaw);
-      });
-      process.on('SIGINT', () => {
-        process.stdin.setRawMode(wasRaw);
-      });
-
       // Detect and enable Kitty keyboard protocol once at startup.
       kittyProtocolDetectionComplete = detectAndEnableKittyProtocol();
+
+      // Auto-detect theme (OSC 11 + COLORFGBG + macOS) when the user has
+      // opted into 'auto' or has not configured a theme at all. Kicked off
+      // here without awaiting so the OSC 11 timeout overlaps with the
+      // heavier startup work below (initializeApp, warnings) instead of
+      // blocking the critical path. The synchronous baseline picked above
+      // keeps the active theme valid in the meantime; this probe only
+      // refines it. Running inside the early-capture window is deliberate:
+      // the filter in startEarlyInputCapture absorbs the OSC 11 response
+      // bytes so they cannot leak into the TUI input, even though our
+      // probe attaches its own listener to parse the RGB value.
+      if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
+        themeAutoDetectionComplete = themeManager
+          .resolveAutoThemeAsync()
+          .catch((err) => {
+            debugLogger.warn('Async theme auto-detection failed:', err);
+          });
+      }
     }
 
     setMaxSizedBoxDebugging(isDebugMode);
@@ -541,6 +685,11 @@ export async function main() {
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
+      // Drain the auto-theme probe before render so the OSC 11 response is
+      // absorbed by the early-capture filter (which is closed inside
+      // startInteractiveUI) and so the first paint uses the refined theme
+      // when the probe finishes in time.
+      await themeAutoDetectionComplete;
       await startInteractiveUI(
         config,
         settings,

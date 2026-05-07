@@ -15,6 +15,8 @@ import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
   QwenLogger,
+  isTelemetrySdkInitialized,
+  shutdownTelemetry,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -39,6 +41,9 @@ import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
+import { ExtensionManager } from '../extension/extensionManager.js';
+import { SkillManager } from '../skills/skill-manager.js';
+import { HookSystem } from '../hooks/index.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -97,6 +102,17 @@ vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 
+vi.mock('../hooks/index.js', () => {
+  const HookSystemMock = vi.fn();
+  HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
+  HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
+  return {
+    HookSystem: HookSystemMock,
+    createHookOutput: vi.fn(),
+  };
+});
+
 // Mock individual tools if their constructors are complex or have side effects
 vi.mock('../tools/ls', () => ({
   LSTool: createToolMock('list_directory'),
@@ -154,7 +170,6 @@ vi.mock('../core/client.js', () => ({
   GeminiClient: vi.fn().mockImplementation(() => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     isInitialized: vi.fn().mockReturnValue(true),
-    stripThoughtsFromHistory: vi.fn(),
     setTools: vi.fn(),
   })),
 }));
@@ -164,6 +179,8 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
   return {
     ...actual,
     initializeTelemetry: vi.fn(),
+    isTelemetrySdkInitialized: vi.fn(() => false),
+    shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
     uiTelemetryService: {
       getLastPromptTokenCount: vi.fn(),
     },
@@ -190,10 +207,23 @@ vi.mock('../skills/skill-manager.js', () => {
   SkillManagerMock.prototype.startWatching = vi
     .fn()
     .mockResolvedValue(undefined);
+  SkillManagerMock.prototype.refreshCache = vi
+    .fn()
+    .mockResolvedValue(undefined);
   SkillManagerMock.prototype.stopWatching = vi.fn();
   SkillManagerMock.prototype.listSkills = vi.fn().mockResolvedValue([]);
   SkillManagerMock.prototype.addChangeListener = vi.fn();
   SkillManagerMock.prototype.removeChangeListener = vi.fn();
+  // Path-conditional skill activation hook (called from
+  // CoreToolScheduler.executeSingleToolCall on every tool invocation).
+  // Mocks return empty so no activation-side effects fire in tests that
+  // exercise the scheduler.
+  SkillManagerMock.prototype.matchAndActivateByPath = vi
+    .fn()
+    .mockResolvedValue([]);
+  SkillManagerMock.prototype.matchAndActivateByPaths = vi
+    .fn()
+    .mockResolvedValue([]);
   return { SkillManager: SkillManagerMock };
 });
 
@@ -259,6 +289,7 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
     vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
       async () => undefined,
     );
@@ -297,6 +328,76 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSystemPrompt()).toBeUndefined();
   });
 
+  describe('FileReadCache isolation', () => {
+    it('returns a distinct cache for child Configs created via Object.create', () => {
+      // Subagent / scoped-agent / fork construction all use
+      // `Object.create(parent)`, which does NOT run field initializers.
+      // Without explicit handling the child would resolve fileReadCache
+      // through the prototype chain back to the parent's instance, so a
+      // subagent's ReadFile would see the parent's recorded reads and
+      // return file_unchanged placeholders for files the subagent has
+      // never received in its own transcript.
+      const parent = new Config(baseParams);
+      const child = Object.create(parent) as Config;
+
+      const parentCache = parent.getFileReadCache();
+      const childCache = child.getFileReadCache();
+
+      expect(parentCache).toBeDefined();
+      expect(childCache).toBeDefined();
+      expect(childCache).not.toBe(parentCache);
+
+      parentCache.recordRead(
+        '/tmp/parent.ts',
+        {
+          dev: 1,
+          ino: 100,
+          mtimeMs: 1_000_000,
+          size: 42,
+        } as unknown as import('node:fs').Stats,
+        { full: true, cacheable: true },
+      );
+
+      expect(parentCache.size()).toBe(1);
+      expect(childCache.size()).toBe(0);
+    });
+
+    it('returns the same cache instance on repeated getter calls within one Config', () => {
+      // Sanity: the lazy own-property initialization in
+      // getFileReadCache() must not allocate a fresh cache on every
+      // call — recorded entries would vanish between operations.
+      const config = new Config(baseParams);
+      expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('startNewSession', () => {
+    it('clears the FileReadCache so a new session does not inherit prior reads', () => {
+      // Regression guard: the file-read cache backs ReadFile's
+      // file_unchanged placeholder, whose correctness depends on the
+      // model having seen the prior read earlier in the *current*
+      // conversation. /clear and resume both go through
+      // startNewSession(), so it must drop cache entries the new
+      // session has never seen.
+      const config = new Config(baseParams);
+      const cache = config.getFileReadCache();
+      cache.recordRead(
+        '/tmp/whatever.ts',
+        {
+          dev: 1,
+          ino: 100,
+          mtimeMs: 1_000_000,
+          size: 42,
+        } as unknown as import('node:fs').Stats,
+        { full: true, cacheable: true },
+      );
+      expect(cache.size()).toBe(1);
+
+      config.startNewSession();
+      expect(cache.size()).toBe(0);
+    });
+  });
+
   describe('initialize', () => {
     it('should throw an error if checkpointing is enabled and GitService fails', async () => {
       const gitError = new Error('Git is not installed');
@@ -332,6 +433,31 @@ describe('Server Config (config.ts)', () => {
       await expect(config.initialize()).rejects.toThrow(
         'Config was already initialized',
       );
+    });
+
+    it('should skip implicit startup discovery in bare mode', async () => {
+      const extensionRefreshSpy = vi
+        .spyOn(ExtensionManager.prototype, 'refreshCache')
+        .mockResolvedValue(undefined);
+
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        bareMode: true,
+      });
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(extensionRefreshSpy).not.toHaveBeenCalled();
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.refreshCache).toHaveBeenCalledTimes(1);
+      expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
+      expect(
+        (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
+          (call) => call[0],
+        ),
+      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
     });
   });
 
@@ -435,10 +561,6 @@ describe('Server Config (config.ts)', () => {
       await config.refreshAuth(AuthType.USE_VERTEX_AI);
 
       await config.refreshAuth(AuthType.USE_GEMINI);
-
-      expect(
-        config.getGeminiClient().stripThoughtsFromHistory,
-      ).not.toHaveBeenCalledWith();
     });
   });
 
@@ -489,7 +611,7 @@ describe('Server Config (config.ts)', () => {
       expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(1);
     });
 
-    it('should strip thoughts from history on model switch (#3304)', async () => {
+    it('should preserve thoughts from history on model switch', async () => {
       const config = new Config(baseParams);
 
       const mockContentConfig: ContentGeneratorConfig = {
@@ -520,12 +642,48 @@ describe('Server Config (config.ts)', () => {
 
       await config.refreshAuth(AuthType.QWEN_OAUTH);
 
-      const stripSpy = config.getGeminiClient().stripThoughtsFromHistory;
-      vi.mocked(stripSpy).mockClear();
+      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+    });
+
+    it('should notify model change listeners after switchModel', async () => {
+      const config = new Config(baseParams);
+
+      const mockContentConfig: ContentGeneratorConfig = {
+        authType: AuthType.QWEN_OAUTH,
+        model: 'coder-model',
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        baseUrl: DEFAULT_DASHSCOPE_BASE_URL,
+        timeout: 60000,
+        maxRetries: 3,
+      } as ContentGeneratorConfig;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: {
+            ...mockContentConfig,
+            authType,
+            model: generationConfig?.model ?? mockContentConfig.model,
+          } as ContentGeneratorConfig,
+          sources: {},
+        }),
+      );
+      vi.mocked(createContentGenerator).mockResolvedValue({
+        generateContent: vi.fn(),
+        generateContentStream: vi.fn(),
+        countTokens: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as ContentGenerator);
+
+      await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+      const listener = vi.fn();
+      const unsubscribe = config.onModelChange(listener);
 
       await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
-      expect(stripSpy).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith('coder-model');
+
+      unsubscribe();
     });
   });
 
@@ -660,6 +818,54 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
   });
 
+  it('refreshHierarchicalMemory should only use explicit inputs in bare mode', async () => {
+    const config = new Config({
+      ...baseParams,
+      bareMode: true,
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
+    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.[1]).toEqual([]);
+    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+  });
+
+  it('refreshHierarchicalMemory should exclude implicit cwd from bare include-directories', async () => {
+    const explicitDir = '/tmp/explicit';
+    const config = new Config({
+      ...baseParams,
+      bareMode: true,
+      includeDirectories: [explicitDir],
+      loadMemoryFromIncludeDirectories: true,
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
+    expect(lastCall?.[1]).toEqual([explicitDir]);
+    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+  });
+
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {
     const contextFileName = 'CUSTOM_AGENTS.md';
     const paramsWithContextFile: ConfigParameters = {
@@ -715,6 +921,32 @@ describe('Server Config (config.ts)', () => {
     };
     const config = new Config(paramsWithTelemetry);
     expect(config.getTelemetryEnabled()).toBe(true);
+  });
+
+  it('Config shutdown should flush telemetry when SDK is initialized', async () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+    };
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
+    const config = new Config(paramsWithTelemetry);
+
+    await config.shutdown();
+
+    expect(shutdownTelemetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('Config shutdown should skip telemetry shutdown before SDK initialization', async () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+    };
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    const config = new Config(paramsWithTelemetry);
+
+    await config.shutdown();
+
+    expect(shutdownTelemetry).not.toHaveBeenCalled();
   });
 
   it('Config constructor should set telemetry to false when provided as false', () => {
@@ -892,6 +1124,41 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('Per-Signal OTLP Endpoint Configuration', () => {
+    it('should return per-signal endpoints when provided', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: {
+          enabled: true,
+          otlpTracesEndpoint: 'http://traces:4318/v1/traces',
+          otlpLogsEndpoint: 'http://logs:4318/v1/logs',
+          otlpMetricsEndpoint: 'http://metrics:4318/v1/metrics',
+        },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryOtlpTracesEndpoint()).toBe(
+        'http://traces:4318/v1/traces',
+      );
+      expect(config.getTelemetryOtlpLogsEndpoint()).toBe(
+        'http://logs:4318/v1/logs',
+      );
+      expect(config.getTelemetryOtlpMetricsEndpoint()).toBe(
+        'http://metrics:4318/v1/metrics',
+      );
+    });
+
+    it('should return undefined when per-signal endpoints are not provided', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: { enabled: true },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryOtlpTracesEndpoint()).toBeUndefined();
+      expect(config.getTelemetryOtlpLogsEndpoint()).toBeUndefined();
+      expect(config.getTelemetryOtlpMetricsEndpoint()).toBeUndefined();
+    });
+  });
+
   describe('UseRipgrep Configuration', () => {
     it('should default useRipgrep to true when not provided', () => {
       const config = new Config(baseParams);
@@ -961,6 +1228,30 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('should ignore coreTools overrides in bare mode', async () => {
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        coreTools: [ToolNames.WEB_FETCH],
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      expect(config.getCoreTools()).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.SHELL,
+      ]);
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+    });
+
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,

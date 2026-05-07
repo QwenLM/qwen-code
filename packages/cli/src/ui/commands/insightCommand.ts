@@ -11,7 +11,12 @@ import type { HistoryItemInsightProgress } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { join } from 'path';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
-import { createDebugLogger, Storage } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  encodeInsightProgressMessage,
+  encodeInsightReadyMessage,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import open from 'open';
 
 const logger = createDebugLogger('DataProcessor');
@@ -24,17 +29,150 @@ export const insightCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext) => {
     try {
       context.ui.setDebugMessage(t('Generating insights...'));
 
       const projectsDir = join(Storage.getRuntimeBaseDir(), 'projects');
       if (!context.services.config) {
+        if (context.executionMode !== 'interactive') {
+          return {
+            type: 'message' as const,
+            messageType: 'error' as const,
+            content: 'Config service is not available.',
+          };
+        }
         throw new Error('Config service is not available');
       }
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
       );
+
+      if (context.executionMode === 'non_interactive') {
+        // non_interactive: run synchronously and return a single message
+        try {
+          const outputPath = await insightGenerator.generateStaticInsight(
+            projectsDir,
+            () => {
+              // progress callback is no-op in non_interactive mode
+            },
+          );
+          return {
+            type: 'message' as const,
+            messageType: 'info' as const,
+            content: t('Insight report generated at: {{path}}', {
+              path: outputPath,
+            }),
+          };
+        } catch (error) {
+          return {
+            type: 'message' as const,
+            messageType: 'error' as const,
+            content: t('Failed to generate insights: {{error}}', {
+              error: (error as Error).message,
+            }),
+          };
+        }
+      }
+
+      if (context.executionMode === 'acp') {
+        const pendingMessages: Array<{
+          messageType: 'info' | 'error';
+          content: string;
+        }> = [];
+        let isComplete = false;
+        let resume: (() => void) | null = null;
+
+        const flushResume = () => {
+          const resolve = resume;
+          if (!resolve) {
+            return;
+          }
+          resume = null;
+          resolve();
+        };
+
+        const pushMessage = (message: {
+          messageType: 'info' | 'error';
+          content: string;
+        }) => {
+          pendingMessages.push(message);
+          flushResume();
+        };
+
+        const streamMessages = async function* (): AsyncGenerator<
+          { messageType: 'info' | 'error'; content: string },
+          void,
+          unknown
+        > {
+          while (!isComplete || pendingMessages.length > 0) {
+            if (pendingMessages.length === 0) {
+              await new Promise<void>((resolve) => {
+                resume = resolve;
+              });
+            }
+
+            while (pendingMessages.length > 0) {
+              const message = pendingMessages.shift();
+              if (message) {
+                yield message;
+              }
+            }
+          }
+        };
+
+        void (async () => {
+          try {
+            pushMessage({
+              messageType: 'info',
+              content: t('This may take a couple minutes. Sit tight!'),
+            });
+            pushMessage({
+              messageType: 'info',
+              content: encodeInsightProgressMessage(
+                t('Starting insight generation...'),
+                0,
+              ),
+            });
+
+            const outputPath = await insightGenerator.generateStaticInsight(
+              projectsDir,
+              (stage, progress, detail) => {
+                pushMessage({
+                  messageType: 'info',
+                  content: encodeInsightProgressMessage(
+                    stage,
+                    progress,
+                    detail,
+                  ),
+                });
+              },
+            );
+
+            pushMessage({
+              messageType: 'info',
+              content: encodeInsightReadyMessage(outputPath),
+            });
+          } catch (error) {
+            pushMessage({
+              messageType: 'error',
+              content: t('Failed to generate insights: {{error}}', {
+                error: (error as Error).message,
+              }),
+            });
+            logger.error('Insight generation error:', error);
+          } finally {
+            isComplete = true;
+            flushResume();
+          }
+        })();
+
+        return {
+          type: 'stream_messages',
+          messages: streamMessages(),
+        };
+      }
 
       const updateProgress = (
         stage: string,
@@ -60,16 +198,13 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
-      // Initial progress
       updateProgress(t('Starting insight generation...'), 0);
 
-      // Generate the static insight HTML file
       const outputPath = await insightGenerator.generateStaticInsight(
         projectsDir,
         updateProgress,
       );
 
-      // Clear pending item
       context.ui.setPendingItem(null);
 
       context.ui.addItem(
@@ -80,7 +215,6 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
-      // Open the file in the default browser
       try {
         await open(outputPath);
 
@@ -111,9 +245,17 @@ export const insightCommand: SlashCommand = {
       }
 
       context.ui.setDebugMessage(t('Insights ready.'));
+      return;
     } catch (error) {
-      // Clear pending item on error
       context.ui.setPendingItem(null);
+
+      if (context.executionMode !== 'interactive') {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content: `Failed to generate insights: ${(error as Error).message}`,
+        };
+      }
 
       context.ui.addItem(
         {
@@ -126,6 +268,8 @@ export const insightCommand: SlashCommand = {
       );
 
       logger.error('Insight generation error:', error);
+      return;
     }
+    return;
   },
 };
