@@ -297,4 +297,41 @@ describe('<MainContent />', () => {
       ),
     ).toBe(1);
   });
+
+  it('passes the full history to Static in one render when below the progressive replay threshold', () => {
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 50 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+
+    renderMainContent(createUIState({ history }));
+
+    // 3 prefix items (header / debug / notifications) + 50 history items
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
+  });
+
+  it('progressively replays Static items when history exceeds the threshold (issue #3899)', async () => {
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 200 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+
+    renderMainContent(createUIState({ history }));
+
+    // Initial render: only the first chunk (50) plus the 3 prefix items
+    // should be in Static — long history must not block the input thread.
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
+
+    // Drain setImmediate ticks to let progressive replay catch up.
+    for (let i = 0; i < 10; i++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    // After catch-up the full history should be present.
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(203);
+  });
 });

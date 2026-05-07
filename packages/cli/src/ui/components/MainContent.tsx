@@ -5,7 +5,7 @@
  */
 
 import { Box, Static } from 'ink';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
@@ -58,6 +58,22 @@ function addSourceBlockCounts(
     offsets.codeBlockLanguageCounts.set(lang, current + count);
   }
   offsets.mathBlockCount += counts.mathBlockCount;
+}
+
+// Issue #3899: Ink's <Static> renders all items synchronously on (re)mount.
+// For long histories that's O(N) blocking work — bad on Ctrl+O which clears
+// the terminal and forces a full remount. To keep input responsive, we
+// progressively grow the slice of history fed to <Static> when the catch-up
+// gap is large (initial mount of a resumed session, or post-Ctrl+O remount).
+// Below the threshold the slice jumps to full length in one render so normal
+// runtime appends are bit-identical to the previous behavior.
+const PROGRESSIVE_REPLAY_THRESHOLD = 100;
+const PROGRESSIVE_REPLAY_CHUNK_SIZE = 50;
+
+function initialReplayCount(length: number): number {
+  return length <= PROGRESSIVE_REPLAY_THRESHOLD
+    ? length
+    : Math.min(PROGRESSIVE_REPLAY_CHUNK_SIZE, length);
 }
 
 export const MainContent = () => {
@@ -265,6 +281,52 @@ export const MainContent = () => {
     });
   }, [pendingHistoryItems, pendingStartSourceCopyOffsets]);
 
+  // Progressive Static replay (issue #3899). `replayCount` is the number of
+  // history items currently passed to <Static>. It catches up to
+  // mergedHistory.length either in one shot (small lag) or chunk-by-chunk
+  // through setImmediate (large lag, e.g., post-Ctrl+O remount of a 500-item
+  // session). The reset effect re-runs only when historyRemountKey changes,
+  // so normal runtime appends never restart the chunked replay.
+  //
+  // Note: source-copy offsets are computed across the FULL mergedHistory
+  // above so each code block keeps its stable copy index even when only a
+  // prefix is visible; we slice the post-offset array here.
+  const [replayCount, setReplayCount] = useState(() =>
+    initialReplayCount(mergedHistory.length),
+  );
+  const mergedLengthRef = useRef(mergedHistory.length);
+  mergedLengthRef.current = mergedHistory.length;
+
+  useEffect(() => {
+    // Intentionally only depends on historyRemountKey — we react to remount
+    // events, not to incremental history growth (handled by the next effect).
+    // mergedLengthRef is a ref so it doesn't need to be in deps.
+    setReplayCount(initialReplayCount(mergedLengthRef.current));
+  }, [historyRemountKey]);
+
+  useEffect(() => {
+    if (replayCount >= mergedHistory.length) return;
+    const remaining = mergedHistory.length - replayCount;
+    if (remaining <= PROGRESSIVE_REPLAY_CHUNK_SIZE) {
+      setReplayCount(mergedHistory.length);
+      return;
+    }
+    const handle = setImmediate(() => {
+      setReplayCount((c) =>
+        Math.min(c + PROGRESSIVE_REPLAY_CHUNK_SIZE, mergedLengthRef.current),
+      );
+    });
+    return () => clearImmediate(handle);
+  }, [replayCount, mergedHistory.length]);
+
+  const visibleHistoryItemsWithSourceCopyOffsets = useMemo(
+    () =>
+      replayCount >= historyItemsWithSourceCopyOffsets.length
+        ? historyItemsWithSourceCopyOffsets
+        : historyItemsWithSourceCopyOffsets.slice(0, replayCount),
+    [historyItemsWithSourceCopyOffsets, replayCount],
+  );
+
   return (
     <>
       {/*
@@ -278,7 +340,7 @@ export const MainContent = () => {
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,
           <Notifications key="notifications" />,
-          ...historyItemsWithSourceCopyOffsets.map(
+          ...visibleHistoryItemsWithSourceCopyOffsets.map(
             ({ item: h, sourceCopyIndexOffsets }) => (
               <HistoryItemDisplay
                 terminalWidth={terminalWidth}
