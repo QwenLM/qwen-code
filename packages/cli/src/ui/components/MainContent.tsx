@@ -67,6 +67,12 @@ function addSourceBlockCounts(
 // gap is large (initial mount of a resumed session, or post-Ctrl+O remount).
 // Below the threshold the slice jumps to full length in one render so normal
 // runtime appends are bit-identical to the previous behavior.
+//
+// TODO(#3899 follow-up): the thresholds below are unbenchmarked. Per-item
+// render cost varies hugely (a one-line user message vs. thousands of lines
+// of tool stdout), so an item-count budget over-yields for tiny items and
+// under-yields for big ones. Consider switching to a *line-budget* per
+// chunk once we have telemetry on actual render times.
 const PROGRESSIVE_REPLAY_THRESHOLD = 100;
 const PROGRESSIVE_REPLAY_CHUNK_SIZE = 50;
 
@@ -319,13 +325,17 @@ export const MainContent = () => {
     return () => clearImmediate(handle);
   }, [replayCount, mergedHistory.length]);
 
-  const visibleHistoryItemsWithSourceCopyOffsets = useMemo(
-    () =>
-      replayCount >= historyItemsWithSourceCopyOffsets.length
-        ? historyItemsWithSourceCopyOffsets
-        : historyItemsWithSourceCopyOffsets.slice(0, replayCount),
-    [historyItemsWithSourceCopyOffsets, replayCount],
-  );
+  // TODO(#3899 follow-up): items at indexes >= replayCount are not yet in
+  // <Static>. If a pending item finalizes at index N during the catch-up
+  // window, it briefly disappears from the screen until replayCount reaches
+  // N. The window is bounded by chunkCount × event-loop tick (~100 ms for
+  // 500 items, ~1 s for 5000). For multi-thousand-item resumes a "tail
+  // buffer" — keep the trailing un-replayed items in the dynamic area until
+  // <Static> catches up — would close this gap.
+  const visibleHistoryItemsWithSourceCopyOffsets =
+    replayCount >= historyItemsWithSourceCopyOffsets.length
+      ? historyItemsWithSourceCopyOffsets
+      : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
   return (
     <>

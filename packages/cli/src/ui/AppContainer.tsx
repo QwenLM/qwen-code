@@ -254,6 +254,12 @@ const SHELL_HEIGHT_PADDING = 10;
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
   const historyManager = useHistory();
+  // `useHistory()` returns a fresh memoized object whenever `history` changes,
+  // so depending on `historyManager` directly inside event-handler callbacks
+  // would rebuild them on every message. Mirror history into a ref so
+  // handlers can read the latest snapshot at call time without reactive deps.
+  const historyRef = useRef(historyManager.history);
+  historyRef.current = historyManager.history;
   useMemoryMonitor(historyManager);
   const [debugMessage, setDebugMessage] = useState<string>('');
   const [quittingMessages, setQuittingMessages] = useState<
@@ -2245,7 +2251,7 @@ export const AppContainer = (props: AppContainerProps) => {
         // append-only. Issue #3899: this unfreezes Ctrl+O for plain-chat
         // long sessions; tool/thinking-bearing sessions still go through
         // the (now chunked) full path in MainContent.
-        if (compactToggleHasVisualEffect(historyManager.history)) {
+        if (compactToggleHasVisualEffect(historyRef.current)) {
           refreshStatic();
         }
       }
@@ -2286,7 +2292,6 @@ export const AppContainer = (props: AppContainerProps) => {
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
-      historyManager,
     ],
   );
 

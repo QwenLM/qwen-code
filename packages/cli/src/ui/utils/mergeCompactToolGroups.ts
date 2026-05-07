@@ -108,10 +108,14 @@ function isHiddenInCompactMode(item: HistoryItem): boolean {
  * Ctrl+O for plain-chat sessions that have neither tool calls nor thinking
  * blocks regardless of conversation length.
  *
- * Conservative: any `tool_group` returns true even if it's force-expanded
- * (force-expand groups render via the same path in both modes, but their
- * adjacent `tool_use_summary` may still render differently — checking the
- * group alone is the cheap upper bound).
+ * Conservative: returns true for any `tool_group`, even though a history of
+ * only force-expanded groups would technically render the same way in both
+ * modes (force-expand groups bypass the compact-rendering path and their
+ * adjacent `tool_use_summary` items are not absorbed). Distinguishing
+ * force-expand from regular groups requires `embeddedShellFocused` and
+ * `activePtyId`, which are not cheaply available at the keypress handler
+ * call site — we accept the false-positive in exchange for keeping this
+ * predicate self-contained and O(N).
  */
 export function compactToggleHasVisualEffect(
   history: readonly HistoryItem[],

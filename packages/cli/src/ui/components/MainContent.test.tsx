@@ -322,16 +322,29 @@ describe('<MainContent />', () => {
 
     renderMainContent(createUIState({ history }));
 
+    const lengthAtLastCall = () =>
+      staticItemsSpy.mock.calls.at(-1)?.[0].length ?? 0;
+
     // Initial render: only the first chunk (50) plus the 3 prefix items
     // should be in Static — long history must not block the input thread.
-    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
+    const TOTAL = 203; // 200 history + 3 prefix items
+    expect(lengthAtLastCall()).toBe(53);
+    expect(lengthAtLastCall()).toBeLessThan(TOTAL);
 
-    // Drain setImmediate ticks to let progressive replay catch up.
-    for (let i = 0; i < 10; i++) {
+    // Drain setImmediate ticks. Each iteration must not regress the visible
+    // count (monotonic) and we must reach TOTAL inside the loop budget — a
+    // silent regression that stops advancing will fail the final assert
+    // rather than spuriously time out.
+    let prev = lengthAtLastCall();
+    for (let i = 0; i < 50; i++) {
       await new Promise<void>((resolve) => setImmediate(resolve));
+      const curr = lengthAtLastCall();
+      expect(curr).toBeGreaterThanOrEqual(prev); // never shrinks mid-replay
+      prev = curr;
+      if (curr === TOTAL) break;
     }
 
-    // After catch-up the full history should be present.
-    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(203);
+    // After catch-up the full history must be present.
+    expect(lengthAtLastCall()).toBe(TOTAL);
   });
 });
