@@ -394,6 +394,35 @@ Another paragraph.
       expect(output).toContain('literal pipe');
     });
 
+    it('renders inline math inside markdown table cells', () => {
+      const text = `
+| Symbol | Meaning |
+|--------|---------|
+| $\\alpha$ | alpha |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+
+      expect(output).toContain('α');
+      expect(output).toContain('alpha');
+      expect(output).not.toContain('$\\alpha$');
+    });
+
+    it('does not treat table dollar amounts as inline math', () => {
+      const text = `
+| Item | Price |
+|------|-------|
+| range | $5 and $10 later |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+
+      expect(lastFrame()).toContain('$5 and $10 later');
+    });
+
     it('renders blockquotes as quoted text', () => {
       const text = '> Important **note**'.replace(/\n/g, eol);
       const { lastFrame } = renderWithProviders(

@@ -342,6 +342,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             rows={tableRows}
             contentWidth={contentWidth}
             aligns={tableAligns}
+            enableInlineMath={renderVisualBlocks}
           />,
         );
       }
@@ -532,6 +533,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         rows={tableRows}
         contentWidth={contentWidth}
         aligns={tableAligns}
+        enableInlineMath={renderVisualBlocks}
       />,
     );
   }
@@ -831,6 +833,7 @@ interface RenderTableProps {
   rows: string[][];
   contentWidth: number;
   aligns?: ColumnAlign[];
+  enableInlineMath?: boolean;
 }
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
@@ -838,12 +841,14 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   rows,
   contentWidth,
   aligns,
+  enableInlineMath = false,
 }) => (
   <TableRenderer
     headers={headers}
     rows={rows}
     contentWidth={contentWidth}
     aligns={aligns}
+    enableInlineMath={enableInlineMath}
   />
 );
 
