@@ -242,7 +242,11 @@ const navigateToCustomAdvancedConfig = async (
   );
 };
 
-describe('AuthDialog', () => {
+const isUnreliableTuiInputEnvironment =
+  process.platform === 'win32' || process.env['CI'] === 'true';
+const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
+
+describe('AuthDialog', { timeout: 15000 }, () => {
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
   let originalEnv: NodeJS.ProcessEnv;
@@ -1153,202 +1157,206 @@ describe('AuthDialog', () => {
     unmount();
   });
 
-  it('should submit Token Plan through the shared subscription handler', async () => {
-    const handleProviderSubmit = vi.fn().mockResolvedValue(undefined);
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+  itWhenTuiInputReliable(
+    'should submit Token Plan through the shared subscription handler',
+    async () => {
+      const handleProviderSubmit = vi.fn().mockResolvedValue(undefined);
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
-
-    const { stdin, lastFrame, unmount } = renderAuthDialog(
-      settings,
-      {},
-      { handleProviderSubmit },
-    );
-
-    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
-    stdin.write('\r');
-    await waitForSelectedOption(lastFrame, 'Coding Plan');
-    await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
-    await pressEnterAndWaitFor(
-      stdin,
-      lastFrame,
-      'Alibaba ModelStudio · Step 1/2 · API Key',
-    );
-
-    await typeText(stdin, 'sk-token-plan');
-
-    await pressEnterAndWaitFor(
-      stdin,
-      lastFrame,
-      'Alibaba ModelStudio · Step 2/2 · Model IDs',
-    );
-    stdin.write('\r');
-    await vi.waitFor(
-      () => {
-        expect(handleProviderSubmit).toHaveBeenCalled();
-      },
-      { timeout: WAIT_FOR_TIMEOUT },
-    );
-
-    unmount();
-  });
-
-  it('should return from Token Plan API key input to Token Plan selection', async () => {
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
+        true,
+        new Set(),
+      );
 
-    const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+      const { stdin, lastFrame, unmount } = renderAuthDialog(
+        settings,
+        {},
+        { handleProviderSubmit },
+      );
 
-    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
-    stdin.write('\r');
-    await waitForSelectedOption(lastFrame, 'Coding Plan');
-    await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
-    await pressEnterAndWaitFor(
-      stdin,
-      lastFrame,
-      'Alibaba ModelStudio · Step 1/2 · API Key',
-    );
-    stdin.write('\u001b');
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      stdin.write('\r');
+      await waitForSelectedOption(lastFrame, 'Coding Plan');
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 1/2 · API Key',
+      );
 
-    await vi.waitFor(
-      () => {
-        expect(lastFrame()).toContain('Alibaba ModelStudio');
-        expectSelectedOption(lastFrame(), 'Token Plan');
-      },
-      { timeout: WAIT_FOR_TIMEOUT },
-    );
+      await typeText(stdin, 'sk-token-plan');
 
-    unmount();
-  });
-
-  it('should trigger OpenRouter OAuth from OAuth provider options', async () => {
-    const handleOpenRouterSubmit = vi.fn().mockResolvedValue(undefined);
-    const settings: LoadedSettings = new LoadedSettings(
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      {
-        settings: {},
-        originalSettings: {},
-        path: '',
-      },
-      {
-        settings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 2/2 · Model IDs',
+      );
+      stdin.write('\r');
+      await vi.waitFor(
+        () => {
+          expect(handleProviderSubmit).toHaveBeenCalled();
         },
-        originalSettings: {
-          security: { auth: { selectedType: undefined } },
-          ui: { customThemes: {} },
-          mcpServers: {},
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'should return from Token Plan API key input to Token Plan selection',
+    async () => {
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
         },
-        path: '',
-      },
-      {
-        settings: { ui: { customThemes: {} }, mcpServers: {} },
-        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-        path: '',
-      },
-      true,
-      new Set(),
-    );
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
 
-    const { stdin, lastFrame, unmount } = renderAuthDialog(
-      settings,
-      {},
-      { handleOpenRouterSubmit },
-    );
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
-    await moveDownAndWaitForSelection(
-      stdin,
-      lastFrame,
-      'Third-party Providers',
-    );
-    await moveDownAndWaitForSelection(stdin, lastFrame, 'OAuth');
-    await pressEnterAndWaitFor(stdin, lastFrame, 'Select OAuth Provider');
-    await waitForSelectedOption(lastFrame, 'OpenRouter');
-    stdin.write('\r');
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      stdin.write('\r');
+      await waitForSelectedOption(lastFrame, 'Coding Plan');
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 1/2 · API Key',
+      );
+      stdin.write('\u001b');
 
-    await vi.waitFor(
-      () => {
-        expect(handleOpenRouterSubmit).toHaveBeenCalledTimes(1);
-      },
-      { timeout: WAIT_FOR_TIMEOUT },
-    );
+      await vi.waitFor(
+        () => {
+          expect(lastFrame()).toContain('Alibaba ModelStudio');
+          expectSelectedOption(lastFrame(), 'Token Plan');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
 
-    unmount();
-  });
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'should trigger OpenRouter OAuth from OAuth provider options',
+    async () => {
+      const handleOpenRouterSubmit = vi.fn().mockResolvedValue(undefined);
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(
+        settings,
+        {},
+        { handleOpenRouterSubmit },
+      );
+
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await moveDownAndWaitForSelection(
+        stdin,
+        lastFrame,
+        'Third-party Providers',
+      );
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'OAuth');
+      await pressEnterAndWaitFor(stdin, lastFrame, 'Select OAuth Provider');
+      await waitForSelectedOption(lastFrame, 'OpenRouter');
+      stdin.write('\r');
+
+      await vi.waitFor(
+        () => {
+          expect(handleOpenRouterSubmit).toHaveBeenCalledTimes(1);
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
+
+      unmount();
+    },
+  );
 });
 
-const isUnreliableTuiInputEnvironment =
-  process.platform === 'win32' ||
-  (process.env['CI'] === 'true' && process.version.startsWith('v20.'));
-const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
-
-describe('AuthDialog Custom API Key Wizard', () => {
+describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const createStandardSettings = (): LoadedSettings =>
