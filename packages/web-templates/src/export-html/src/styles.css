@@ -21,9 +21,15 @@
 
   /*
    * Mirror webui's light-theme overrides so ChatViewer follows the toggle.
-   * These values track @qwen-code/webui's variables.css `:root.auto-theme`
-   * block. When upgrading the webui dependency, diff that block and sync
-   * any new `--app-*` keys here so light mode keeps parity with dark.
+   * The first group tracks @qwen-code/webui's variables.css `:root.auto-theme`
+   * block. The second group covers `--app-*` tokens that the auto-theme block
+   * does NOT override but ChatViewer / MarkdownRenderer / CollapsibleFileContent
+   * still read — without these, light-mode exports leak dark surfaces (e.g.
+   * markdown table headers, collapsible file blocks).
+   *
+   * When upgrading the webui dependency, diff its `:root` defaults plus the
+   * `:root.auto-theme` block and sync any new `--app-*` keys here so light
+   * mode keeps parity with dark.
    */
   --app-primary-foreground: #1f2937;
   --app-secondary-foreground: #6b7280;
@@ -48,6 +54,14 @@
   --app-menu-foreground: #1f2937;
   --app-tool-background: #ffffff;
   --app-code-background: #f3f4f6;
+  --app-secondary-background: #f3f4f6;
+  --app-input-secondary-background: #f3f4f6;
+  --app-input-foreground: #1f2937;
+  --app-button-background: #e5e7eb;
+  --app-button-secondary-background: #f3f4f6;
+  --app-button-foreground: #1f2937;
+  --app-transparent-inner-border: rgba(0, 0, 0, 0.1);
+  --app-warning-foreground: #b45309;
 }
 
 body {
