@@ -304,9 +304,33 @@ describe('useAuthCommand', () => {
           name: '[DeepSeek] deepseek-v4-pro',
           baseUrl: 'https://api.deepseek.com',
           envKey: 'DEEPSEEK_API_KEY',
-          generationConfig: { contextWindowSize: 1000000 },
+          generationConfig: {
+            contextWindowSize: 1000000,
+            extra_body: { enable_thinking: true },
+            modalities: { image: true, video: true },
+          },
         },
       ],
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      'openai',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'model.name',
+      'deepseek-v4-flash',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'providerMetadata.deepseek.version',
+      expect.any(String),
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'providerMetadata.deepseek.baseUrl',
+      'https://api.deepseek.com',
     );
     expect(config.reloadModelProvidersConfig).toHaveBeenCalledWith({
       [AuthType.USE_OPENAI]: expect.any(Array),
@@ -526,10 +550,6 @@ describe('useAuthCommand', () => {
           name: '[ModelStudio Standard] qwen3.5-plus',
           baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
           envKey: 'DASHSCOPE_API_KEY',
-          generationConfig: {
-            contextWindowSize: 1000000,
-            extra_body: { enable_thinking: true },
-          },
         },
         {
           id: 'deepseek-v4-flash',
@@ -545,16 +565,36 @@ describe('useAuthCommand', () => {
         },
       ],
     );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      'openai',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'model.name',
+      'qwen3.5-plus',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'providerMetadata.alibabaStandard.version',
+      expect.any(String),
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'providerMetadata.alibabaStandard.baseUrl',
+      'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    );
   });
 });
 
 describe('generateCustomApiKeyEnvKey', () => {
-  it('generates deterministic hash-based env key', () => {
+  it('generates deterministic URL-based env key', () => {
     const key = generateCustomApiKeyEnvKey(
       AuthType.USE_OPENAI,
       'https://api.openai.com/v1',
     );
-    expect(key).toMatch(/^QWEN_CUSTOM_API_KEY_[A-F0-9]{16}$/);
+    expect(key).toMatch(/^QWEN_CUSTOM_API_KEY_[A-Z0-9_]+$/);
     const key2 = generateCustomApiKeyEnvKey(
       AuthType.USE_OPENAI,
       'https://api.openai.com/v1',
@@ -586,7 +626,8 @@ describe('generateCustomApiKeyEnvKey', () => {
     expect(key1).not.toBe(key2);
   });
 
-  it('distinguishes similar URLs that differ only in special chars', () => {
+  it('produces equal keys for URLs that differ only in trailing slash', () => {
+    // Trailing slashes are normalized away, so these should be equal.
     const key1 = generateCustomApiKeyEnvKey(
       AuthType.USE_OPENAI,
       'https://openrouter.ai/api/v1/',
@@ -595,7 +636,7 @@ describe('generateCustomApiKeyEnvKey', () => {
       AuthType.USE_OPENAI,
       'https://openrouter.ai/api/v1',
     );
-    expect(key1).not.toBe(key2);
+    expect(key1).toBe(key2);
   });
 });
 

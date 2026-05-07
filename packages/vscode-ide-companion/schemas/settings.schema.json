@@ -18,16 +18,6 @@
       "type": "object",
       "additionalProperties": true
     },
-    "codingPlan": {
-      "description": "Coding Plan template version tracking and configuration.",
-      "type": "object",
-      "properties": {
-        "version": {
-          "description": "SHA256 hash of the Coding Plan template. Used to detect template updates.",
-          "type": "string"
-        }
-      }
-    },
     "env": {
       "description": "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.",
       "type": "object",

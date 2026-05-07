@@ -1300,6 +1300,8 @@ const isUnreliableTuiInputEnvironment =
 const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
 
 describe('AuthDialog Custom API Key Wizard', () => {
+  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+
   const createStandardSettings = (): LoadedSettings =>
     new LoadedSettings(
       {

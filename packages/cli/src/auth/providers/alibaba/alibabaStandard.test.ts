@@ -47,15 +47,15 @@ describe('alibabaStandardProvider', () => {
     const plan = buildInstallPlan(alibabaStandardProvider, {
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       apiKey: 'sk-standard',
-      modelIds: ['qwen3.5-plus', 'custom-model'],
+      modelIds: ['qwen3.6-plus', 'custom-model'],
     });
 
     expect(plan.providerId).toBe('alibabaStandard');
     const models = plan.modelProviders?.[0]?.models;
     expect(models).toHaveLength(2);
     expect(models?.[0]).toMatchObject({
-      id: 'qwen3.5-plus',
-      name: '[ModelStudio Standard] qwen3.5-plus',
+      id: 'qwen3.6-plus',
+      name: '[ModelStudio Standard] qwen3.6-plus',
       generationConfig: {
         extra_body: { enable_thinking: true },
         contextWindowSize: 1000000,
