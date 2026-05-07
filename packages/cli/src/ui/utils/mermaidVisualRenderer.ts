@@ -57,6 +57,7 @@ const GIT_GRAPH_START_RE = /^gitGraph\b/i;
 const MINDMAP_START_RE = /^mindmap\b/i;
 const REQUIREMENT_START_RE = /^requirementDiagram\b/i;
 const LINE_COMMENT_RE = /^%%/;
+const FLOW_ARROW_OPERATOR = '--' + '>';
 const MAX_RENDERED_LINES = 80;
 const MAX_FLOWCHART_PREVIEW_LINES = 120;
 const MAX_FLOWCHART_PREVIEW_EDGES = 80;
@@ -68,8 +69,21 @@ const MAX_PREVIEW_SOURCE_LINE_LENGTH = 1000;
 const MIN_CANVAS_WIDTH = 24;
 const NODE_GAP_X = 4;
 const NODE_GAP_Y = 4;
-const FLOW_EDGE_OPERATOR_RE =
-  /\s*(?:-->\|([^|]+)\||--\s+(.+?)\s+-->|(?:-->|---|==>|-\.->|--x|--o))\s*/g;
+const FLOW_EDGE_OPERATOR_RE = new RegExp(
+  String.raw`\s*(?:` +
+    `${escapeRegExp(FLOW_ARROW_OPERATOR)}\\|([^|]+)\\|` +
+    String.raw`|--\s+(.+?)\s+` +
+    escapeRegExp(FLOW_ARROW_OPERATOR) +
+    `|(?:${[FLOW_ARROW_OPERATOR, '---', '==>', '-.->', '--x', '--o']
+      .map(escapeRegExp)
+      .join('|')}))` +
+    String.raw`\s*`,
+  'g',
+);
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function truncateToWidth(text: string, width: number): string {
   if (width <= 0 || stringWidth(text) <= width) return text;
