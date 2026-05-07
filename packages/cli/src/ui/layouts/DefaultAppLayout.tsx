@@ -115,9 +115,16 @@ export const DefaultAppLayout: React.FC = () => {
         open (auth / permission / background tasks / etc.) so the modal
         surface doesn't compete with the live roster, and the panel's
         own internal self-hide handles the empty-roster case.
+
+        Panel uses `terminalWidth`, not `mainAreaWidth` — `mainAreaWidth`
+        is hard-capped at 100 cols (intended for markdown / code blocks
+        where soft-wrap matters), which on wider terminals leaves a
+        large empty gutter to the right of an already-truncating row.
+        Live progress lines have nothing to soft-wrap, so the panel
+        wants the full terminal width.
       */}
       {!isAgentTab && !uiState.dialogsVisible && (
-        <LiveAgentPanel width={uiState.mainAreaWidth} />
+        <LiveAgentPanel width={uiState.terminalWidth} />
       )}
     </Box>
   );

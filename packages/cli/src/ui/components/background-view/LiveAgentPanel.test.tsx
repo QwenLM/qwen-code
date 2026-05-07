@@ -156,7 +156,10 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('5s');
   });
 
-  it('marks foreground agents with the [in turn] prefix', () => {
+  it('does NOT surface a flavor marker on foreground agents', () => {
+    // Foreground vs background distinction stays with BackgroundTasksDialog
+    // (where cancel semantics differ); the panel reads as a glance roster
+    // and the marker added more confusion than signal.
     const { lastFrame } = renderPanel({
       entries: [
         agentEntry({
@@ -167,7 +170,10 @@ describe('<LiveAgentPanel />', () => {
         }),
       ],
     });
-    expect(lastFrame() ?? '').toContain('[in turn]');
+    const frame = lastFrame() ?? '';
+    expect(frame).not.toContain('[in turn]');
+    expect(frame).toContain('editor');
+    expect(frame).toContain('tighten import order');
   });
 
   it('windows from the tail when entries exceed maxRows', () => {
@@ -190,8 +196,11 @@ describe('<LiveAgentPanel />', () => {
     ];
     const { lastFrame } = renderPanel({ entries, maxRows: 2 });
     const frame = lastFrame() ?? '';
-    // `more above` callout flagged with the dropped count.
+    // `more above` callout flagged with the dropped count and points
+    // at the dialog (the only surface where the user can scroll
+    // through the full roster + take action).
     expect(frame).toContain('1 more above');
+    expect(frame).toContain('to view all');
     // Tail window keeps the newest two rows.
     expect(frame).toContain('mid-agent');
     expect(frame).toContain('fresh-agent');

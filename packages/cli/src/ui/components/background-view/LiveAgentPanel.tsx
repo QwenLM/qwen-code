@@ -237,9 +237,17 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
       </Box>
       {overflow > 0 && (
         <Box>
+          {/*
+            The panel is read-only (no keyboard focus — that would
+            steal input from the composer), so when the roster
+            overflows the row budget we point users at the dialog
+            that DOES support selection / scroll / cancel / resume.
+            Same keystroke the footer pill uses, kept in sync so
+            users only have to learn one thing.
+          */}
           <Text
             color={theme.text.secondary}
-          >{`  ^ ${overflow} more above`}</Text>
+          >{`  ^ ${overflow} more above (↓ to view all)`}</Text>
         </Box>
       )}
       {visible.map((entry) => (
@@ -255,7 +263,13 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
 }) => {
   const { glyph, color } = statusIcon(entry);
   const label = descriptionWithoutPrefix(entry);
-  const flavorPrefix = entry.flavor === 'foreground' ? '[in turn] ' : '';
+  // Note: foreground vs background is intentionally not surfaced here.
+  // Earlier iterations prefixed foreground rows with `[in turn]` (the
+  // BackgroundTasksDialog convention), but in the panel context the
+  // marker reads as cryptic — the foreground / background distinction
+  // matters in the dialog (where cancel semantics differ) but the
+  // glance roster just needs identity + intent + cost. Keep the
+  // dialog as the place that surfaces the flavor distinction.
   const activity = activityLabel(entry);
   const elapsed = elapsedLabel(entry, now);
   const showType =
@@ -296,7 +310,7 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
               <Text color={theme.text.secondary}>{': '}</Text>
             </>
           )}
-          <Text color={theme.text.secondary}>{`${flavorPrefix}${label}`}</Text>
+          <Text color={theme.text.secondary}>{label}</Text>
           {activity && (
             <Text color={theme.text.secondary}>{` (${activity})`}</Text>
           )}
