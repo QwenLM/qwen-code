@@ -55,6 +55,7 @@ import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { reviewCommand } from '../commands/review.js';
+import { remoteControlCommand } from '../commands/remote-control.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -617,7 +618,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Channel subcommands
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand);
+    .command(reviewCommand)
+    // Register local remote-control server
+    .command(remoteControlCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -640,9 +643,11 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'extensions' ||
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
-      result._[0] === 'review')
+      result._[0] === 'review' ||
+      result._[0] === 'remote-control' ||
+      result._[0] === 'rc')
   ) {
-    // MCP/Extensions/Hooks/Channel/Review commands handle their own
+    // MCP/Extensions/Hooks/Channel/Review/Remote Control commands handle their own
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
