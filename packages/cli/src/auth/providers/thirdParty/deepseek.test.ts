@@ -31,7 +31,7 @@ describe('deepseekProvider', () => {
     expect(models?.[0]).toMatchObject({
       id: 'deepseek-v4-flash',
       name: '[DeepSeek] deepseek-v4-flash',
-      generationConfig: { contextWindowSize: 65536 },
+      generationConfig: { contextWindowSize: 1000000 },
     });
   });
 
@@ -44,7 +44,9 @@ describe('deepseekProvider', () => {
 
     const models = plan.modelProviders?.[0]?.models;
     expect(models).toHaveLength(2);
-    expect(models?.[0]?.generationConfig).toEqual({ contextWindowSize: 65536 });
+    expect(models?.[0]?.generationConfig).toEqual({
+      contextWindowSize: 1000000,
+    });
     expect(models?.[1]).toMatchObject({
       id: 'some-new-model',
       name: '[DeepSeek] some-new-model',

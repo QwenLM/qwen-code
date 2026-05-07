@@ -296,14 +296,14 @@ describe('useAuthCommand', () => {
           name: '[DeepSeek] deepseek-v4-flash',
           baseUrl: 'https://api.deepseek.com',
           envKey: 'DEEPSEEK_API_KEY',
-          generationConfig: { contextWindowSize: 65536 },
+          generationConfig: { contextWindowSize: 1000000 },
         },
         {
           id: 'deepseek-v4-pro',
           name: '[DeepSeek] deepseek-v4-pro',
           baseUrl: 'https://api.deepseek.com',
           envKey: 'DEEPSEEK_API_KEY',
-          generationConfig: { contextWindowSize: 65536 },
+          generationConfig: { contextWindowSize: 1000000 },
         },
       ],
     );

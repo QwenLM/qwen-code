@@ -16,8 +16,8 @@ export const deepseekProvider: ProviderConfig = {
   envKey: 'DEEPSEEK_API_KEY',
   authMethod: 'input',
   models: [
-    { id: 'deepseek-v4-flash', contextWindowSize: 65536 },
-    { id: 'deepseek-v4-pro', contextWindowSize: 65536 },
+    { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
+    { id: 'deepseek-v4-pro', contextWindowSize: 1000000 },
   ],
   modelsEditable: true,
   modelNamePrefix: 'DeepSeek',

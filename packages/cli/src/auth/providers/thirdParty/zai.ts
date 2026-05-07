@@ -29,9 +29,9 @@ export const zaiProvider: ProviderConfig = {
   envKey: 'ZAI_API_KEY',
   authMethod: 'input',
   models: [
-    { id: 'GLM-5.1', contextWindowSize: 128000, enableThinking: true },
-    { id: 'GLM-5', contextWindowSize: 32768 },
-    { id: 'GLM-5-Turbo', contextWindowSize: 128000 },
+    { id: 'GLM-5.1', contextWindowSize: 204800, enableThinking: true },
+    { id: 'GLM-5', contextWindowSize: 204800 },
+    { id: 'GLM-5-Turbo', contextWindowSize: 204800 },
   ],
   modelsEditable: true,
   modelNamePrefix: 'Z.AI',

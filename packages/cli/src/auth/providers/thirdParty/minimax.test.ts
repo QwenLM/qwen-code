@@ -37,7 +37,7 @@ describe('minimaxProvider', () => {
     expect(models?.[0]).toMatchObject({
       id: 'MiniMax-M2.5',
       name: '[MiniMax] MiniMax-M2.5',
-      generationConfig: { contextWindowSize: 1048576 },
+      generationConfig: { contextWindowSize: 196608 },
     });
   });
 });

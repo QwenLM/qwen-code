@@ -38,13 +38,13 @@ describe('zaiProvider', () => {
       id: 'GLM-5.1',
       name: '[Z.AI] GLM-5.1',
       generationConfig: {
-        contextWindowSize: 128000,
+        contextWindowSize: 204800,
         extra_body: { enable_thinking: true },
       },
     });
     expect(models?.[1]).toMatchObject({
       id: 'GLM-5',
-      generationConfig: { contextWindowSize: 32768 },
+      generationConfig: { contextWindowSize: 204800 },
     });
   });
 
