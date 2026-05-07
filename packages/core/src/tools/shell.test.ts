@@ -1917,9 +1917,25 @@ describe('ShellTool', () => {
       });
 
       // `git -C <path> commit` runs in <path>, not our cwd — same risk
-      // as the cd case, so the rewrite should be skipped.
-      it('should NOT add co-author for git -C <path> commit', async () => {
-        const command = 'git -C /tmp/other commit -m "Other repo"';
+      // as the cd case, so the rewrite should be skipped. Also covers
+      // the attached-value form `-C/path` (single token from
+      // shell-quote) and the long-flag attached forms
+      // `--git-dir=/path` / `--work-tree=/path`.
+      it.each([
+        ['git -C /tmp/other commit', 'git -C /tmp/other commit -m "Other"'],
+        [
+          'git -C/tmp/other commit (attached)',
+          'git -C/tmp/other commit -m "Other"',
+        ],
+        [
+          'git --git-dir=/tmp/other/.git commit',
+          'git --git-dir=/tmp/other/.git commit -m "Other"',
+        ],
+        [
+          'git --work-tree=/tmp/other commit',
+          'git --work-tree=/tmp/other commit -m "Other"',
+        ],
+      ])('should NOT add co-author for %s', async (_label, command) => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
