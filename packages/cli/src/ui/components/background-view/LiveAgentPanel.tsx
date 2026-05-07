@@ -77,10 +77,14 @@ function isAgentEntry(entry: DialogEntry): entry is AgentDialogEntry {
   return entry.kind === 'agent';
 }
 
+// Bullet glyphs mirror Claude Code's CoordinatorTaskPanel — `○` for
+// active slots (running / paused) so the row reads as a uniform list,
+// terminal states keep distinct check / cross marks so they're easy
+// to scan at a glance.
 function statusIcon(entry: AgentDialogEntry): { glyph: string; color: string } {
   switch (entry.status) {
     case 'running':
-      return { glyph: '⊷', color: theme.status.warning };
+      return { glyph: '○', color: theme.status.warning };
     case 'paused':
       return { glyph: '⏸', color: theme.status.warning };
     case 'completed':
@@ -262,40 +266,39 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
       ? ` · ${formatTokenCount(entry.stats.totalTokens)} tokens`
       : '';
 
-  // Two-column row, layout order:
-  //   [icon · type · description · activity]   ·   [elapsed · tokens]
-  //         ^ flex-shrink:1, truncate-end          ^ flex-shrink:0
+  // Layout (Claude Code's CoordinatorTaskPanel visual + our
+  // right-pin to keep elapsed / tokens from being clipped):
   //
-  // Identity (type) and intent (description / activity) read in
-  // natural left-to-right order. Elapsed + tokens live in a
-  // flex-shrink:0 right column so they're never clipped — long
-  // descriptions truncate inside the left column with `truncate-end`.
-  // Crucially the left column does NOT have `flex-grow:1`, so when
-  // the row content fits comfortably (wide terminal) the two columns
-  // sit side by side with the empty space at the row tail rather
-  // than between description and elapsed (which is what `flex-grow`
-  // would have produced).
-  const tail =
-    tokenSuffix.length > 0 ? ` · ${elapsed}${tokenSuffix}` : ` · ${elapsed}`;
+  //   [○ type: desc (activity)]   [▶ 13s · 2.4k tokens]
+  //         ^ flex-shrink:1              ^ flex-shrink:0
+  //         truncate-end                 always intact
+  //
+  // - Status glyph at the left (`○` for live slots, ✔/✖/⏸ for
+  //   terminal — see `statusIcon`).
+  // - `type:` prefix when not the default `general-purpose`.
+  // - Activity wrapped in parentheses so it reads as an annotation
+  //   on the description rather than a sibling field.
+  // - `▶` separates the description from elapsed / tokens, mirroring
+  //   the leaked CoordinatorTaskPanel pattern (`PLAY_ICON`).
+  // - The left column has flex-shrink:1 (no flex-grow) so the two
+  //   columns sit side by side at intrinsic widths; empty slack
+  //   falls off the row tail rather than opening a visual gap
+  //   between the description and the right-pinned elapsed.
+  const tail = ` ▶ ${elapsed}${tokenSuffix}`;
   return (
     <Box flexDirection="row">
       <Box flexShrink={1}>
         <Text wrap="truncate-end">
-          {/*
-            Template literal preserves the two-space breathing room
-            after the status glyph — prettier can collapse literal
-            whitespace inside JSX text expressions.
-          */}
-          <Text color={color}>{`${glyph}  `}</Text>
+          <Text color={color}>{`${glyph} `}</Text>
           {showType && (
             <>
               <Text bold>{entry.subagentType}</Text>
-              <Text color={theme.text.secondary}>{' · '}</Text>
+              <Text color={theme.text.secondary}>{': '}</Text>
             </>
           )}
           <Text color={theme.text.secondary}>{`${flavorPrefix}${label}`}</Text>
           {activity && (
-            <Text color={theme.text.secondary}>{` · ${activity}`}</Text>
+            <Text color={theme.text.secondary}>{` (${activity})`}</Text>
           )}
         </Text>
       </Box>
