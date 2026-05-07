@@ -2662,6 +2662,19 @@ describe('runNonInteractive', () => {
         (m: unknown) => extractToolResultId(m) === 'tool-leading',
       );
       expect(leadingToolResult).toBeDefined();
+      // On the success path, the synthesised "Skipped" message must NOT
+      // include the trailing "Re-issue this call in a separate turn"
+      // advice — the session terminates immediately so neither the model
+      // nor any SDK consumer can act on it. Keeps the success-path event
+      // stream clean and avoids contradictory guidance ("re-issue" + the
+      // run already exited).
+      const leadingContent = (
+        leadingToolResult as {
+          message?: { content?: Array<{ content?: string }> };
+        }
+      )?.message?.content?.[0]?.content;
+      expect(leadingContent).toMatch(/Skipped:/);
+      expect(leadingContent).not.toMatch(/Re-issue this call/);
     });
 
     it('tries multiple structured_output calls in the same turn until one succeeds', async () => {
@@ -3026,6 +3039,15 @@ describe('runNonInteractive', () => {
         (p) => p.functionResponse?.id === 'tool-leading',
       );
       expect(suppressed?.functionResponse?.name).toBe('side_effect_tool');
+      // On the retry path the suppressed call's synthesised body must keep
+      // the "Re-issue this call" guidance: the model is about to receive
+      // these parts and may legitimately want to retry the suppressed call
+      // in the next turn (the structured contract didn't terminate yet).
+      const suppressedOutput = JSON.stringify(
+        suppressed?.functionResponse?.response,
+      );
+      expect(suppressedOutput).toMatch(/Skipped:/);
+      expect(suppressedOutput).toMatch(/Re-issue this call/);
 
       // The failed structured_output's tool_result must carry the actual
       // validation error from `executeToolCall` so the model has signal

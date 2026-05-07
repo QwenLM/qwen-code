@@ -254,6 +254,59 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('rejects --json-schema combined with --acp', async () => {
+    // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
+    // the synthetic structured_output terminal contract. The yargs check
+    // must reject the combination at parse time so users get an actionable
+    // error instead of silently watching the run never terminate.
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema cannot be used with --acp'),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --experimental-acp (deprecated alias)', async () => {
+    // --experimental-acp is the deprecated alias; the same mutual-
+    // exclusion logic must apply or users get the silent-no-terminate
+    // behaviour the --acp check was added to prevent.
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-acp',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema cannot be used with --acp'),
+    );
+
+    mockExit.mockRestore();
+  });
+
   it('should parse --system-prompt', async () => {
     process.argv = [
       'node',

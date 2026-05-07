@@ -624,8 +624,14 @@ export async function runNonInteractive(
             (r) => !executedCallIds.has(r.callId),
           );
           if (unexecutedCalls.length > 0) {
+            // The trailing "Re-issue this call in a separate turn if needed"
+            // is advice TO the model on the retry path — drop it on the
+            // success path, where the session terminates immediately after
+            // synthesis and no consumer (model or SDK) will act on it.
             const skippedOutput =
-              "Skipped: this turn's structured_output contract took precedence as the terminal output. Re-issue this call in a separate turn if needed.";
+              structuredSubmission !== undefined
+                ? "Skipped: this turn's structured_output contract took precedence as the terminal output."
+                : "Skipped: this turn's structured_output contract took precedence as the terminal output. Re-issue this call in a separate turn if needed.";
             for (const call of unexecutedCalls) {
               const responseParts: Part[] = [
                 {
@@ -869,8 +875,14 @@ export async function runNonInteractive(
                   (r) => !itemExecutedCallIds.has(r.callId),
                 );
                 if (itemUnexecuted.length > 0) {
+                  // Same success/retry split as the main-turn path: the
+                  // "Re-issue" advice has no consumer when the drain
+                  // captured the terminal contract and the run is about
+                  // to exit.
                   const itemSkippedOutput =
-                    "Skipped: this turn's structured_output contract took precedence as the terminal output. Re-issue this call in a separate turn if needed.";
+                    structuredSubmission !== undefined
+                      ? "Skipped: this turn's structured_output contract took precedence as the terminal output."
+                      : "Skipped: this turn's structured_output contract took precedence as the terminal output. Re-issue this call in a separate turn if needed.";
                   for (const call of itemUnexecuted) {
                     const responseParts: Part[] = [
                       {
@@ -1045,6 +1057,24 @@ export async function runNonInteractive(
           // through to the "Model produced plain text..." failure path.
           if (structuredSubmission !== undefined) {
             registry.abortAll();
+            // Hold back briefly so any in-flight background agent's
+            // terminal `task_notification` can land in the queue, then
+            // flush whatever's left. Without this, items the drain loop
+            // didn't have time to process before structuredSubmission
+            // was set (cron firings, notifications, agent completions
+            // emitted right after registry.abortAll()) would be silently
+            // dropped — leaving stream-json consumers staring at a
+            // `task_started` with no matching `task_notification`. Same
+            // 500ms cap as the main-turn structured success path.
+            const holdbackDeadline =
+              Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
+            while (
+              Date.now() < holdbackDeadline &&
+              registry.hasUnfinalizedTasks()
+            ) {
+              await new Promise((r) => setTimeout(r, 50));
+            }
+            flushQueuedNotificationsToSdk(localQueue);
             adapter.emitResult({
               isError: false,
               durationMs: Date.now() - startTime,

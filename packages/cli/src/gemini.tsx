@@ -683,6 +683,24 @@ export async function main() {
     finalizeStartupProfile(config.getSessionId());
 
     if (config.isInteractive()) {
+      // --json-schema is a headless-only contract: the synthetic
+      // structured_output tool only terminates the run inside
+      // runNonInteractive's main/drain loops. In TUI mode the same call
+      // would just emit "Structured output accepted." and keep the chat
+      // alive, which silently strands the user's run. Parse-time gating
+      // can't catch this case (`qwen --json-schema '...'` on a TTY with
+      // no prompt routes to interactive only after stdin TTY detection),
+      // so reject here before the UI launches.
+      if (config.getJsonSchema?.()) {
+        writeStderrLine(
+          'Error: --json-schema is a headless-only flag. Provide a one-shot prompt via -p / --prompt or pipe one in via stdin.',
+        );
+        // Run cleanup so MCP subprocesses + telemetry exporters that the
+        // earlier initializeApp() / loadCliConfig() registered get shut
+        // down — process.exit() doesn't drain them on its own.
+        await runExitCleanup();
+        process.exit(1);
+      }
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
       // Drain the auto-theme probe before render so the OSC 11 response is

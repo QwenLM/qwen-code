@@ -846,6 +846,15 @@ export async function parseArguments(): Promise<CliArgs> {
               // wins.
               return '--json-schema cannot be used with --input-format stream-json; the "first structured_output call ends the session" contract is incompatible with the long-lived stream-json input protocol.';
             }
+            if (argv['acp'] || argv['experimentalAcp']) {
+              // ACP runs an external IDE/Zed protocol on its own turn loop
+              // (runAcpAgent), which doesn't honour the synthetic
+              // structured_output contract. Without this check the tool
+              // would register but its "session ends now" llmContent would
+              // just be relayed back into the ACP chat, leaving the run
+              // open and silently ignoring --json-schema.
+              return '--json-schema cannot be used with --acp; structured output is only honoured by the headless non-interactive flow.';
+            }
             // We deliberately do NOT reject the no-prompt / no-positional
             // case here: the headless CLI still accepts a prompt piped via
             // stdin (e.g. `cat prompt.txt | qwen --json-schema '...'`),

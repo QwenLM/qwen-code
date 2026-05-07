@@ -2795,6 +2795,21 @@ export class Config {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
       });
+      // The synthetic structured_output tool is the terminal contract for
+      // --json-schema runs. Without it the model can't finish a structured
+      // run, so it must be registered in bare mode too — otherwise
+      // `qwen --bare --json-schema X -p "..."` would loop until
+      // maxSessionTurns and exit with the "plain text" failure path,
+      // burning tokens for no reason.
+      if (this.jsonSchema) {
+        const schema = this.jsonSchema;
+        await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
+          const { SyntheticOutputTool } = await import(
+            '../tools/syntheticOutput.js'
+          );
+          return new SyntheticOutputTool(schema);
+        });
+      }
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );

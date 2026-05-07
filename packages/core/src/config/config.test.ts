@@ -1242,6 +1242,36 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
     });
 
+    it('registers structured_output in bare mode when jsonSchema is set', async () => {
+      // Bare mode strips the toolset to READ_FILE/EDIT/SHELL, but the
+      // synthetic structured_output tool is the terminal contract for
+      // --json-schema runs. Without it the model loops until
+      // maxSessionTurns and exits via the "plain text" failure path —
+      // expensive in tokens for what's almost always a CI use case. The
+      // synthetic tool must be registered alongside the bare three.
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.SHELL,
+        ToolNames.STRUCTURED_OUTPUT,
+      ]);
+    });
+
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,
