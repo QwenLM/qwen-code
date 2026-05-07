@@ -29,6 +29,7 @@ import {
 
 const EXPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER_SIZE = 10_000;
+const BUFFER_OVERFLOW_WARNING_INTERVAL_MS = 30_000;
 const MAX_SPAN_NAME_LENGTH = 128;
 const SENSITIVE_ATTRIBUTE_KEYS = new Set([
   'prompt',
@@ -64,6 +65,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private cachedTraceId: string | undefined;
   private readonly includeSensitiveSpanAttributes: boolean;
   private readonly maxBufferSize: number;
+  private lastBufferOverflowWarningMs: number | undefined;
+  private droppedSpansSinceLastBufferWarning = 0;
 
   constructor(spanExporter: SpanExporter);
   constructor(
@@ -181,7 +184,32 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       recordException: () => {},
     });
     if (this.buffer.length > this.maxBufferSize) {
-      this.buffer.splice(0, this.buffer.length - this.maxBufferSize);
+      const droppedSpanCount = this.buffer.length - this.maxBufferSize;
+      this.buffer.splice(0, droppedSpanCount);
+      this.warnBufferOverflow(droppedSpanCount);
+    }
+  }
+
+  private warnBufferOverflow(droppedSpanCount: number): void {
+    this.droppedSpansSinceLastBufferWarning += droppedSpanCount;
+    const now = Date.now();
+    if (
+      this.lastBufferOverflowWarningMs !== undefined &&
+      now - this.lastBufferOverflowWarningMs <
+        BUFFER_OVERFLOW_WARNING_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    const droppedSinceLastWarning = this.droppedSpansSinceLastBufferWarning;
+    this.droppedSpansSinceLastBufferWarning = 0;
+    this.lastBufferOverflowWarningMs = now;
+    try {
+      process.stderr.write(
+        `[LogToSpan] buffer exceeded max size (${this.maxBufferSize}); dropped ${droppedSinceLastWarning} oldest span(s)\n`,
+      );
+    } catch {
+      // Logging diagnostics must not interrupt telemetry ingestion.
     }
   }
 

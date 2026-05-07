@@ -114,7 +114,11 @@ function setToolSpanFailure(
   failureKind: string,
   message: string,
 ): void {
-  span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, failureKind);
+  try {
+    span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, failureKind);
+  } catch {
+    // OTel errors must not block the failure status update.
+  }
   span.setStatus({
     code: SpanStatusCode.ERROR,
     message,
@@ -122,10 +126,41 @@ function setToolSpanFailure(
 }
 
 function setToolSpanCancelled(span: Span): void {
-  span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, TOOL_FAILURE_KIND_CANCELLED);
+  try {
+    span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, TOOL_FAILURE_KIND_CANCELLED);
+  } catch {
+    // OTel errors must not block the cancellation status update.
+  }
   span.setStatus({
     code: SpanStatusCode.UNSET,
   });
+}
+
+async function safelyFirePostToolUseFailureHook(
+  messageBus: MessageBus | undefined,
+  toolUseId: string,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  errorMessage: string,
+  isInterrupt: boolean,
+  permissionMode?: string,
+): ReturnType<typeof firePostToolUseFailureHook> {
+  try {
+    return await firePostToolUseFailureHook(
+      messageBus,
+      toolUseId,
+      toolName,
+      toolInput,
+      errorMessage,
+      isInterrupt,
+      permissionMode,
+    );
+  } catch (error) {
+    debugLogger.warn(
+      `PostToolUseFailure hook failed for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {};
+  }
 }
 
 export type ValidatingToolCall = {
@@ -1913,7 +1948,7 @@ export class CoreToolScheduler {
           if (signal.aborted) {
             // PostToolUseFailure Hook
             if (hooksEnabled && messageBus) {
-              const failureHookResult = await firePostToolUseFailureHook(
+              const failureHookResult = await safelyFirePostToolUseFailureHook(
                 messageBus,
                 toolUseId,
                 toolName,
@@ -2108,7 +2143,7 @@ export class CoreToolScheduler {
             // PostToolUseFailure Hook
             let errorMessage = toolResult.error.message;
             if (hooksEnabled && messageBus) {
-              const failureHookResult = await firePostToolUseFailureHook(
+              const failureHookResult = await safelyFirePostToolUseFailureHook(
                 messageBus,
                 toolUseId,
                 toolName,
@@ -2146,7 +2181,7 @@ export class CoreToolScheduler {
           if (signal.aborted) {
             // PostToolUseFailure Hook (user interrupt)
             if (hooksEnabled && messageBus) {
-              const failureHookResult = await firePostToolUseFailureHook(
+              const failureHookResult = await safelyFirePostToolUseFailureHook(
                 messageBus,
                 toolUseId,
                 toolName,
@@ -2176,7 +2211,7 @@ export class CoreToolScheduler {
             // PostToolUseFailure Hook
             let exceptionErrorMessage = errorMessage;
             if (hooksEnabled && messageBus) {
-              const failureHookResult = await firePostToolUseFailureHook(
+              const failureHookResult = await safelyFirePostToolUseFailureHook(
                 messageBus,
                 toolUseId,
                 toolName,

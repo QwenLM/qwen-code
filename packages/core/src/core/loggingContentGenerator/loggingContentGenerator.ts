@@ -62,6 +62,7 @@ const MAX_RESPONSE_TEXT_LENGTH = 4096;
 const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
 const MAX_RESPONSE_TEXT_PREFIX_LENGTH =
   MAX_RESPONSE_TEXT_LENGTH - RESPONSE_TEXT_TRUNCATION_SUFFIX.length;
+const API_CALL_FAILED_SPAN_STATUS_MESSAGE = 'API call failed';
 
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
@@ -178,6 +179,28 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
   }
 
+  private safelyLogApiResponse(
+    responseId: string,
+    durationMs: number,
+    model: string,
+    prompt_id: string,
+    usageMetadata?: GenerateContentResponseUsageMetadata,
+    responseText?: string,
+  ): void {
+    try {
+      this._logApiResponse(
+        responseId,
+        durationMs,
+        model,
+        prompt_id,
+        usageMetadata,
+        responseText,
+      );
+    } catch (loggingError) {
+      debugLogger.warn('Failed to log API response:', loggingError);
+    }
+  }
+
   async generateContent(
     req: GenerateContentParameters,
     userPromptId: string,
@@ -185,7 +208,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     return withSpan(
       'api.generateContent',
       { model: req.model, prompt_id: userPromptId },
-      async () => {
+      async (span) => {
         const startTime = Date.now();
         const isInternal = isInternalPromptId(userPromptId);
         if (!isInternal) {
@@ -207,7 +230,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           const responseText = isInternal
             ? undefined
             : this.extractResponseText(response);
-          this._logApiResponse(
+          this.safelyLogApiResponse(
             response.responseId ?? '',
             durationMs,
             response.modelVersion || req.model,
@@ -216,7 +239,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             responseText,
           );
           if (!isInternal) {
-            await this.logOpenAIInteraction(openaiRequest, response);
+            await this.safelyLogOpenAIInteraction(openaiRequest, response);
           }
           return response;
         } catch (error) {
@@ -234,6 +257,14 @@ export class LoggingContentGenerator implements ContentGenerator {
               undefined,
               error,
             );
+          }
+          try {
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+            });
+          } catch {
+            // OTel errors must not mask the original API error
           }
           throw error;
         }
@@ -275,7 +306,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       try {
         span.setStatus({
           code: SpanStatusCode.ERROR,
-          message: error instanceof Error ? error.message : String(error),
+          message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
         });
       } catch {
         // OTel errors must not mask the original API error
@@ -356,7 +387,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         ? undefined
         : this.consolidateGeminiResponsesForLogging(responses);
       runInSpan(() =>
-        this._logApiResponse(
+        this.safelyLogApiResponse(
           firstResponseId,
           durationMs,
           firstModelVersion || model,
@@ -366,9 +397,15 @@ export class LoggingContentGenerator implements ContentGenerator {
         ),
       );
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(openaiRequest, consolidatedResponse),
+        );
       }
-      span?.setStatus({ code: SpanStatusCode.OK });
+      try {
+        span?.setStatus({ code: SpanStatusCode.OK });
+      } catch {
+        // OTel errors must not mask successful stream consumption
+      }
     } catch (error) {
       const durationMs = Date.now() - startTime;
       runInSpan(() =>
@@ -386,7 +423,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       try {
         span?.setStatus({
           code: SpanStatusCode.ERROR,
-          message: error instanceof Error ? error.message : String(error),
+          message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
         });
       } catch {
         // OTel errors must not mask the original API error

@@ -33,6 +33,9 @@ const loggingSpanRecords = vi.hoisted(
     ended: boolean;
   }> => [],
 );
+const loggingSpanNamesWithSetStatusFailure = vi.hoisted(
+  () => new Set<string>(),
+);
 
 vi.mock('@opentelemetry/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@opentelemetry/api')>();
@@ -106,6 +109,9 @@ vi.mock('../../telemetry/tracer.js', () => {
     return {
       __spanName: name,
       setStatus(status: { code: number; message?: string }) {
+        if (loggingSpanNamesWithSetStatusFailure.has(name)) {
+          throw new Error('set-status-fail');
+        }
         record.statuses.push(status);
       },
       setAttribute: vi.fn(),
@@ -144,7 +150,34 @@ vi.mock('../../telemetry/tracer.js', () => {
         name: string,
         attributes: Record<string, string | number | boolean>,
         fn: (span: ReturnType<typeof createSpan>) => Promise<unknown>,
-      ) => fn(createSpan(name, attributes)),
+      ) => {
+        const span = createSpan(name, attributes);
+        let statusSet = false;
+        const wrappedSpan = {
+          ...span,
+          setStatus(status: { code: number; message?: string }) {
+            statusSet = true;
+            return span.setStatus(status);
+          },
+        };
+        try {
+          const result = await fn(wrappedSpan);
+          if (!statusSet) {
+            span.setStatus({ code: 1 });
+          }
+          return result;
+        } catch (error) {
+          if (!statusSet) {
+            span.setStatus({
+              code: 2,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+          throw error;
+        } finally {
+          span.end();
+        }
+      },
     ),
     startSpanWithContext: vi.fn(
       (name: string, attributes: Record<string, string | number | boolean>) => {
@@ -253,6 +286,16 @@ const getStreamSpanRecord = () => {
   return spanRecord;
 };
 
+const getGenerateContentSpanRecord = () => {
+  const spanRecord = loggingSpanRecords.find(
+    (record) => record.name === 'api.generateContent',
+  );
+  if (!spanRecord) {
+    throw new Error('api.generateContent span was not created');
+  }
+  return spanRecord;
+};
+
 const MAX_RESPONSE_TEXT_LENGTH = 4096;
 const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
 
@@ -261,6 +304,7 @@ describe('LoggingContentGenerator', () => {
     vi.clearAllMocks();
     activeOtelContext.current = 'root';
     loggingSpanRecords.length = 0;
+    loggingSpanNamesWithSetStatusFailure.clear();
   });
 
   afterEach(() => {
@@ -382,6 +426,75 @@ describe('LoggingContentGenerator', () => {
     expect(openaiError).toBeUndefined();
   });
 
+  it('creates and closes the non-stream API span on success', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-span', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-span');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.attributes).toEqual({
+      model: 'test-model',
+      prompt_id: 'prompt-span',
+    });
+    expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('preserves non-stream success when response and OpenAI logging fail', async () => {
+    vi.mocked(logApiResponse).mockImplementationOnce(() => {
+      throw new Error('response-log-fail');
+    });
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-safe', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('openai-log-fail'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const response = await generator.generateContent(request, 'prompt-safe');
+
+    expect(response.responseId).toBe('resp-safe');
+    expect(logApiResponse).toHaveBeenCalledTimes(1);
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+    expect(getGenerateContentSpanRecord().statuses).toEqual([
+      { code: SpanStatusCode.OK },
+    ]);
+  });
+
   it('truncates long response text in API response telemetry', async () => {
     const longText = 'x'.repeat(MAX_RESPONSE_TEXT_LENGTH + 100);
     const wrapped = createWrappedGenerator(
@@ -487,6 +600,13 @@ describe('LoggingContentGenerator', () => {
     const [, , loggedError] = openaiLoggerInstance.logInteraction.mock.calls[0];
     expect(loggedError).toBeInstanceOf(Error);
     expect((loggedError as Error).message).toBe('boom');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
+    ]);
+    expect(JSON.stringify(spanRecord.statuses)).not.toContain('boom');
+    expect(spanRecord.ended).toBe(true);
   });
 
   it('logs streaming responses and consolidates tool calls', async () => {
@@ -578,6 +698,91 @@ describe('LoggingContentGenerator', () => {
     expect(spanRecord.ended).toBe(true);
   });
 
+  it('preserves stream success when response and OpenAI logging fail', async () => {
+    vi.mocked(logApiResponse).mockImplementationOnce(() => {
+      throw new Error('response-log-fail');
+    });
+    const response = createResponse('resp-safe-stream', 'model-stream', [
+      { text: 'ok' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('openai-log-fail'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-safe-stream',
+    );
+    const seen: GenerateContentResponse[] = [];
+    for await (const item of stream) {
+      seen.push(item);
+    }
+
+    expect(seen).toEqual([response]);
+    expect(logApiResponse).toHaveBeenCalledTimes(1);
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+    expect(getStreamSpanRecord().ended).toBe(true);
+  });
+
+  it('preserves stream success when the OK status update fails', async () => {
+    loggingSpanNamesWithSetStatusFailure.add('api.generateContentStream');
+    const response = createResponse('resp-status', 'model-stream', [
+      { text: 'ok' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-status',
+    );
+    const seen: GenerateContentResponse[] = [];
+    for await (const item of stream) {
+      seen.push(item);
+    }
+
+    expect(seen).toEqual([response]);
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
   it('activates the stream span while the wrapped generator creates the stream', async () => {
     const response = createResponse('resp-1', 'model-stream', [
       { text: 'Hello' },
@@ -644,8 +849,9 @@ describe('LoggingContentGenerator', () => {
 
     const spanRecord = getStreamSpanRecord();
     expect(spanRecord.statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'setup-fail' },
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
     ]);
+    expect(JSON.stringify(spanRecord.statuses)).not.toContain('setup-fail');
     expect(spanRecord.ended).toBe(true);
   });
 
@@ -694,8 +900,9 @@ describe('LoggingContentGenerator', () => {
 
     const spanRecord = getStreamSpanRecord();
     expect(spanRecord.statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'stream-fail' },
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
     ]);
+    expect(JSON.stringify(spanRecord.statuses)).not.toContain('stream-fail');
     expect(spanRecord.ended).toBe(true);
   });
 
@@ -744,7 +951,7 @@ describe('LoggingContentGenerator', () => {
 
     const spanRecord = getStreamSpanRecord();
     expect(spanRecord.statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'stream-fail' },
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
     ]);
     expect(spanRecord.ended).toBe(true);
   });

@@ -303,29 +303,40 @@ describe('LogToSpanProcessor', () => {
   it('drops the oldest spans when the buffer exceeds the configured limit', async () => {
     await processor.shutdown();
     processor = new LogToSpanProcessor(mockExporter, 60000, 2);
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
 
-    processor.onEmit({
-      body: 'event1',
-      hrTime: [1000, 0] as [number, number],
-      attributes: {},
-    } as unknown as ReadableLogRecord);
-    processor.onEmit({
-      body: 'event2',
-      hrTime: [1001, 0] as [number, number],
-      attributes: {},
-    } as unknown as ReadableLogRecord);
-    processor.onEmit({
-      body: 'event3',
-      hrTime: [1002, 0] as [number, number],
-      attributes: {},
-    } as unknown as ReadableLogRecord);
+    try {
+      processor.onEmit({
+        body: 'event1',
+        hrTime: [1000, 0] as [number, number],
+        attributes: {},
+      } as unknown as ReadableLogRecord);
+      processor.onEmit({
+        body: 'event2',
+        hrTime: [1001, 0] as [number, number],
+        attributes: {},
+      } as unknown as ReadableLogRecord);
+      processor.onEmit({
+        body: 'event3',
+        hrTime: [1002, 0] as [number, number],
+        attributes: {},
+      } as unknown as ReadableLogRecord);
 
-    await processor.forceFlush();
+      expect(stderrWrite).toHaveBeenCalledWith(
+        expect.stringContaining('dropped 1 oldest span(s)'),
+      );
 
-    expect(exportedSpans.map((span) => span.name)).toEqual([
-      'event2',
-      'event3',
-    ]);
+      await processor.forceFlush();
+
+      expect(exportedSpans.map((span) => span.name)).toEqual([
+        'event2',
+        'event3',
+      ]);
+    } finally {
+      stderrWrite.mockRestore();
+    }
   });
 
   it('sets ERROR status for truthy error attributes', async () => {

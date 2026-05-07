@@ -62,6 +62,7 @@ type ToolSpanRecord = {
 };
 
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
+const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
 
 vi.mock('../telemetry/tracer.js', () => ({
   withSpan: vi.fn(
@@ -87,6 +88,9 @@ vi.mock('../telemetry/tracer.js', () => ({
           record.statusCalls.push(status);
         },
         setAttribute(key: string, value: string | number | boolean) {
+          if (shouldThrowToolSpanSetAttribute.value) {
+            throw new Error('setAttribute failed');
+          }
           record.spanAttributes[key] = value;
         },
         end() {
@@ -2909,6 +2913,10 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
 });
 
 describe('CoreToolScheduler telemetry spans', () => {
+  afterEach(() => {
+    shouldThrowToolSpanSetAttribute.value = false;
+  });
+
   function getLastToolSpan(): ToolSpanRecord {
     const spanRecord = toolSpanRecords.at(-1);
     if (!spanRecord) {
@@ -2992,12 +3000,15 @@ describe('CoreToolScheduler telemetry spans', () => {
       messageBus?: { request: ReturnType<typeof vi.fn> };
       disableHooks?: boolean;
       abortController?: AbortController;
+      throwSpanSetAttribute?: boolean;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
     completedCalls: ToolCall[];
   }> {
     toolSpanRecords.length = 0;
+    shouldThrowToolSpanSetAttribute.value =
+      options.throwSpanSetAttribute ?? false;
     const { scheduler, onAllToolCallsComplete } = buildScheduler(options);
     const abortController = options.abortController ?? new AbortController();
     await scheduler.schedule(
@@ -3118,12 +3129,102 @@ describe('CoreToolScheduler telemetry spans', () => {
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
   });
 
+  it('sets tool failure status when span attribute recording fails', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      throwSpanSetAttribute: true,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'sensitive /secret/path',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expect(spanRecord.statusCalls).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'Tool execution failed' },
+    ]);
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('preserves original tool errors when the failure hook rejects', async () => {
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockRejectedValueOnce(new Error('failure hook failed')),
+    };
+    const { spanRecord, completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'original tool error',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe('original tool error');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_FAILED,
+      );
+    }
+    expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
+  });
+
   it('marks thrown tool exceptions with a sanitized failure kind', async () => {
     const { spanRecord, completedCalls } = await runSingleTool({
       execute: vi.fn().mockRejectedValue(new Error('sensitive /secret/path')),
     });
 
     expect(completedCalls[0].status).toBe('error');
+    expectSanitizedFailure(
+      spanRecord,
+      'Tool execution failed with exception',
+      'tool_exception',
+    );
+  });
+
+  it('preserves original tool exceptions when the failure hook rejects', async () => {
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockRejectedValueOnce(new Error('failure hook failed')),
+    };
+    const { spanRecord, completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockRejectedValue(new Error('original exception')),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe('original exception');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.UNHANDLED_EXCEPTION,
+      );
+    }
     expectSanitizedFailure(
       spanRecord,
       'Tool execution failed with exception',
@@ -3147,6 +3248,26 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCalls[0].status).toBe('cancelled');
     expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
     expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('cancelled');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('sets cancellation status when span attribute recording fails', async () => {
+    const abortController = new AbortController();
+    const { spanRecord, completedCalls } = await runSingleTool({
+      abortController,
+      throwSpanSetAttribute: true,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'cancelled',
+          returnDisplay: 'cancelled',
+        };
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('cancelled');
+    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
   });
 
