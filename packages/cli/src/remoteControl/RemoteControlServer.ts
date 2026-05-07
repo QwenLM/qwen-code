@@ -12,6 +12,7 @@ import type { PermissionMode } from '../nonInteractive/types.js';
 import { PairingManager } from './PairingManager.js';
 import {
   SessionRegistry,
+  type RemoteControlSessionRegistry,
   type SessionRegistryOptions,
 } from './SessionRegistry.js';
 import { APP_JS, INDEX_HTML, STYLES_CSS } from './staticAssets.js';
@@ -26,6 +27,7 @@ import {
   makeEnvelope,
   parseRemoteEnvelope,
   requireStringField,
+  type RemoteCapabilities,
   type RemoteEnvelope,
   type RemoteHistoryPayload,
   type RemoteSessionCreatePayload,
@@ -49,8 +51,9 @@ export interface RemoteControlServerOptions {
   cliEntryPath: string;
   defaultModel?: string;
   defaultPermissionMode?: PermissionMode;
-  registry?: SessionRegistry;
+  registry?: RemoteControlSessionRegistry;
   registryOptions?: Partial<SessionRegistryOptions>;
+  capabilities?: Partial<RemoteCapabilities>;
 }
 
 export interface RemoteControlServerInfo {
@@ -91,7 +94,7 @@ export class RemoteControlServer {
       | 'tokenTtlMs'
     >;
   private readonly pairing = new PairingManager();
-  private readonly registry: SessionRegistry;
+  private readonly registry: RemoteControlSessionRegistry;
   private readonly clients = new Map<WebSocket, ClientState>();
   private readonly authFailures = new Map<string, number[]>();
   private server: http.Server | null = null;
@@ -115,6 +118,7 @@ export class RemoteControlServer {
       defaultPermissionMode: options.defaultPermissionMode,
       registry: options.registry,
       registryOptions: options.registryOptions,
+      capabilities: options.capabilities,
     };
     this.assertHostAllowed();
     this.registry =
@@ -350,10 +354,10 @@ export class RemoteControlServer {
     const issued = isClientToken ? null : this.pairing.issueClientToken();
     this.send(ws, 'auth/result', {
       ok: true,
-      capabilities: buildCapabilities(),
       clientToken: issued?.token,
       clientTokenExpiresAt: issued?.expiresAt,
       sessions: this.registry.listSessions(),
+      capabilities: buildCapabilities(this.options.capabilities),
     });
   }
 

@@ -18,7 +18,7 @@ export const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_CLIENTS = 5;
 export const DEFAULT_EVENT_LOG_LIMIT = 1000;
 
-export type RemoteSessionMode = 'worker';
+export type RemoteSessionMode = 'worker' | 'tui';
 
 export type RemoteSessionState =
   | 'starting'
@@ -104,17 +104,19 @@ export type RemoteChildMessage =
   | Record<string, unknown>;
 
 export interface RemoteCapabilities {
-  canCreateWorkerSession: true;
-  canAttachCurrentTui: false;
-  canStreamEvents: true;
-  canReplayHistory: true;
-  canApproveTools: true;
-  canInterrupt: true;
-  canSetModel: true;
-  canSetPermissionMode: true;
+  canCreateWorkerSession: boolean;
+  canAttachCurrentTui: boolean;
+  canStreamEvents: boolean;
+  canReplayHistory: boolean;
+  canApproveTools: boolean;
+  canInterrupt: boolean;
+  canSetModel: boolean;
+  canSetPermissionMode: boolean;
 }
 
-export function buildCapabilities(): RemoteCapabilities {
+export function buildCapabilities(
+  overrides: Partial<RemoteCapabilities> = {},
+): RemoteCapabilities {
   return {
     canCreateWorkerSession: true,
     canAttachCurrentTui: false,
@@ -124,6 +126,7 @@ export function buildCapabilities(): RemoteCapabilities {
     canInterrupt: true,
     canSetModel: true,
     canSetPermissionMode: true,
+    ...overrides,
   };
 }
 

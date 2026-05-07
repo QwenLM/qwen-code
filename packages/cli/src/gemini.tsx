@@ -86,6 +86,12 @@ import { DualOutputBridge } from './dualOutput/DualOutputBridge.js';
 import { DualOutputContext } from './dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
 import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
+import {
+  MutableDualOutputBridge,
+  MutableRemoteInputController,
+  TuiRemoteControlManager,
+} from './remoteControl/TuiRemoteControlManager.js';
+import type { RemoteControlServerInfo } from './remoteControl/RemoteControlServer.js';
 import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
 
@@ -206,6 +212,29 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   };
 }
 
+function writeRemoteControlStartupInfo(
+  info: RemoteControlServerInfo,
+  allowLan: boolean,
+): void {
+  writeStderrLine('[Remote Control] Attached to current TUI session');
+  writeStderrLine(`[Remote Control] URL: ${info.url}`);
+  if (info.lanUrls.length > 0) {
+    writeStderrLine('[Remote Control] LAN URLs:');
+    for (const url of info.lanUrls) {
+      writeStderrLine(`[Remote Control]   ${url}`);
+    }
+  }
+  writeStderrLine(`[Remote Control] Pairing token: ${info.pairingToken}`);
+  writeStderrLine(
+    `[Remote Control] Pairing token expires at: ${info.pairingExpiresAt}`,
+  );
+  if (allowLan) {
+    writeStderrLine(
+      '[Remote Control] LAN mode is enabled. Only share the pairing token with trusted devices on this network.',
+    );
+  }
+}
+
 export async function startInteractiveUI(
   config: Config,
   settings: LoadedSettings,
@@ -267,6 +296,44 @@ export async function startInteractiveUI(
     }
   }
 
+  const dualOutputProvider = new MutableDualOutputBridge();
+  if (dualOutputBridge) {
+    dualOutputProvider.addBridge(dualOutputBridge);
+  }
+  const remoteInputProvider = new MutableRemoteInputController();
+  if (remoteInputWatcher) {
+    remoteInputProvider.addController(remoteInputWatcher);
+  }
+  const remoteControlManager = new TuiRemoteControlManager(config, {
+    version,
+    dualOutput: dualOutputProvider,
+    remoteInput: remoteInputProvider,
+  });
+  const remoteControlConfig = config.getRemoteControlConfig?.();
+  if (remoteControlConfig?.enabled) {
+    try {
+      const result = await remoteControlManager.start({
+        host:
+          remoteControlConfig.host ??
+          (remoteControlConfig.allowLan ? '0.0.0.0' : undefined),
+        port: remoteControlConfig.port,
+        allowLan: remoteControlConfig.allowLan,
+        noUi: remoteControlConfig.noUi,
+        tokenTtlMs:
+          Math.max(1, remoteControlConfig.tokenTtlSeconds ?? 300) * 1000,
+      });
+      writeRemoteControlStartupInfo(
+        result.info,
+        remoteControlConfig.allowLan ?? false,
+      );
+    } catch (err) {
+      debugLogger.error('Failed to initialize TUI remote-control bridge:', err);
+      writeStderrLine(
+        `Warning: remote control disabled — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   // Drain the early-captured input exactly once, before any React rendering.
   // Must be outside any component/effect so StrictMode's mount/cleanup/remount
   // always reads from the same stable prop rather than the (now empty) module buffer.
@@ -277,8 +344,8 @@ export async function startInteractiveUI(
     const kittyProtocolStatus = useKittyKeyboardProtocol();
     const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
     return (
-      <RemoteInputContext.Provider value={remoteInputWatcher}>
-        <DualOutputContext.Provider value={dualOutputBridge}>
+      <RemoteInputContext.Provider value={remoteInputProvider}>
+        <DualOutputContext.Provider value={dualOutputProvider}>
           <SettingsContext.Provider value={settings}>
             <KeypressProvider
               kittyProtocolEnabled={kittyProtocolStatus.enabled}
@@ -301,6 +368,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        remoteControl={remoteControlManager}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
@@ -341,6 +409,7 @@ export async function startInteractiveUI(
   }
 
   registerCleanup(async () => {
+    await remoteControlManager.shutdown();
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
     // Explicitly disable the Kitty keyboard protocol before unmounting Ink so

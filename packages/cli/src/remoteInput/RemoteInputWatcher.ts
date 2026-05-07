@@ -5,8 +5,8 @@
  */
 
 import { createReadStream, watchFile, unwatchFile, statSync } from 'node:fs';
-import { createInterface } from 'node:readline';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('REMOTE_INPUT');
 
@@ -21,7 +21,10 @@ const debugLogger = createDebugLogger('REMOTE_INPUT');
  */
 export type RemoteInputCommand =
   | { type: 'submit'; text: string }
-  | { type: 'confirmation_response'; request_id: string; allowed: boolean };
+  | { type: 'confirmation_response'; request_id: string; allowed: boolean }
+  | { type: 'interrupt' }
+  | { type: 'set_permission_mode'; mode: ApprovalMode }
+  | { type: 'set_model'; model: string };
 
 /**
  * Callback invoked when a `confirmation_response` command is read.
@@ -36,6 +39,13 @@ export type SubmitFn = (
   query: string,
 ) => Promise<boolean | void> | boolean | void;
 
+export type ControlHandler = (
+  command: Extract<
+    RemoteInputCommand,
+    { type: 'interrupt' | 'set_permission_mode' | 'set_model' }
+  >,
+) => Promise<void> | void;
+
 /**
  * Watches a JSONL file for remote input commands and calls the registered
  * submit function when new commands arrive.
@@ -47,10 +57,12 @@ export type SubmitFn = (
 export class RemoteInputWatcher {
   private submitFn: SubmitFn | null = null;
   private confirmationHandler: ConfirmationHandler | null = null;
+  private controlHandler: ControlHandler | null = null;
   private queue: Array<Extract<RemoteInputCommand, { type: 'submit' }>> = [];
   private processing = false;
   private active = true;
   private bytesRead = 0;
+  private pendingInput = '';
   private reading = false;
   private filePath: string;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -78,6 +90,10 @@ export class RemoteInputWatcher {
    */
   setConfirmationHandler(fn: ConfirmationHandler): void {
     this.confirmationHandler = fn;
+  }
+
+  setControlHandler(fn: ControlHandler): void {
+    this.controlHandler = fn;
   }
 
   /**
@@ -128,62 +144,96 @@ export class RemoteInputWatcher {
       return Promise.resolve();
     }
 
+    if (currentSize < this.bytesRead) {
+      this.bytesRead = 0;
+      this.pendingInput = '';
+    }
+
     if (currentSize <= this.bytesRead) return Promise.resolve();
 
     this.reading = true;
+    const chunks: string[] = [];
     const stream = createReadStream(this.filePath, {
       start: this.bytesRead,
+      end: currentSize - 1,
       encoding: 'utf-8',
-    });
-    const rl = createInterface({ input: stream, crlfDelay: Infinity });
-
-    rl.on('line', (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      try {
-        const cmd = JSON.parse(trimmed);
-        // confirmation_response is dispatched immediately rather than queued:
-        // a pending tool call is blocking and the response must reach
-        // onConfirm without waiting for any earlier `submit` to finish.
-        if (
-          cmd &&
-          cmd.type === 'confirmation_response' &&
-          typeof cmd.request_id === 'string' &&
-          typeof cmd.allowed === 'boolean'
-        ) {
-          debugLogger.debug(
-            `RemoteInput: confirmation_response for ${cmd.request_id} (allowed=${cmd.allowed})`,
-          );
-          this.confirmationHandler?.(cmd.request_id, cmd.allowed);
-        } else if (
-          cmd &&
-          cmd.type === 'submit' &&
-          typeof cmd.text === 'string'
-        ) {
-          debugLogger.debug(
-            `RemoteInput: queued command: ${cmd.text.slice(0, 50)}...`,
-          );
-          this.queue.push(
-            cmd as Extract<RemoteInputCommand, { type: 'submit' }>,
-          );
-        } else {
-          debugLogger.warn(
-            `RemoteInput: unknown command type: ${String(cmd?.type)}`,
-          );
-        }
-      } catch (_err) {
-        debugLogger.warn(`RemoteInput: failed to parse line: ${trimmed}`);
-      }
     });
 
     return new Promise<void>((resolve) => {
-      rl.on('close', () => {
+      stream.on('data', (chunk) => {
+        chunks.push(String(chunk));
+      });
+      stream.on('error', (error) => {
+        debugLogger.warn(`RemoteInput: failed to read input: ${error.message}`);
+        this.reading = false;
+        resolve();
+      });
+      stream.on('end', () => {
+        const text = this.pendingInput + chunks.join('');
+        const lines = text.split(/\r?\n/);
+        this.pendingInput = lines.pop() ?? '';
+        for (const line of lines) {
+          this.handleLine(line);
+        }
         this.bytesRead = currentSize;
         this.reading = false;
         this.processQueue();
         resolve();
       });
     });
+  }
+
+  private handleLine(line: string): void {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      const cmd = JSON.parse(trimmed);
+      // confirmation_response is dispatched immediately rather than queued:
+      // a pending tool call is blocking and the response must reach
+      // onConfirm without waiting for any earlier `submit` to finish.
+      if (
+        cmd &&
+        cmd.type === 'confirmation_response' &&
+        typeof cmd.request_id === 'string' &&
+        typeof cmd.allowed === 'boolean'
+      ) {
+        debugLogger.debug(
+          `RemoteInput: confirmation_response for ${cmd.request_id} (allowed=${cmd.allowed})`,
+        );
+        this.confirmationHandler?.(cmd.request_id, cmd.allowed);
+      } else if (cmd && cmd.type === 'submit' && typeof cmd.text === 'string') {
+        debugLogger.debug(
+          `RemoteInput: queued command: ${cmd.text.slice(0, 50)}...`,
+        );
+        this.queue.push(cmd as Extract<RemoteInputCommand, { type: 'submit' }>);
+      } else if (cmd && cmd.type === 'interrupt') {
+        this.controlHandler?.({ type: 'interrupt' });
+      } else if (
+        cmd &&
+        cmd.type === 'set_permission_mode' &&
+        typeof cmd.mode === 'string'
+      ) {
+        this.controlHandler?.({
+          type: 'set_permission_mode',
+          mode: cmd.mode as ApprovalMode,
+        });
+      } else if (
+        cmd &&
+        cmd.type === 'set_model' &&
+        typeof cmd.model === 'string'
+      ) {
+        this.controlHandler?.({
+          type: 'set_model',
+          model: cmd.model,
+        });
+      } else {
+        debugLogger.warn(
+          `RemoteInput: unknown command type: ${String(cmd?.type)}`,
+        );
+      }
+    } catch (_err) {
+      debugLogger.warn(`RemoteInput: failed to parse line: ${trimmed}`);
+    }
   }
 
   private async processQueue(): Promise<void> {

@@ -5,9 +5,20 @@
  */
 
 import { createContext, useContext } from 'react';
-import type { RemoteInputWatcher } from './RemoteInputWatcher.js';
+import type {
+  ConfirmationHandler,
+  ControlHandler,
+  SubmitFn,
+} from './RemoteInputWatcher.js';
 
-export const RemoteInputContext = createContext<RemoteInputWatcher | null>(
+export interface RemoteInputController {
+  setSubmitFn(fn: SubmitFn): void;
+  setConfirmationHandler(fn: ConfirmationHandler): void;
+  setControlHandler(fn: ControlHandler): void;
+  notifyIdle(): void;
+}
+
+export const RemoteInputContext = createContext<RemoteInputController | null>(
   null,
 );
 export const useRemoteInput = () => useContext(RemoteInputContext);

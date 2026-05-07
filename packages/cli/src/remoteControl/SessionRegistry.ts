@@ -54,9 +54,34 @@ interface RemoteSessionRecord {
   runner: RemoteSessionRunnerLike;
 }
 
-type SessionEventListener = (sessionId: string, event: RemoteEvent) => void;
+export type SessionEventListener = (
+  sessionId: string,
+  event: RemoteEvent,
+) => void;
 
-export class SessionRegistry {
+export interface RemoteControlSessionRegistry {
+  subscribe(listener: SessionEventListener): () => void;
+  createSession(payload?: RemoteSessionCreatePayload): RemoteSessionSnapshot;
+  listSessions(): RemoteSessionSnapshot[];
+  getSession(sessionId: string): RemoteSessionSnapshot;
+  replay(
+    sessionId: string,
+    since?: number,
+  ): {
+    events: RemoteEvent[];
+    truncated: boolean;
+  };
+  submit(sessionId: string, text: string): void;
+  respondToTool(sessionId: string, payload: RemoteToolResponsePayload): void;
+  interrupt(sessionId: string): string;
+  setModel(sessionId: string, model: string): string;
+  setPermissionMode(sessionId: string, mode: PermissionMode): string;
+  getContextUsage(sessionId: string, showDetails?: boolean): string;
+  closeSession(sessionId: string): void;
+  closeAll(): void;
+}
+
+export class SessionRegistry implements RemoteControlSessionRegistry {
   private readonly sessions = new Map<string, RemoteSessionRecord>();
   private readonly listeners = new Set<SessionEventListener>();
   private readonly options: SessionRegistryOptions;

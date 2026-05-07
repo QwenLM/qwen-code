@@ -7,6 +7,13 @@
 export { RemoteControlServer } from './RemoteControlServer.js';
 export { SessionRegistry } from './SessionRegistry.js';
 export { RemoteSessionRunner } from './RemoteSessionRunner.js';
+export { TuiRemoteBridge } from './TuiRemoteBridge.js';
+export {
+  MutableDualOutputBridge,
+  MutableRemoteInputController,
+  TuiRemoteControlManager,
+} from './TuiRemoteControlManager.js';
+export { TuiSessionRegistry } from './TuiSessionRegistry.js';
 export { EventLog } from './EventLog.js';
 export { PairingManager } from './PairingManager.js';
 export * from './protocol.js';

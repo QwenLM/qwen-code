@@ -521,6 +521,52 @@ describe('parseArguments', () => {
     expect(argv.includePartialMessages).toBe(true);
   });
 
+  it('should parse remote-control TUI attach flags', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--remote-control',
+      '--remote-control-host',
+      '127.0.0.1',
+      '--remote-control-port',
+      '0',
+      '--remote-control-token-ttl',
+      '60',
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv.remoteControl).toBe(true);
+    expect(argv.remoteControlHost).toBe('127.0.0.1');
+    expect(argv.remoteControlPort).toBe(0);
+    expect(argv.remoteControlTokenTtl).toBe(60);
+  });
+
+  it('should reject remote-control attach in non-interactive prompt mode', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--remote-control',
+      '--prompt',
+      'hello',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--remote-control attaches to the interactive TUI',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
   it('should allow --approval-mode without --yolo', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'auto-edit'];
     const argv = await parseArguments();
@@ -705,6 +751,31 @@ describe('loadCliConfig', () => {
     expect(lspInstance).toBeDefined();
     expect(lspInstance?.discoverAndPrepare).toHaveBeenCalledTimes(1);
     expect(lspInstance?.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('should pass remote-control attach config into core config', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--remote-control',
+      '--remote-control-port',
+      '0',
+      '--remote-control-token-ttl',
+      '90',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getRemoteControlConfig()).toEqual({
+      enabled: true,
+      host: undefined,
+      port: 0,
+      allowLan: false,
+      noUi: false,
+      tokenTtlSeconds: 90,
+    });
   });
 
   describe('Proxy configuration', () => {

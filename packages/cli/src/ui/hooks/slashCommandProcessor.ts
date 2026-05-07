@@ -128,6 +128,7 @@ export const useSlashCommandProcessor = (
   isConfigInitialized: boolean,
   logger: Logger | null,
   setSessionName?: (name: string | null) => void,
+  remoteControl?: CommandContext['services']['remoteControl'],
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -273,6 +274,7 @@ export const useSlashCommandProcessor = (
         settings,
         git: gitService,
         logger,
+        remoteControl,
       },
       ui: {
         addItem,
@@ -313,6 +315,7 @@ export const useSlashCommandProcessor = (
       settings,
       gitService,
       logger,
+      remoteControl,
       loadHistory,
       addItem,
       clearItems,

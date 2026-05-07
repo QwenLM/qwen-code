@@ -164,6 +164,7 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import type { RemoteControlCommandService } from './commands/types.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -236,6 +237,7 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  remoteControl?: RemoteControlCommandService;
 }
 
 /**
@@ -251,7 +253,7 @@ const SHELL_WIDTH_FRACTION = 0.89;
 const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
-  const { settings, config, initializationResult } = props;
+  const { settings, config, initializationResult, remoteControl } = props;
   const historyManager = useHistory();
   useMemoryMonitor(historyManager);
   const [debugMessage, setDebugMessage] = useState<string>('');
@@ -826,6 +828,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isConfigInitialized,
     logger,
     setSessionName,
+    remoteControl,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -1015,8 +1018,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const remoteInput = useRemoteInput();
   useEffect(() => {
     if (!remoteInput) return;
-    remoteInput.setSubmitFn((text: string) => submitQuery(text));
-  }, [remoteInput, submitQuery]);
+    remoteInput.setSubmitFn((text: string) => {
+      if (streamingState !== StreamingState.Idle) {
+        return false;
+      }
+      return submitQuery(text);
+    });
+  }, [remoteInput, streamingState, submitQuery]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
@@ -1083,6 +1091,63 @@ export const AppContainer = (props: AppContainerProps) => {
   pendingToolCallsRef.current = pendingToolCalls;
   const dualOutputRef = useRef(dualOutput);
   dualOutputRef.current = dualOutput;
+
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setControlHandler(async (command) => {
+      try {
+        if (command.type === 'interrupt') {
+          cancelOngoingRequest?.();
+          return;
+        }
+        if (command.type === 'set_permission_mode') {
+          config.setApprovalMode(command.mode);
+          await handleApprovalModeChange(command.mode);
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: `Remote control switched permission mode to ${command.mode}.`,
+            },
+            Date.now(),
+          );
+          return;
+        }
+        if (command.type === 'set_model') {
+          await config.setModel(command.model, { reason: 'remote_control' });
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: `Remote control switched model to ${command.model}.`,
+            },
+            Date.now(),
+          );
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        historyManager.addItem(
+          {
+            type: MessageType.ERROR,
+            text: `Remote control command failed: ${message}`,
+          },
+          Date.now(),
+        );
+        dualOutputRef.current?.emitSystemMessage('remote_control_error', {
+          command: command.type,
+          message,
+        });
+      }
+    });
+
+    return () => {
+      remoteInput.setControlHandler(() => {});
+    };
+  }, [
+    cancelOngoingRequest,
+    config,
+    handleApprovalModeChange,
+    historyManager,
+    remoteInput,
+  ]);
 
   // Route confirmation_response commands written to --input-file back into
   // the tool's onConfirm handler. Registered once (deps: [remoteInput]) to

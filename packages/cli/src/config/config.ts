@@ -166,6 +166,12 @@ export interface CliArgs {
   jsonFd?: number | undefined;
   jsonFile?: string | undefined;
   inputFile?: string | undefined;
+  remoteControl?: boolean | undefined;
+  remoteControlHost?: string | undefined;
+  remoteControlPort?: number | undefined;
+  remoteControlAllowLan?: boolean | undefined;
+  remoteControlNoUi?: boolean | undefined;
+  remoteControlTokenTtl?: number | undefined;
 }
 
 function normalizeOutputFormat(
@@ -477,6 +483,38 @@ export async function parseArguments(): Promise<CliArgs> {
             'File path for receiving remote input commands (bidirectional sync). ' +
             'An external process writes JSONL commands; the TUI watches and processes them.',
         })
+        .option('remote-control', {
+          type: 'boolean',
+          description:
+            'Attach a browser/mobile remote-control server to the current interactive TUI session.',
+        })
+        .option('remote-control-host', {
+          type: 'string',
+          description:
+            'Host interface for --remote-control. Defaults to 127.0.0.1.',
+        })
+        .option('remote-control-port', {
+          type: 'number',
+          description:
+            'Port for --remote-control. Defaults to 7373; use 0 for a random free port.',
+        })
+        .option('remote-control-allow-lan', {
+          type: 'boolean',
+          default: false,
+          description:
+            'Allow --remote-control to bind to non-loopback interfaces.',
+        })
+        .option('remote-control-no-ui', {
+          type: 'boolean',
+          default: false,
+          description:
+            'Disable the built-in browser UI for --remote-control and serve only the API.',
+        })
+        .option('remote-control-token-ttl', {
+          type: 'number',
+          description:
+            'Pairing token TTL for --remote-control in seconds. Defaults to 300.',
+        })
         .option('continue', {
           alias: 'c',
           type: 'boolean',
@@ -603,6 +641,20 @@ export async function parseArguments(): Promise<CliArgs> {
           // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
             return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
+          }
+          if (
+            argv['remoteControl'] &&
+            (argv['prompt'] ||
+              (hasPositionalQuery && !argv['promptInteractive']))
+          ) {
+            return '--remote-control attaches to the interactive TUI and cannot be combined with non-interactive prompt mode.';
+          }
+          if (
+            argv['remoteControl'] &&
+            (argv['inputFormat'] === 'stream-json' ||
+              argv['outputFormat'] === OutputFormat.STREAM_JSON)
+          ) {
+            return '--remote-control attaches to the interactive TUI and cannot be combined with stream-json mode.';
           }
           return true;
         }),
@@ -1322,6 +1374,16 @@ export async function loadCliConfig(
     jsonFd: argv.jsonFd,
     jsonFile: argv.jsonFile ?? settings.dualOutput?.jsonFile,
     inputFile: argv.inputFile ?? settings.dualOutput?.inputFile,
+    remoteControl: argv.remoteControl
+      ? {
+          enabled: true,
+          host: argv.remoteControlHost,
+          port: argv.remoteControlPort,
+          allowLan: argv.remoteControlAllowLan,
+          noUi: argv.remoteControlNoUi,
+          tokenTtlSeconds: argv.remoteControlTokenTtl,
+        }
+      : undefined,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
     // always be true and the settings file can never disable recording.

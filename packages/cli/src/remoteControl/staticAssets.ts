@@ -221,6 +221,7 @@ export const APP_JS = `const protocolVersion = 1;
 let socket;
 let clientToken = localStorage.getItem('qwenRemoteClientToken') || '';
 let activeSessionId = null;
+let capabilities = {};
 let authenticated = false;
 let authTimer = null;
 const sessions = new Map();
@@ -314,6 +315,15 @@ function renderSessions() {
   }
 }
 
+function applyCapabilities() {
+  const canCreateWorkerSession = capabilities.canCreateWorkerSession !== false;
+  for (const id of ['session-name', 'cwd', 'model', 'permission-mode']) {
+    document.getElementById(id).disabled = !canCreateWorkerSession;
+  }
+  const create = document.getElementById('create');
+  create.textContent = canCreateWorkerSession ? 'New session' : 'Attach current TUI';
+}
+
 function handleApproval(message) {
   const wrapper = document.createElement('div');
   wrapper.className = 'entry approval';
@@ -342,8 +352,14 @@ function handleMessage(envelope) {
       localStorage.setItem('qwenRemoteClientToken', clientToken);
       tokenInput.value = clientToken;
     }
+    capabilities = envelope.payload.capabilities || {};
+    applyCapabilities();
     setStatus('Connected');
     for (const session of envelope.payload.sessions || []) sessions.set(session.id, session);
+    if (!activeSessionId && capabilities.canAttachCurrentTui && sessions.size === 1) {
+      activeSessionId = sessions.values().next().value.id;
+      send('session/attach', { since: 0 }, activeSessionId);
+    }
     renderSessions();
     return;
   }
@@ -416,6 +432,16 @@ document.getElementById('connect').addEventListener('click', () => {
 });
 
 document.getElementById('create').addEventListener('click', () => {
+  if (capabilities.canCreateWorkerSession === false) {
+    const first = sessions.values().next().value;
+    if (first) {
+      activeSessionId = first.id;
+      log.replaceChildren();
+      send('session/attach', { since: 0 }, activeSessionId);
+      renderSessions();
+    }
+    return;
+  }
   send('session/create', {
     name: document.getElementById('session-name').value.trim() || undefined,
     cwd: document.getElementById('cwd').value.trim() || undefined,

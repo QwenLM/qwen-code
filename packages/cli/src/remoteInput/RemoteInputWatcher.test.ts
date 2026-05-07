@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { RemoteInputWatcher } from './RemoteInputWatcher.js';
 
 describe('RemoteInputWatcher', () => {
@@ -67,6 +68,36 @@ describe('RemoteInputWatcher', () => {
     expect(handler).toHaveBeenCalledWith('req-7', true);
   });
 
+  it('dispatches control commands immediately', async () => {
+    watcher = new RemoteInputWatcher(inputFile);
+    const handler = vi.fn();
+    watcher.setControlHandler(handler);
+
+    fs.appendFileSync(
+      inputFile,
+      JSON.stringify({ type: 'interrupt' }) +
+        '\n' +
+        JSON.stringify({
+          type: 'set_permission_mode',
+          mode: ApprovalMode.AUTO_EDIT,
+        }) +
+        '\n' +
+        JSON.stringify({ type: 'set_model', model: 'qwen3-coder' }) +
+        '\n',
+    );
+
+    await watcher.checkForNewInput();
+    expect(handler).toHaveBeenNthCalledWith(1, { type: 'interrupt' });
+    expect(handler).toHaveBeenNthCalledWith(2, {
+      type: 'set_permission_mode',
+      mode: ApprovalMode.AUTO_EDIT,
+    });
+    expect(handler).toHaveBeenNthCalledWith(3, {
+      type: 'set_model',
+      model: 'qwen3-coder',
+    });
+  });
+
   it('retries queued submits when the TUI signals it has become idle', async () => {
     watcher = new RemoteInputWatcher(inputFile);
 
@@ -112,6 +143,22 @@ describe('RemoteInputWatcher', () => {
 
     await watcher.checkForNewInput();
     expect(submitted).toEqual(['after-bad-line']);
+  });
+
+  it('buffers incomplete JSONL commands until a newline arrives', async () => {
+    watcher = new RemoteInputWatcher(inputFile);
+    const submitted: string[] = [];
+    watcher.setSubmitFn((text) => {
+      submitted.push(text);
+    });
+
+    fs.appendFileSync(inputFile, '{"type":"submit"');
+    await watcher.checkForNewInput();
+    expect(submitted).toEqual([]);
+
+    fs.appendFileSync(inputFile, ',"text":"after-newline"}\n');
+    await watcher.checkForNewInput();
+    expect(submitted).toEqual(['after-newline']);
   });
 
   it('stops watching after shutdown', async () => {

@@ -464,6 +464,11 @@ export interface ConfigParameters {
    * watches it to process messages as if the user typed them.
    */
   inputFile?: string;
+  /**
+   * Attach a browser/mobile remote-control server to the current interactive
+   * TUI session.
+   */
+  remoteControl?: RemoteControlConfig;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
@@ -519,6 +524,15 @@ export interface ConfigParameters {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+}
+
+export interface RemoteControlConfig {
+  enabled?: boolean;
+  host?: string;
+  port?: number;
+  allowLan?: boolean;
+  noUi?: boolean;
+  tokenTtlSeconds?: number;
 }
 
 function normalizeConfigOutputFormat(
@@ -699,6 +713,7 @@ export class Config {
   private readonly jsonFd: number | undefined;
   private readonly jsonFile: string | undefined;
   private readonly inputFile: string | undefined;
+  private readonly remoteControl: RemoteControlConfig | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
@@ -855,6 +870,7 @@ export class Config {
     this.jsonFd = params.jsonFd;
     this.jsonFile = params.jsonFile;
     this.inputFile = params.inputFile;
+    this.remoteControl = params.remoteControl;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -2412,6 +2428,10 @@ export class Config {
    */
   getInputFile(): string | undefined {
     return this.inputFile;
+  }
+
+  getRemoteControlConfig(): RemoteControlConfig | undefined {
+    return this.remoteControl;
   }
 
   /**

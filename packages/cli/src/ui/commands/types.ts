@@ -26,6 +26,41 @@ import type {
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
 
+export interface RemoteControlCommandServerInfo {
+  url: string;
+  wsUrl: string;
+  lanUrls: string[];
+  lanWsUrls: string[];
+  pairingToken: string;
+  pairingExpiresAt: string;
+}
+
+export interface RemoteControlCommandStartOptions {
+  host?: string;
+  port?: number;
+  allowLan?: boolean;
+  noUi?: boolean;
+  tokenTtlMs?: number;
+}
+
+export interface RemoteControlCommandStartResult {
+  info: RemoteControlCommandServerInfo;
+  alreadyStarted: boolean;
+}
+
+export interface RemoteControlCommandStatus {
+  running: boolean;
+  info?: RemoteControlCommandServerInfo;
+}
+
+export interface RemoteControlCommandService {
+  start(
+    options?: RemoteControlCommandStartOptions,
+  ): Promise<RemoteControlCommandStartResult>;
+  stop(): Promise<boolean>;
+  getStatus(): RemoteControlCommandStatus;
+}
+
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
   /**
@@ -52,6 +87,7 @@ export interface CommandContext {
     settings: LoadedSettings;
     git: GitService | undefined;
     logger: Logger | null;
+    remoteControl?: RemoteControlCommandService;
   };
   // UI state and history management
   ui: {
