@@ -119,7 +119,7 @@ export function createSessionRootContext(sessionId: string): Context {
   const rootSpan = trace.wrapSpanContext({
     traceId,
     spanId,
-    traceFlags: TraceFlags.NONE,
+    traceFlags: TraceFlags.SAMPLED,
     isRemote: false,
   });
   return trace.setSpan(ROOT_CONTEXT, rootSpan);

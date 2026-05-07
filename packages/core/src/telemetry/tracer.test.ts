@@ -221,11 +221,11 @@ describe('createSessionRootContext', () => {
     expect(ctx.traceId).toBe(deriveTraceId('session-123'));
   });
 
-  it('uses TraceFlags.NONE to respect operator sampler config', () => {
+  it('uses TraceFlags.SAMPLED so children are recorded by default', () => {
     const ctx = createSessionRootContext('session-123') as unknown as {
       traceFlags: number;
     };
-    expect(ctx.traceFlags).toBe(TraceFlags.NONE);
+    expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
   });
 
   it('generates a valid 16-char hex spanId', () => {
