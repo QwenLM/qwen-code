@@ -226,4 +226,104 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
 
     expect(stopSpy).toHaveBeenCalledTimes(1);
   });
+
+  it('stops the per-fork ToolRegistry even when AgentHeadless.create rejects', async () => {
+    // Failure-path regression: a future refactor could accidentally
+    // move the stop() out of the `finally` and onto the success path
+    // while every other test still passes. This test pins that the
+    // cleanup runs when `AgentHeadless.create` rejects before any
+    // body executes.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const stopSpy = vi.fn().mockResolvedValue(undefined);
+    const originalCreate = parent.createToolRegistry.bind(parent);
+    vi.spyOn(parent, 'createToolRegistry').mockImplementation(
+      async (...args) => {
+        const reg = await originalCreate(...args);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (reg as any).stop = stopSpy;
+        return reg;
+      },
+    );
+
+    const createSpy = vi
+      .spyOn(AgentHeadless, 'create')
+      .mockRejectedValue(new Error('agent-headless-create-blew-up'));
+
+    try {
+      await expect(
+        runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'do the task',
+          config: parent,
+        }),
+      ).rejects.toThrow('agent-headless-create-blew-up');
+    } finally {
+      createSpy.mockRestore();
+    }
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the per-fork ToolRegistry even when headless.execute rejects', async () => {
+    // Same shape as the create-rejects test, but for the execute
+    // failure path. Together they pin the lifecycle stop to the
+    // `finally` block rather than any specific success branch.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const stopSpy = vi.fn().mockResolvedValue(undefined);
+    const originalCreate = parent.createToolRegistry.bind(parent);
+    vi.spyOn(parent, 'createToolRegistry').mockImplementation(
+      async (...args) => {
+        const reg = await originalCreate(...args);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (reg as any).stop = stopSpy;
+        return reg;
+      },
+    );
+
+    const createSpy = vi
+      .spyOn(AgentHeadless, 'create')
+      .mockImplementation(
+        async (..._args: unknown[]): Promise<AgentHeadless> =>
+          ({
+            execute: vi
+              .fn()
+              .mockRejectedValue(new Error('headless-execute-blew-up')),
+            getTerminateMode: vi
+              .fn()
+              .mockReturnValue(AgentTerminateMode.GOAL),
+            getFinalText: vi.fn().mockReturnValue(''),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          }) as any,
+      );
+
+    try {
+      await expect(
+        runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'do the task',
+          config: parent,
+        }),
+      ).rejects.toThrow('headless-execute-blew-up');
+    } finally {
+      createSpy.mockRestore();
+    }
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+  });
 });
