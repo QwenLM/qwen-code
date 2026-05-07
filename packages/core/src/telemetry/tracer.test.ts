@@ -18,6 +18,8 @@ const mockState = vi.hoisted(() => ({
   lastParentCtx: undefined as unknown,
   sessionContext: undefined as unknown,
   activeContext: {} as unknown,
+  throwOnSetStatus: false,
+  throwOnEnd: false,
 }));
 
 vi.mock('./session-context.js', () => ({
@@ -55,10 +57,16 @@ vi.mock('@opentelemetry/api', async () => {
         traceFlags: 1,
       }),
       setStatus(status: object) {
+        if (mockState.throwOnSetStatus) {
+          throw new Error('setStatus failed');
+        }
         record.statuses.push(status as { code: number; message?: string });
       },
       setAttribute() {},
       end() {
+        if (mockState.throwOnEnd) {
+          throw new Error('end failed');
+        }
         record.ended = true;
       },
     };
@@ -108,6 +116,8 @@ beforeEach(() => {
   mockState.lastParentCtx = undefined;
   mockState.sessionContext = undefined;
   mockState.activeContext = {};
+  mockState.throwOnSetStatus = false;
+  mockState.throwOnEnd = false;
 });
 
 describe('withSpan', () => {
@@ -180,6 +190,44 @@ describe('withSpan', () => {
     ).rejects.toThrow('boom');
 
     expect(spans[0].ended).toBe(true);
+  });
+
+  it('does not let OK status failures mask a successful result', async () => {
+    mockState.throwOnSetStatus = true;
+
+    const result = await withSpan('test.status-fail', {}, async () => 42);
+
+    expect(result).toBe(42);
+    expect(spans[0].statuses).toEqual([]);
+    expect(spans[0].ended).toBe(true);
+  });
+
+  it('does not let ERROR status failures mask the original error', async () => {
+    mockState.throwOnSetStatus = true;
+
+    await expect(
+      withSpan('test.error-status-fail', {}, async () => {
+        throw new Error('original failure');
+      }),
+    ).rejects.toThrow('original failure');
+
+    expect(spans[0].statuses).toEqual([]);
+    expect(spans[0].ended).toBe(true);
+  });
+
+  it('does not let span end failures mask the original error', async () => {
+    mockState.throwOnEnd = true;
+
+    await expect(
+      withSpan('test.end-fail', {}, async () => {
+        throw new Error('original failure');
+      }),
+    ).rejects.toThrow('original failure');
+
+    expect(spans[0].statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'original failure' },
+    ]);
+    expect(spans[0].ended).toBe(false);
   });
 
   it('passes attributes to the span', async () => {

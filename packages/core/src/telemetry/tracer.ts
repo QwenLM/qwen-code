@@ -19,6 +19,25 @@ import { getSessionContext } from './session-context.js';
 
 const tracer = trace.getTracer(SERVICE_NAME);
 
+function safeSetStatus(
+  span: Span,
+  status: Parameters<Span['setStatus']>[0],
+): void {
+  try {
+    span.setStatus(status);
+  } catch {
+    // OTel errors must not mask caller behavior.
+  }
+}
+
+function safeEndSpan(span: Span): void {
+  try {
+    span.end();
+  } catch {
+    // OTel errors must not mask caller behavior.
+  }
+}
+
 function getParentContext(): Context {
   const active = context.active();
   if (trace.getSpan(active)) {
@@ -40,7 +59,12 @@ function wrapSpanWithStatusTracking(span: Span): {
   const originalSetStatus = span.setStatus.bind(span);
   span.setStatus = (...args: Parameters<Span['setStatus']>) => {
     statusSet = true;
-    return originalSetStatus(...args);
+    try {
+      return originalSetStatus(...args);
+    } catch {
+      // OTel errors must not mask caller behavior.
+      return span;
+    }
   };
   return { wrappedSpan: span, wasStatusSet: () => statusSet };
 }
@@ -69,19 +93,19 @@ export async function withSpan<T>(
       try {
         const result = await fn(wrappedSpan);
         if (!wasStatusSet()) {
-          span.setStatus({ code: SpanStatusCode.OK });
+          safeSetStatus(span, { code: SpanStatusCode.OK });
         }
         return result;
       } catch (error) {
         if (!wasStatusSet()) {
-          span.setStatus({
+          safeSetStatus(span, {
             code: SpanStatusCode.ERROR,
             message: error instanceof Error ? error.message : String(error),
           });
         }
         throw error;
       } finally {
-        span.end();
+        safeEndSpan(span);
       }
     },
   );

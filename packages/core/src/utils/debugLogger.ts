@@ -81,7 +81,7 @@ function formatArgs(args: unknown[]): string {
 
 const ZERO_TRACE_ID = '00000000000000000000000000000000';
 
-function getTraceContext(session: DebugLogSession | null): TraceContext | null {
+function getActiveSpanTraceContext(): TraceContext | null {
   try {
     const activeSpan = trace.getActiveSpan();
     if (activeSpan) {
@@ -90,19 +90,33 @@ function getTraceContext(session: DebugLogSession | null): TraceContext | null {
         return { traceId: ctx.traceId, spanId: ctx.spanId };
       }
     }
-    if (session) {
-      const sessionId = session.getSessionId();
-      if (cachedSessionId !== sessionId) {
-        cachedSessionId = sessionId;
-        cachedTraceId = deriveTraceId(sessionId);
-        cachedSessionSpanId = randomSpanId();
-      }
-      return { traceId: cachedTraceId!, spanId: cachedSessionSpanId! };
-    }
     return null;
   } catch {
     return null;
   }
+}
+
+function getSessionTraceContext(
+  session: DebugLogSession | null,
+): TraceContext | null {
+  if (!session) {
+    return null;
+  }
+  try {
+    const sessionId = session.getSessionId();
+    if (cachedSessionId !== sessionId) {
+      cachedSessionId = sessionId;
+      cachedTraceId = deriveTraceId(sessionId);
+      cachedSessionSpanId = randomSpanId();
+    }
+    return { traceId: cachedTraceId!, spanId: cachedSessionSpanId! };
+  } catch {
+    return null;
+  }
+}
+
+function getTraceContext(session: DebugLogSession | null): TraceContext | null {
+  return getActiveSpanTraceContext() ?? getSessionTraceContext(session);
 }
 
 /**

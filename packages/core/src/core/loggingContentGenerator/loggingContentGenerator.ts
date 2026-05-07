@@ -48,12 +48,15 @@ import type {
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
   getErrorMessage,
   getErrorStatus,
   getErrorType,
 } from '../../utils/errors.js';
 import { withSpan, startSpanWithContext } from '../../telemetry/tracer.js';
+
+const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
@@ -156,6 +159,20 @@ export class LoggingContentGenerator implements ContentGenerator {
     );
   }
 
+  private safelyLogApiError(
+    responseId: string | undefined,
+    durationMs: number,
+    error: unknown,
+    model: string,
+    prompt_id: string,
+  ): void {
+    try {
+      this._logApiError(responseId, durationMs, error, model, prompt_id);
+    } catch (loggingError) {
+      debugLogger.warn('Failed to log API error:', loggingError);
+    }
+  }
+
   async generateContent(
     req: GenerateContentParameters,
     userPromptId: string,
@@ -195,9 +212,19 @@ export class LoggingContentGenerator implements ContentGenerator {
           return response;
         } catch (error) {
           const durationMs = Date.now() - startTime;
-          this._logApiError('', durationMs, error, req.model, userPromptId);
+          this.safelyLogApiError(
+            '',
+            durationMs,
+            error,
+            req.model,
+            userPromptId,
+          );
           if (!isInternal) {
-            await this.logOpenAIInteraction(openaiRequest, undefined, error);
+            await this.safelyLogOpenAIInteraction(
+              openaiRequest,
+              undefined,
+              error,
+            );
           }
           throw error;
         }
@@ -246,7 +273,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       const durationMs = Date.now() - startTime;
       runInContext(() =>
-        this._logApiError('', durationMs, error, req.model, userPromptId),
+        this.safelyLogApiError('', durationMs, error, req.model, userPromptId),
       );
       try {
         span.end();
@@ -254,7 +281,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         // OTel errors must not mask the original API error
       }
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        await this.safelyLogOpenAIInteraction(openaiRequest, undefined, error);
       }
       throw error;
     }
@@ -334,7 +361,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       const durationMs = Date.now() - startTime;
       runInSpan(() =>
-        this._logApiError(
+        this.safelyLogApiError(
           firstResponseId,
           durationMs,
           error,
@@ -343,7 +370,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         ),
       );
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        await this.safelyLogOpenAIInteraction(openaiRequest, undefined, error);
       }
       try {
         span?.setStatus({
@@ -441,6 +468,18 @@ export class LoggingContentGenerator implements ContentGenerator {
           ? new Error(String(error))
           : undefined,
     );
+  }
+
+  private async safelyLogOpenAIInteraction(
+    openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined,
+    response?: GenerateContentResponse,
+    error?: unknown,
+  ): Promise<void> {
+    try {
+      await this.logOpenAIInteraction(openaiRequest, response, error);
+    } catch (loggingError) {
+      debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
+    }
   }
 
   private convertGeminiResponseToOpenAIForLogging(

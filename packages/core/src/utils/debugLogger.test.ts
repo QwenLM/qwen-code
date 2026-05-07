@@ -174,6 +174,23 @@ describe('debugLogger', () => {
       );
     });
 
+    it('falls back to session-derived trace when reading the active span throws', async () => {
+      vi.mocked(trace.getActiveSpan).mockImplementationOnce(() => {
+        throw new Error('otel unavailable');
+      });
+
+      const logger = createDebugLogger();
+      logger.debug('otel failure');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('trace_id=aabbccddeeff00112233445566778899'),
+        'utf8',
+      );
+    });
+
     it('uses the same fallback spanId for all log lines in the same session', async () => {
       const logger = createDebugLogger();
       logger.debug('first line');

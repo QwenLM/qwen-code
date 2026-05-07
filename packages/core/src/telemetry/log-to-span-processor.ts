@@ -21,7 +21,11 @@ import {
 } from '@opentelemetry/resources';
 
 import { SERVICE_NAME } from './constants.js';
-import { deriveTraceId, randomHexString } from './trace-id-utils.js';
+import {
+  deriveTraceId,
+  randomHexString,
+  randomSpanId,
+} from './trace-id-utils.js';
 
 const EXPORT_TIMEOUT_MS = 30_000;
 const MAX_SPAN_NAME_LENGTH = 128;
@@ -119,7 +123,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     } else {
       traceId = randomHexString(32);
     }
-    const spanId = randomHexString(16);
+    const spanId = randomSpanId();
 
     this.buffer.push({
       name,

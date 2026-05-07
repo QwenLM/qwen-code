@@ -631,6 +631,56 @@ describe('LoggingContentGenerator', () => {
     expect(spanRecord.ended).toBe(true);
   });
 
+  it('preserves stream errors when error logging fails', async () => {
+    const response1 = createResponse('resp-1', 'model-stream', [
+      { text: 'partial' },
+    ]);
+    const streamError = new Error('stream-fail');
+    vi.mocked(logApiError).mockImplementationOnce(() => {
+      throw new Error('api-log-fail');
+    });
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response1;
+          throw streamError;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('openai-log-fail'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(request, 'prompt-4');
+    await expect(async () => {
+      for await (const _item of stream) {
+        // Consume stream to trigger error.
+      }
+    }).rejects.toThrow('stream-fail');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'stream-fail' },
+    ]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
   it('ends the stream span when the consumer stops early', async () => {
     const response1 = createResponse('resp-1', 'model-stream', [
       { text: 'first' },
