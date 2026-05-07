@@ -51,9 +51,14 @@ interface ToolGroupMessageProps {
   /**
    * True when this tool group is being rendered live (in
    * `pendingHistoryItems`). False once it commits to Ink's `<Static>`.
-   * Currently consumed by upstream callers but not by the group body
-   * itself — the subagent renderer used to gate its live frame on
-   * this; that gating moved to LiveAgentPanel + BackgroundTasksDialog.
+   *
+   * Read by the group body to (1) force-expand a compact group when
+   * it has just committed AND carries a terminal subagent, so
+   * `SubagentScrollbackSummary` lands in the persistent record, and
+   * (2) forward to `ToolMessage` so the same renderer can decide
+   * whether to emit the inline summary or stay panel-only. Live
+   * progress / drill-down for running subagents themselves still
+   * happens via `LiveAgentPanel` + `BackgroundTasksDialog`.
    */
   isPending?: boolean;
   activeShellPtyId?: number | null;
