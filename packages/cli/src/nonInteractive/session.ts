@@ -61,7 +61,8 @@ class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
-  private abortController: AbortController;
+  private readonly abortController = new AbortController();
+  private currentTurnAbortController: AbortController | null = null;
   private config: Config;
   private sessionId: string;
   private promptIdCounter: number = 0;
@@ -94,7 +95,6 @@ class Session {
     this.config = config;
     this.settings = settings;
     this.sessionId = config.getSessionId();
-    this.abortController = new AbortController();
     this.initialPrompt = initialPrompt ?? null;
 
     this.inputReader = new StreamJsonInputReader();
@@ -443,10 +443,12 @@ class Session {
     await this.waitForInitialization();
 
     const promptId = this.getNextPromptId();
+    const turnAbortController = new AbortController();
+    this.currentTurnAbortController = turnAbortController;
 
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
-        abortController: this.abortController,
+        abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         captureMonitorNotifications: false,
@@ -454,6 +456,10 @@ class Session {
       });
     } catch (error) {
       debugLogger.error('[Session] Query execution error:', error);
+    } finally {
+      if (this.currentTurnAbortController === turnAbortController) {
+        this.currentTurnAbortController = null;
+      }
     }
   }
 
@@ -469,21 +475,30 @@ class Session {
     );
 
     const promptId = this.getNextPromptId();
-    await runNonInteractive(
-      this.config,
-      this.settings,
-      notification.modelText,
-      promptId,
-      {
-        abortController: this.abortController,
-        adapter: this.outputAdapter,
-        controlService: this.controlService ?? undefined,
-        sendMessageType: SendMessageType.Notification,
-        notificationDisplayText: notification.displayText,
-        captureMonitorNotifications: false,
-        captureMonitorRegistrations: false,
-      },
-    );
+    const turnAbortController = new AbortController();
+    this.currentTurnAbortController = turnAbortController;
+
+    try {
+      await runNonInteractive(
+        this.config,
+        this.settings,
+        notification.modelText,
+        promptId,
+        {
+          abortController: turnAbortController,
+          adapter: this.outputAdapter,
+          controlService: this.controlService ?? undefined,
+          sendMessageType: SendMessageType.Notification,
+          notificationDisplayText: notification.displayText,
+          captureMonitorNotifications: false,
+          captureMonitorRegistrations: false,
+        },
+      );
+    } finally {
+      if (this.currentTurnAbortController === turnAbortController) {
+        this.currentTurnAbortController = null;
+      }
+    }
   }
 
   private async processPendingWork(): Promise<void> {
@@ -584,9 +599,8 @@ class Session {
 
   private handleInterrupt(): void {
     debugLogger.info('[Session] Interrupt requested');
-    this.abortController.abort();
-    // Do not create a new AbortController to prevent listener leaks.
-    // Subsequent queries will check signal.aborted and fail immediately.
+    this.currentTurnAbortController?.abort();
+    this.dispatcher?.abortOutgoingRequests('Interrupted');
   }
 
   private setupSignalHandlers(): void {
@@ -594,6 +608,7 @@ class Session {
       debugLogger.info('[Session] Shutdown signal received');
       this.isShuttingDown = true;
       this.abortController.abort();
+      this.currentTurnAbortController?.abort();
     };
 
     process.on('SIGINT', this.shutdownHandler);

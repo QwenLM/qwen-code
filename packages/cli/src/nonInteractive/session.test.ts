@@ -165,6 +165,7 @@ describe('runNonInteractiveStreamJson', () => {
     dispatch: ReturnType<typeof vi.fn>;
     handleControlResponse: ReturnType<typeof vi.fn>;
     handleCancel: ReturnType<typeof vi.fn>;
+    abortOutgoingRequests: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
     markInputClosed: ReturnType<typeof vi.fn>;
     getPendingIncomingRequestCount: ReturnType<typeof vi.fn>;
@@ -207,6 +208,7 @@ describe('runNonInteractiveStreamJson', () => {
       dispatch: vi.fn().mockResolvedValue(undefined),
       handleControlResponse: vi.fn(),
       handleCancel: vi.fn(),
+      abortOutgoingRequests: vi.fn(),
       shutdown: vi.fn(),
       markInputClosed: vi.fn(),
       getPendingIncomingRequestCount: vi.fn().mockReturnValue(0),
@@ -219,7 +221,7 @@ describe('runNonInteractiveStreamJson', () => {
       ControlDispatcher as unknown as ReturnType<typeof vi.fn>
     ).mockImplementation(() => mockDispatcher);
     (ControlContext as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      () => ({}),
+      (options: { onInterrupt?: () => void }) => options,
     );
     (ControlService as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       () => ({}),
@@ -290,6 +292,77 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('interrupts the active turn without aborting future messages', async () => {
+    const initRequest = createControlRequest('initialize');
+    const interruptRequest = createControlRequest('interrupt');
+    const userMessage1 = createUserMessage('First message');
+    const userMessage2 = createUserMessage('Second message');
+    let firstRunStarted: (() => void) | undefined;
+    const firstRunStartedPromise = new Promise<void>((resolve) => {
+      firstRunStarted = resolve;
+    });
+
+    mockDispatcher.dispatch.mockImplementation(
+      async (request: CLIControlRequest) => {
+        if (request.request.subtype === 'interrupt') {
+          const context = (
+            ControlContext as unknown as ReturnType<typeof vi.fn>
+          ).mock.results.at(-1)?.value as { onInterrupt?: () => void };
+          context.onInterrupt?.();
+        }
+      },
+    );
+
+    runNonInteractiveMock.mockImplementation(
+      (
+        _config: unknown,
+        _settings: unknown,
+        input: string,
+        _promptId: string,
+        options: { abortController: AbortController },
+      ) => {
+        if (input === 'First message') {
+          firstRunStarted?.();
+          return new Promise<void>((resolve) => {
+            if (options.abortController.signal.aborted) {
+              resolve();
+              return;
+            }
+            options.abortController.signal.addEventListener(
+              'abort',
+              () => resolve(),
+              { once: true },
+            );
+          });
+        }
+        return Promise.resolve();
+      },
+    );
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage1;
+      await firstRunStartedPromise;
+      yield interruptRequest;
+      yield userMessage2;
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    const firstTurnOptions = runNonInteractiveMock.mock.calls[0][4] as {
+      abortController: AbortController;
+    };
+    const secondTurnOptions = runNonInteractiveMock.mock.calls[1][4] as {
+      abortController: AbortController;
+    };
+    expect(firstTurnOptions.abortController.signal.aborted).toBe(true);
+    expect(secondTurnOptions.abortController.signal.aborted).toBe(false);
+    expect(mockDispatcher.abortOutgoingRequests).toHaveBeenCalledWith(
+      'Interrupted',
+    );
   });
 
   it('routes monitor notifications through the session queue', async () => {

@@ -208,6 +208,24 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   }
 
   /**
+   * Rejects pending outgoing requests without shutting down controllers.
+   *
+   * This is used by per-turn interrupts: the active model/tool turn should stop
+   * waiting for host approval, but the session-scoped control plane must remain
+   * available for subsequent user messages.
+   */
+  abortOutgoingRequests(reason: string = 'Request aborted'): void {
+    for (const [
+      _requestId,
+      pending,
+    ] of this.pendingOutgoingRequests.entries()) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(new Error(reason));
+    }
+    this.pendingOutgoingRequests.clear();
+  }
+
+  /**
    * Marks stdin as closed and rejects all pending outgoing requests.
    * After this is called, new outgoing requests will be rejected immediately.
    * This should be called when stdin closes to avoid waiting for responses.
