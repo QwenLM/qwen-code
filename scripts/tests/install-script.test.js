@@ -485,6 +485,7 @@ describe('standalone release packaging', () => {
 
   it('stages hosted installation assets with checksums', async () => {
     const {
+      HOSTED_INSTALLATION_ASSET_NAMES,
       HOSTED_INSTALLATION_ASSETS,
       assertHostedInstallationAssetChecksums,
       buildHostedInstallationAssets,
@@ -498,10 +499,13 @@ describe('standalone release packaging', () => {
       const installBat = path.join(tmpDir, 'install-qwen.bat');
       const checksums = readScript(path.join(tmpDir, 'SHA256SUMS'));
 
-      expect(HOSTED_INSTALLATION_ASSETS.map(({ output }) => output)).toEqual([
+      expect(HOSTED_INSTALLATION_ASSET_NAMES).toEqual([
         'install-qwen.sh',
         'install-qwen.bat',
       ]);
+      expect(HOSTED_INSTALLATION_ASSETS.map(({ output }) => output)).toEqual(
+        HOSTED_INSTALLATION_ASSET_NAMES,
+      );
       expect(readScript(installSh)).toBe(
         readScript('scripts/installation/install-qwen-with-source.sh'),
       );
@@ -520,6 +524,23 @@ describe('standalone release packaging', () => {
       await expect(
         assertHostedInstallationAssetChecksums(tmpDir),
       ).rejects.toThrow(/Checksum verification failed for install-qwen\.sh/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects stale hosted installation assets in the output directory', async () => {
+    const { buildHostedInstallationAssets } = await import(
+      hostedInstallationScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+
+    try {
+      writeFileSync(path.join(tmpDir, 'install'), 'stale alias');
+
+      await expect(buildHostedInstallationAssets(tmpDir)).rejects.toThrow(
+        /Unexpected hosted installer asset: install/,
+      );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

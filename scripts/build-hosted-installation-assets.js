@@ -32,6 +32,13 @@ const HOSTED_INSTALLATION_ASSETS = [
     output: 'install-qwen.bat',
   },
 ];
+const HOSTED_INSTALLATION_ASSET_NAMES = HOSTED_INSTALLATION_ASSETS.map(
+  ({ output }) => output,
+);
+const HOSTED_INSTALLATION_OUTPUT_NAMES = new Set([
+  ...HOSTED_INSTALLATION_ASSET_NAMES,
+  'SHA256SUMS',
+]);
 
 const CLI_OPTIONS = {
   '--help': { name: 'help', type: 'boolean' },
@@ -78,6 +85,7 @@ Options:
 async function buildHostedInstallationAssets(outDir, options = {}) {
   const root = options.root || rootDir;
   fs.mkdirSync(outDir, { recursive: true });
+  assertNoUnexpectedHostedFiles(outDir);
 
   for (const asset of HOSTED_INSTALLATION_ASSETS) {
     const source = path.join(root, ...asset.sourcePath);
@@ -95,6 +103,17 @@ async function buildHostedInstallationAssets(outDir, options = {}) {
 
   await writeHostedSha256Sums(outDir);
   await assertHostedInstallationAssetChecksums(outDir);
+}
+
+function assertNoUnexpectedHostedFiles(outDir) {
+  const unexpected = fs
+    .readdirSync(outDir)
+    .filter((entryName) => !HOSTED_INSTALLATION_OUTPUT_NAMES.has(entryName))
+    .sort();
+
+  if (unexpected.length > 0) {
+    fail(`Unexpected hosted installer asset: ${unexpected.join(', ')}`);
+  }
 }
 
 function assertHostedInstallerSource(source, output) {
@@ -149,6 +168,7 @@ async function assertHostedInstallationAssetChecksums(outDir) {
 
 export {
   HOSTED_INSTALLATION_ASSETS,
+  HOSTED_INSTALLATION_ASSET_NAMES,
   assertHostedInstallationAssetChecksums,
   buildHostedInstallationAssets,
 };
