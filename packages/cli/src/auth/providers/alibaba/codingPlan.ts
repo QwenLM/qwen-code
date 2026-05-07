@@ -83,8 +83,8 @@ export const codingPlanProvider: ProviderConfig = {
       ? 'ModelStudio Coding Plan for Global/Intl'
       : 'ModelStudio Coding Plan',
   apiKeyPlaceholder: 'sk-sp-...',
-  validateApiKey: (key, baseUrl) =>
-    baseUrl === CODING_PLAN_CHINA_BASE_URL && !key.startsWith('sk-sp-')
+  validateApiKey: (key) =>
+    !key.startsWith('sk-sp-')
       ? 'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.'
       : null,
   ownsModel: (model) =>

@@ -13,6 +13,7 @@ import type { ProviderInstallPlan } from '../types.js';
 vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),
   restoreSettingsFromBackup: vi.fn(),
+  cleanupSettingsBackup: vi.fn(),
 }));
 
 vi.mock('../../config/modelProvidersScope.js', () => ({
@@ -20,12 +21,18 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
 }));
 
 function createSettings(modelProviders = {}) {
+  const settingsObj = {
+    settings: {},
+    originalSettings: {},
+    path: '/tmp/settings.json',
+  };
   return {
     merged: {
       modelProviders,
     },
     setValue: vi.fn(),
-    forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
+    forScope: vi.fn(() => settingsObj),
+    recomputeMerged: vi.fn(),
   };
 }
 

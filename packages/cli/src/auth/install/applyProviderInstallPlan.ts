@@ -8,6 +8,7 @@ import type { ModelProvidersConfig } from '@qwen-code/qwen-code-core';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   backupSettingsFile,
+  cleanupSettingsBackup,
   restoreSettingsFromBackup,
 } from '../../utils/settingsUtils.js';
 import type {
@@ -61,6 +62,14 @@ export async function applyProviderInstallPlan(
   backupSettingsFile(settingsFile.path);
 
   const previousEnvValues = new Map<string, string | undefined>();
+  const previousSettingsSnapshot = structuredClone(settingsFile.settings);
+  const previousOriginalSnapshot = structuredClone(
+    settingsFile.originalSettings,
+  );
+  const previousModelProviders: ModelProvidersConfig = {
+    ...((settings.merged.modelProviders as ModelProvidersConfig | undefined) ??
+      {}),
+  };
 
   try {
     for (const [key, value] of Object.entries(plan.env ?? {})) {
@@ -133,12 +142,23 @@ export async function applyProviderInstallPlan(
       await config.refreshAuth(plan.authType);
     }
 
+    cleanupSettingsBackup(settingsFile.path);
+
     return {
       persistScope,
       updatedModelProviders,
     };
   } catch (error) {
     restoreSettingsFromBackup(settingsFile.path);
+
+    // Restore in-memory settings state
+    settingsFile.settings = previousSettingsSnapshot;
+    settingsFile.originalSettings = previousOriginalSnapshot;
+    settings.recomputeMerged();
+
+    // Restore in-memory config state
+    config.reloadModelProvidersConfig(previousModelProviders);
+
     for (const [key, prev] of previousEnvValues) {
       if (prev === undefined) {
         delete process.env[key];

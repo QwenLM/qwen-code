@@ -145,8 +145,14 @@ export function writeCodingPlanConfig(
   }));
   providers[AuthType.USE_OPENAI] = [...planModels, ...nonCodingPlan];
 
-  // Coding Plan metadata
-  settings.codingPlan = { region: codingRegion, version: planConfig.version };
+  // Coding Plan metadata — write to the providerMetadata namespace that
+  // the CLI now reads from. Remove legacy top-level key if present.
+  const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
+  providerMetadata['coding-plan'] = {
+    region: codingRegion,
+    version: planConfig.version,
+  };
+  delete settings.codingPlan;
 
   // Default model
   const defaultModelId = planConfig.template[0]?.id ?? 'qwen3.5-plus';
@@ -213,6 +219,11 @@ export function writeModelProvidersConfig(params: {
 
   for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
     delete settings[plan.metadataKey];
+  }
+  const pm = settings.providerMetadata as Record<string, unknown> | undefined;
+  if (pm) {
+    delete pm['coding-plan'];
+    delete pm['token-plan'];
   }
 
   writeSettings(settings);
@@ -297,9 +308,14 @@ export function clearPersistedAuth(): void {
       delete env['OPENAI_API_KEY'];
     }
 
-    // Remove subscription plan metadata
+    // Remove subscription plan metadata (legacy + new namespace)
     for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
       delete settings[plan.metadataKey];
+    }
+    const pm = settings.providerMetadata as Record<string, unknown> | undefined;
+    if (pm) {
+      delete pm['coding-plan'];
+      delete pm['token-plan'];
     }
 
     writeSettings(settings);

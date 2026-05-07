@@ -48,6 +48,8 @@ vi.mock('../../config/config.js', () => ({
 
 vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: mockBackupSettingsFile,
+  restoreSettingsFromBackup: vi.fn(),
+  cleanupSettingsBackup: vi.fn(),
 }));
 
 vi.mock('../../config/modelProvidersScope.js', () => ({

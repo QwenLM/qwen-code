@@ -25,6 +25,8 @@ import {
 
 vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),
+  restoreSettingsFromBackup: vi.fn(),
+  cleanupSettingsBackup: vi.fn(),
 }));
 
 const chinaTemplate = buildProviderTemplate(

@@ -624,7 +624,7 @@ export function getEffectiveDisplayValue(
 
 /**
  * Backup a settings file before modification.
- * Creates a backup with `.orig` suffix if the file exists and backup doesn't already exist.
+ * Always creates a fresh backup with `.orig` suffix (overwrites any stale backup).
  * @param filePath - Path to the settings file to backup
  * @returns boolean indicating whether a backup was created
  */
@@ -632,10 +632,8 @@ export function backupSettingsFile(filePath: string): boolean {
   try {
     if (fs.existsSync(filePath)) {
       const backupPath = `${filePath}.orig`;
-      if (!fs.existsSync(backupPath)) {
-        fs.renameSync(filePath, backupPath);
-        return true;
-      }
+      fs.copyFileSync(filePath, backupPath);
+      return true;
     }
   } catch (_e) {
     // Ignore backup errors, proceed without backup
@@ -645,6 +643,7 @@ export function backupSettingsFile(filePath: string): boolean {
 
 /**
  * Restore a settings file from its `.orig` backup created by {@link backupSettingsFile}.
+ * Removes the backup file after a successful restore.
  * @param filePath - Path to the settings file to restore
  * @returns boolean indicating whether the restore succeeded
  */
@@ -653,12 +652,28 @@ export function restoreSettingsFromBackup(filePath: string): boolean {
     const backupPath = `${filePath}.orig`;
     if (fs.existsSync(backupPath)) {
       fs.copyFileSync(backupPath, filePath);
+      fs.unlinkSync(backupPath);
       return true;
     }
   } catch (_e) {
     // Ignore restore errors — caller should handle the failure
   }
   return false;
+}
+
+/**
+ * Remove the `.orig` backup after a successful operation.
+ * @param filePath - Path to the settings file whose backup should be removed
+ */
+export function cleanupSettingsBackup(filePath: string): void {
+  try {
+    const backupPath = `${filePath}.orig`;
+    if (fs.existsSync(backupPath)) {
+      fs.unlinkSync(backupPath);
+    }
+  } catch (_e) {
+    // Ignore cleanup errors — non-critical
+  }
 }
 
 export const TEST_ONLY = { clearFlattenedSchema };

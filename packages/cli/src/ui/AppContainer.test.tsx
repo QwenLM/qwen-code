@@ -79,6 +79,12 @@ vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');
 vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
+vi.mock('./hooks/useProviderUpdates.js', () => ({
+  useProviderUpdates: vi.fn(() => ({
+    providerUpdateRequest: undefined,
+    dismissProviderUpdate: vi.fn(),
+  })),
+}));
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
 vi.mock('./contexts/AgentViewContext.js', () => ({
