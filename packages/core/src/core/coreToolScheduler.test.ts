@@ -51,6 +51,9 @@ import { type NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
 import { WriteFileTool } from '../tools/write-file.js';
+import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
+import type { ShellToolParams } from '../tools/shell.js';
+import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
@@ -5377,5 +5380,131 @@ describe('CoreToolScheduler activation wiring', () => {
     );
 
     expect(matchAndActivateByPaths).not.toHaveBeenCalled();
+  });
+});
+
+describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => {
+  it('stashes promoteAbortController on the executing tool call when shell.ts fires the callback', async () => {
+    // Pin the scheduler-side wiring for the promote-AbortController
+    // callback. PR-3's Ctrl+B keybind will look up the
+    // currently-executing shell tool call by callId and abort
+    // `tc.promoteAbortController`; if the scheduler stops populating
+    // that field, the keybind silently breaks. Direct
+    // ShellToolInvocation tests can't see this — they don't go
+    // through the scheduler.
+    let exposedAc: AbortController | undefined;
+    class TestShellInvocation extends ShellToolInvocation {
+      override async execute(
+        _signal: AbortSignal,
+        _updateOutput?: (output: ToolResultDisplay) => void,
+        _shellExecutionConfig?: ShellExecutionConfig,
+        _setPidCallback?: (pid: number) => void,
+        setPromoteAbortControllerCallback?: (ac: AbortController) => void,
+      ): Promise<ToolResult> {
+        // Mirror the production flow: foreground shell.ts spawns,
+        // calls setPromoteAbortControllerCallback right after spawn,
+        // then waits for the result. We synthesize the callback fire
+        // and immediately complete with a benign success result.
+        const ac = new AbortController();
+        exposedAc = ac;
+        setPromoteAbortControllerCallback?.(ac);
+        return { llmContent: 'ok', returnDisplay: 'ok' };
+      }
+    }
+
+    class TestShellTool extends ShellTool {
+      protected override createInvocation(params: ShellToolParams) {
+        // Cast through unknown — the test invocation extends the real
+        // ShellToolInvocation prototype so the scheduler's `instanceof
+        // ShellToolInvocation` check still routes the call through
+        // the shell-tool-specific branch (which is the branch that
+        // wires setPromoteAbortControllerCallback).
+        return new TestShellInvocation(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (this as any).config,
+          params,
+        ) as unknown as ToolInvocation<ShellToolParams, ToolResult>;
+      }
+    }
+
+    const tool = new TestShellTool({} as Config);
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getToolRegistry: () => mockToolRegistry,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 80,
+        terminalHeight: 24,
+      }),
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'shell-1',
+          name: 'run_shell_command',
+          args: { command: 'echo hi' },
+          isClientInitiated: true,
+          prompt_id: 'p-shell',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    // Find a tool-calls-update emitted while the call was 'executing'
+    // that carries the promoteAbortController. The exact ordering of
+    // updates depends on the scheduler's internal flow, but at SOME
+    // point during the executing window the field must be populated —
+    // otherwise PR-3's Ctrl+B keybind has nothing to abort.
+    const updateBatches = onToolCallsUpdate.mock.calls;
+    const sawPromoteAcWhileExecuting = updateBatches.some((batch) => {
+      const tcs = batch[0] as ToolCall[];
+      return tcs.some(
+        (tc) =>
+          tc.request.callId === 'shell-1' &&
+          tc.status === 'executing' &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (tc as any).promoteAbortController === exposedAc,
+      );
+    });
+    expect(sawPromoteAcWhileExecuting).toBe(true);
   });
 });

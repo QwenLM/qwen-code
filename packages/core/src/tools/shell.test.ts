@@ -1596,7 +1596,14 @@ describe('ShellTool', () => {
     });
 
     describe('foreground → background promote (#3831 PR-2)', () => {
-      it('exposes a promote AbortController via setPromoteAbortControllerCallback', async () => {
+      it("exposes a promote AbortController whose signal is wired into ShellExecutionService.execute's combined signal", async () => {
+        // Pin the operational guarantee: aborting the controller exposed
+        // via `setPromoteAbortControllerCallback` must actually reach
+        // `ShellExecutionService` — the bare "controller is an
+        // AbortController instance" assertion would still pass if
+        // `shell.ts` exposed the controller but forgot to include
+        // `promoteAbortController.signal` in `AbortSignal.any(...)`,
+        // silently breaking the future Ctrl+B keybind.
         const setPromoteAc = vi.fn();
         const invocation = shellTool.build({
           command: 'npm run dev',
@@ -1616,11 +1623,18 @@ describe('ShellTool', () => {
         resolveShellExecution({ pid: 12345 });
         await promise;
 
-        // Called once, with an AbortController whose signal is wired
-        // into the combined signal handed to ShellExecutionService.
         expect(setPromoteAc).toHaveBeenCalledTimes(1);
         const passedAc = setPromoteAc.mock.calls[0][0] as AbortController;
         expect(passedAc).toBeInstanceOf(AbortController);
+
+        // Capture the AbortSignal handed to ShellExecutionService.execute
+        // (4th arg per the call signature) and verify firing the promote
+        // controller propagates through it.
+        const passedSignal = mockShellExecutionService.mock
+          .calls[0][3] as AbortSignal;
+        expect(passedSignal.aborted).toBe(false);
+        passedAc.abort({ kind: 'background', shellId: 'bg_unit_test' });
+        expect(passedSignal.aborted).toBe(true);
       });
 
       it('registers a bg_xxx entry on `result.promoted: true` and returns promote-flavored ToolResult', async () => {
@@ -1675,6 +1689,61 @@ describe('ShellTool', () => {
         // No `error` on the result — promote is a success-shaped outcome
         // per #3831 design question 7 / @tanzhenxin's PR-1 review.
         expect(result.error).toBeUndefined();
+      });
+
+      it('aborting entry.abortController kills the child via SIGTERM/SIGKILL and marks the registry entry cancelled', async () => {
+        // Pin the core operational guarantee for promoted shells:
+        // `task_stop bg_xxx` (which goes through
+        // `registry.requestCancel` → `entry.abortController.abort()`)
+        // must actually stop the child + transition the entry to
+        // `'cancelled'`. The bare "fresh controller" check below
+        // doesn't exercise the full kill path.
+        vi.useFakeTimers();
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        try {
+          const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+          writeFileSyncSpy.mockReturnValue(undefined);
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 55555,
+          });
+          await promise;
+
+          const entry = (registry.register as Mock).mock.calls[0][0];
+          // Trigger the cancellation path the way `task_stop` does.
+          entry.abortController.abort();
+          // Sync part of cancelChild runs as a microtask after abort:
+          // SIGTERM is dispatched, then the listener awaits a 200ms
+          // timer before SIGKILL + registry.cancel. Flush microtasks +
+          // advance fake time past the SIGKILL window.
+          await Promise.resolve();
+          expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGTERM');
+          // Advance past PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS (200ms).
+          await vi.advanceTimersByTimeAsync(250);
+          expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGKILL');
+          // Registry entry transitions to 'cancelled' synchronously
+          // after SIGKILL — so /tasks reflects user intent without
+          // waiting for the (non-existent) settle path.
+          expect(registry.cancel).toHaveBeenCalledWith(
+            entry.shellId,
+            expect.any(Number),
+          );
+        } finally {
+          processKillSpy.mockRestore();
+          vi.useRealTimers();
+        }
       });
 
       it("entry.abortController is a FRESH controller (not the already-aborted promote controller) so task_stop's abort() actually fires kill listeners", async () => {
