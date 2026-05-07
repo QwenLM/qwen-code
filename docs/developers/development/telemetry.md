@@ -81,8 +81,11 @@ other value will disable it.
 no logs endpoint, log records are bridged into trace spans. By default, the
 bridge drops `prompt`, `function_args`, and `response_text` from span attributes.
 Set `includeSensitiveSpanAttributes` to `true` only when you explicitly want
-those fields in bridged spans. This setting does not change OTel logs,
-QwenLogger, UI telemetry, or chat recording behavior.
+those fields in bridged spans. This setting only controls the log-to-span
+bridge. It does not disable sensitive data in OTel logs or other telemetry
+sinks; non-internal API response telemetry can populate `response_text`, so OTel
+logs, UI telemetry, and chat recording may receive response text independently
+of this bridge setting. QwenLogger does not include `response_text`.
 
 **HTTP OTLP signal routing:** When using HTTP protocol (`otlpProtocol: "http"`),
 Qwen Code automatically appends signal-specific paths (`/v1/traces`, `/v1/logs`,

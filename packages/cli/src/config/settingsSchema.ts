@@ -913,7 +913,7 @@ const SETTINGS_SCHEMA = {
       properties: {
         includeSensitiveSpanAttributes: {
           description:
-            'Include prompt, function_args, and response_text in spans created by the log-to-span bridge. Does not affect telemetry logs.',
+            'Include prompt, function_args, and response_text in spans created by the log-to-span bridge. Only controls bridge spans; OTel logs and other telemetry sinks may still receive response_text.',
           type: 'boolean',
           default: false,
         },
