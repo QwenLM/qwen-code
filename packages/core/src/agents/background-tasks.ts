@@ -193,21 +193,17 @@ interface BackgroundTaskCancelOptions {
  * consumers that only care about the roster don't re-render on every
  * tool call a background agent makes.
  *
- * `entry` reflects the registry's view at the moment of emission.
- * `unregisterForeground` fires twice for a single logical removal:
- *   - first emit: `removed === false` (or absent), entry still in the
- *     registry. Mirrors the complete/fail/cancel/finalize ordering so
- *     callbacks that re-read `registry.get(entry.agentId)` from inside
- *     the callback see the entry across every terminal path.
- *   - second emit: `removed === true`, the registry has already
- *     deleted the entry. Snapshot-style consumers (those that
- *     re-pull `getAll()` from inside the callback) need this signal
- *     to drop the row; consumers that only care about the entry's
- *     last live state can ignore it.
+ * Ordering relative to the registry mutation:
+ *   - register / complete / fail / cancel / finalize: emit AFTER the
+ *     Map mutation but with the entry still present, so a callback
+ *     that re-reads `registry.get(entry.agentId)` sees the entry.
+ *   - unregisterForeground: deletes BEFORE emitting so snapshot-style
+ *     consumers (those that re-pull `getAll()` from inside the
+ *     callback) drop the row. The `entry` arg still carries the
+ *     agent's last live state for log / display consumers.
  */
 export type BackgroundStatusChangeCallback = (
   entry?: BackgroundTaskEntry,
-  context?: { removed?: boolean },
 ) => void;
 
 /** Fires on `appendActivity` — scoped to detail-view consumers. */
@@ -288,22 +284,17 @@ export class BackgroundTaskRegistry {
           `Background entries must terminate via complete/fail/finalizeCancelled.`,
       );
     }
-    // Emit BEFORE delete so callbacks that re-read `registry.get(agentId)`
-    // from inside see the entry — matches the ordering used by
-    // complete/fail/cancel/finalize. This is the "agent reached its
-    // last live state" signal; the entry is still present in the
-    // registry, so `removed` is omitted (treated as false).
-    this.emitStatusChange(entry);
+    // Delete BEFORE emitting so snapshot-style consumers (those that
+    // re-pull `getAll()` from inside the callback) no longer include
+    // this entry. The reverse order (emit-then-delete) caused the
+    // foreground agent to linger as `status='running'` in the footer
+    // pill / dialog: the callback's `getAll()` still saw it, and no
+    // second status-change fired after the deletion. Diverges from
+    // complete/fail/cancel/finalize ordering on purpose — those
+    // keep the entry around (terminal state) so callbacks can inspect
+    // it on re-read; unregister removes it outright.
     this.agents.delete(agentId);
-    // Emit AGAIN after delete with `removed: true` so snapshot-style
-    // consumers — those that re-pull `getAll()` from inside the
-    // callback — see the entry-less state and stop surfacing the
-    // row. Consumers that only care about the entry's last live
-    // state can ignore the second emit (or check `context.removed`
-    // and skip duplicate work). Without this signal a snapshot
-    // freezes at the pre-delete state until the next unrelated
-    // status transition.
-    this.emitStatusChange(entry, { removed: true });
+    this.emitStatusChange(entry);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
   }
 
@@ -640,13 +631,10 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  private emitStatusChange(
-    entry?: BackgroundTaskEntry,
-    context?: { removed?: boolean },
-  ): void {
+  private emitStatusChange(entry?: BackgroundTaskEntry): void {
     if (!this.statusChangeCallback) return;
     try {
-      this.statusChangeCallback(entry, context);
+      this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('Failed to emit background status change:', error);
     }
