@@ -2153,7 +2153,12 @@ export const AppContainer = (props: AppContainerProps) => {
         }
 
         // Input is empty, cancel request immediately (no double-press needed)
-        if (streamingState === StreamingState.Responding) {
+        // Skip when a dialog (background tasks, etc.) is open — ESC should
+        // close the dialog, not cancel the running request.
+        if (
+          streamingState === StreamingState.Responding &&
+          !dialogsVisibleRef.current
+        ) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
