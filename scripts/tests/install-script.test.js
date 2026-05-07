@@ -789,7 +789,7 @@ describe('standalone release packaging', () => {
   it('verifies release asset URLs from SHA256SUMS', async () => {
     const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
       await import(installationReleaseVerificationScriptUrl);
-    const checksumContent = standaloneChecksumContent(
+    const checksumContent = placeholderChecksumContent(
       EXPECTED_STANDALONE_ARCHIVE_NAMES,
     );
     const fetchedUrls = [];
@@ -827,7 +827,7 @@ describe('standalone release packaging', () => {
   it('falls back to ranged GET when remote HEAD is unavailable', async () => {
     const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
       await import(installationReleaseVerificationScriptUrl);
-    const checksumContent = standaloneChecksumContent(
+    const checksumContent = placeholderChecksumContent(
       EXPECTED_STANDALONE_ARCHIVE_NAMES,
     );
     const observedMethods = [];
@@ -856,7 +856,7 @@ describe('standalone release packaging', () => {
   it('rejects a release base URL with no archives reachable', async () => {
     const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
       await import(installationReleaseVerificationScriptUrl);
-    const checksumContent = standaloneChecksumContent(
+    const checksumContent = placeholderChecksumContent(
       EXPECTED_STANDALONE_ARCHIVE_NAMES,
     );
 
@@ -872,14 +872,22 @@ describe('standalone release packaging', () => {
     ).rejects.toThrow(/Release asset URL is not available/);
   });
 
-  it('rejects a release base URL that is not http(s)', async () => {
+  it('rejects a release base URL that is not https', async () => {
     const { verifyReleaseBaseUrl } = await import(
       installationReleaseVerificationScriptUrl
     );
 
+    // file:// must be rejected as a URL the verifier cannot reach safely.
     await expect(verifyReleaseBaseUrl('file:///tmp/release/')).rejects.toThrow(
-      /--base-url must use http or https/,
+      /--base-url must use https/,
     );
+
+    // Plain http must also be rejected even though it is technically a valid
+    // URL — release URLs are always HTTPS, and accepting http would let an
+    // operator silently target a stale or attacker-controlled mirror.
+    await expect(
+      verifyReleaseBaseUrl('http://example.com/release/'),
+    ).rejects.toThrow(/--base-url must use https/);
   });
 
   it('rejects a runtime archive without a Node executable', () => {
@@ -2091,7 +2099,11 @@ function writeStandaloneReleaseChecksums(outDir, archiveNames) {
   writeFileSync(path.join(outDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
 }
 
-function standaloneChecksumContent(archiveNames) {
+// Generates a SHA256SUMS-formatted string for the given archive names. The
+// hash values are placeholders — the remote verifier (verifyReleaseBaseUrl)
+// only checks that SHA256SUMS lists the expected entries and that each
+// archive URL is reachable; it does not download archives or compare hashes.
+function placeholderChecksumContent(archiveNames) {
   return `${archiveNames
     .map(
       (assetName) =>

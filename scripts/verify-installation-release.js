@@ -112,7 +112,7 @@ async function verifyReleaseDirectory(dir) {
 
 async function verifyReleaseBaseUrl(baseUrl, options = {}) {
   const { fetchImpl = fetch } = options;
-  const normalizedBaseUrl = normalizeHttpBaseUrl(baseUrl);
+  const normalizedBaseUrl = normalizeHttpsBaseUrl(baseUrl);
   const checksumUrl = new URL('SHA256SUMS', normalizedBaseUrl).toString();
   const checksums = parseSha256Sums(await fetchText(checksumUrl, fetchImpl));
   assertExpectedChecksumEntries(checksums);
@@ -188,15 +188,18 @@ async function fetchText(url, fetchImpl) {
   return response.text();
 }
 
-function normalizeHttpBaseUrl(baseUrl) {
+function normalizeHttpsBaseUrl(baseUrl) {
   let parsed;
   try {
     parsed = new URL(baseUrl);
   } catch {
     fail(`--base-url must be a valid URL: ${baseUrl}`);
   }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    fail(`--base-url must use http or https: ${baseUrl}`);
+  // Real release URLs are always HTTPS. Tests use injected fetchImpl, so
+  // they don't need a real protocol. Rejecting non-https early prevents an
+  // operator from accidentally pointing the verifier at a plain-http mirror.
+  if (parsed.protocol !== 'https:') {
+    fail(`--base-url must use https: ${baseUrl}`);
   }
   if (!parsed.pathname.endsWith('/')) {
     parsed.pathname = `${parsed.pathname}/`;
@@ -205,7 +208,6 @@ function normalizeHttpBaseUrl(baseUrl) {
 }
 
 export {
-  EXPECTED_RELEASE_ASSET_NAMES,
   EXPECTED_STANDALONE_ARCHIVE_NAMES,
   verifyReleaseBaseUrl,
   verifyReleaseDirectory,
