@@ -585,6 +585,14 @@ export class CommitAttributionService {
   ): void {
     if (renamedFiles.size === 0) return;
 
+    // Build the new-key path using POSIX semantics so the joined
+    // string matches `git diff --name-only` output (which is always
+    // forward-slash) and isn't subject to `path.win32.join`'s
+    // backslash conversion. `realpathOrSelf` is what canonicalises
+    // back to the platform's actual storage form: on Windows it
+    // calls `fs.realpathSync` which accepts mixed slashes and returns
+    // backslash form, matching what `recordEdit` stored.
+    const posixRepoRoot = canonicalRepoRoot.split(path.sep).join('/');
     for (const [key, attr] of [...this.fileAttributions.entries()]) {
       const rel = path
         .relative(canonicalRepoRoot, key)
@@ -594,7 +602,7 @@ export class CommitAttributionService {
       if (!renamedRel) continue;
 
       const renamedAbs = realpathOrSelf(
-        path.join(canonicalRepoRoot, ...renamedRel.split('/')),
+        path.posix.join(posixRepoRoot, renamedRel),
       );
       if (renamedAbs === key) continue;
 
