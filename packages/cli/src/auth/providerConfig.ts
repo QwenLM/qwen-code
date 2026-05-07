@@ -285,13 +285,19 @@ function buildModelConfigs(
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the settings key used to store version metadata for a provider.
- * Auto-derived from `config.id` when `config.models` is defined.
+ * Returns the provider's metadata key (same as `config.id`).
+ * Only defined for providers with a static `models` list.
  */
 export function resolveMetadataKey(config: ProviderConfig): string | undefined {
   if (config.models) return config.id;
   return undefined;
 }
+
+/**
+ * Namespace prefix used for all provider metadata in settings.
+ * e.g. `providerMetadata.coding-plan.version`
+ */
+export const PROVIDER_METADATA_NS = 'providerMetadata';
 
 function resolveProviderState(
   config: ProviderConfig,
@@ -300,7 +306,12 @@ function resolveProviderState(
 ): ProviderInstallState | undefined {
   const key = resolveMetadataKey(config);
   if (key) {
-    return { [key]: { version: computeModelListVersion(models), baseUrl } };
+    return {
+      [`${PROVIDER_METADATA_NS}.${key}`]: {
+        version: computeModelListVersion(models),
+        baseUrl,
+      },
+    };
   }
   return undefined;
 }

@@ -21,6 +21,7 @@ import {
   resolveBaseUrl,
   resolveMetadataKey,
   getDefaultModelIds,
+  PROVIDER_METADATA_NS,
 } from '../../auth/providerConfig.js';
 import { findProviderByCredentials } from '../../auth/allProviders.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
@@ -529,9 +530,12 @@ export async function showAuthStatus(): Promise<void> {
               ? managedProvider.envKey
               : '';
           const metaKey = resolveMetadataKey(managedProvider)!;
-          const metadata = (mergedSettings as Record<string, unknown>)[
-            metaKey
-          ] as { version?: string; baseUrl?: string } | undefined;
+          const ns = (mergedSettings as Record<string, unknown>)[
+            PROVIDER_METADATA_NS
+          ] as Record<string, unknown> | undefined;
+          const metadata = ns?.[metaKey] as
+            | { version?: string; baseUrl?: string }
+            | undefined;
           const hasApiKey =
             !!process.env[envKey] || !!mergedSettings.env?.[envKey];
 

@@ -16,6 +16,7 @@ import {
 import {
   buildProviderTemplate,
   computeModelListVersion,
+  PROVIDER_METADATA_NS,
 } from '../../auth/providerConfig.js';
 
 vi.mock('../../utils/settingsUtils.js', () => ({
@@ -34,7 +35,7 @@ describe('useProviderUpdates', () => {
   const mockSettings = {
     merged: {
       modelProviders: {} as Record<string, unknown>,
-      [METADATA_KEY]: {} as Record<string, unknown>,
+      [PROVIDER_METADATA_NS]: {} as Record<string, unknown>,
     } as Record<string, unknown>,
     setValue: vi.fn(),
     forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
@@ -59,7 +60,7 @@ describe('useProviderUpdates', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSettings.merged['modelProviders'] = {};
-    mockSettings.merged[METADATA_KEY] = {};
+    mockSettings.merged[PROVIDER_METADATA_NS] = {};
     mockConfig.getModel.mockReturnValue('qwen3.5-plus');
     mockModelsConfig.syncAfterAuthRefresh.mockClear();
     delete process.env[CODING_PLAN_ENV_KEY];
@@ -78,7 +79,9 @@ describe('useProviderUpdates', () => {
   });
 
   it('does not show update prompt when versions match', () => {
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: chinaVersion,
     };
@@ -98,7 +101,9 @@ describe('useProviderUpdates', () => {
   });
 
   it('shows update prompt with structured diff when versions differ', async () => {
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
     };
@@ -129,7 +134,9 @@ describe('useProviderUpdates', () => {
 
   it('reports currentModelAffected when model is removed', async () => {
     mockConfig.getModel.mockReturnValue('old-deprecated-model');
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
     };
@@ -166,7 +173,9 @@ describe('useProviderUpdates', () => {
   });
 
   it('executes update when user confirms with "update"', async () => {
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
     };
@@ -202,12 +211,12 @@ describe('useProviderUpdates', () => {
 
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
-      `${METADATA_KEY}.version`,
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
       chinaVersion,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
-      `${METADATA_KEY}.baseUrl`,
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.baseUrl`,
       CODING_PLAN_CHINA_BASE_URL,
     );
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
@@ -217,7 +226,9 @@ describe('useProviderUpdates', () => {
 
   it('does not overwrite existing env key with empty value', async () => {
     process.env[CODING_PLAN_ENV_KEY] = 'sk-sp-existing-key';
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
     };
@@ -254,7 +265,9 @@ describe('useProviderUpdates', () => {
 
   it('switches model when previous model is no longer available', async () => {
     mockConfig.getModel.mockReturnValue('removed-model');
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
     };
@@ -288,7 +301,9 @@ describe('useProviderUpdates', () => {
   });
 
   it('dismisses without persisting when user chooses "later"', async () => {
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
     };
@@ -318,7 +333,9 @@ describe('useProviderUpdates', () => {
   });
 
   it('persists ignoredVersion when user chooses "skip"', async () => {
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
     };
@@ -345,14 +362,16 @@ describe('useProviderUpdates', () => {
     });
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
-      `${METADATA_KEY}.ignoredVersion`,
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.ignoredVersion`,
       chinaVersion,
     );
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
   });
 
   it('does not show prompt when currentVersion matches ignoredVersion', () => {
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
       ignoredVersion: chinaVersion,
@@ -373,7 +392,9 @@ describe('useProviderUpdates', () => {
   });
 
   it('shows prompt again when a newer version supersedes ignoredVersion', async () => {
-    mockSettings.merged[METADATA_KEY] = {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
       ignoredVersion: 'stale-ignored-hash',

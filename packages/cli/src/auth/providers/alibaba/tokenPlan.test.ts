@@ -54,7 +54,7 @@ describe('token plan provider', () => {
       },
     ]);
     expect(plan.providerState).toEqual({
-      'token-plan': {
+      'providerMetadata.token-plan': {
         baseUrl: TOKEN_PLAN_BASE_URL,
         version,
       },
