@@ -597,14 +597,17 @@ function cdTargetMayChangeRepo(tokens: string[]): boolean {
 /**
  * Detect whether the attributable `git commit` invocation in
  * `command` carries the `--amend` flag. Used so attachCommitAttribution
- * can switch the diff range from `HEAD~1..HEAD` (the amended commit
- * vs its parent — too broad for amend) to `HEAD@{1}..HEAD` (the
- * actual amend delta).
+ * can switch the diff range from `${postHead}~1..${postHead}` (the
+ * amended commit vs its parent — too broad for amend, since the
+ * amended commit's parent is the original commit's parent, so this
+ * diff lumps both commits' worth of changes) to
+ * `${preHead}..${postHead}` (the actual amend delta — `preHead` was
+ * captured synchronously before spawn and is the pre-amend SHA).
  *
  * Only the *first* commit segment that runs in the same cwd as the
  * shell tool counts. `git -C ../other commit --amend && git commit -m x`
  * must not flip the diff range for the second (fresh) commit, since
- * `HEAD@{1}` belongs to the inner repo there, not ours.
+ * `preHead` would be the inner repo's SHA there, not ours.
  */
 function isAmendCommit(command: string): boolean {
   let cwdShifted = false;
@@ -1545,11 +1548,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // movement, so it's a no-op when no commit was actually created.
     let attributionWarning: string | null = null;
     if (commitCtx.attributableInCwd) {
-      // `git commit --amend` rewrites HEAD in place, so the diff
-      // `HEAD~1..HEAD` would span the entire amended commit (parent →
-      // amended), not just what this amend changed. Detect the flag
-      // so getCommittedFileInfo can switch to `HEAD@{1}..HEAD` and
-      // attribute only the actual amend delta.
+      // `git commit --amend` rewrites HEAD in place, so the standard
+      // parent-vs-postHead diff (`${postHead}~1..${postHead}`) would
+      // span the entire amended commit (the amended commit's parent
+      // is the original's parent, so diffing against it lumps both
+      // commits' worth of changes). Detect the flag so
+      // `getCommittedFileInfo` can switch to `${preHead}..${postHead}`
+      // — `preHead` was captured synchronously before spawn and is
+      // the pre-amend SHA, so this range captures only the amend
+      // delta.
       const isAmend = isAmendCommit(strippedCommand);
       attributionWarning = await this.attachCommitAttribution(
         cwd,
@@ -2454,8 +2461,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Get information about files in the most recent commit by diffing
-   * HEAD against its parent (HEAD~1).
+   * Get information about files in the just-landed commit by diffing
+   * the captured `postHead` against its parent (`${postHead}~1`), or
+   * for amend against `preHead` (the captured pre-amend SHA). All
+   * probes/diffs are SHA-pinned so a post-commit hook moving HEAD
+   * between this call and the eventual `git notes` write can't make
+   * the note describe a different commit than it attaches to.
    *
    * Returns:
    * - A populated `StagedFileInfo` when analysis succeeded.
@@ -2463,7 +2474,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
    *   (e.g. `--allow-empty`). The caller does a no-op partial clear so
    *   pending AI attributions stay tracked for the next real commit.
    * - `null` when analysis itself failed (shallow clone with no parent
-   *   object, --amend with no reflog, partial diff failure, exception).
+   *   object, --amend with `preHead === null` or unresolvable `preHead`,
+   *   partial diff failure, exception).
    *   The caller treats this as "could not determine the committed
    *   set" and falls back to `noteCommitWithoutClearing()` — snapshots
    *   the prompt counter but leaves per-file attribution intact, so
