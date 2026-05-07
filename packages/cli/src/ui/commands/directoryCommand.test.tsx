@@ -6,12 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { directoryCommand } from './directoryCommand.js';
-import {
-  type Config,
-  type WorkspaceContext,
-  loadServerHierarchicalMemory,
-  expandHomeDir,
-} from '@qwen-code/qwen-code-core';
+import * as core from '@qwen-code/qwen-code-core';
 import type { CommandContext } from './types.js';
 
 import { MessageType } from '../types.js';
@@ -20,42 +15,19 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
-vi.mock('node:fs', async () => {
-  const actual = await vi.importActual('node:fs');
+// Mock fs to allow spying on realpathSync in a way that works with ESM
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
-    realpathSync: vi.fn((p) => p),
-  };
-});
-
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const actual = await importOriginal<any>();
-  return {
-    ...actual,
-    loadServerHierarchicalMemory: vi.fn(),
-    expandHomeDir: (p: string) => {
-      if (typeof p !== 'string') return p;
-      if (p.startsWith('~')) {
-        return path.join(os.homedir(), p.slice(1));
-      }
-      if (p.toLowerCase().startsWith('%userprofile%')) {
-        return path.join(os.homedir(), p.slice(13));
-      }
-      return p;
-    },
-    ConditionalRulesRegistry:
-      actual.ConditionalRulesRegistry ||
-      class {
-        constructor() {}
-      },
+    realpathSync: vi.fn(actual.realpathSync),
   };
 });
 
 describe('directoryCommand', () => {
   let mockContext: CommandContext;
-  let mockConfig: Config;
-  let mockWorkspaceContext: WorkspaceContext;
+  let mockConfig: core.Config;
+  let mockWorkspaceContext: core.WorkspaceContext;
   let mockWorkspaceDirectories: string[];
   const addCommand = directoryCommand.subCommands?.find(
     (c) => c.name === 'add',
@@ -68,6 +40,8 @@ describe('directoryCommand', () => {
   );
 
   beforeEach(() => {
+    vi.clearAllMocks();
+
     mockWorkspaceDirectories = [
       path.normalize('/home/user/project1'),
       path.normalize('/home/user/project2'),
@@ -86,7 +60,7 @@ describe('directoryCommand', () => {
         initialDirs.has(path.normalize(dir)),
       ),
       removeDirectory: vi.fn(),
-    } as unknown as WorkspaceContext;
+    } as unknown as core.WorkspaceContext;
 
     mockConfig = {
       getWorkspaceContext: () => mockWorkspaceContext,
@@ -102,7 +76,10 @@ describe('directoryCommand', () => {
       getFileFilteringOptions: () => ({ ignore: [], include: [] }),
       setUserMemory: vi.fn(),
       setGeminiMdFileCount: vi.fn(),
-    } as unknown as Config;
+      setConditionalRulesRegistry: vi.fn(),
+      getContextRuleExcludes: () => [],
+      getFolderTrust: () => ({ isTrusted: true }),
+    } as unknown as core.Config;
 
     mockContext = {
       services: {
@@ -423,12 +400,12 @@ describe('directoryCommand', () => {
         getInitialDirectories: vi
           .fn()
           .mockReturnValue([path.normalize('/home/user/project1')]),
-      } as unknown as WorkspaceContext;
+      } as unknown as core.WorkspaceContext;
 
       mockConfig = {
         ...mockConfig,
         getWorkspaceContext: () => mockWorkspaceContext,
-      } as unknown as Config;
+      } as unknown as core.Config;
 
       mockContext.services.settings.workspace.originalSettings = {
         context: {
@@ -468,12 +445,12 @@ describe('directoryCommand', () => {
         ...mockWorkspaceContext,
         removeDirectory: vi.fn().mockReturnValue(true),
         getInitialDirectories: vi.fn().mockReturnValue([]),
-      } as unknown as WorkspaceContext;
+      } as unknown as core.WorkspaceContext;
 
       mockConfig = {
         ...mockConfig,
         getWorkspaceContext: () => mockWorkspaceContext,
-      } as unknown as Config;
+      } as unknown as core.Config;
 
       // Not in workspace scope
       mockContext.services.settings.workspace.originalSettings = {
@@ -509,12 +486,12 @@ describe('directoryCommand', () => {
         ...mockWorkspaceContext,
         removeDirectory: vi.fn().mockReturnValue(true),
         getInitialDirectories: vi.fn().mockReturnValue([]),
-      } as unknown as WorkspaceContext;
+      } as unknown as core.WorkspaceContext;
 
       mockConfig = {
         ...mockConfig,
         getWorkspaceContext: () => mockWorkspaceContext,
-      } as unknown as Config;
+      } as unknown as core.Config;
 
       // Stored as canonical
       mockContext.services.settings.workspace.originalSettings = {
@@ -525,7 +502,8 @@ describe('directoryCommand', () => {
       vi.mocked(fs.realpathSync).mockImplementation((p) => {
         if (typeof p === 'string' && p.includes('link-project'))
           return canonicalDir;
-        return p as string;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (vi.importActual('node:fs') as any).realpathSync(p);
       });
 
       if (!removeCommand?.action) throw new Error('No action');
@@ -544,7 +522,7 @@ describe('directoryCommand', () => {
         ...mockWorkspaceContext,
         removeDirectory: vi.fn().mockReturnValue(true),
         getInitialDirectories: vi.fn().mockReturnValue([]),
-      } as unknown as WorkspaceContext;
+      } as unknown as core.WorkspaceContext;
 
       const updatedMockConfig = {
         ...mockConfig,
@@ -558,24 +536,26 @@ describe('directoryCommand', () => {
         setUserMemory: vi.fn(),
         setGeminiMdFileCount: vi.fn(),
         setConditionalRulesRegistry: vi.fn(),
-      } as unknown as Config;
+      } as unknown as core.Config;
 
       mockContext.services.config = updatedMockConfig;
       mockContext.services.settings.workspace.originalSettings = {
         context: { includeDirectories: [removableDir] },
       };
 
-      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
-        memoryContent: 'new memory',
-        fileCount: 10,
-        conditionalRules: [],
-        projectRoot: '/test/dir',
-      });
+      const loadMemorySpy = vi
+        .spyOn(core, 'loadServerHierarchicalMemory')
+        .mockResolvedValue({
+          memoryContent: 'new memory',
+          fileCount: 10,
+          conditionalRules: [],
+          projectRoot: '/test/dir',
+        });
 
       if (!removeCommand?.action) throw new Error('No action');
       await removeCommand.action(mockContext, removableDir);
 
-      expect(loadServerHierarchicalMemory).toHaveBeenCalled();
+      expect(loadMemorySpy).toHaveBeenCalled();
       expect(updatedMockConfig.setUserMemory).toHaveBeenCalledWith(
         'new memory',
       );
@@ -587,12 +567,12 @@ describe('directoryCommand', () => {
       mockWorkspaceContext = {
         ...mockWorkspaceContext,
         getInitialDirectories: vi.fn().mockReturnValue([initialDir]),
-      } as unknown as WorkspaceContext;
+      } as unknown as core.WorkspaceContext;
 
       mockConfig = {
         ...mockConfig,
         getWorkspaceContext: () => mockWorkspaceContext,
-      } as unknown as Config;
+      } as unknown as core.Config;
 
       // Test with a relative path that resolves to the initial directory
       const relativePath = path.relative(process.cwd(), initialDir);
@@ -616,18 +596,19 @@ describe('directoryCommand', () => {
       mockWorkspaceContext = {
         ...mockWorkspaceContext,
         getInitialDirectories: vi.fn().mockReturnValue([initialDir]),
-      } as unknown as WorkspaceContext;
+      } as unknown as core.WorkspaceContext;
 
       mockConfig = {
         ...mockConfig,
         getWorkspaceContext: () => mockWorkspaceContext,
-      } as unknown as Config;
+      } as unknown as core.Config;
 
       // Mock fs.realpathSync to return the target directory for the symlink
       vi.mocked(fs.realpathSync).mockImplementation((p) => {
         if (typeof p === 'string' && p.includes('link-to-project1'))
           return initialDir;
-        return p as string;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (vi.importActual('node:fs') as any).realpathSync(p);
       });
 
       if (!removeCommand?.action) throw new Error('No action');
@@ -650,12 +631,12 @@ describe('directoryCommand', () => {
         getInitialDirectories: vi
           .fn()
           .mockReturnValue([path.normalize('/home/user/project1')]),
-      } as unknown as WorkspaceContext;
+      } as unknown as core.WorkspaceContext;
 
       mockConfig = {
         ...mockConfig,
         getWorkspaceContext: () => mockWorkspaceContext,
-      } as unknown as Config;
+      } as unknown as core.Config;
 
       const settingsError = new Error('write failed');
       mockContext.services.settings.workspace.originalSettings = {
@@ -683,7 +664,7 @@ describe('directoryCommand', () => {
   it('should correctly expand a Windows-style home directory path', () => {
     const windowsPath = '%userprofile%\\Documents';
     const expectedPath = path.win32.join(os.homedir(), 'Documents');
-    const result = expandHomeDir(windowsPath);
+    const result = core.expandHomeDir(windowsPath);
     expect(path.win32.normalize(result)).toBe(
       path.win32.normalize(expectedPath),
     );

@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as childProcess from 'node:child_process';
+import * as themeModule from './detect-terminal-theme.js';
 
 vi.mock('node:child_process');
 
@@ -14,14 +15,16 @@ describe('detectTerminalTheme', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    vi.resetModules();
     vi.restoreAllMocks();
     process.env = { ...originalEnv };
     delete process.env['COLORFGBG'];
   });
 
   afterEach(() => {
-    Object.defineProperty(process, 'platform', { value: originalPlatform });
+    Object.defineProperty(process, 'platform', {
+      value: originalPlatform,
+      configurable: true,
+    });
     process.env = originalEnv;
   });
 
@@ -30,56 +33,56 @@ describe('detectTerminalTheme', () => {
   // ---------------------------------------------------------------------------
 
   describe('parseOscRgb', () => {
-    it('should parse rgb:RRRR/GGGG/BBBB format', async () => {
-      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+    it('should parse rgb:RRRR/GGGG/BBBB format', () => {
+      const { parseOscRgb } = themeModule;
       const rgb = parseOscRgb('rgb:0000/0000/0000');
       expect(rgb).toEqual({ r: 0, g: 0, b: 0 });
     });
 
-    it('should parse short hex components (rgb:RR/GG/BB)', async () => {
-      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+    it('should parse short hex components (rgb:RR/GG/BB)', () => {
+      const { parseOscRgb } = themeModule;
       const rgb = parseOscRgb('rgb:ff/ff/ff');
       expect(rgb).toEqual({ r: 1, g: 1, b: 1 });
     });
 
-    it('should parse #RRGGBB format', async () => {
-      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+    it('should parse #RRGGBB format', () => {
+      const { parseOscRgb } = themeModule;
       const rgb = parseOscRgb('#000000');
       expect(rgb).toEqual({ r: 0, g: 0, b: 0 });
     });
 
-    it('should parse #RRRRGGGGBBBB format', async () => {
-      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+    it('should parse #RRRRGGGGBBBB format', () => {
+      const { parseOscRgb } = themeModule;
       const rgb = parseOscRgb('#ffffffffffff');
       expect(rgb).toEqual({ r: 1, g: 1, b: 1 });
     });
 
-    it('should return undefined for invalid data', async () => {
-      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+    it('should return undefined for invalid data', () => {
+      const { parseOscRgb } = themeModule;
       expect(parseOscRgb('garbage')).toBeUndefined();
       expect(parseOscRgb('')).toBeUndefined();
     });
   });
 
   describe('themeFromOscColor', () => {
-    it('should return "dark" for a dark background', async () => {
-      const { themeFromOscColor } = await import('./detect-terminal-theme.js');
+    it('should return "dark" for a dark background', () => {
+      const { themeFromOscColor } = themeModule;
       // Pure black background
       expect(themeFromOscColor('rgb:0000/0000/0000')).toBe('dark');
       // Typical dark terminal (e.g., #1e1e2e)
       expect(themeFromOscColor('rgb:1e1e/1e1e/2e2e')).toBe('dark');
     });
 
-    it('should return "light" for a light background', async () => {
-      const { themeFromOscColor } = await import('./detect-terminal-theme.js');
+    it('should return "light" for a light background', () => {
+      const { themeFromOscColor } = themeModule;
       // Pure white background
       expect(themeFromOscColor('rgb:ffff/ffff/ffff')).toBe('light');
       // Typical light terminal (e.g., #fafafa)
       expect(themeFromOscColor('rgb:fafa/fafa/fafa')).toBe('light');
     });
 
-    it('should return undefined for unparseable data', async () => {
-      const { themeFromOscColor } = await import('./detect-terminal-theme.js');
+    it('should return undefined for unparseable data', () => {
+      const { themeFromOscColor } = themeModule;
       expect(themeFromOscColor('not-a-color')).toBeUndefined();
     });
   });
@@ -119,7 +122,7 @@ describe('detectTerminalTheme', () => {
         configurable: true,
       });
 
-      const { detectOsc11Theme } = await import('./detect-terminal-theme.js');
+      const { detectOsc11Theme } = themeModule;
       const result = await detectOsc11Theme();
       expect(result).toBeUndefined();
 
@@ -137,7 +140,7 @@ describe('detectTerminalTheme', () => {
       const baseline = process.stdin.listenerCount('data');
 
       try {
-        const { detectOsc11Theme } = await import('./detect-terminal-theme.js');
+        const { detectOsc11Theme } = themeModule;
         const promise = detectOsc11Theme();
         // Listener must be attached synchronously so the response is captured.
         expect(process.stdin.listenerCount('data')).toBe(baseline + 1);
@@ -163,16 +166,13 @@ describe('detectTerminalTheme', () => {
       const baseline = process.stdin.listenerCount('data');
 
       try {
-        const { detectOsc11Theme } = await import('./detect-terminal-theme.js');
+        const { detectOsc11Theme } = themeModule;
         const promise = detectOsc11Theme();
         expect(process.stdin.listenerCount('data')).toBe(baseline + 1);
 
         await vi.advanceTimersByTimeAsync(250);
 
         await expect(promise).resolves.toBeUndefined();
-        // Regression guard: the listener-leak that motivated earlier fixes
-        // in this PR (OSC 11 bytes bleeding into the input box) only
-        // happens when the timeout path forgets to detach.
         expect(process.stdin.listenerCount('data')).toBe(baseline);
       } finally {
         restoreTTY();
@@ -185,7 +185,7 @@ describe('detectTerminalTheme', () => {
       vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
       try {
-        const { detectOsc11Theme } = await import('./detect-terminal-theme.js');
+        const { detectOsc11Theme } = themeModule;
         const promise = detectOsc11Theme();
         // Split a pure-white response across two chunks.
         process.stdin.emit('data', Buffer.from('\x1b]11;rgb:ffff/'));
@@ -203,26 +203,35 @@ describe('detectTerminalTheme', () => {
   // ---------------------------------------------------------------------------
 
   describe('detectMacOSTheme', () => {
-    it('should return "dark" when macOS dark mode is active', async () => {
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
+    it('should return "dark" when macOS dark mode is active', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+      });
       vi.mocked(childProcess.execSync).mockReturnValue('Dark\n');
 
-      const { detectMacOSTheme } = await import('./detect-terminal-theme.js');
+      const { detectMacOSTheme } = themeModule;
       expect(detectMacOSTheme()).toBe('dark');
     });
 
-    it('should return "light" when macOS light mode is active', async () => {
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
+    it('should return "light" when macOS light mode is active', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+      });
       vi.mocked(childProcess.execSync).mockImplementation(() => {
         throw new Error('The domain/default pair does not exist');
       });
 
-      const { detectMacOSTheme } = await import('./detect-terminal-theme.js');
+      const { detectMacOSTheme } = themeModule;
       expect(detectMacOSTheme()).toBe('light');
     });
 
-    it('should return "light" when the "does not exist" message is on stderr only', async () => {
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
+    it('should return "light" when the "does not exist" message is on stderr only', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+      });
       vi.mocked(childProcess.execSync).mockImplementation(() => {
         const err = new Error('Command failed') as Error & {
           stderr?: string;
@@ -232,22 +241,28 @@ describe('detectTerminalTheme', () => {
         throw err;
       });
 
-      const { detectMacOSTheme } = await import('./detect-terminal-theme.js');
+      const { detectMacOSTheme } = themeModule;
       expect(detectMacOSTheme()).toBe('light');
     });
 
-    it('should return undefined on timeout (do not assume Light Mode)', async () => {
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
+    it('should return undefined on timeout (do not assume Light Mode)', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+      });
       vi.mocked(childProcess.execSync).mockImplementation(() => {
         throw new Error('Command failed: defaults read -g AppleInterfaceStyle');
       });
 
-      const { detectMacOSTheme } = await import('./detect-terminal-theme.js');
+      const { detectMacOSTheme } = themeModule;
       expect(detectMacOSTheme()).toBeUndefined();
     });
 
-    it('should return undefined when `defaults` is not on PATH', async () => {
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
+    it('should return undefined when `defaults` is not on PATH', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+      });
       vi.mocked(childProcess.execSync).mockImplementation(() => {
         const err = new Error('spawnSync defaults ENOENT') as Error & {
           code?: string;
@@ -256,14 +271,17 @@ describe('detectTerminalTheme', () => {
         throw err;
       });
 
-      const { detectMacOSTheme } = await import('./detect-terminal-theme.js');
+      const { detectMacOSTheme } = themeModule;
       expect(detectMacOSTheme()).toBeUndefined();
     });
 
-    it('should return undefined on non-macOS platforms', async () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
+    it('should return undefined on non-macOS platforms', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
 
-      const { detectMacOSTheme } = await import('./detect-terminal-theme.js');
+      const { detectMacOSTheme } = themeModule;
       expect(detectMacOSTheme()).toBeUndefined();
     });
   });
@@ -273,59 +291,45 @@ describe('detectTerminalTheme', () => {
   // ---------------------------------------------------------------------------
 
   describe('detectFromColorFgBg', () => {
-    it('should return "dark" when background is dark (COLORFGBG=15;0)', async () => {
+    it('should return "dark" when background is dark (COLORFGBG=15;0)', () => {
       process.env['COLORFGBG'] = '15;0';
-      const { detectFromColorFgBg } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectFromColorFgBg } = themeModule;
       expect(detectFromColorFgBg()).toBe('dark');
     });
 
-    it('should return "light" when background is light (COLORFGBG=0;15)', async () => {
+    it('should return "light" when background is light (COLORFGBG=0;15)', () => {
       process.env['COLORFGBG'] = '0;15';
-      const { detectFromColorFgBg } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectFromColorFgBg } = themeModule;
       expect(detectFromColorFgBg()).toBe('light');
     });
 
-    it('should return "light" when background is 7 (light gray)', async () => {
+    it('should return "light" when background is 7 (light gray)', () => {
       process.env['COLORFGBG'] = '0;7';
-      const { detectFromColorFgBg } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectFromColorFgBg } = themeModule;
       expect(detectFromColorFgBg()).toBe('light');
     });
 
-    it('should return "dark" when background is 8 (dark gray)', async () => {
+    it('should return "dark" when background is 8 (dark gray)', () => {
       process.env['COLORFGBG'] = '15;8';
-      const { detectFromColorFgBg } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectFromColorFgBg } = themeModule;
       expect(detectFromColorFgBg()).toBe('dark');
     });
 
-    it('should handle three-part format (fg;extra;bg)', async () => {
+    it('should handle three-part format (fg;extra;bg)', () => {
       process.env['COLORFGBG'] = '15;0;0';
-      const { detectFromColorFgBg } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectFromColorFgBg } = themeModule;
       expect(detectFromColorFgBg()).toBe('dark');
     });
 
-    it('should return undefined when COLORFGBG is not set', async () => {
+    it('should return undefined when COLORFGBG is not set', () => {
       delete process.env['COLORFGBG'];
-      const { detectFromColorFgBg } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectFromColorFgBg } = themeModule;
       expect(detectFromColorFgBg()).toBeUndefined();
     });
 
-    it('should return undefined when COLORFGBG has invalid value', async () => {
+    it('should return undefined when COLORFGBG has invalid value', () => {
       process.env['COLORFGBG'] = 'invalid';
-      const { detectFromColorFgBg } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectFromColorFgBg } = themeModule;
       expect(detectFromColorFgBg()).toBeUndefined();
     });
   });
@@ -335,45 +339,49 @@ describe('detectTerminalTheme', () => {
   // ---------------------------------------------------------------------------
 
   describe('detectTerminalTheme (sync)', () => {
-    it('should prefer COLORFGBG over macOS detection', async () => {
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
+    it('should prefer COLORFGBG over macOS detection', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+      });
       vi.mocked(childProcess.execSync).mockReturnValue('Dark\n');
       process.env['COLORFGBG'] = '0;15';
 
-      const { detectTerminalTheme } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectTerminalTheme } = themeModule;
       expect(detectTerminalTheme()).toBe('light');
     });
 
-    it('should fall back to macOS when COLORFGBG is not set', async () => {
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
+    it('should fall back to macOS when COLORFGBG is not set', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+      });
       vi.mocked(childProcess.execSync).mockReturnValue('Dark\n');
       delete process.env['COLORFGBG'];
 
-      const { detectTerminalTheme } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectTerminalTheme } = themeModule;
       expect(detectTerminalTheme()).toBe('dark');
     });
 
-    it('should fall back to COLORFGBG on non-macOS', async () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
+    it('should fall back to COLORFGBG on non-macOS', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
       process.env['COLORFGBG'] = '0;15';
 
-      const { detectTerminalTheme } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectTerminalTheme } = themeModule;
       expect(detectTerminalTheme()).toBe('light');
     });
 
-    it('should default to dark when no detection method works', async () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
+    it('should default to dark when no detection method works', () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
       delete process.env['COLORFGBG'];
 
-      const { detectTerminalTheme } = await import(
-        './detect-terminal-theme.js'
-      );
+      const { detectTerminalTheme } = themeModule;
       expect(detectTerminalTheme()).toBe('dark');
     });
   });

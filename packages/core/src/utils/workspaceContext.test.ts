@@ -535,3 +535,54 @@ describe('WorkspaceContext isInitialDirectory', () => {
     expect(ctx.isInitialDirectory('/some/random/path')).toBe(false);
   });
 });
+
+describe('WorkspaceContext with path expansion', () => {
+  let tempDir: string;
+  let cwd: string;
+  let homeDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-context-expansion-')),
+    );
+    cwd = path.join(tempDir, 'project');
+    homeDir = path.join(tempDir, 'home');
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(homeDir, { recursive: true });
+
+    vi.spyOn(os, 'homedir').mockReturnValue(homeDir);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('should expand ~ in addDirectory', () => {
+    const projectInHome = path.join(homeDir, 'my-project');
+    fs.mkdirSync(projectInHome, { recursive: true });
+
+    const ctx = new WorkspaceContext(cwd);
+    ctx.addDirectory('~/my-project');
+
+    expect(ctx.getDirectories()).toContain(fs.realpathSync(projectInHome));
+  });
+
+  it('should expand %userprofile% in addDirectory', () => {
+    const projectInHome = path.join(homeDir, 'win-project');
+    fs.mkdirSync(projectInHome, { recursive: true });
+
+    const ctx = new WorkspaceContext(cwd);
+    ctx.addDirectory('%userprofile%/win-project');
+
+    expect(ctx.getDirectories()).toContain(fs.realpathSync(projectInHome));
+  });
+
+  it('should track expansion in skippedDirectories when resolution fails', () => {
+    const ctx = new WorkspaceContext(cwd);
+    ctx.addDirectory('~/non-existent');
+
+    const skipped = ctx.getSkippedDirectories();
+    expect(skipped).toContain('~/non-existent');
+  });
+});

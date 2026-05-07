@@ -41,7 +41,7 @@ export function _resetValidatePathCacheForTest(): void {
 
 /**
  * Special characters that need to be escaped in file paths for shell compatibility.
- * Includes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
+ * Includes: spaces, parentheses, brackets, brackets, braces, semicolons, ampersands, pipes,
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
  */
 export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~]/;

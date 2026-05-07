@@ -9,8 +9,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as process from 'node:process';
 import { createDebugLogger } from './debugLogger.js';
+import { expandHomeDir } from './paths.js';
 
-const debugLogger = createDebugLogger('WORKSPACE');
+const debugLogger = createDebugLogger('WORKSPACE_CONTEXT');
 
 export type Unsubscribe = () => void;
 
@@ -98,9 +99,10 @@ export class WorkspaceContext {
     directory: string,
     basePath: string = process.cwd(),
   ): string {
-    const absolutePath = path.isAbsolute(directory)
-      ? directory
-      : path.resolve(basePath, directory);
+    const expanded = expandHomeDir(directory);
+    const absolutePath = path.isAbsolute(expanded)
+      ? expanded
+      : path.resolve(basePath, expanded);
 
     if (!fs.existsSync(absolutePath)) {
       throw new Error(`Directory does not exist: ${absolutePath}`);

@@ -44,6 +44,21 @@ import { readAutoMemoryIndex } from '../memory/store.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
+import * as debugLoggerModule from '../utils/debugLogger.js';
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: vi.fn().mockReturnValue({
+      warn: vi.fn(),
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    }),
+  };
+});
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -912,6 +927,33 @@ describe('Server Config (config.ts)', () => {
     expect(directories).toContain(path.resolve(baseParams.targetDir));
     expect(directories).toContain('/path/to/dir1');
     expect(directories).toContain('/path/to/dir2');
+  });
+
+  it('should warn when includeDirectories paths are skipped', () => {
+    const invalidDir = '/path/to/invalid';
+    vi.mocked(fs.existsSync).mockImplementation((p) => p !== invalidDir);
+
+    const mockWarn = vi.fn();
+    vi.mocked(debugLoggerModule.createDebugLogger).mockReturnValue({
+      warn: mockWarn,
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    } as unknown as debugLoggerModule.DebugLogger);
+
+    const paramsWithInvalidDir: ConfigParameters = {
+      ...baseParams,
+      includeDirectories: [invalidDir],
+    };
+
+    new Config(paramsWithInvalidDir);
+
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'The following --include-directories paths were skipped',
+      ),
+    );
+    expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining(invalidDir));
   });
 
   it('Config constructor should set telemetry to true when provided as true', () => {

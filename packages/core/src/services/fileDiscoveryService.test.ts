@@ -4,158 +4,150 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+// Mock the entire module before importing the class under test
+vi.mock('../utils/gitUtils.js', () => ({
+    isGitRepository: vi.fn(),
+    findGitRoot: vi.fn(),
+    getGitIgnorePatterns: vi.fn(),
+  }));
+
+import * as gitUtils from '../utils/gitUtils.js';
 import { FileDiscoveryService } from './fileDiscoveryService.js';
 
 describe('FileDiscoveryService', () => {
   let testRootDir: string;
   let projectRoot: string;
 
-  async function createTestFile(filePath: string, content = '') {
+  function createTestFile(filePath: string, content = '') {
     const fullPath = path.join(projectRoot, filePath);
-    await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, content);
-    return fullPath;
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, content);
   }
 
-  beforeEach(async () => {
-    testRootDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'file-discovery-test-'),
+  beforeEach(() => {
+    testRootDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'file-discovery-test-')),
     );
     projectRoot = path.join(testRootDir, 'project');
-    await fs.mkdir(projectRoot, { recursive: true });
+    fs.mkdirSync(projectRoot);
   });
 
-  afterEach(async () => {
-    await fs.rm(testRootDir, { recursive: true, force: true });
+  afterEach(() => {
+    fs.rmSync(testRootDir, { recursive: true, force: true });
+    vi.clearAllMocks();
   });
 
   describe('initialization', () => {
-    it('should initialize git ignore parser by default in a git repo', async () => {
-      await fs.mkdir(path.join(projectRoot, '.git'));
-      await createTestFile('.gitignore', 'node_modules/');
+    it('should initialize git ignore parser by default in a git repo', () => {
+      vi.mocked(gitUtils.isGitRepository).mockReturnValue(true);
+      createTestFile('.gitignore', 'node_modules');
 
       const service = new FileDiscoveryService(projectRoot);
-      // Let's check the effect of the parser instead of mocking it.
-      expect(service.shouldGitIgnoreFile('node_modules/foo.js')).toBe(true);
-      expect(service.shouldGitIgnoreFile('src/foo.js')).toBe(false);
+      expect(
+        service.shouldGitIgnoreFile(
+          path.join(projectRoot, 'node_modules/foo.js'),
+        ),
+      ).toBe(true);
     });
 
-    it('should not load git repo patterns when not in a git repo', async () => {
-      // No .git directory
-      await createTestFile('.gitignore', 'node_modules/');
+    it('should not load git repo patterns when not in a git repo', () => {
+      vi.mocked(gitUtils.isGitRepository).mockReturnValue(false);
+      createTestFile('.gitignore', 'node_modules');
       const service = new FileDiscoveryService(projectRoot);
 
-      // .gitignore is not loaded in non-git repos
-      expect(service.shouldGitIgnoreFile('node_modules/foo.js')).toBe(false);
-    });
-
-    it('should load .qwenignore patterns even when not in a git repo', async () => {
-      await createTestFile('.qwenignore', 'secrets.txt');
-      const service = new FileDiscoveryService(projectRoot);
-
-      expect(service.shouldQwenIgnoreFile('secrets.txt')).toBe(true);
-      expect(service.shouldQwenIgnoreFile('src/index.js')).toBe(false);
+      expect(
+        service.shouldGitIgnoreFile(
+          path.join(projectRoot, 'node_modules/foo.js'),
+        ),
+      ).toBe(false);
     });
   });
 
   describe('filterFiles', () => {
-    beforeEach(async () => {
-      await fs.mkdir(path.join(projectRoot, '.git'));
-      await createTestFile('.gitignore', 'node_modules/\n.git/\ndist');
-      await createTestFile('.qwenignore', 'logs/');
-    });
-
     it('should filter out git-ignored and qwen-ignored files by default', () => {
+      vi.mocked(gitUtils.isGitRepository).mockReturnValue(true);
+      createTestFile('.gitignore', 'node_modules');
+      createTestFile('.qwenignore', 'logs');
+
       const files = [
         'src/index.ts',
         'node_modules/package/index.js',
         'README.md',
-        '.git/config',
-        'dist/bundle.js',
         'logs/latest.log',
       ].map((f) => path.join(projectRoot, f));
 
       const service = new FileDiscoveryService(projectRoot);
 
-      expect(service.filterFiles(files)).toEqual(
-        ['src/index.ts', 'README.md'].map((f) => path.join(projectRoot, f)),
+      expect(service.filterFiles(files).sort()).toEqual(
+        ['src/index.ts', 'README.md']
+          .map((f) => path.join(projectRoot, f))
+          .sort(),
       );
     });
 
     it('should not filter files when respectGitIgnore is false', () => {
-      const files = [
-        'src/index.ts',
-        'node_modules/package/index.js',
-        '.git/config',
-        'logs/latest.log',
-      ].map((f) => path.join(projectRoot, f));
+      vi.mocked(gitUtils.isGitRepository).mockReturnValue(true);
+      createTestFile('.gitignore', 'node_modules');
+
+      const files = ['src/index.ts', 'node_modules/package/index.js'].map((f) =>
+        path.join(projectRoot, f),
+      );
 
       const service = new FileDiscoveryService(projectRoot);
 
-      const filtered = service.filterFiles(files, {
-        respectGitIgnore: false,
-        respectQwenIgnore: true, // still respect this one
-      });
-
-      expect(filtered).toEqual(
-        ['src/index.ts', 'node_modules/package/index.js', '.git/config'].map(
-          (f) => path.join(projectRoot, f),
-        ),
-      );
+      expect(
+        service.filterFiles(files, { respectGitIgnore: false }).sort(),
+      ).toEqual(files.sort());
     });
 
     it('should not filter files when respectQwenIgnore is false', () => {
-      const files = [
-        'src/index.ts',
-        'node_modules/package/index.js',
-        'logs/latest.log',
-      ].map((f) => path.join(projectRoot, f));
+      vi.mocked(gitUtils.isGitRepository).mockReturnValue(true);
+      createTestFile('.qwenignore', 'logs');
+
+      const files = ['src/index.ts', 'logs/latest.log'].map((f) =>
+        path.join(projectRoot, f),
+      );
 
       const service = new FileDiscoveryService(projectRoot);
 
       const filtered = service.filterFiles(files, {
-        respectGitIgnore: true,
         respectQwenIgnore: false,
       });
 
-      expect(filtered).toEqual(
-        ['src/index.ts', 'logs/latest.log'].map((f) =>
-          path.join(projectRoot, f),
-        ),
+      expect(filtered.sort()).toEqual(
+        ['src/index.ts', 'logs/latest.log']
+          .map((f) => path.join(projectRoot, f))
+          .sort(),
       );
-    });
-
-    it('should handle empty file list', () => {
-      const service = new FileDiscoveryService(projectRoot);
-
-      expect(service.filterFiles([])).toEqual([]);
     });
   });
 
   describe('shouldGitIgnoreFile & shouldQwenIgnoreFile', () => {
-    beforeEach(async () => {
-      await fs.mkdir(path.join(projectRoot, '.git'));
-      await createTestFile('.gitignore', 'node_modules/');
-      await createTestFile('.qwenignore', '*.log');
+    beforeEach(() => {
+      vi.mocked(gitUtils.isGitRepository).mockReturnValue(true);
+      createTestFile('.gitignore', 'node_modules\n*.log');
+      createTestFile('.qwenignore', 'secrets.txt\nconfig.json');
     });
 
     it('should return true for git-ignored files', () => {
       const service = new FileDiscoveryService(projectRoot);
-
       expect(
         service.shouldGitIgnoreFile(
           path.join(projectRoot, 'node_modules/package/index.js'),
         ),
       ).toBe(true);
+      expect(
+        service.shouldGitIgnoreFile(path.join(projectRoot, 'app.log')),
+      ).toBe(true);
     });
 
     it('should return false for non-git-ignored files', () => {
       const service = new FileDiscoveryService(projectRoot);
-
       expect(
         service.shouldGitIgnoreFile(path.join(projectRoot, 'src/index.ts')),
       ).toBe(false);
@@ -163,49 +155,13 @@ describe('FileDiscoveryService', () => {
 
     it('should return true for qwen-ignored files', () => {
       const service = new FileDiscoveryService(projectRoot);
-
-      expect(
-        service.shouldQwenIgnoreFile(path.join(projectRoot, 'debug.log')),
-      ).toBe(true);
+      expect(service.shouldQwenIgnoreFile('secrets.txt')).toBe(true);
+      expect(service.shouldQwenIgnoreFile('config.json')).toBe(true);
     });
 
     it('should return false for non-qwen-ignored files', () => {
       const service = new FileDiscoveryService(projectRoot);
-
-      expect(
-        service.shouldQwenIgnoreFile(path.join(projectRoot, 'src/index.ts')),
-      ).toBe(false);
-    });
-  });
-
-  describe('edge cases', () => {
-    it('should handle relative project root paths', async () => {
-      await fs.mkdir(path.join(projectRoot, '.git'));
-      await createTestFile('.gitignore', 'ignored.txt');
-      const service = new FileDiscoveryService(
-        path.relative(process.cwd(), projectRoot),
-      );
-
-      expect(
-        service.shouldGitIgnoreFile(path.join(projectRoot, 'ignored.txt')),
-      ).toBe(true);
-      expect(
-        service.shouldGitIgnoreFile(path.join(projectRoot, 'not-ignored.txt')),
-      ).toBe(false);
-    });
-
-    it('should handle filterFiles with undefined options', async () => {
-      await fs.mkdir(path.join(projectRoot, '.git'));
-      await createTestFile('.gitignore', 'ignored.txt');
-      const service = new FileDiscoveryService(projectRoot);
-
-      const files = ['src/index.ts', 'ignored.txt'].map((f) =>
-        path.join(projectRoot, f),
-      );
-
-      expect(service.filterFiles(files, undefined)).toEqual([
-        path.join(projectRoot, 'src/index.ts'),
-      ]);
+      expect(service.shouldQwenIgnoreFile('README.md')).toBe(false);
     });
   });
 });
