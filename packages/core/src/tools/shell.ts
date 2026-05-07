@@ -230,10 +230,21 @@ function tokeniseSegment(segment: string): string[] | null {
       // segment as repo-shifting (same contract as a leading
       // `GIT_DIR=...` assignment) so we don't stamp our trailer onto
       // a commit that landed in a different repository.
-      if (
-        (wrapper === 'env' && ENV_FLAGS_SHIFT_CWD.has(flag)) ||
-        (wrapper === 'sudo' && SUDO_FLAGS_SHIFT_CWD.has(flag))
-      ) {
+      //
+      // Also catch the attached-value forms `--chdir=DIR` and the
+      // short-form `-CDIR` / `-DDIR` that shell-quote tokenises as a
+      // single argv entry. Without this, `sudo --chdir=/tmp git
+      // commit` and `env -C/tmp git commit` would both pass through
+      // the bare-flag check (which is set-membership, not prefix-
+      // match) and silently land our trailer on a commit in the
+      // wrong repo.
+      const shiftSet =
+        wrapper === 'env'
+          ? ENV_FLAGS_SHIFT_CWD
+          : wrapper === 'sudo'
+            ? SUDO_FLAGS_SHIFT_CWD
+            : null;
+      if (shiftSet && isShiftCwdFlag(flag, shiftSet)) {
         return null;
       }
       // Value-taking flag tables, per wrapper: `sudo -u user`,
@@ -302,6 +313,30 @@ const ENV_FLAGS_SHIFT_CWD = new Set(['-C', '--chdir']);
 // command run in DIR, which means a `git commit` underneath it
 // targets DIR's repo, not ours. Refuse the segment.
 const SUDO_FLAGS_SHIFT_CWD = new Set(['-D', '--chdir']);
+
+/**
+ * Match a flag token against a SHIFT_CWD set, including attached-value
+ * forms. Bare `--chdir`/`-D`/`-C` are caught by direct set membership;
+ * the long attached form `--name=value` matches when `--name` is in the
+ * set, and the short attached form `-Xvalue` matches when `-X` is in
+ * the set AND the token is longer than the flag (so `-D` alone doesn't
+ * spuriously match `-D` against itself twice).
+ */
+function isShiftCwdFlag(flag: string, set: ReadonlySet<string>): boolean {
+  if (set.has(flag)) return true;
+  for (const f of set) {
+    if (f.startsWith('--') && flag.startsWith(f + '=')) return true;
+    if (
+      f.length === 2 &&
+      f.startsWith('-') &&
+      flag.startsWith(f) &&
+      flag.length > 2
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Environment variables that redirect git's repository selection. A

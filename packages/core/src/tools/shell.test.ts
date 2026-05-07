@@ -1765,6 +1765,16 @@ describe('ShellTool', () => {
         // contract as `cd /elsewhere && git commit`.
         ['env -C', 'env -C /tmp/other git commit -m "msg"'],
         ['env --chdir', 'env --chdir /tmp/other git commit -m "msg"'],
+        // Attached-value forms: `shell-quote` tokenises `--chdir=/tmp`
+        // and `-C/tmp` as single argv entries, so the bare-flag set
+        // membership check would miss them. Without explicit
+        // attached-form handling, `sudo --chdir=/tmp git commit` and
+        // `env -C/tmp git commit` would silently land our trailer on
+        // a commit in the wrong repo.
+        ['env --chdir=', 'env --chdir=/tmp/other git commit -m "msg"'],
+        ['env -C attached', 'env -C/tmp/other git commit -m "msg"'],
+        ['sudo --chdir=', 'sudo --chdir=/tmp/other git commit -m "msg"'],
+        ['sudo -D attached', 'sudo -D/tmp/other git commit -m "msg"'],
       ])(
         'should NOT add co-author for repo-redirecting %s assignment',
         async (_label, command) => {
