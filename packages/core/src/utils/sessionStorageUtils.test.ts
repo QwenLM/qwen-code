@@ -281,6 +281,45 @@ describe('sessionStorageUtils', () => {
         readLastJsonStringFieldSync(p, 'customTitle', 'custom_title'),
       ).toBe('last');
     });
+
+    it('reuses a caller-provided scratch tail buffer', () => {
+      // Smoke test for the buffer-pool plumbing: when the caller hands
+      // in a scratch buffer (as `listSessions` does on every page), the
+      // function must produce the same result as the no-buffer path.
+      // Crucially, multiple calls must reuse the same buffer without
+      // bleeding state — values from an earlier file must not leak
+      // into a smaller subsequent file's tail decode.
+      const big = writeFile(
+        'big.jsonl',
+        '{"subtype":"custom_title","customTitle":"big-file"}\n',
+      );
+      const small = writeFile(
+        'small.jsonl',
+        '{"subtype":"custom_title","customTitle":"x"}\n',
+      );
+
+      const scratch = Buffer.alloc(LITE_READ_BUF_SIZE);
+      // Pre-fill the buffer with a sentinel byte so a buggy decode that
+      // reads past `bytesRead` would produce a corrupted return value.
+      scratch.fill(0x55);
+
+      expect(
+        readLastJsonStringFieldSync(
+          big,
+          'customTitle',
+          'custom_title',
+          scratch,
+        ),
+      ).toBe('big-file');
+      expect(
+        readLastJsonStringFieldSync(
+          small,
+          'customTitle',
+          'custom_title',
+          scratch,
+        ),
+      ).toBe('x');
+    });
   });
 
   describe('extractLastJsonStringFields', () => {

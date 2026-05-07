@@ -187,6 +187,28 @@ describe('SessionService', () => {
       expect(result.items[0].gitBranch).toBe('main');
     });
 
+    it('should NOT populate messageCount during listing', async () => {
+      // Listing must avoid the full-file readline that counting requires
+      // — message counts are now lazy and provided by
+      // `countSessionMessages(sessionId)` only when a UI surface (e.g.
+      // a session preview) is about to display them. Pinning this
+      // contract here so future refactors can't quietly re-introduce
+      // the per-file scan that used to dominate /resume open time.
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].messageCount).toBeUndefined();
+    });
+
     it('should truncate long prompts', async () => {
       const longPrompt = 'A'.repeat(300);
       const recordWithLongPrompt: ChatRecord = {

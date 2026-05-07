@@ -258,11 +258,20 @@ export function extractLastJsonStringField(
  *
  * @param lineContains Optional substring that must appear on the same line
  *   as the matched field. See {@link extractLastJsonStringField}.
+ * @param scratchTailBuffer Optional caller-owned Buffer reused across many
+ *   files in the same listing pass. Must be at least
+ *   {@link LITE_READ_BUF_SIZE} bytes; only the leading `tailLength` bytes
+ *   are touched and decoded, so a smaller file in the run leaves earlier
+ *   bytes alone (we never read past the bytes we just wrote). When omitted,
+ *   the function allocates a per-call buffer — preserves the simple call
+ *   site for one-off reads (rename, single-session lookup) while letting
+ *   `listSessions` skip the per-file alloc.
  */
 export function readLastJsonStringFieldSync(
   filePath: string,
   key: string,
   lineContains?: string,
+  scratchTailBuffer?: Buffer,
 ): string | undefined {
   let fd: number | undefined;
   try {
@@ -275,7 +284,10 @@ export function readLastJsonStringFieldSync(
     // Phase 1: tail window — fast path.
     const tailLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const tailOffset = fileSize - tailLength;
-    const tailBuffer = Buffer.alloc(tailLength);
+    const tailBuffer =
+      scratchTailBuffer && scratchTailBuffer.length >= tailLength
+        ? scratchTailBuffer
+        : Buffer.alloc(tailLength);
     const tailBytes = fs.readSync(fd, tailBuffer, 0, tailLength, tailOffset);
     if (tailBytes > 0) {
       const tailText = tailBuffer.toString('utf-8', 0, tailBytes);
@@ -359,6 +371,7 @@ export function readLastJsonStringFieldsSync(
   primaryKey: string,
   otherKeys: string[],
   lineContains?: string,
+  scratchTailBuffer?: Buffer,
 ): Record<string, string | undefined> {
   const emptyResult: Record<string, string | undefined> = {};
   emptyResult[primaryKey] = undefined;
@@ -372,10 +385,14 @@ export function readLastJsonStringFieldsSync(
 
     fd = fs.openSync(filePath, getReadOpenFlags());
 
-    // Phase 1: tail window fast path.
+    // Phase 1: tail window fast path. See the single-field variant for
+    // the buffer-pool semantics.
     const tailLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const tailOffset = fileSize - tailLength;
-    const tailBuffer = Buffer.alloc(tailLength);
+    const tailBuffer =
+      scratchTailBuffer && scratchTailBuffer.length >= tailLength
+        ? scratchTailBuffer
+        : Buffer.alloc(tailLength);
     const tailBytes = fs.readSync(fd, tailBuffer, 0, tailLength, tailOffset);
     if (tailBytes > 0) {
       const tailText = tailBuffer.toString('utf-8', 0, tailBytes);
