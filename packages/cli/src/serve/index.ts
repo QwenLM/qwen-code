@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export { createServeApp } from './server.js';
-export { runQwenServe, type RunHandle } from './runQwenServe.js';
+export { createServeApp, type ServeAppDeps } from './server.js';
+export {
+  runQwenServe,
+  type RunHandle,
+  type RunQwenServeDeps,
+} from './runQwenServe.js';
 export {
   CAPABILITIES_SCHEMA_VERSION,
   STAGE1_FEATURES,
@@ -15,7 +19,11 @@ export {
 } from './types.js';
 export {
   createHttpAcpBridge,
+  defaultSpawnChannelFactory,
+  type AcpChannel,
+  type BridgeOptions,
   type BridgeSession,
   type BridgeSpawnRequest,
+  type ChannelFactory,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';

@@ -6,6 +6,7 @@
 
 import { type Server } from 'node:http';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import { createHttpAcpBridge, type HttpAcpBridge } from './httpAcpBridge.js';
 import { createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
 
@@ -15,8 +16,14 @@ const LOOPBACK_BINDS = new Set(['127.0.0.1', 'localhost']);
 export interface RunHandle {
   server: Server;
   url: string;
-  /** Resolves when the listener has fully closed. */
+  bridge: HttpAcpBridge;
+  /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
+}
+
+export interface RunQwenServeDeps {
+  /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
+  bridge?: HttpAcpBridge;
 }
 
 /**
@@ -32,6 +39,7 @@ export interface RunHandle {
  */
 export async function runQwenServe(
   optsIn: Omit<ServeOptions, 'token'> & { token?: string },
+  deps: RunQwenServeDeps = {},
 ): Promise<RunHandle> {
   const token = optsIn.token ?? process.env[QWEN_SERVER_TOKEN_ENV];
   const opts: ServeOptions = { ...optsIn, token };
@@ -43,8 +51,9 @@ export async function runQwenServe(
     );
   }
 
+  const bridge = deps.bridge ?? createHttpAcpBridge();
   let actualPort = opts.port;
-  const app = createServeApp(opts, () => actualPort);
+  const app = createServeApp(opts, () => actualPort, { bridge });
 
   return await new Promise<RunHandle>((resolve, reject) => {
     const server = app.listen(opts.port, opts.hostname, () => {
@@ -67,11 +76,23 @@ export async function runQwenServe(
       const handle: RunHandle = {
         server,
         url,
+        bridge,
         close: () =>
           new Promise<void>((res, rej) => {
             shuttingDown = true;
             detachSignals();
-            server.close((err) => (err ? rej(err) : res()));
+            // Tear down child agents before closing the listener so in-flight
+            // requests aren't left holding references to dead processes.
+            bridge
+              .shutdown()
+              .catch((err) =>
+                writeStderrLine(
+                  `qwen serve: bridge shutdown error: ${String(err)}`,
+                ),
+              )
+              .finally(() => {
+                server.close((err) => (err ? rej(err) : res()));
+              });
           }),
       };
 
