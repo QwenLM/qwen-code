@@ -232,7 +232,26 @@ jobs:
               require_write_enabled "$@"
               validate_issue_comment_args "$@"
               reject_if_arg_contains_secret "$@"
-              exec "${real_gh}" "$@"
+              # Some models emit a literal `\n` (backslash + n) inside the
+              # --body argument; bash double-quoted strings do not interpret
+              # it, so the rendered comment collapses onto one line. Rewrite
+              # the body just before exec so multi-paragraph follow-ups
+              # render correctly on GitHub.
+              normalized_args=()
+              expect_body=0
+              for arg in "$@"; do
+                if (( expect_body )); then
+                  arg="${arg//\\n/$'\n'}"
+                  expect_body=0
+                elif [[ "${arg}" == '--body' ]]; then
+                  expect_body=1
+                elif [[ "${arg}" == --body=* ]]; then
+                  arg="--body=${arg#--body=}"
+                  arg="${arg//\\n/$'\n'}"
+                fi
+                normalized_args+=("${arg}")
+              done
+              exec "${real_gh}" "${normalized_args[@]}"
               ;;
             'issue edit')
               require_write_enabled "$@"
@@ -408,6 +427,15 @@ jobs:
             - Use `gh issue comment <number> --repo "${{ github.repository }}" --body "..."`
               to create comments. The runner blocks comment editing, comment
               deletion, body files, and comments containing known secret values.
+            - The `--body` value must contain real newline characters between
+              paragraphs and list items. Bash double-quoted strings do not
+              interpret `\n`, so writing the literal two characters `\` and
+              `n` collapses the comment onto a single line on GitHub. Either
+              break the argument across multiple lines, for example
+              `--body "<!-- qwen-issue-bot:related -->`, then a blank line,
+              then `This appears related to ...`, then ``- #1234 - ...``,
+              all inside the same double-quoted argument; or use ANSI-C
+              quoting like `--body $'<!-- qwen-issue-bot:related -->\n\nThis appears ...\n\n- #1234 - ...'`.
             - Do not update existing comments through `gh api`; skip issues with
               an existing marker comment unless a human explicitly re-runs this
               workflow for that issue.
