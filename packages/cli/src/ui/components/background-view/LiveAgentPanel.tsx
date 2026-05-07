@@ -279,9 +279,30 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   // in `bgTasksDialogOpen`), but we keep the internal gate so callers
   // mounting the panel outside that layout still get the right
   // behavior.
+  //
+  // The early-return is the LAST statement of this component on
+  // purpose — pure rendering moves to LiveAgentPanelBody so that
+  // future refactors which add a hook can't accidentally drop it
+  // below the `dialogOpen` guard (`Rendered fewer hooks than
+  // expected` is the canonical bug shape this guards against).
   if (dialogOpen) return null;
+  return (
+    <LiveAgentPanelBody
+      snapshots={liveAgentSnapshots}
+      now={now}
+      maxRows={maxRows}
+      width={width}
+    />
+  );
+};
 
-  const visibleAgents: LivePanelEntry[] = liveAgentSnapshots
+const LiveAgentPanelBody: React.FC<{
+  snapshots: AgentDialogEntry[];
+  now: number;
+  maxRows: number;
+  width: number | undefined;
+}> = ({ snapshots, now, maxRows, width }) => {
+  const visibleAgents: LivePanelEntry[] = snapshots
     .map((entry) => ({
       ...entry,
       expired:

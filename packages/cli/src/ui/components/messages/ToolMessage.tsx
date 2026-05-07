@@ -406,29 +406,8 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
    * surface — when true the focus-holder banner renders and the
    * underlying ToolConfirmationMessage receives keystrokes; when false
    * sibling subagents render a dim "Queued approval" marker instead.
-   * (The legacy Ctrl+E / Ctrl+F display shortcuts were retired with
-   * the inline AgentExecutionDisplay frame; LiveAgentPanel owns the
-   * live progress surface and BackgroundTasksDialog owns drill-down.)
    */
   isFocused?: boolean;
-  /**
-   * True when rendering inside `pendingHistoryItems` (live area), false once
-   * committed to `<Static>`. Subagents no longer paint an inline frame in
-   * either phase — `LiveAgentPanel` (always-on roster) and
-   * `BackgroundTasksDialog` (Down-arrow detail) own that surface — so this
-   * flag is purely informational at this layer; ToolGroupMessage still
-   * forwards it for non-subagent message types that key off live vs.
-   * committed rendering.
-   */
-  isPending?: boolean;
-  /**
-   * Whether another subagent's approval currently holds the focus lock,
-   * blocking this one. Routed by `ToolGroupMessage`; vestigial for the
-   * subagent renderer (the queued marker reads the absence of `isFocused`
-   * directly), retained on the prop bag for call-site compatibility and
-   * future signaling needs.
-   */
-  isWaitingForOtherApproval?: boolean;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -446,11 +425,6 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   isFocused,
-  // isPending / isWaitingForOtherApproval flow into ToolMessage from
-  // ToolGroupMessage but no longer drive the subagent render path
-  // (LiveAgentPanel + BackgroundTasksDialog own that surface). They stay
-  // on the props interface so callers don't churn, but skipping the
-  // destructure here keeps the implementation honest about what's read.
   executionStartTime,
 }) => {
   const settings = useSettings();

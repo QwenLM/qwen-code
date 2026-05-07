@@ -51,9 +51,9 @@ interface ToolGroupMessageProps {
   /**
    * True when this tool group is being rendered live (in
    * `pendingHistoryItems`). False once it commits to Ink's `<Static>`.
-   * The subagent renderer uses this to suppress the live frame for
-   * foreground subagents (the pill+dialog handle live drill-down) while
-   * keeping the committed scrollback render unchanged.
+   * Currently consumed by upstream callers but not by the group body
+   * itself — the subagent renderer used to gate its live frame on
+   * this; that gating moved to LiveAgentPanel + BackgroundTasksDialog.
    */
   isPending?: boolean;
   activeShellPtyId?: number | null;
@@ -78,7 +78,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   isFocused = true,
-  isPending = false,
+  // `isPending` stays on the props interface for upstream compat
+  // (HistoryItemDisplay et al. forward it) but the group body no
+  // longer reads it. Skip the destructure so TS catches accidental
+  // re-introductions of dead state.
   activeShellPtyId,
   embeddedShellFocused,
   memoryWriteCount,
@@ -298,12 +301,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
           isFocused &&
           !toolAwaitingApproval &&
           keyboardFocusedSubagentCallId === tool.callId;
-        // Show the waiting indicator only when this subagent genuinely has a
-        // pending confirmation AND another subagent holds the focus lock.
-        const isWaitingForOtherApproval =
-          isAgentWithPendingConfirmation(tool.resultDisplay) &&
-          focusedSubagentCallId !== null &&
-          focusedSubagentCallId !== tool.callId;
         return (
           <Box key={tool.callId} flexDirection="column" minHeight={1}>
             <Box flexDirection="row" alignItems="center">
@@ -328,8 +325,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   isAgentWithPendingConfirmation(tool.resultDisplay)
                 }
                 isFocused={isSubagentFocused}
-                isPending={isPending}
-                isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             </Box>
             {tool.status === ToolCallStatus.Confirming &&

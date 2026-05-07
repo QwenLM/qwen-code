@@ -103,8 +103,8 @@ vi.mock('../../utils/MarkdownDisplay.js', () => ({
 }));
 vi.mock('./ToolConfirmationMessage.js', () => ({
   ToolConfirmationMessage: function MockToolConfirmationMessage() {
-    // Sentinel string lets `isPending && pendingConfirmation` tests
-    // assert the banner renders (instead of being suppressed).
+    // Sentinel string lets the focus-routed approval tests assert
+    // the banner renders (instead of being suppressed).
     return <Text>MockApprovalPrompt</Text>;
   },
 }));
@@ -315,9 +315,7 @@ describe('<ToolMessage />', () => {
         status: 'running' | 'completed';
         pendingConfirmation?: object;
       };
-      isPending?: boolean;
       isFocused?: boolean;
-      isWaitingForOtherApproval?: boolean;
     }): ToolMessageProps => {
       const resultDisplay = {
         type: 'task_execution' as const,
@@ -331,9 +329,7 @@ describe('<ToolMessage />', () => {
         status: ToolCallStatus.Executing,
         callId: 'gated-task-call',
         forceShowResult: true, // mirror ToolGroupMessage's forceShowResult
-        isPending: overrides.isPending,
         isFocused: overrides.isFocused,
-        isWaitingForOtherApproval: overrides.isWaitingForOtherApproval,
       };
     };
 
@@ -347,7 +343,6 @@ describe('<ToolMessage />', () => {
               taskPrompt: 'Search',
               status: 'running',
             },
-            isPending: true,
           })}
         />,
         StreamingState.Responding,
@@ -371,7 +366,6 @@ describe('<ToolMessage />', () => {
               taskPrompt: 'Already done',
               status: 'completed',
             },
-            isPending: false,
           })}
         />,
         StreamingState.Idle,
@@ -392,7 +386,6 @@ describe('<ToolMessage />', () => {
               status: 'running',
               pendingConfirmation: {} as object,
             },
-            isPending: true,
             isFocused: true,
           })}
         />,
@@ -419,7 +412,6 @@ describe('<ToolMessage />', () => {
               status: 'running',
               pendingConfirmation: {} as object,
             },
-            isPending: true,
             isFocused: false,
           })}
         />,
