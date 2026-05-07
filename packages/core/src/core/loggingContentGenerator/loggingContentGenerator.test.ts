@@ -543,6 +543,44 @@ describe('LoggingContentGenerator', () => {
     expect(activeContextDuringWrappedCall).toBe('api.generateContentStream');
   });
 
+  it('logs stream setup errors before leaving the stream span context', async () => {
+    const setupError = new Error('setup-fail');
+    let activeContextDuringApiError = '';
+    let spanEndedDuringApiError = true;
+    vi.mocked(logApiError).mockImplementationOnce(() => {
+      activeContextDuringApiError = activeOtelContext.current;
+      spanEndedDuringApiError = getStreamSpanRecord().ended;
+    });
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockRejectedValue(setupError),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContentStream(request, 'prompt-setup-error'),
+    ).rejects.toThrow('setup-fail');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    expect(activeContextDuringApiError).toBe('api.generateContentStream');
+    expect(spanEndedDuringApiError).toBe(false);
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'setup-fail' },
+    ]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
   it('logs stream errors and skips response logging', async () => {
     const response1 = createResponse('resp-1', 'model-stream', [
       { text: 'partial' },

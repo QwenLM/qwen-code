@@ -244,13 +244,15 @@ export class LoggingContentGenerator implements ContentGenerator {
       } catch {
         // OTel errors must not mask the original API error
       }
+      const durationMs = Date.now() - startTime;
+      runInContext(() =>
+        this._logApiError('', durationMs, error, req.model, userPromptId),
+      );
       try {
         span.end();
       } catch {
         // OTel errors must not mask the original API error
       }
-      const durationMs = Date.now() - startTime;
-      this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
         await this.logOpenAIInteraction(openaiRequest, undefined, error);
       }
