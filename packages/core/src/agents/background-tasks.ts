@@ -275,12 +275,14 @@ export class BackgroundTaskRegistry {
           `Background entries must terminate via complete/fail/finalizeCancelled.`,
       );
     }
-    // Emit before delete so any future BackgroundStatusChangeCallback that
-    // re-reads `registry.get(agentId)` from inside the callback sees the
-    // entry, matching the ordering used by complete/fail/cancel/finalize.
-    this.emitStatusChange(entry);
+    // Delete before emitting so the status-change callback (which rebuilds
+    // its snapshot via getAll()) no longer includes this entry. Emitting
+    // before delete caused the entry to linger in React state with
+    // status='running' because the callback's getAll() still saw it, and
+    // no second status-change fired after the deletion.
     this.agents.delete(agentId);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
+    this.emitStatusChange(entry);
   }
 
   // See complete() for the cancelled → terminal path rationale.
