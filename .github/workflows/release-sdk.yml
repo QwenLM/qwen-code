@@ -413,7 +413,15 @@ jobs:
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
         run: |-
           set -euo pipefail
-          gh pr merge "${PR_URL}" --squash --auto --delete-branch
+          # Keep [skip ci] on the squash commit that lands on main. The release
+          # PR title also includes it for visibility, but --subject makes the
+          # post-merge CI-skip behavior explicit instead of depending on gh's
+          # default squash subject.
+          gh pr merge "${PR_URL}" \
+            --squash \
+            --auto \
+            --delete-branch \
+            --subject "chore(release): sdk-typescript ${RELEASE_TAG} [skip ci]"
 
       - name: 'Create Issue on Failure'
         if: |-
