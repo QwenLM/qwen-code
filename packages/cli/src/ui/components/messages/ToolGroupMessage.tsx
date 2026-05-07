@@ -164,15 +164,35 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Compact mode: entire group → single line summary
   // Force-expand when: user must interact (Confirming or subagent pending
-  // confirmation), tool errored, shell is focused, or user-initiated
+  // confirmation), tool errored, shell is focused, or user-initiated.
+  // Also force-expand when this group has just committed and contains
+  // a terminal subagent — `CompactToolGroupDisplay` doesn't know about
+  // `task_execution` results, so the compact path would skip
+  // `SubagentScrollbackSummary` and the user would lose the persistent
+  // record promised by the LiveAgentPanel → committed-summary handoff.
+  // Stay compact while the parent turn is still live (`isPending`),
+  // because the panel below the composer is still showing the row.
   const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
+  const hasCommittedTerminalSubagent =
+    !isPending &&
+    toolCalls.some((t) => {
+      const display = t.resultDisplay;
+      if (!display || typeof display !== 'object') return false;
+      if (!('type' in display) || display.type !== 'task_execution')
+        return false;
+      const status = (display as { status?: string }).status;
+      return (
+        status === 'completed' || status === 'failed' || status === 'cancelled'
+      );
+    });
   const showCompact =
     compactMode &&
     !hasConfirmingTool &&
     !hasSubagentPendingConfirmation &&
     !hasErrorTool &&
     !isEmbeddedShellFocused &&
-    !isUserInitiated;
+    !isUserInitiated &&
+    !hasCommittedTerminalSubagent;
 
   if (showCompact) {
     return (

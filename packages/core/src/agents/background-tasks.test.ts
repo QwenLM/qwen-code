@@ -999,7 +999,7 @@ describe('BackgroundTaskRegistry', () => {
       }
     });
 
-    it('unregisterForeground removes the entry and emits status change twice (pre + post delete)', () => {
+    it('unregisterForeground emits status change twice with removed flag on second emit', () => {
       const onStatusChange = vi.fn();
       registry.setStatusChangeCallback(onStatusChange);
 
@@ -1016,14 +1016,25 @@ describe('BackgroundTaskRegistry', () => {
       registry.unregisterForeground('fg-5');
 
       expect(registry.get('fg-5')).toBeUndefined();
-      // Two emits: the pre-delete one matches the
-      // complete/fail/cancel/finalize ordering so callbacks that
-      // re-read `registry.get(agentId)` see the entry; the post-delete
-      // one lets snapshot-based views (`useBackgroundTaskView` calling
-      // `registry.getAll()`) observe the entry-less state without
-      // needing per-tick reconciliation. Both fire synchronously, so
-      // React batches the resulting setState calls into one re-render.
+      // Two emits: the first omits `removed` (entry still present in
+      // the registry — matches complete/fail/cancel/finalize); the
+      // second sets `removed: true` (entry gone). Snapshot-style
+      // consumers can ignore the first; consumers that key off the
+      // entry's last live state can ignore the second. Both fire
+      // synchronously so a typical React-based consumer's setState
+      // calls collapse to a single re-render.
       expect(onStatusChange).toHaveBeenCalledTimes(2);
+      // First call: pre-delete, no context flag (context arg is
+      // undefined since `emitStatusChange(entry)` doesn't pass one).
+      expect(onStatusChange.mock.calls[0][0]).toMatchObject({
+        agentId: 'fg-5',
+      });
+      expect(onStatusChange.mock.calls[0][1]).toBeUndefined();
+      // Second call: post-delete, `removed: true` flag set.
+      expect(onStatusChange.mock.calls[1][0]).toMatchObject({
+        agentId: 'fg-5',
+      });
+      expect(onStatusChange.mock.calls[1][1]).toEqual({ removed: true });
     });
 
     it('unregisterForeground post-delete emit observes registry-less state', () => {
@@ -1042,12 +1053,14 @@ describe('BackgroundTaskRegistry', () => {
       });
 
       const observations: Array<{
+        removed: boolean;
         getAtCallback: BackgroundTaskEntry | undefined;
         getAllCount: number;
       }> = [];
-      registry.setStatusChangeCallback((entry) => {
+      registry.setStatusChangeCallback((entry, context) => {
         if (entry?.agentId !== 'fg-post-delete') return;
         observations.push({
+          removed: context?.removed ?? false,
           getAtCallback: registry.get('fg-post-delete'),
           getAllCount: registry
             .getAll()
@@ -1058,12 +1071,15 @@ describe('BackgroundTaskRegistry', () => {
       registry.unregisterForeground('fg-post-delete');
 
       expect(observations).toHaveLength(2);
-      // First emit (pre-delete): entry still in the registry.
+      // First emit (pre-delete): entry still in the registry, no
+      // `removed` flag → callbacks that re-read see the entry.
+      expect(observations[0].removed).toBe(false);
       expect(observations[0].getAtCallback?.agentId).toBe('fg-post-delete');
       expect(observations[0].getAllCount).toBe(1);
-      // Second emit (post-delete): entry gone. This is what
-      // `useBackgroundTaskView.refresh()` sees, so its merged
-      // entries no longer include the agent.
+      // Second emit (post-delete): `removed: true` flag, entry gone.
+      // This is what `useBackgroundTaskView.refresh()` sees, so its
+      // merged entries no longer include the agent.
+      expect(observations[1].removed).toBe(true);
       expect(observations[1].getAtCallback).toBeUndefined();
       expect(observations[1].getAllCount).toBe(0);
     });
@@ -1135,7 +1151,9 @@ describe('BackgroundTaskRegistry', () => {
       // for snapshot consumers like `useBackgroundTaskView`) sees the
       // registry-less state — both paths are documented + tested
       // separately so a future refactor that collapsed the two emits
-      // would surface here.
+      // would surface here. Consumers that need to distinguish the
+      // two emits without re-querying the registry can read
+      // `context.removed`.
       registry.register({
         agentId: 'fg-unregister-order',
         description: 'sync agent',
@@ -1145,21 +1163,30 @@ describe('BackgroundTaskRegistry', () => {
         abortController: new AbortController(),
       });
 
-      const observed: Array<BackgroundTaskEntry | undefined> = [];
-      registry.setStatusChangeCallback((entry) => {
+      const observed: Array<{
+        live: BackgroundTaskEntry | undefined;
+        removed: boolean;
+      }> = [];
+      registry.setStatusChangeCallback((entry, context) => {
         if (entry?.agentId === 'fg-unregister-order') {
-          observed.push(registry.get(entry.agentId));
+          observed.push({
+            live: registry.get(entry.agentId),
+            removed: context?.removed ?? false,
+          });
         }
       });
 
       registry.unregisterForeground('fg-unregister-order');
 
       expect(observed).toHaveLength(2);
-      // First emit: pre-delete, callback sees the entry.
-      expect(observed[0]).toBeDefined();
-      expect(observed[0]!.agentId).toBe('fg-unregister-order');
-      // Second emit: post-delete, callback sees the registry-less state.
-      expect(observed[1]).toBeUndefined();
+      // First emit: pre-delete, callback sees the entry, `removed` absent.
+      expect(observed[0].live).toBeDefined();
+      expect(observed[0].live!.agentId).toBe('fg-unregister-order');
+      expect(observed[0].removed).toBe(false);
+      // Second emit: post-delete, callback sees the registry-less
+      // state, `removed: true` flag set.
+      expect(observed[1].live).toBeUndefined();
+      expect(observed[1].removed).toBe(true);
       expect(registry.get('fg-unregister-order')).toBeUndefined();
     });
 

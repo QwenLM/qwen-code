@@ -500,11 +500,13 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   isFocused?: boolean;
   /**
    * True while the tool message is rendered inside `pendingHistoryItems`
-   * (live area), false once committed to `<Static>`. Used by the
-   * subagent renderer to gate the scrollback summary so the live area
-   * stays panel-only — without this gate the summary would duplicate
-   * the synthesized row LiveAgentPanel already renders below the
-   * composer the moment a subagent terminates.
+   * (live area), false (or omitted — undefined is treated as false)
+   * once committed to `<Static>`. Live-area renderers MUST pass
+   * `true` explicitly; committed renderers can omit it. Used by the
+   * subagent renderer to gate the scrollback summary so the live
+   * area stays panel-only — without this gate the summary would
+   * duplicate the synthesized row LiveAgentPanel already renders
+   * below the composer the moment a subagent terminates.
    */
   isPending?: boolean;
 }

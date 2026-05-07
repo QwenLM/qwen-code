@@ -18,6 +18,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
+import { CompactModeProvider } from '../../contexts/CompactModeContext.js';
 
 // Mock child components to isolate ToolGroupMessage behavior
 vi.mock('./ToolMessage.js', () => ({
@@ -564,6 +565,109 @@ describe('<ToolGroupMessage />', () => {
       );
       // Should only show confirmation for the first tool
       expect(lastFrame()).toMatchSnapshot();
+    });
+  });
+
+  describe('Compact mode + terminal subagent expansion', () => {
+    // Helper that wraps the group with `compactMode: true` so the
+    // `showCompact` branch is exercised. Verifies the safety net that
+    // forces the group to expand when it carries a committed terminal
+    // subagent — without it, `CompactToolGroupDisplay` would skip the
+    // ToolMessage path and `SubagentScrollbackSummary` would never
+    // surface in scrollback. The committed-summary handoff promised
+    // by the LiveAgentPanel design depends on this.
+    const renderCompact = (component: React.ReactElement, compactMode = true) =>
+      render(
+        <ConfigContext.Provider value={mockConfig}>
+          <CompactModeProvider value={{ compactMode }}>
+            {component}
+          </CompactModeProvider>
+        </ConfigContext.Provider>,
+      );
+
+    const subagentCall = (
+      status: 'running' | 'completed' | 'failed' | 'cancelled',
+    ): IndividualToolCallDisplay =>
+      createToolCall({
+        callId: `task-${status}`,
+        name: 'task',
+        description: 'Delegate task to subagent',
+        status:
+          status === 'running'
+            ? ToolCallStatus.Executing
+            : status === 'completed'
+              ? ToolCallStatus.Success
+              : ToolCallStatus.Error,
+        resultDisplay: {
+          type: 'task_execution',
+          subagentName: 'researcher',
+          taskDescription: 'investigate the change',
+          taskPrompt: 'investigate',
+          status,
+        } as AgentResultDisplay,
+      });
+
+    it('compact mode: committed group with completed subagent forces expand', () => {
+      // isPending=false (committed) + completed subagent → expand,
+      // routing through ToolMessage so the scrollback summary lands
+      // in the persistent record.
+      const { lastFrame } = renderCompact(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('completed')]}
+          isPending={false}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // The MockToolMessage's `MockSubagent[task-completed]` sentinel
+      // proves we routed through the expanded path; absence would
+      // mean CompactToolGroupDisplay swallowed the call.
+      expect(frame).toContain('MockSubagent[task-completed]');
+    });
+
+    it('compact mode: live group with running subagent stays compact', () => {
+      // isPending=true (live) → panel below the composer owns the
+      // row; staying compact keeps scrollback quiet until the parent
+      // turn commits.
+      const { lastFrame } = renderCompact(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('running')]}
+          isPending={true}
+        />,
+      );
+      // Compact path renders the group header / count, NOT the
+      // expanded MockToolMessage sentinel.
+      expect(lastFrame() ?? '').not.toContain('MockSubagent[task-running]');
+    });
+
+    it('compact mode: live group with completed subagent stays compact', () => {
+      // The subagent terminated mid-turn but the parent is still
+      // running. Panel shows the synthesized / terminal row; the
+      // group should NOT yet expand to render the scrollback summary
+      // (that happens when the parent commits, isPending=false).
+      const { lastFrame } = renderCompact(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('completed')]}
+          isPending={true}
+        />,
+      );
+      expect(lastFrame() ?? '').not.toContain('MockSubagent[task-completed]');
+    });
+
+    it('compact mode: committed group with failed subagent forces expand', () => {
+      // Same as the completed case — the scrollback summary needs to
+      // land for failed / cancelled foreground subagents too so the
+      // user has a permanent record of the run's outcome.
+      const { lastFrame } = renderCompact(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('failed')]}
+          isPending={false}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('MockSubagent[task-failed]');
     });
   });
 });
