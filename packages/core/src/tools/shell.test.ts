@@ -2597,6 +2597,43 @@ describe('ShellTool', () => {
     });
 
     describe('addAttributionToPR', () => {
+      // Non-inline-body flows: `--body-file <path>` reads the body
+      // from a file on disk, `--fill` populates it from commit
+      // messages, and bare `gh pr create` opens an editor. None of
+      // these have a body argv we can splice the attribution into.
+      // We can't safely modify them automatically (would either
+      // mutate the user's file on disk or break the editor flow),
+      // so we leave the command untouched and rely on the debug
+      // warning to surface the skip when QWEN_DEBUG_LOG_FILE is set.
+      it.each([
+        ['--body-file', 'gh pr create --title "x" --body-file /tmp/body.md'],
+        ['--fill', 'gh pr create --title "x" --fill'],
+        ['no body flag (editor)', 'gh pr create --title "x"'],
+      ])(
+        'should leave gh pr create %s unchanged (non-inline-body flow)',
+        async (_label, command) => {
+          const invocation = shellTool.build({ command, is_background: false });
+          const promise = invocation.execute(mockAbortSignal);
+
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+
+          await promise;
+
+          const observed = mockShellExecutionService.mock.calls[0][0] as string;
+          expect(observed).toBe(command);
+          expect(observed).not.toContain('Generated with Qwen Code');
+        },
+      );
+
       // `gh pr new` is a documented alias for `gh pr create`. Without
       // explicit alias handling the rewrite silently misses it.
       it('should append attribution to `gh pr new --body "..."` (alias form)', async () => {

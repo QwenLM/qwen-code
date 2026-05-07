@@ -3078,6 +3078,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
+    // Reached here means: `gh pr create`/`gh pr new` was detected,
+    // `gitCoAuthor.pr` is enabled, but the regex found no inline
+    // `--body`/`-b` to splice the attribution into. Common causes
+    // are `--body-file <path>`, `--fill` (uses commit messages as
+    // body), or just bare `gh pr create` (opens an editor). The
+    // command runs as the user typed it; we just don't add the
+    // attribution line. Surface this as a debug warning so a user
+    // wondering "why isn't my PR getting the trailer?" can see the
+    // skip in `QWEN_DEBUG_LOG_FILE`. Inline-body rewriting is the
+    // only safe automatic path — `--body-file` would require us to
+    // mutate the user's file on disk; `--fill` and editor flows
+    // have no body in argv at all.
+    debugLogger.warn(
+      'addAttributionToPR: gh pr create detected but no inline ' +
+        '`--body`/`-b` argument found to append attribution to ' +
+        '(--body-file / --fill / editor flows are unsupported); ' +
+        'PR will be created without the AI attribution line. ' +
+        'Pass `--body "..."` inline to enable automatic attribution.',
+    );
     return command;
   }
 }

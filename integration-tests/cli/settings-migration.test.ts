@@ -24,6 +24,7 @@ const {
   v2PreexistingEnableSettings,
   v3LegacyDisableSettings,
   v999FutureVersionSettings,
+  v3GitCoAuthorBooleanSettings,
 } = workspacesSettings;
 
 /**
@@ -537,6 +538,44 @@ describe('settings-migration', () => {
       // Custom settings should be preserved
       expect(finalSettings['custom']).toEqual({
         note: 'should remain unchanged in v3',
+      });
+    });
+
+    // V3 used to allow `general.gitCoAuthor: <boolean>`. The V3→V4
+    // migration must expand that boolean into the new
+    // `{ commit, pr }` object shape so the user's stored opt-out
+    // doesn't get silently overwritten by the schema defaults
+    // (which default both sub-toggles to `true`) on the next save.
+    // The unit test in `v3-to-v4.test.ts` already pins the
+    // migration body, but without an end-to-end fixture the real
+    // CLI load → migrate → write path could regress without
+    // this suite noticing.
+    it('should expand legacy boolean general.gitCoAuthor: false through V3 → V4', async () => {
+      rig.setup('v3-gitcoauthor-boolean');
+
+      overwriteSettingsFile(rig, v3GitCoAuthorBooleanSettings);
+
+      try {
+        await rig.runCommand(['mcp', 'list']);
+      } catch {
+        // Expected to potentially fail
+      }
+
+      const finalSettings = readSettingsFile(rig);
+
+      expect(finalSettings['$version']).toBe(4);
+      expect(
+        (finalSettings['general'] as Record<string, unknown>)?.['gitCoAuthor'],
+      ).toEqual({ commit: false, pr: false });
+      // Sibling general.* keys must survive the migration unchanged.
+      expect(
+        (finalSettings['general'] as Record<string, unknown>)?.[
+          'disableAutoUpdate'
+        ],
+      ).toBe(true);
+      // And so must unrelated top-level sections.
+      expect(finalSettings['custom']).toEqual({
+        note: 'preserve me through v3->v4',
       });
     });
   });
