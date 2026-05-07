@@ -759,6 +759,25 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('opts validation', () => {
+    it('rejects an invalid sessionScope', () => {
+      expect(() =>
+        createHttpAcpBridge({
+          sessionScope: 'bogus' as unknown as 'single',
+        }),
+      ).toThrow(/Invalid sessionScope/);
+    });
+
+    it('rejects a non-positive initializeTimeoutMs', () => {
+      expect(() => createHttpAcpBridge({ initializeTimeoutMs: 0 })).toThrow(
+        /initializeTimeoutMs/,
+      );
+      expect(() => createHttpAcpBridge({ initializeTimeoutMs: -1 })).toThrow(
+        /initializeTimeoutMs/,
+      );
+    });
+  });
+
   describe('concurrent spawn coalescing (single scope)', () => {
     it('two parallel calls for the same workspace spawn ONE channel', async () => {
       let spawnCount = 0;

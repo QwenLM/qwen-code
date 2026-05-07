@@ -296,8 +296,19 @@ const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 
 export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   const sessionScope = opts.sessionScope ?? 'single';
+  if (sessionScope !== 'single' && sessionScope !== 'thread') {
+    throw new TypeError(
+      `Invalid sessionScope: ${JSON.stringify(sessionScope)}. ` +
+        `Expected 'single' or 'thread'.`,
+    );
+  }
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   const initTimeoutMs = opts.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
+  if (initTimeoutMs <= 0) {
+    throw new TypeError(
+      `Invalid initializeTimeoutMs: ${initTimeoutMs}. Must be > 0.`,
+    );
+  }
 
   // Single-scope reuse keyed by canonical workspace path.
   const byWorkspace = new Map<string, SessionEntry>();

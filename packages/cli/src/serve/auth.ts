@@ -7,6 +7,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import cors from 'cors';
+import { isLoopbackBind } from './loopbackBinds.js';
 
 class CORSError extends Error {
   constructor(message: string) {
@@ -38,13 +39,11 @@ export const denyBrowserOriginCors = cors({
  * lazily on each request because callers commonly request port 0 (ephemeral)
  * and only learn the actual port once `listen()` has resolved.
  */
-const LOOPBACK_HOST_BINDS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
-
 export function hostAllowlist(
   bind: string,
   getPort: () => number,
 ): RequestHandler {
-  if (!LOOPBACK_HOST_BINDS.has(bind)) {
+  if (!isLoopbackBind(bind)) {
     // For non-loopback binds the operator chose the surface area; trust the
     // bearer token gate to cover Host header spoofing.
     return (_req: Request, _res: Response, next: NextFunction) => next();

@@ -227,7 +227,8 @@ export function createServeApp(
     // Disable proxy buffering (nginx); event-stream content type alone
     // doesn't always reach the client through every proxy.
     res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders?.();
+    // Always present in Node >= 20, which `engines` requires.
+    res.flushHeaders();
     // Tell EventSource to retry after 3s on disconnect.
     res.write('retry: 3000\n\n');
 
@@ -237,13 +238,21 @@ export function createServeApp(
     const heartbeatTimer = setInterval(() => {
       if (!res.writableEnded) res.write(': heartbeat\n\n');
     }, 15_000);
-    heartbeatTimer.unref?.();
+    heartbeatTimer.unref();
 
     const cleanup = () => {
       clearInterval(heartbeatTimer);
       abort.abort();
     };
     req.on('close', cleanup);
+    // Swallow socket-level write errors. When the underlying TCP connection
+    // dies (RST, mid-flight kill -9), the next `res.write` throws EPIPE.
+    // Without an `error` listener Express forwards it to its default error
+    // handler which logs noisily. The req.on('close') path above is what we
+    // actually rely on to tear down the subscription; this listener just
+    // suppresses the noise + ensures cleanup runs even if for some reason
+    // the close event doesn't fire first.
+    res.on('error', cleanup);
 
     void (async () => {
       try {

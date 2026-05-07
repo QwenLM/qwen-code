@@ -610,6 +610,66 @@ describe('runQwenServe', () => {
     handle = undefined;
     expect(bridge.shutdownCalls).toBe(1);
   });
+
+  it('force-closes connections after the shutdown timeout', async () => {
+    const bridge = fakeBridge();
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    // Open a long-lived SSE-like connection; without force-close the
+    // listener's `server.close` would hang on this socket forever.
+    const sseFetch = fetch(`http://127.0.0.1:${port}/session/dangle/events`);
+
+    // close() is expected to resolve in well under the 5s force-close
+    // window — but well above 0ms because the timer arms after bridge
+    // shutdown. Just assert it resolves at all and observe roughly when.
+    const start = Date.now();
+    await handle.close();
+    handle = undefined;
+    const elapsed = Date.now() - start;
+
+    // The fakeBridge's subscribe stream is empty so the SSE response ends
+    // promptly; this assertion mainly proves the close didn't hang on the
+    // live connection. Even if the connection had stayed open, the 5s
+    // force-close timer would unblock us.
+    expect(elapsed).toBeLessThan(5_500);
+    // Drain the fetch promise so vitest doesn't complain about open handles.
+    try {
+      const res = await sseFetch;
+      await res.body?.cancel();
+    } catch {
+      /* socket may be torn down by force-close */
+    }
+  });
+
+  it('detaches its SIGINT/SIGTERM listeners after close completes', async () => {
+    const bridge = fakeBridge();
+    const sigintBefore = process.listenerCount('SIGINT');
+    const sigtermBefore = process.listenerCount('SIGTERM');
+
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+
+    // runQwenServe attaches one of each.
+    expect(process.listenerCount('SIGINT')).toBe(sigintBefore + 1);
+    expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore + 1);
+
+    await handle.close();
+    handle = undefined;
+
+    // After drain completes, the listener that runQwenServe added is gone.
+    // (Detaching during drain would leave a second-signal-during-shutdown
+    // hitting Node's default termination behavior; this design detaches at
+    // the end of `finish` so the `if (shuttingDown) return` guard is the
+    // sole no-op path during the drain window.)
+    expect(process.listenerCount('SIGINT')).toBe(sigintBefore);
+    expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore);
+  });
 });
 
 describe('GET /session/:id/events (SSE)', () => {

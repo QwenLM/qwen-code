@@ -7,16 +7,12 @@
 import { type Server } from 'node:http';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { createHttpAcpBridge, type HttpAcpBridge } from './httpAcpBridge.js';
+import { isLoopbackBind } from './loopbackBinds.js';
 import { createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
-// Hostnames that don't require a token (developer convenience). Includes the
-// IPv6 loopback variants because Node may bind to `::1` when the OS prefers
-// IPv6 even for the literal string `localhost`. We compare against the raw
-// hostname string the operator typed, not the resolved interface — both
-// must be loopback for the bind to be auth-free.
-const LOOPBACK_BINDS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 
 export interface RunHandle {
   server: Server;
@@ -49,7 +45,7 @@ export async function runQwenServe(
   const token = optsIn.token ?? process.env[QWEN_SERVER_TOKEN_ENV];
   const opts: ServeOptions = { ...optsIn, token };
 
-  if (!LOOPBACK_BINDS.has(opts.hostname) && !token) {
+  if (!isLoopbackBind(opts.hostname) && !token) {
     throw new Error(
       `Refusing to bind ${opts.hostname}:${opts.port} without a bearer token. ` +
         `Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to 127.0.0.1.`,
@@ -73,34 +69,9 @@ export async function runQwenServe(
       }
 
       let shuttingDown = false;
-      const detachSignals = () => {
-        process.removeListener('SIGINT', onSignal);
-        process.removeListener('SIGTERM', onSignal);
-      };
 
-      const handle: RunHandle = {
-        server,
-        url,
-        bridge,
-        close: () =>
-          new Promise<void>((res, rej) => {
-            shuttingDown = true;
-            detachSignals();
-            // Tear down child agents before closing the listener so in-flight
-            // requests aren't left holding references to dead processes.
-            bridge
-              .shutdown()
-              .catch((err) =>
-                writeStderrLine(
-                  `qwen serve: bridge shutdown error: ${String(err)}`,
-                ),
-              )
-              .finally(() => {
-                server.close((err) => (err ? rej(err) : res()));
-              });
-          }),
-      };
-
+      // Forward declaration so handle.close can detach the listener after
+      // drain completes. The handler is registered just before `resolve()`.
       const onSignal = async (signal: NodeJS.Signals) => {
         if (shuttingDown) return;
         writeStderrLine(`qwen serve: received ${signal}, draining...`);
@@ -112,6 +83,64 @@ export async function runQwenServe(
           process.exit(1);
         }
       };
+
+      const handle: RunHandle = {
+        server,
+        url,
+        bridge,
+        close: () =>
+          new Promise<void>((res, rej) => {
+            shuttingDown = true;
+            // NOTE: the SIGINT/SIGTERM handlers stay attached during the
+            // drain. Their `if (shuttingDown) return` guard makes a second
+            // signal a no-op. Detaching them up front would leave Node's
+            // default signal behavior in charge — a second SIGTERM mid-drain
+            // would terminate the process and orphan agent children. We
+            // detach AFTER drain completes (`finish` below).
+
+            // server.close waits for in-flight connections (e.g. long-lived
+            // SSE subscribers) before invoking the callback. Without a force
+            // timeout, a single hung consumer can block shutdown forever.
+            // Race a setTimeout against the natural close.
+            let settled = false;
+            const finish = (err?: Error | null) => {
+              if (settled) return;
+              settled = true;
+              // Drain finished (or timed out) — safe to detach now.
+              process.removeListener('SIGINT', onSignal);
+              process.removeListener('SIGTERM', onSignal);
+              if (err) rej(err);
+              else res();
+            };
+            const forceTimer = setTimeout(() => {
+              writeStderrLine(
+                `qwen serve: ${SHUTDOWN_FORCE_CLOSE_MS}ms shutdown timeout reached; force-closing remaining connections`,
+              );
+              // Force-destroy every still-open connection on the listener.
+              // This unblocks `server.close` which then resolves naturally.
+              server.closeAllConnections?.();
+              setTimeout(() => finish(), 100).unref();
+            }, SHUTDOWN_FORCE_CLOSE_MS);
+            forceTimer.unref();
+
+            // Tear down child agents before closing the listener so in-flight
+            // requests aren't left holding references to dead processes.
+            bridge
+              .shutdown()
+              .catch((err) =>
+                writeStderrLine(
+                  `qwen serve: bridge shutdown error: ${String(err)}`,
+                ),
+              )
+              .finally(() => {
+                server.close((err) => {
+                  clearTimeout(forceTimer);
+                  finish(err);
+                });
+              });
+          }),
+      };
+
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
 
