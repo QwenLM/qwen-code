@@ -908,6 +908,18 @@ const SETTINGS_SCHEMA = {
     default: undefined as TelemetrySettings | undefined,
     description: 'Telemetry configuration.',
     showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'object',
+      properties: {
+        includeSensitiveSpanAttributes: {
+          description:
+            'Include prompt, function_args, and response_text in spans created by the log-to-span bridge. Does not affect telemetry logs.',
+          type: 'boolean',
+          default: false,
+        },
+      },
+      additionalProperties: true,
+    },
   },
 
   fastModel: {

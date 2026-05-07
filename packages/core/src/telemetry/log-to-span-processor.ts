@@ -27,6 +27,10 @@ const SENSITIVE_ATTRIBUTE_KEYS = new Set([
   'response_text',
 ]);
 
+interface LogToSpanProcessorOptions {
+  includeSensitiveAttributes?: boolean;
+}
+
 /**
  * A LogRecordProcessor that converts each OTel log record into a span
  * and exports it directly through the provided SpanExporter.
@@ -45,12 +49,22 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private flushTimer: ReturnType<typeof setInterval> | undefined;
   private inFlightExport: Promise<void> | undefined;
   private readonly flushIntervalMs: number;
+  private readonly includeSensitiveAttributes: boolean;
 
   constructor(
     private readonly spanExporter: SpanExporter,
-    flushIntervalMs = 5000,
+    flushIntervalMsOrOptions: number | LogToSpanProcessorOptions = 5000,
+    options: LogToSpanProcessorOptions = {},
   ) {
-    this.flushIntervalMs = flushIntervalMs;
+    if (typeof flushIntervalMsOrOptions === 'number') {
+      this.flushIntervalMs = flushIntervalMsOrOptions;
+      this.includeSensitiveAttributes =
+        options.includeSensitiveAttributes ?? false;
+    } else {
+      this.flushIntervalMs = 5000;
+      this.includeSensitiveAttributes =
+        flushIntervalMsOrOptions.includeSensitiveAttributes ?? false;
+    }
     this.flushTimer = setInterval(() => {
       void this.flush();
     }, this.flushIntervalMs);
@@ -67,7 +81,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         if (
           value !== undefined &&
           value !== null &&
-          !SENSITIVE_ATTRIBUTE_KEYS.has(key)
+          (this.includeSensitiveAttributes ||
+            !SENSITIVE_ATTRIBUTE_KEYS.has(key))
         ) {
           attributes[key] =
             typeof value === 'object'
