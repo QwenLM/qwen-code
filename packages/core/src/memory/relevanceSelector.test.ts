@@ -48,7 +48,7 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
 
   it('returns documents chosen by the side-query selector', async () => {
     vi.mocked(runSideQuery).mockResolvedValue({
-      selected_memories: ['preferences.md'],
+      selected_memories: ['user.md'],
     });
 
     const result = await selectRelevantAutoMemoryDocumentsByModel(
