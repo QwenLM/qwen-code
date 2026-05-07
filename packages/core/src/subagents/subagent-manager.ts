@@ -48,6 +48,10 @@ import { parseSubagentModelSelection } from './model-selection.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
+import {
+  hasRebuiltToolRegistry,
+  rebuildToolRegistryOnOverride,
+} from '../tools/agent/agent.js';
 
 const QWEN_CONFIG_DIR = '.qwen';
 const AGENT_CONFIG_DIR = 'agents';
@@ -701,22 +705,38 @@ export class SubagentManager {
     base: Config,
   ): Promise<Config> {
     const selection = parseSubagentModelSelection(config.model);
+    // Skip the registry rebuild if any wrapper above `base` already
+    // rebuilt one (typically `agent.ts:createApprovalModeOverride`,
+    // which marks itself via Symbol-keyed flag — Symbol property lookup
+    // walks the prototype chain, so this also catches
+    // wrapper-on-wrapper layering like
+    // `bgConfig = Object.create(agentConfig)` passed in from the
+    // background path). Rebuilding a second time would waste work,
+    // leak listeners on shared managers (any AgentTool / SkillTool the
+    // second registry later instantiates registers a change-listener
+    // and the short-lived registry has no explicit stop() site), and
+    // split the cache so client-level cache clears target an empty
+    // second-layer cache while bound tools (still in the upstream
+    // layer's registry) keep using the upstream cache.
+    const upstreamRebuilt = hasRebuiltToolRegistry(base);
+
     if (selection.inherits) {
       // Thin prototype-delegation override: no method changes, but a
       // distinct instance triggers the lazy-init in
       // `Config.getFileReadCache()` so the subagent gets its own
       // cache rather than inheriting the parent's.
       //
-      // Same caveat as in `agent.ts:createApprovalModeOverride`: the
-      // tool registry was bound on the parent at initialise time, so
-      // tool invocations still resolve `this.config` to the parent
-      // and reach the parent's cache. `InProcessBackend.createPerAgentConfig`
-      // already rebuilds the registry via `override.createToolRegistry()`
-      // + `copyDiscoveredToolsFrom(base.getToolRegistry())`; doing
-      // that here is the follow-up that closes the bound-tool path.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const isolated = Object.create(base) as any;
-      return isolated as Config;
+      // When no upstream rebuild has happened, also rebuild the tool
+      // registry so `EditTool` / `WriteFileTool` / `ReadFileTool` are
+      // bound to the override and resolve `this.config` to the subagent
+      // — without that step, the parent's cached tool instances still
+      // reach the parent's FileReadCache and silently weaken prior-read
+      // enforcement on the subagent's mutation paths.
+      const isolated = Object.create(base) as Config;
+      if (!upstreamRebuilt) {
+        await rebuildToolRegistryOnOverride(isolated, base);
+      }
+      return isolated;
     }
 
     const authType =
@@ -744,6 +764,14 @@ export class SubagentManager {
     override.getAuthType = (): AuthType | undefined =>
       agentGeneratorConfig.authType;
     override.getModel = (): string => agentGeneratorConfig.model;
+
+    // Rebuild the tool registry on the override so core tools resolve
+    // `this.config` to the subagent — but only if the upstream caller
+    // did not already build one. See the comment at the top of this
+    // function for the reasoning.
+    if (!upstreamRebuilt) {
+      await rebuildToolRegistryOnOverride(override as Config, base);
+    }
 
     debugLogger.info(
       `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${agentGeneratorConfig.model}`,
