@@ -512,9 +512,52 @@ export class ContentGenerationPipeline {
       const result = await executor(openaiRequest, context);
       return result;
     } catch (error) {
+      // Retry once for model-unloaded errors.
+      // Local model servers like LM Studio support Just-In-Time (JIT) model
+      // loading: they load the model into memory when they receive the actual
+      // chat completion request. If the model is not currently loaded, the
+      // server returns an error (e.g. "Model is unloaded") instead of loading
+      // it. A single retry gives the server a second chance to load the model.
+      if (this.isModelUnloadedError(error)) {
+        try {
+          const openaiRequest = await this.buildRequest(
+            request,
+            userPromptId,
+            context,
+            isStreaming,
+          );
+          return await executor(openaiRequest, context);
+        } catch (retryError) {
+          return await this.handleError(retryError, context, request);
+        }
+      }
       // Use shared error handling logic
       return await this.handleError(error, context, request);
     }
+  }
+
+  /**
+   * Check if an error indicates that the model is not currently loaded in memory.
+   *
+   * Local model servers like LM Studio may return an error when the requested
+   * model is not loaded, instead of loading it on demand. This method detects
+   * such errors so the pipeline can retry the request.
+   */
+  private isModelUnloadedError(error: unknown): boolean {
+    if (!error) return false;
+
+    const errorMessage =
+      error instanceof Error
+        ? error.message.toLowerCase()
+        : String(error).toLowerCase();
+
+    return (
+      errorMessage.includes('model is unloaded') ||
+      errorMessage.includes('model not loaded') ||
+      errorMessage.includes('model unloaded') ||
+      errorMessage.includes('is not loaded') ||
+      errorMessage.includes('model not found')
+    );
   }
 
   /**
