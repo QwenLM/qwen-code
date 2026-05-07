@@ -1477,6 +1477,15 @@ describe('Tool Control Parameters (E2E)', () => {
             }
           }
 
+          // Make the read-first dependency explicit: if the model
+          // skipped read_file, prior-read enforcement would surface
+          // EDIT_REQUIRES_PRIOR_READ instead of the canUseTool deny
+          // message we are asserting on below — fail fast with a
+          // clear signal instead of a confusing toContain mismatch.
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+          expect(toolNames).toContain('read_file');
+
           // write_file should have been attempted but stream was closed
           const writeFileResults = findToolResults(messages, 'write_file');
           expect(writeFileResults.length).toBeGreaterThan(0);
@@ -1540,9 +1549,12 @@ describe('Tool Control Parameters (E2E)', () => {
             cwd: testDir,
             permissionMode: 'default',
             coreTools: ['read_file', 'write_file'],
-            canUseTool: async (toolName) => {
+            canUseTool: async (toolName, input) => {
               canUseToolCalls.push(toolName);
-              return { behavior: 'allow', updatedInput: {} };
+              // Pass-through: empty `updatedInput` would erase
+              // file_path on the SDK→CLI boundary
+              // (permissionController.ts:444 truthy-replaces args).
+              return { behavior: 'allow', updatedInput: input };
             },
             debug: false,
           },
