@@ -54,4 +54,5 @@ export const STAGE1_FEATURES: readonly string[] = [
   'session_prompt',
   'session_cancel',
   'session_events',
+  'permission_vote',
 ] as const;

@@ -136,6 +136,35 @@ export function createServeApp(
     }
   });
 
+  app.post('/permission/:requestId', (req, res) => {
+    const requestId = req.params['requestId'];
+    const body =
+      typeof req.body === 'object' && req.body !== null
+        ? (req.body as Record<string, unknown>)
+        : {};
+    const outcome = body['outcome'];
+    if (!isValidOutcome(outcome)) {
+      res.status(400).json({
+        error:
+          '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`',
+      });
+      return;
+    }
+    const accepted = bridge.respondToPermission(requestId, {
+      ...(body as object),
+      outcome,
+    } as Parameters<HttpAcpBridge['respondToPermission']>[1]);
+    if (!accepted) {
+      // Either the requestId never existed or another client already won
+      // the race. Stage 1 doesn't distinguish — both surface as 404.
+      res
+        .status(404)
+        .json({ error: 'No pending permission request', requestId });
+      return;
+    }
+    res.status(200).json({});
+  });
+
   app.get('/session/:id/events', (req, res) => {
     const sessionId = req.params['id'];
     const lastEventId = parseLastEventId(req.headers['last-event-id']);
@@ -205,6 +234,15 @@ export function createServeApp(
   });
 
   return app;
+}
+
+function isValidOutcome(
+  raw: unknown,
+): raw is { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string } {
+  if (typeof raw !== 'object' || raw === null) return false;
+  const obj = raw as Record<string, unknown>;
+  if (obj['outcome'] === 'cancelled') return true;
+  return obj['outcome'] === 'selected' && typeof obj['optionId'] === 'string';
 }
 
 function parseLastEventId(raw: unknown): number | undefined {

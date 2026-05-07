@@ -509,6 +509,252 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('permission flow', () => {
+    /** Spin up a bridge with a hand-driven channel; returns the bridge,
+     *  session, and a function the test uses to call `requestPermission`
+     *  from the agent side. */
+    async function setupForPermission() {
+      let capturedConn: AgentSideConnection | undefined;
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const fakeAgent = new FakeAgent();
+        // The agent side gets an AgentSideConnection; that exposes a
+        // ClientSideConnection-equivalent on its `agent` callback. We need
+        // to drive `requestPermission` from the agent direction — for that
+        // the agent calls back through its `connection` instance.
+        const conn = new AgentSideConnection(() => fakeAgent, agentStream);
+        // Save the connection — agent code uses `conn.requestPermission(...)`
+        // which sends the JSON-RPC request to the bridge's BridgeClient.
+        capturedConn = conn;
+        const handle = { killed: false };
+        handles.push(handle);
+        return {
+          stream: clientStream,
+          kill: async () => {
+            handle.killed = true;
+          },
+        };
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      return { bridge, session, conn: capturedConn!, handles };
+    }
+
+    it('publishes a permission_request event with a generated requestId and awaits a vote', async () => {
+      const { bridge, session, conn } = await setupForPermission();
+
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+
+      // Fire requestPermission from the agent side.
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'rm -rf /' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      });
+
+      // Read the permission_request event off the bus.
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      expect(next.done).toBe(false);
+      const evt = next.value!;
+      expect(evt.type).toBe('permission_request');
+      const payload = evt.data as {
+        requestId: string;
+        sessionId: string;
+        options: Array<{ optionId: string }>;
+      };
+      expect(typeof payload.requestId).toBe('string');
+      expect(payload.requestId.length).toBeGreaterThan(0);
+      expect(payload.sessionId).toBe(session.sessionId);
+      expect(payload.options.map((o) => o.optionId)).toEqual(['allow', 'deny']);
+      expect(bridge.pendingPermissionCount).toBe(1);
+
+      // Vote.
+      const accepted = bridge.respondToPermission(payload.requestId, {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+      expect(accepted).toBe(true);
+
+      // The agent's promise resolves.
+      const response = (await respPromise) as {
+        outcome: { outcome: string; optionId?: string };
+      };
+      expect(response.outcome.outcome).toBe('selected');
+      expect(response.outcome.optionId).toBe('allow');
+      expect(bridge.pendingPermissionCount).toBe(0);
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('first-responder wins: a second vote returns false', async () => {
+      const { bridge, session, conn } = await setupForPermission();
+
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'x' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+
+      const it = iter[Symbol.asyncIterator]();
+      const evt = (await it.next()).value!;
+      const requestId = (evt.data as { requestId: string }).requestId;
+
+      const first = bridge.respondToPermission(requestId, {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+      const second = bridge.respondToPermission(requestId, {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(first).toBe(true);
+      expect(second).toBe(false);
+
+      await respPromise; // resolved by the first vote
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('publishes a permission_resolved event when a vote lands', async () => {
+      const { bridge, session, conn } = await setupForPermission();
+
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+
+      void (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'x' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+
+      const it = iter[Symbol.asyncIterator]();
+      const reqEvt = (await it.next()).value!;
+      const requestId = (reqEvt.data as { requestId: string }).requestId;
+      bridge.respondToPermission(requestId, {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+
+      const resolvedEvt = (await it.next()).value!;
+      expect(resolvedEvt.type).toBe('permission_resolved');
+      expect(resolvedEvt.data).toMatchObject({
+        requestId,
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('respondToPermission returns false for unknown requestId', async () => {
+      const bridge = createHttpAcpBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const accepted = bridge.respondToPermission('does-not-exist', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(accepted).toBe(false);
+      await bridge.shutdown();
+    });
+
+    it('cancelSession resolves outstanding permissions as cancelled', async () => {
+      const { bridge, session, conn } = await setupForPermission();
+
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'x' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+
+      // Drain the permission_request event off the bus before cancelling
+      // (resolving via cancel publishes a permission_resolved event;
+      // ensure the consumer's queue isn't already full of unread frames).
+      const it = iter[Symbol.asyncIterator]();
+      await it.next();
+      expect(bridge.pendingPermissionCount).toBe(1);
+
+      await bridge.cancelSession(session.sessionId);
+
+      const response = (await respPromise) as {
+        outcome: { outcome: string };
+      };
+      expect(response.outcome.outcome).toBe('cancelled');
+      expect(bridge.pendingPermissionCount).toBe(0);
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('shutdown resolves outstanding permissions as cancelled', async () => {
+      const { bridge, session, conn } = await setupForPermission();
+
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'x' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+
+      const it = iter[Symbol.asyncIterator]();
+      await it.next();
+      expect(bridge.pendingPermissionCount).toBe(1);
+
+      await bridge.shutdown();
+
+      const response = (await respPromise) as {
+        outcome: { outcome: string };
+      };
+      expect(response.outcome.outcome).toBe('cancelled');
+      expect(bridge.pendingPermissionCount).toBe(0);
+
+      subAbort.abort();
+    });
+  });
+
   describe('subscribeEvents', () => {
     it('throws SessionNotFoundError for unknown session ids', () => {
       const bridge = createHttpAcpBridge({

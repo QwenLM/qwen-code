@@ -5,6 +5,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -98,8 +99,21 @@ export interface HttpAcpBridge {
     opts?: SubscribeOptions,
   ): AsyncIterable<BridgeEvent>;
 
+  /**
+   * Cast a vote on a pending `permission_request` (first-responder wins).
+   * Returns true when the vote was accepted, false when the requestId is
+   * unknown — either never existed or already resolved by another client.
+   */
+  respondToPermission(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): boolean;
+
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
+
+  /** Test/inspection hook: number of permission requests awaiting a vote. */
+  readonly pendingPermissionCount: number;
 
   /** Close all live child processes; called on daemon shutdown. */
   shutdown(): Promise<void>;
@@ -158,6 +172,19 @@ interface SessionEntry {
    * caller still observes the rejection on its own returned promise.
    */
   promptQueue: Promise<void>;
+  /**
+   * Permission requestIds belonging to this session, kept so cancelSession
+   * + shutdown can resolve them as `cancelled` per ACP requirement
+   * (cancelled prompt MUST resolve outstanding requestPermission with
+   * outcome.cancelled).
+   */
+  pendingPermissionIds: Set<string>;
+}
+
+interface PendingPermission {
+  requestId: string;
+  sessionId: string;
+  resolve: (resp: RequestPermissionResponse) => void;
 }
 
 /**
@@ -165,20 +192,44 @@ interface SessionEntry {
  * the agent asks the client (file reads/writes, permission prompts).
  *
  * Stage 1 behavior:
- *   - `requestPermission` denies by default. The HTTP `/permission/:requestId`
- *     route in a follow-up will let any attached client cast the deciding
- *     vote (first-responder wins).
+ *   - `requestPermission` publishes a `permission_request` event onto the
+ *     session bus and awaits the first HTTP `POST /permission/:requestId`
+ *     vote (first-responder wins). When the session is cancelled or the
+ *     daemon shuts down, the pending promise resolves with
+ *     `{ outcome: { outcome: 'cancelled' } }` per ACP spec.
  *   - `sessionUpdate` notifications publish onto the session's EventBus; SSE
  *     subscribers (`GET /session/:id/events`) drain it.
  *   - File reads/writes proxy to local fs (daemon and agent share the host).
  */
 class BridgeClient implements Client {
-  constructor(private readonly resolveEntry: () => SessionEntry | undefined) {}
+  constructor(
+    private readonly resolveEntry: () => SessionEntry | undefined,
+    private readonly registerPending: (pending: PendingPermission) => void,
+  ) {}
 
   async requestPermission(
-    _params: RequestPermissionRequest,
+    params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
-    return { outcome: { outcome: 'cancelled' } };
+    const entry = this.resolveEntry();
+    if (!entry) return { outcome: { outcome: 'cancelled' } };
+
+    const requestId = randomUUID();
+    return await new Promise<RequestPermissionResponse>((resolve) => {
+      this.registerPending({
+        requestId,
+        sessionId: entry.sessionId,
+        resolve,
+      });
+      entry.events.publish({
+        type: 'permission_request',
+        data: {
+          requestId,
+          sessionId: entry.sessionId,
+          toolCall: params.toolCall,
+          options: params.options,
+        },
+      });
+    });
   }
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
@@ -218,10 +269,61 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   // Single-scope reuse keyed by canonical workspace path.
   const byWorkspace = new Map<string, SessionEntry>();
   const byId = new Map<string, SessionEntry>();
+  // Daemon-wide pending permission table; requestIds are UUIDs so collisions
+  // across sessions are infeasible in practice.
+  const pendingPermissions = new Map<string, PendingPermission>();
+
+  const registerPending = (p: PendingPermission) => {
+    pendingPermissions.set(p.requestId, p);
+    const entry = byId.get(p.sessionId);
+    if (entry) entry.pendingPermissionIds.add(p.requestId);
+  };
+
+  /** Resolve a single pending request and clean up its bookkeeping. */
+  const resolvePending = (
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): boolean => {
+    const pending = pendingPermissions.get(requestId);
+    if (!pending) return false;
+    pendingPermissions.delete(requestId);
+    const entry = byId.get(pending.sessionId);
+    if (entry) {
+      entry.pendingPermissionIds.delete(requestId);
+      // Fan-out a follow-up event so other clients update their UI when the
+      // race is decided. Best-effort — failure to publish (e.g. bus closed
+      // mid-shutdown) doesn't block resolution.
+      try {
+        entry.events.publish({
+          type: 'permission_resolved',
+          data: { requestId, outcome: response.outcome },
+        });
+      } catch {
+        /* bus closed during shutdown */
+      }
+    }
+    pending.resolve(response);
+    return true;
+  };
+
+  /** Resolve every pending request belonging to one session as cancelled. */
+  const cancelPendingForSession = (sessionId: string) => {
+    const entry = byId.get(sessionId);
+    if (!entry) return;
+    // Snapshot ids — resolvePending mutates the underlying set.
+    const ids = Array.from(entry.pendingPermissionIds);
+    for (const id of ids) {
+      resolvePending(id, { outcome: { outcome: 'cancelled' } });
+    }
+  };
 
   return {
     get sessionCount() {
       return byId.size;
+    },
+
+    get pendingPermissionCount() {
+      return pendingPermissions.size;
     },
 
     async spawnOrAttach(req) {
@@ -245,7 +347,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
 
       const channel = await channelFactory(workspaceKey);
       let entry: SessionEntry | undefined;
-      const client = new BridgeClient(() => entry);
+      const client = new BridgeClient(() => entry, registerPending);
       const connection = new ClientSideConnection(() => client, channel.stream);
 
       try {
@@ -276,6 +378,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           connection,
           events: new EventBus(),
           promptQueue: Promise.resolve(),
+          pendingPermissionIds: new Set(),
         };
         byWorkspace.set(workspaceKey, entry);
         byId.set(entry.sessionId, entry);
@@ -313,6 +416,11 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     async cancelSession(sessionId, req) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      // ACP spec: cancelling a prompt MUST resolve outstanding
+      // requestPermission calls with outcome.cancelled. Do this *before*
+      // forwarding the notification so the agent's wind-down sees the
+      // resolutions.
+      cancelPendingForSession(sessionId);
       // Cancel intentionally bypasses the prompt queue: it's a notification
       // that the agent uses to wind down the *currently active* prompt, not
       // something to wait behind queued work.
@@ -328,10 +436,23 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       return entry.events.subscribe(subOpts);
     },
 
+    respondToPermission(requestId, response) {
+      return resolvePending(requestId, response);
+    },
+
     async shutdown() {
       const entries = Array.from(byId.values());
+      // Resolve every still-pending permission as cancelled before clearing
+      // the maps so callers awaiting `requestPermission` unwind cleanly.
+      for (const e of entries) {
+        const ids = Array.from(e.pendingPermissionIds);
+        for (const id of ids) {
+          resolvePending(id, { outcome: { outcome: 'cancelled' } });
+        }
+      }
       byWorkspace.clear();
       byId.clear();
+      pendingPermissions.clear();
       for (const e of entries) e.events.close();
       await Promise.all(entries.map((e) => e.channel.kill().catch(() => {})));
     },
