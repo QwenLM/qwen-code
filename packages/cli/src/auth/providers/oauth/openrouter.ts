@@ -8,14 +8,15 @@ import { AuthType, type ProviderModelConfig } from '@qwen-code/qwen-code-core';
 import type { ProviderConfig } from '../../providerConfig.js';
 import { buildInstallPlan } from '../../providerConfig.js';
 import {
+  OPENROUTER_ENV_KEY,
+  OPENROUTER_BASE_URL,
   getOpenRouterModelsWithFallback,
   selectRecommendedOpenRouterModels,
   getPreferredOpenRouterModelId,
 } from './openrouterOAuth.js';
 import type { ProviderInstallPlan } from '../../types.js';
 
-export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
-export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+export { OPENROUTER_ENV_KEY, OPENROUTER_BASE_URL };
 
 export const openRouterProvider: ProviderConfig = {
   id: 'openrouter',

@@ -1444,7 +1444,7 @@ describe('AuthDialog Custom API Key Wizard', () => {
         const frame = lastFrame();
         expect(frame).toContain('Custom Provider · Step 6/6 · Review');
         expect(frame).toContain('The following JSON will be saved');
-        expect(frame).toContain('QWEN_CUSTOM_API_KEY_OPENAI');
+        expect(frame).toContain('QWEN_CUSTOM_API_KEY_');
         expect(frame).toContain('qwen/qwen3-coder');
         expect(frame).toContain('gpt-4.1');
         expect(frame).toContain('Enter to save');

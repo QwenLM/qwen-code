@@ -62,6 +62,7 @@ vi.mock('../../auth/providers/oauth/openrouterOAuth.js', () => ({
     Boolean(model.baseUrl?.includes('openrouter.ai')),
   ),
   OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
+  OPENROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
   selectRecommendedOpenRouterModels: vi.fn((models) => models),
   runOpenRouterOAuthLogin: vi.fn(
     () => new Promise(() => undefined) as Promise<{ apiKey: string }>,
@@ -369,6 +370,10 @@ describe('useAuthCommand', () => {
   });
 
   it('configures Custom API Key via the provider install plan flow', async () => {
+    const envKey = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api.example.com/v1',
+    );
     const settings = createSettings();
     settings.merged.modelProviders = {
       [AuthType.USE_OPENAI]: [
@@ -376,7 +381,7 @@ describe('useAuthCommand', () => {
           id: 'old-custom',
           name: 'old-custom',
           baseUrl: 'https://api.example.com/v1',
-          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_EXAMPLE_COM_V1',
+          envKey,
         },
         {
           id: 'preserved-model',
@@ -408,7 +413,6 @@ describe('useAuthCommand', () => {
       );
     });
 
-    const envKey = 'QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_EXAMPLE_COM_V1';
     expect(settings.setValue).toHaveBeenCalledWith(
       'user',
       `env.${envKey}`,
@@ -545,60 +549,53 @@ describe('useAuthCommand', () => {
 });
 
 describe('generateCustomApiKeyEnvKey', () => {
-  it('generates env key from openai protocol and base URL', () => {
+  it('generates deterministic hash-based env key', () => {
     const key = generateCustomApiKeyEnvKey(
       AuthType.USE_OPENAI,
       'https://api.openai.com/v1',
     );
-    expect(key).toBe('QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_OPENAI_COM_V1');
+    expect(key).toMatch(/^QWEN_CUSTOM_API_KEY_[A-F0-9]{16}$/);
+    const key2 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api.openai.com/v1',
+    );
+    expect(key).toBe(key2);
   });
 
-  it('generates env key from anthropic protocol and base URL', () => {
-    const key = generateCustomApiKeyEnvKey(
+  it('produces different keys for different protocols', () => {
+    const key1 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api.example.com/v1',
+    );
+    const key2 = generateCustomApiKeyEnvKey(
       AuthType.USE_ANTHROPIC,
-      'https://api.anthropic.com/v1',
+      'https://api.example.com/v1',
     );
-    expect(key).toBe(
-      'QWEN_CUSTOM_API_KEY_ANTHROPIC_HTTPS_API_ANTHROPIC_COM_V1',
-    );
+    expect(key1).not.toBe(key2);
   });
 
-  it('generates env key from gemini protocol and base URL', () => {
-    const key = generateCustomApiKeyEnvKey(
-      AuthType.USE_GEMINI,
-      'https://generativelanguage.googleapis.com',
+  it('produces different keys for different base URLs', () => {
+    const key1 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api.openai.com/v1',
     );
-    expect(key).toBe(
-      'QWEN_CUSTOM_API_KEY_GEMINI_HTTPS_GENERATIVELANGUAGE_GOOGLEAPIS_COM',
-    );
-  });
-
-  it('handles localhost URLs', () => {
-    const key = generateCustomApiKeyEnvKey(
+    const key2 = generateCustomApiKeyEnvKey(
       AuthType.USE_OPENAI,
       'http://localhost:11434/v1',
     );
-    expect(key).toBe('QWEN_CUSTOM_API_KEY_OPENAI_HTTP_LOCALHOST_11434_V1');
+    expect(key1).not.toBe(key2);
   });
 
-  it('normalizes trailing slashes and special chars', () => {
-    const key = generateCustomApiKeyEnvKey(
+  it('distinguishes similar URLs that differ only in special chars', () => {
+    const key1 = generateCustomApiKeyEnvKey(
       AuthType.USE_OPENAI,
       'https://openrouter.ai/api/v1/',
     );
-    expect(key).toBe('QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_OPENROUTER_AI_API_V1');
-  });
-
-  it('different protocols with same base URL produce different keys', () => {
-    const baseUrl = 'https://api.example.com/v1';
-    const openaiKey = generateCustomApiKeyEnvKey(AuthType.USE_OPENAI, baseUrl);
-    const anthropicKey = generateCustomApiKeyEnvKey(
-      AuthType.USE_ANTHROPIC,
-      baseUrl,
+    const key2 = generateCustomApiKeyEnvKey(
+      AuthType.USE_OPENAI,
+      'https://openrouter.ai/api/v1',
     );
-    expect(openaiKey).not.toBe(anthropicKey);
-    expect(openaiKey).toContain('OPENAI');
-    expect(anthropicKey).toContain('ANTHROPIC');
+    expect(key1).not.toBe(key2);
   });
 });
 

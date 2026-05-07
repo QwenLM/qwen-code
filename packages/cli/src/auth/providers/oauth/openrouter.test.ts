@@ -15,6 +15,7 @@ vi.mock('./openrouterOAuth.js', () => ({
   getOpenRouterModelsWithFallback: vi.fn(),
   getPreferredOpenRouterModelId: vi.fn((models) => models[0]?.id),
   OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
+  OPENROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
   selectRecommendedOpenRouterModels: vi.fn((models) => models.slice(0, 1)),
 }));
 

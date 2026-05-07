@@ -244,4 +244,119 @@ describe('applyProviderInstallPlan', () => {
       'v1',
     );
   });
+
+  it('appends models with append merge strategy', async () => {
+    const settings = createSettings({
+      [AuthType.USE_OPENAI]: [
+        { id: 'existing-1', envKey: 'A' },
+        { id: 'existing-2', envKey: 'B' },
+      ],
+    });
+    const config = createConfig();
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'new-model', envKey: 'C' }],
+          mergeStrategy: 'append',
+        },
+      ],
+    };
+
+    await applyProviderInstallPlan(plan, {
+      settings: settings as never,
+      config: config as never,
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'modelProviders.openai',
+      [
+        { id: 'existing-1', envKey: 'A' },
+        { id: 'existing-2', envKey: 'B' },
+        { id: 'new-model', envKey: 'C' },
+      ],
+    );
+  });
+
+  it('replaces owned models with replace-owned strategy (appends new at end)', async () => {
+    const settings = createSettings({
+      [AuthType.USE_OPENAI]: [
+        { id: 'owned-1', envKey: 'A' },
+        { id: 'unrelated', envKey: 'B' },
+        { id: 'owned-2', envKey: 'A' },
+      ],
+    });
+    const config = createConfig();
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'new-a', envKey: 'A' }],
+          mergeStrategy: 'replace-owned',
+          ownsModel: (model) => model.envKey === 'A',
+        },
+      ],
+    };
+
+    await applyProviderInstallPlan(plan, {
+      settings: settings as never,
+      config: config as never,
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'modelProviders.openai',
+      [
+        { id: 'unrelated', envKey: 'B' },
+        { id: 'new-a', envKey: 'A' },
+      ],
+    );
+  });
+
+  it('rolls back process.env on error', async () => {
+    process.env['TEST_API_KEY'] = 'old-value';
+    const settings = createSettings();
+    const config = createConfig();
+    config.refreshAuth.mockRejectedValueOnce(new Error('network error'));
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: { TEST_API_KEY: 'new-value' },
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, {
+        settings: settings as never,
+        config: config as never,
+      }),
+    ).rejects.toThrow('network error');
+
+    expect(process.env['TEST_API_KEY']).toBe('old-value');
+  });
+
+  it('deletes env var on rollback if it did not exist before', async () => {
+    delete process.env['BRAND_NEW_KEY'];
+    const settings = createSettings();
+    const config = createConfig();
+    config.refreshAuth.mockRejectedValueOnce(new Error('fail'));
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: { BRAND_NEW_KEY: 'value' },
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, {
+        settings: settings as never,
+        config: config as never,
+      }),
+    ).rejects.toThrow('fail');
+
+    expect(process.env['BRAND_NEW_KEY']).toBeUndefined();
+  });
 });

@@ -17,7 +17,8 @@ import {
   computeModelListVersion,
   getDefaultModelIds,
   resolveBaseUrl,
- providerMatchesCredentials } from '../../providerConfig.js';
+  providerMatchesCredentials,
+} from '../../providerConfig.js';
 
 describe('token plan provider', () => {
   it('creates a Token Plan install plan', () => {

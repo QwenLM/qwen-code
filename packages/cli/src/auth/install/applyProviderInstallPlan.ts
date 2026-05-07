@@ -57,69 +57,91 @@ export async function applyProviderInstallPlan(
   const settingsFile = settings.forScope(persistScope);
   backupSettingsFile(settingsFile.path);
 
-  for (const [key, value] of Object.entries(plan.env ?? {})) {
-    settings.setValue(persistScope, `env.${key}`, value);
-    process.env[key] = value;
-  }
+  const previousEnvValues = new Map<string, string | undefined>();
 
-  let updatedModelProviders: ModelProvidersConfig = {
-    ...((settings.merged.modelProviders as ModelProvidersConfig | undefined) ??
-      {}),
-  };
-
-  for (const patch of plan.modelProviders ?? []) {
-    updatedModelProviders = applyModelProvidersPatch(
-      updatedModelProviders,
-      patch,
-    );
-    settings.setValue(
-      persistScope,
-      `modelProviders.${patch.authType}`,
-      updatedModelProviders[patch.authType] ?? [],
-    );
-  }
-
-  settings.setValue(persistScope, 'security.auth.selectedType', plan.authType);
-
-  if (plan.legacyCredentials?.apiKey != null) {
-    settings.setValue(
-      persistScope,
-      'security.auth.apiKey',
-      plan.legacyCredentials.apiKey,
-    );
-  }
-
-  if (plan.legacyCredentials?.baseUrl != null) {
-    settings.setValue(
-      persistScope,
-      'security.auth.baseUrl',
-      plan.legacyCredentials.baseUrl,
-    );
-  }
-
-  if (plan.modelSelection?.modelId) {
-    settings.setValue(persistScope, 'model.name', plan.modelSelection.modelId);
-  }
-
-  // Persist arbitrary provider state (e.g. codingPlan.version, tokenPlan.baseUrl)
-  for (const [key, entries] of Object.entries(plan.providerState ?? {})) {
-    for (const [field, value] of Object.entries(entries)) {
-      settings.setValue(persistScope, `${key}.${field}`, value);
+  try {
+    for (const [key, value] of Object.entries(plan.env ?? {})) {
+      previousEnvValues.set(key, process.env[key]);
+      settings.setValue(persistScope, `env.${key}`, value);
+      process.env[key] = value;
     }
-  }
 
-  config.reloadModelProvidersConfig(updatedModelProviders);
-  if (plan.modelSelection?.modelId) {
-    config
-      .getModelsConfig()
-      .syncAfterAuthRefresh(plan.authType, plan.modelSelection.modelId);
-  }
-  if (refreshAuth) {
-    await config.refreshAuth(plan.authType);
-  }
+    let updatedModelProviders: ModelProvidersConfig = {
+      ...((settings.merged.modelProviders as
+        | ModelProvidersConfig
+        | undefined) ?? {}),
+    };
 
-  return {
-    persistScope,
-    updatedModelProviders,
-  };
+    for (const patch of plan.modelProviders ?? []) {
+      updatedModelProviders = applyModelProvidersPatch(
+        updatedModelProviders,
+        patch,
+      );
+      settings.setValue(
+        persistScope,
+        `modelProviders.${patch.authType}`,
+        updatedModelProviders[patch.authType] ?? [],
+      );
+    }
+
+    settings.setValue(
+      persistScope,
+      'security.auth.selectedType',
+      plan.authType,
+    );
+
+    if (plan.legacyCredentials?.apiKey != null) {
+      settings.setValue(
+        persistScope,
+        'security.auth.apiKey',
+        plan.legacyCredentials.apiKey,
+      );
+    }
+
+    if (plan.legacyCredentials?.baseUrl != null) {
+      settings.setValue(
+        persistScope,
+        'security.auth.baseUrl',
+        plan.legacyCredentials.baseUrl,
+      );
+    }
+
+    if (plan.modelSelection?.modelId) {
+      settings.setValue(
+        persistScope,
+        'model.name',
+        plan.modelSelection.modelId,
+      );
+    }
+
+    for (const [key, entries] of Object.entries(plan.providerState ?? {})) {
+      for (const [field, value] of Object.entries(entries)) {
+        settings.setValue(persistScope, `${key}.${field}`, value);
+      }
+    }
+
+    config.reloadModelProvidersConfig(updatedModelProviders);
+    if (plan.modelSelection?.modelId) {
+      config
+        .getModelsConfig()
+        .syncAfterAuthRefresh(plan.authType, plan.modelSelection.modelId);
+    }
+    if (refreshAuth) {
+      await config.refreshAuth(plan.authType);
+    }
+
+    return {
+      persistScope,
+      updatedModelProviders,
+    };
+  } catch (error) {
+    for (const [key, prev] of previousEnvValues) {
+      if (prev === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = prev;
+      }
+    }
+    throw error;
+  }
 }

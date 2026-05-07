@@ -105,6 +105,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 vi.mock('../../auth/providers/oauth/openrouterOAuth.js', () => ({
   OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
+  OPENROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
   OPENROUTER_OAUTH_CALLBACK_URL: 'http://localhost:3000/openrouter/callback',
   createOpenRouterOAuthSession: vi.fn(() => ({
     callbackUrl: 'http://localhost:3000/openrouter/callback',

@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -18,10 +18,13 @@ import {
   OPENROUTER_DEFAULT_MODELS,
   OPENROUTER_MODELS_URL,
   OPENROUTER_OAUTH_AUTHORIZE_URL,
+  OPENROUTER_OAUTH_CALLBACK_PORT,
   OPENROUTER_OAUTH_EXCHANGE_URL,
   runOpenRouterOAuthLogin,
   selectRecommendedOpenRouterModels,
   startOAuthCallbackListener,
+  startOAuthCallbackListenerWithRetry,
+  type OAuthCallbackListenerWithPort,
 } from './openrouterOAuth.js';
 import { request } from 'node:http';
 
@@ -196,7 +199,7 @@ describe('openrouterOAuth', () => {
 
   it('returns OAuth result without waiting for slow listener close', async () => {
     let resolveClose!: () => void;
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: Promise.resolve('auth-code-123'),
       close: vi.fn(
@@ -205,6 +208,7 @@ describe('openrouterOAuth', () => {
             resolveClose = resolve;
           }),
       ),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn(async () => ({
@@ -215,7 +219,7 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
       {
         openBrowser,
-        startListener: vi.fn(() => listener),
+        startListener: vi.fn(async () => listener),
         exchangeApiKey,
         now: () => 1000,
       },
@@ -231,13 +235,14 @@ describe('openrouterOAuth', () => {
   });
 
   it('passes the session state to the OAuth callback listener', async () => {
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: Promise.resolve('auth-code-123'),
       close: vi.fn(async () => undefined),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
-    const startListener = vi.fn(() => listener);
+    const startListener = vi.fn(async () => listener);
     const exchangeApiKey = vi.fn(async () => ({
       apiKey: 'or-key-123',
       userId: 'user-1',
@@ -251,7 +256,8 @@ describe('openrouterOAuth', () => {
         callbackUrl: 'http://localhost:3000/openrouter/callback',
         codeVerifier: 'verifier-123',
         state: 'state-123',
-        authorizationUrl: 'https://openrouter.ai/auth?state=state-123',
+        authorizationUrl:
+          'https://openrouter.ai/auth?state=state-123&code_challenge=challenge-123',
       },
     });
 
@@ -263,10 +269,11 @@ describe('openrouterOAuth', () => {
   });
 
   it('records wait and exchange timings during OAuth login', async () => {
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: Promise.resolve('auth-code-123'),
       close: vi.fn(async () => undefined),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn(async () => ({
@@ -284,7 +291,7 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
       {
         openBrowser,
-        startListener: () => listener,
+        startListener: async () => listener,
         exchangeApiKey,
         now,
       },
@@ -330,10 +337,11 @@ describe('openrouterOAuth', () => {
         ) => undefined,
       ),
     };
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: new Promise<string>(() => undefined),
       close: vi.fn(async () => undefined),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn();
@@ -342,7 +350,7 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
       {
         openBrowser,
-        startListener: () => listener,
+        startListener: async () => listener,
         exchangeApiKey,
         signalTarget,
       },
@@ -373,10 +381,11 @@ describe('openrouterOAuth', () => {
 
   it('allows cancelling OAuth wait with an abort signal', async () => {
     const abortController = new AbortController();
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: new Promise<string>(() => undefined),
       close: vi.fn(async () => undefined),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn();
@@ -385,7 +394,7 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
       {
         openBrowser,
-        startListener: () => listener,
+        startListener: async () => listener,
         exchangeApiKey,
         abortSignal: abortController.signal,
       },
@@ -649,5 +658,117 @@ describe('openrouterOAuth', () => {
         envKey: 'OPENAI_API_KEY',
       },
     ]);
+  });
+
+  it('returns 404 for non-callback paths', async () => {
+    const listener = startOAuthCallbackListener(
+      'http://localhost:3102/openrouter/callback',
+      5000,
+      'state-123',
+    );
+    await listener.ready;
+
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request('http://localhost:3102/wrong-path', (res) => {
+        resolve(res.statusCode!);
+        res.resume();
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    expect(status).toBe(404);
+    await listener.close();
+  });
+
+  it('rejects with error when OpenRouter returns an error parameter', async () => {
+    const listener = startOAuthCallbackListener(
+      'http://localhost:3103/openrouter/callback',
+      5000,
+      'state-123',
+    );
+    await listener.ready;
+
+    const codePromise = listener.waitForCode.catch((err: unknown) => err);
+    await new Promise<void>((resolve, reject) => {
+      const req = request(
+        'http://localhost:3103/openrouter/callback?error=access_denied&state=state-123',
+        (res) => {
+          expect(res.statusCode).toBe(400);
+          res.resume();
+          res.on('end', resolve);
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    await expect(codePromise).resolves.toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('access_denied'),
+      }),
+    );
+  });
+
+  it('rejects with missing code error', async () => {
+    const listener = startOAuthCallbackListener(
+      'http://localhost:3104/openrouter/callback',
+      5000,
+      'state-123',
+    );
+    await listener.ready;
+
+    const codePromise = listener.waitForCode.catch((err: unknown) => err);
+    await new Promise<void>((resolve, reject) => {
+      const req = request(
+        'http://localhost:3104/openrouter/callback?state=state-123',
+        (res) => {
+          expect(res.statusCode).toBe(400);
+          res.resume();
+          res.on('end', resolve);
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    await expect(codePromise).resolves.toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('Missing authorization code'),
+      }),
+    );
+  });
+
+  it('retries ports when address is in use', async () => {
+    const blockingListener = startOAuthCallbackListener(
+      'http://localhost:3150/openrouter/callback',
+      10000,
+      'block-state',
+    );
+    await blockingListener.ready;
+
+    try {
+      const retried = await startOAuthCallbackListenerWithRetry(
+        'http://localhost:3150/openrouter/callback',
+        5000,
+        'retry-state',
+        5,
+      );
+
+      expect(retried.port).toBeGreaterThan(3150);
+      await retried.close();
+    } finally {
+      await blockingListener.close();
+    }
+  });
+
+  it('throws non-http protocol error', () => {
+    expect(() =>
+      startOAuthCallbackListener(
+        'https://localhost:3000/callback',
+        5000,
+        'state-123',
+      ),
+    ).toThrow('Only http localhost callback URLs are currently supported.');
   });
 });

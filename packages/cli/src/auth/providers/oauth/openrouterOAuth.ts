@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -17,8 +17,9 @@ export const OPENROUTER_OAUTH_AUTHORIZE_URL = 'https://openrouter.ai/auth';
 export const OPENROUTER_OAUTH_EXCHANGE_URL =
   'https://openrouter.ai/api/v1/auth/keys';
 export const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
-export const OPENROUTER_OAUTH_CALLBACK_URL =
-  'http://localhost:3000/openrouter/callback';
+export const OPENROUTER_OAUTH_CALLBACK_PORT = 3000;
+const OPENROUTER_OAUTH_CALLBACK_PORT_RETRIES = 10;
+export const OPENROUTER_OAUTH_CALLBACK_URL = `http://localhost:${OPENROUTER_OAUTH_CALLBACK_PORT}/openrouter/callback`;
 const OPENROUTER_CODE_CHALLENGE_METHOD = 'S256';
 const OPENROUTER_OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const OPENROUTER_MINIMUM_TEXT_MODELS = 1;
@@ -29,12 +30,14 @@ export const OPENROUTER_DEFAULT_MODELS: ModelConfig[] = [
     name: 'OpenRouter · GLM 4.5 Air',
     baseUrl: OPENROUTER_BASE_URL,
     envKey: OPENROUTER_ENV_KEY,
+    generationConfig: { contextWindowSize: 128000 },
   },
   {
     id: 'openai/gpt-oss-120b:free',
     name: 'OpenRouter · GPT OSS 120B',
     baseUrl: OPENROUTER_BASE_URL,
     envKey: OPENROUTER_ENV_KEY,
+    generationConfig: { contextWindowSize: 131072 },
   },
 ];
 
@@ -138,18 +141,17 @@ export function createOpenRouterOAuthSession(
   };
 }
 
-export function startOAuthCallbackListener(
-  callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
-  timeoutMs = OPENROUTER_OAUTH_TIMEOUT_MS,
-  expectedState?: string,
-): OAuthCallbackListener {
-  const parsedUrl = new URL(callbackUrl);
-  if (parsedUrl.protocol !== 'http:') {
-    throw new Error(
-      'Only http localhost callback URLs are currently supported.',
-    );
-  }
+export interface OAuthCallbackListenerWithPort extends OAuthCallbackListener {
+  /** The actual port the server bound to (may differ from the requested port). */
+  port: number;
+}
 
+function createOAuthCallbackServer(
+  parsedUrl: URL,
+  expectedState: string,
+  port: number,
+  timeoutMs: number,
+): OAuthCallbackListenerWithPort {
   let server: Server | undefined;
   let timeout: NodeJS.Timeout | undefined;
   let settled = false;
@@ -224,7 +226,7 @@ export function startOAuthCallbackListener(
     }
 
     const callbackState = requestUrl.searchParams.get('state');
-    if (expectedState && callbackState !== expectedState) {
+    if (callbackState !== expectedState) {
       res.statusCode = 400;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.end('Invalid OAuth state.');
@@ -256,14 +258,12 @@ export function startOAuthCallbackListener(
   });
 
   server.once('error', (error) => {
-    rejectReady(error instanceof Error ? error : new Error(String(error)));
-    void finish(
-      'reject',
-      error instanceof Error ? error : new Error(String(error)),
-    );
+    const err = error instanceof Error ? error : new Error(String(error));
+    rejectReady(err);
+    void finish('reject', err);
+    waitForCode.catch(() => undefined);
   });
 
-  const port = parsedUrl.port ? Number(parsedUrl.port) : 80;
   server.listen(port, parsedUrl.hostname, () => {
     resolveReady();
   });
@@ -279,7 +279,66 @@ export function startOAuthCallbackListener(
     ready,
     waitForCode,
     close,
+    port,
   };
+}
+
+export function startOAuthCallbackListener(
+  callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
+  timeoutMs = OPENROUTER_OAUTH_TIMEOUT_MS,
+  expectedState: string,
+): OAuthCallbackListenerWithPort {
+  const parsedUrl = new URL(callbackUrl);
+  if (parsedUrl.protocol !== 'http:') {
+    throw new Error(
+      'Only http localhost callback URLs are currently supported.',
+    );
+  }
+
+  const port = parsedUrl.port ? Number(parsedUrl.port) : 80;
+  return createOAuthCallbackServer(parsedUrl, expectedState, port, timeoutMs);
+}
+
+export async function startOAuthCallbackListenerWithRetry(
+  callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
+  timeoutMs = OPENROUTER_OAUTH_TIMEOUT_MS,
+  expectedState: string,
+  maxRetries = OPENROUTER_OAUTH_CALLBACK_PORT_RETRIES,
+): Promise<OAuthCallbackListenerWithPort> {
+  const parsedUrl = new URL(callbackUrl);
+  if (parsedUrl.protocol !== 'http:') {
+    throw new Error(
+      'Only http localhost callback URLs are currently supported.',
+    );
+  }
+
+  const basePort = parsedUrl.port ? Number(parsedUrl.port) : 80;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const port = basePort + attempt;
+    const listener = createOAuthCallbackServer(
+      parsedUrl,
+      expectedState,
+      port,
+      timeoutMs,
+    );
+    try {
+      await listener.ready;
+      return listener;
+    } catch (error: unknown) {
+      const isAddrInUse =
+        error instanceof Error &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'EADDRINUSE';
+      if (!isAddrInUse || attempt === maxRetries) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(
+    `Could not find an available port (tried ${basePort}–${basePort + maxRetries}).`,
+  );
 }
 
 function buildOpenRouterHeaders() {
@@ -528,9 +587,9 @@ interface OAuthSignalTarget {
   ): void;
 }
 
-interface OpenRouterOAuthLoginDeps {
+export interface OpenRouterOAuthLoginDeps {
   openBrowser?: typeof open;
-  startListener?: typeof startOAuthCallbackListener;
+  startListener?: typeof startOAuthCallbackListenerWithRetry;
   exchangeApiKey?: typeof exchangeAuthCodeForApiKey;
   now?: () => number;
   signalTarget?: OAuthSignalTarget;
@@ -542,30 +601,61 @@ export async function runOpenRouterOAuthLogin(
   callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
   deps: OpenRouterOAuthLoginDeps = {},
 ): Promise<OpenRouterOAuthResult> {
-  const session = deps.session || createOpenRouterOAuthSession(callbackUrl);
-  const {
-    callbackUrl: effectiveCallbackUrl,
-    codeVerifier,
-    state,
-    authorizationUrl: authUrl,
-  } = session;
-
   const openBrowser = deps.openBrowser || open;
-  const startListener = deps.startListener || startOAuthCallbackListener;
+  const startListener =
+    deps.startListener || startOAuthCallbackListenerWithRetry;
   const exchangeApiKey = deps.exchangeApiKey || exchangeAuthCodeForApiKey;
   const now = deps.now || Date.now;
   const signalTarget = deps.signalTarget || process;
   const abortSignal = deps.abortSignal;
 
-  const listener = startListener(
-    effectiveCallbackUrl,
-    OPENROUTER_OAUTH_TIMEOUT_MS,
+  const pkcePair = createPkcePair();
+  const state = createOAuthState();
+
+  const preSession = deps.session || {
+    callbackUrl,
+    codeVerifier: pkcePair.codeVerifier,
     state,
+  };
+
+  const listener = await startListener(
+    preSession.callbackUrl,
+    OPENROUTER_OAUTH_TIMEOUT_MS,
+    preSession.state,
   );
+
+  const portChanged =
+    listener.port !==
+    (new URL(preSession.callbackUrl).port
+      ? Number(new URL(preSession.callbackUrl).port)
+      : 80);
+  const actualCallbackUrl = portChanged
+    ? preSession.callbackUrl.replace(/:\d+/, `:${String(listener.port)}`)
+    : preSession.callbackUrl;
+
+  let authUrl: string;
+  if (deps.session?.authorizationUrl && !portChanged) {
+    authUrl = deps.session.authorizationUrl;
+  } else {
+    const challenge =
+      deps.session != null
+        ? new URL(deps.session.authorizationUrl).searchParams.get(
+            'code_challenge',
+          )!
+        : pkcePair.codeChallenge;
+    authUrl = buildOpenRouterAuthorizationUrl({
+      callbackUrl: actualCallbackUrl,
+      codeChallenge: challenge,
+      state: preSession.state,
+      codeChallengeMethod: OPENROUTER_CODE_CHALLENGE_METHOD,
+    });
+  }
+
+  const codeVerifier = preSession.codeVerifier;
+
   let cleanupSignalHandlers = () => {};
   let cleanupAbortListener = () => {};
   try {
-    await listener.ready;
     await openBrowser(authUrl);
 
     const waitForCancel = new Promise<never>((_, reject) => {

@@ -177,24 +177,36 @@ function resolveOwnsModel(
     model.name.startsWith(namePrefix);
 }
 
+function buildGenerationConfig(
+  spec: Pick<ModelSpec, 'enableThinking' | 'contextWindowSize'>,
+): ProviderModelConfig['generationConfig'] | undefined {
+  const parts: ProviderModelConfig['generationConfig'] = {};
+  let hasAny = false;
+  if (spec.enableThinking) {
+    parts.extra_body = { enable_thinking: true };
+    hasAny = true;
+  }
+  if (spec.contextWindowSize) {
+    parts.contextWindowSize = spec.contextWindowSize;
+    hasAny = true;
+  }
+  return hasAny ? parts : undefined;
+}
+
 function specToModelConfig(
   spec: ModelSpec,
   prefix: string,
   baseUrl: string,
   envKey: string,
 ): ProviderModelConfig {
+  const genConfig = buildGenerationConfig(spec);
   return {
     id: spec.id,
     name: prefix ? `[${prefix}] ${spec.id}` : spec.id,
     ...(spec.description ? { description: spec.description } : {}),
     baseUrl,
     envKey,
-    generationConfig: {
-      ...(spec.enableThinking ? { extra_body: { enable_thinking: true } } : {}),
-      ...(spec.contextWindowSize
-        ? { contextWindowSize: spec.contextWindowSize }
-        : {}),
-    },
+    ...(genConfig ? { generationConfig: genConfig } : {}),
   };
 }
 
@@ -231,35 +243,43 @@ function buildModelConfigs(
 
   // No predefined models (custom provider) — use advancedConfig
   const advCfg = inputs.advancedConfig;
-  const genConfig: ProviderModelConfig['generationConfig'] = {};
-  let hasGenConfig = false;
 
-  if (advCfg?.enableThinking) {
-    genConfig.extra_body = { enable_thinking: true };
-    hasGenConfig = true;
-  }
-  if (advCfg?.multimodal) {
-    genConfig.modalities = {
-      image: advCfg.multimodal.image ?? false,
-      video: advCfg.multimodal.video ?? false,
-      audio: advCfg.multimodal.audio ?? false,
-    };
-    hasGenConfig = true;
-  }
-  if (advCfg?.maxTokens && advCfg.maxTokens > 0) {
-    genConfig.samplingParams = { max_tokens: advCfg.maxTokens };
-    hasGenConfig = true;
+  function buildCustomGenConfig():
+    | ProviderModelConfig['generationConfig']
+    | undefined {
+    const cfg: ProviderModelConfig['generationConfig'] = {};
+    let hasAny = false;
+    if (advCfg?.enableThinking) {
+      cfg.extra_body = { enable_thinking: true };
+      hasAny = true;
+    }
+    if (advCfg?.multimodal) {
+      cfg.modalities = {
+        image: advCfg.multimodal.image ?? false,
+        video: advCfg.multimodal.video ?? false,
+        audio: advCfg.multimodal.audio ?? false,
+      };
+      hasAny = true;
+    }
+    if (advCfg?.maxTokens && advCfg.maxTokens > 0) {
+      cfg.samplingParams = { max_tokens: advCfg.maxTokens };
+      hasAny = true;
+    }
+    return hasAny ? cfg : undefined;
   }
 
   const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
 
-  return inputs.modelIds.map((id) => ({
-    id,
-    name: displayName(id),
-    baseUrl: inputs.baseUrl,
-    envKey,
-    ...(hasGenConfig ? { generationConfig: genConfig } : {}),
-  }));
+  return inputs.modelIds.map((id) => {
+    const genConfig = buildCustomGenConfig();
+    return {
+      id,
+      name: displayName(id),
+      baseUrl: inputs.baseUrl,
+      envKey,
+      ...(genConfig ? { generationConfig: genConfig } : {}),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +363,7 @@ export function shouldShowStep(
     case 'baseUrl':
       return config.baseUrl === undefined || Array.isArray(config.baseUrl);
     case 'apiKey':
-      return true; // always needed
+      return config.authMethod !== 'oauth';
     case 'models':
       return !config.models || config.modelsEditable === true;
     case 'advancedConfig':
