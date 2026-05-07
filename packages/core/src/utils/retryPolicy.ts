@@ -20,9 +20,18 @@ export interface RetryDelayPolicyOptions {
 /**
  * Calculates a retry delay using a shared exponential-backoff policy.
  *
- * Retry-After handling is explicit because different paths need different
- * semantics: stream retries use it as a minimum, while HTTP request retries
- * use it as a server-preferred delay.
+ * Retry-After handling depends on `retryAfterMode`:
+ *   - `'ignore'` (default): do not parse Retry-After; always return the
+ *     exponential delay (with optional jitter).
+ *   - `'minimum'`: use Retry-After as a floor on the exponential delay.
+ *   - `'prefer'`: if Retry-After is present, use it directly.
+ *
+ * When Retry-After is honored (`'minimum'` or `'prefer'` with a present
+ * header), `jitterRatio` is intentionally not applied — the server's wait is
+ * treated as exact.
+ *
+ * `retryAfterMaxDelayMs` caps the Retry-After-derived delay; defaults to
+ * `maxDelayMs`.
  */
 export function getRetryDelayMs(options: RetryDelayPolicyOptions): number {
   const normalizedAttempt = Math.max(1, options.attempt);
