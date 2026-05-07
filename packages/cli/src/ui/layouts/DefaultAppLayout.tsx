@@ -16,6 +16,7 @@ import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
+import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
@@ -106,6 +107,18 @@ export const DefaultAppLayout: React.FC = () => {
 
       {/* Tab bar: visible whenever in-process agents exist and input is active */}
       {hasAgents && !uiState.dialogsVisible && <AgentTabBar />}
+
+      {/*
+        LiveAgentPanel — always-on roster of running subagents anchored
+        beneath the input footer (mirrors Claude Code's
+        CoordinatorAgentStatus position). Hidden whenever any dialog is
+        open (auth / permission / background tasks / etc.) so the modal
+        surface doesn't compete with the live roster, and the panel's
+        own internal self-hide handles the empty-roster case.
+      */}
+      {!isAgentTab && !uiState.dialogsVisible && (
+        <LiveAgentPanel width={uiState.mainAreaWidth} />
+      )}
     </Box>
   );
 };

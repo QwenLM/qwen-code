@@ -24,7 +24,6 @@ import type {
   McpToolProgressData,
   FileDiff,
 } from '@qwen-code/qwen-code-core';
-import { AgentExecutionDisplay } from '../subagents/index.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
@@ -250,17 +249,18 @@ const PlanResultRenderer: React.FC<{
 /**
  * Component to render subagent execution results.
  *
- * Live (`isPending===true`): the inline frame is suppressed — running
- * subagents are surfaced through the footer pill + dialog instead, which
- * removes the live-area flicker that occurred when the frame's tool-call
- * list grew past the terminal height. The one exception is an active
- * approval prompt that holds the focus lock: that renders as a small
- * banner with an agent-name label, since hiding it would block the run
- * silently.
+ * The verbose inline frame has been retired in favour of the
+ * always-on `LiveAgentPanel` (live roster, anchored beneath the input
+ * footer) and `BackgroundTasksDialog` (Down-arrow detail view). This
+ * renderer now only emits the focus-routed approval surfaces:
  *
- * Committed (`isPending===false`): renders the full `AgentExecutionDisplay`
- * exactly as before. Ink's `<Static>` is append-only, so committed frames
- * never flicker even when verbose.
+ * - focus-holder: full inline approval prompt so the user can answer
+ *   without context-switching into the dialog.
+ * - queued sibling: a one-line marker so users know another subagent
+ *   is waiting in line behind the focus-holder.
+ *
+ * All other agent state (running progress + completion summary) is
+ * rendered exclusively by the panel + dialog pair.
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -268,69 +268,41 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth: number;
   config: Config;
   isFocused?: boolean;
-  isPending?: boolean;
-  isWaitingForOtherApproval?: boolean;
-}> = ({
-  data,
-  availableHeight,
-  childWidth,
-  config,
-  isFocused,
-  isPending,
-  isWaitingForOtherApproval,
-}) => {
-  if (isPending) {
-    if (data.pendingConfirmation && isFocused) {
-      // Active approval prompt for the focus-holding subagent — render
-      // inline so the user can act on it without opening the dialog.
-      const agentLabel = data.subagentName || 'agent';
-      return (
-        <Box flexDirection="column" paddingLeft={1}>
-          <Box>
-            <Text color={theme.text.secondary}>Approval requested by </Text>
-            <Text bold color={theme.text.accent}>
-              {agentLabel}
-            </Text>
-            <Text color={theme.text.secondary}>:</Text>
-          </Box>
-          <ToolConfirmationMessage
-            confirmationDetails={data.pendingConfirmation}
-            isFocused={isFocused}
-            availableTerminalHeight={availableHeight}
-            contentWidth={childWidth - 2}
-            compactMode={true}
-            config={config}
-          />
-        </Box>
-      );
-    }
-    if (data.pendingConfirmation) {
-      // Queued approval — another subagent currently holds the focus lock.
-      // A one-line marker keeps the user aware that something is waiting
-      // without opening the dialog; the full prompt renders on the
-      // focus-holder above and inside `BackgroundTasksDialog`.
-      const agentLabel = data.subagentName || 'agent';
-      return (
-        <Box paddingLeft={1}>
-          <Text color={theme.text.secondary} dimColor>
-            ⏳ Queued approval:{' '}
+}> = ({ data, availableHeight, childWidth, config, isFocused }) => {
+  if (data.pendingConfirmation && isFocused) {
+    const agentLabel = data.subagentName || 'agent';
+    return (
+      <Box flexDirection="column" paddingLeft={1}>
+        <Box>
+          <Text color={theme.text.secondary}>Approval requested by </Text>
+          <Text bold color={theme.text.accent}>
+            {agentLabel}
           </Text>
-          <Text dimColor>{agentLabel}</Text>
+          <Text color={theme.text.secondary}>:</Text>
         </Box>
-      );
-    }
-    return null;
+        <ToolConfirmationMessage
+          confirmationDetails={data.pendingConfirmation}
+          isFocused={isFocused}
+          availableTerminalHeight={availableHeight}
+          contentWidth={childWidth - 2}
+          compactMode={true}
+          config={config}
+        />
+      </Box>
+    );
   }
-  return (
-    <AgentExecutionDisplay
-      data={data}
-      availableHeight={availableHeight}
-      childWidth={childWidth}
-      config={config}
-      isFocused={isFocused}
-      isWaitingForOtherApproval={isWaitingForOtherApproval}
-    />
-  );
+  if (data.pendingConfirmation) {
+    const agentLabel = data.subagentName || 'agent';
+    return (
+      <Box paddingLeft={1}>
+        <Text color={theme.text.secondary} dimColor>
+          ⏳ Queued approval:{' '}
+        </Text>
+        <Text dimColor>{agentLabel}</Text>
+      </Box>
+    );
+  }
+  return null;
 };
 
 /**
@@ -436,12 +408,21 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   isFocused?: boolean;
   /**
    * True when rendering inside `pendingHistoryItems` (live area), false once
-   * committed to `<Static>`. Foreground subagents suppress their inline
-   * frame in the live phase — the pill+dialog handle drill-down — but
-   * always render in scrollback.
+   * committed to `<Static>`. Subagents no longer paint an inline frame in
+   * either phase — `LiveAgentPanel` (always-on roster) and
+   * `BackgroundTasksDialog` (Down-arrow detail) own that surface — so this
+   * flag is purely informational at this layer; ToolGroupMessage still
+   * forwards it for non-subagent message types that key off live vs.
+   * committed rendering.
    */
   isPending?: boolean;
-  /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
+  /**
+   * Whether another subagent's approval currently holds the focus lock,
+   * blocking this one. Routed by `ToolGroupMessage`; vestigial for the
+   * subagent renderer (the queued marker reads the absence of `isFocused`
+   * directly), retained on the prop bag for call-site compatibility and
+   * future signaling needs.
+   */
   isWaitingForOtherApproval?: boolean;
 }
 
@@ -460,8 +441,11 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   isFocused,
-  isPending,
-  isWaitingForOtherApproval,
+  // isPending / isWaitingForOtherApproval flow into ToolMessage from
+  // ToolGroupMessage but no longer drive the subagent render path
+  // (LiveAgentPanel + BackgroundTasksDialog own that surface). They stay
+  // on the props interface so callers don't churn, but skipping the
+  // destructure here keeps the implementation honest about what's read.
   executionStartTime,
 }) => {
   const settings = useSettings();
@@ -616,8 +600,6 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={innerWidth}
                 config={config}
                 isFocused={isFocused}
-                isPending={isPending}
-                isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             )}
             {effectiveDisplayRenderer.type === 'diff' && (
