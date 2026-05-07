@@ -13,6 +13,7 @@ import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
+  MistralOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
@@ -28,6 +29,7 @@ export {
   type OpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
+  MistralOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
 } from './provider/index.js';
@@ -93,6 +95,14 @@ export function determineProvider(
   // Check for MiniMax provider
   if (MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config)) {
     return new MiniMaxOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Check for Mistral provider
+  if (MistralOpenAICompatibleProvider.isMistralProvider(config)) {
+    return new MistralOpenAICompatibleProvider(
       contentGeneratorConfig,
       cliConfig,
     );
