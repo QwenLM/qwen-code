@@ -284,7 +284,12 @@ class BridgeClient implements Client {
     const content = await fs.readFile(params.path, 'utf8');
     if (typeof params.line === 'number' || typeof params.limit === 'number') {
       const lines = content.split('\n');
-      const start = params.line ?? 0;
+      // ACP `ReadTextFileRequest.line` is 1-based per spec — clients passing
+      // `{ line: 1, limit: 2 }` mean "the first two lines", not "skip the
+      // first then take two". Convert to a 0-based slice index, clamping
+      // values < 1 to 0 to be tolerant of unusual inputs.
+      const startLine = params.line ?? 1;
+      const start = startLine > 0 ? startLine - 1 : 0;
       const end = params.limit != null ? start + params.limit : undefined;
       return { content: lines.slice(start, end).join('\n') };
     }
@@ -362,7 +367,10 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     return true;
   };
 
-  async function doSpawn(workspaceKey: string): Promise<BridgeSession> {
+  async function doSpawn(
+    workspaceKey: string,
+    modelServiceId?: string,
+  ): Promise<BridgeSession> {
     const channel = await channelFactory(workspaceKey);
     let entry: SessionEntry | undefined;
     const client = new BridgeClient(() => entry, registerPending);
@@ -400,6 +408,37 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       };
       byWorkspace.set(workspaceKey, entry);
       byId.set(entry.sessionId, entry);
+
+      // ACP `newSession` doesn't take a model id; honor the caller's
+      // `modelServiceId` by issuing the unstable `setSessionModel` call
+      // immediately after the session is established. If the agent rejects
+      // the model id, surface it as a session-creation failure so the
+      // caller doesn't think they got the requested model.
+      if (modelServiceId) {
+        try {
+          const conn = entry.connection as unknown as {
+            unstable_setSessionModel(p: {
+              sessionId: string;
+              modelId: string;
+            }): Promise<unknown>;
+          };
+          await withTimeout(
+            conn.unstable_setSessionModel({
+              sessionId: entry.sessionId,
+              modelId: modelServiceId,
+            }),
+            initTimeoutMs,
+            'setSessionModel',
+          );
+        } catch (err) {
+          // The session is half-initialized — a known sessionId on a real
+          // child but pointing at the wrong model. Tear it down so the
+          // caller can retry cleanly instead of inheriting silent drift.
+          byWorkspace.delete(workspaceKey);
+          byId.delete(entry.sessionId);
+          throw err;
+        }
+      }
 
       return {
         sessionId: entry.sessionId,
@@ -459,7 +498,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         }
       }
 
-      const promise = doSpawn(workspaceKey);
+      const promise = doSpawn(workspaceKey, req.modelServiceId);
       if (sessionScope === 'single') {
         inFlightSpawns.set(workspaceKey, promise);
       }

@@ -845,7 +845,12 @@ describe('GET /session/:id/events (SSE)', () => {
     const frames = await readSseFrames(res.body!, 2);
     expect(frames).toHaveLength(2);
     expect(frames[0]?.event).toBe('session_update');
+    expect(frames[0]?.id).toBe('1');
     expect(frames[1]?.event).toBe('stream_error');
+    // The terminal `stream_error` frame deliberately has no `id:` line so
+    // it doesn't pollute the per-session monotonic sequence used for
+    // Last-Event-ID resume.
+    expect(frames[1]?.id).toBeUndefined();
     expect(JSON.parse(frames[1]!.data!).data).toEqual({ error: 'agent died' });
   });
 

@@ -6,30 +6,26 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import cors from 'cors';
 import { isLoopbackBind } from './loopbackBinds.js';
 
-class CORSError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'CORSError';
-  }
-}
-
 /**
- * Mirrors the no-browser-origin policy from
- * `packages/vscode-ide-companion/src/ide-server.ts:157-170` — CLI/SDK clients
- * never send an Origin header; browsers always do. Rejecting any Origin keeps
- * a malicious page from CSRF-ing the local daemon.
+ * Reject any request that carries an `Origin` header. CLI/SDK clients never
+ * set Origin; only browsers do. Returning a deterministic 403 JSON keeps
+ * the daemon from CSRF-ing itself (and is more useful to clients than the
+ * 500 HTML default that the `cors` package's error-callback path produces
+ * when no Express error middleware is registered).
  */
-export const denyBrowserOriginCors = cors({
-  origin: (origin, callback) => {
-    if (!origin) {
-      return callback(null, true);
-    }
-    return callback(new CORSError('Request denied by CORS policy.'), false);
-  },
-});
+export const denyBrowserOriginCors: RequestHandler = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  if (req.headers.origin) {
+    res.status(403).json({ error: 'Request denied by CORS policy' });
+    return;
+  }
+  next();
+};
 
 /**
  * Reject requests whose Host header isn't one of the bound interfaces.

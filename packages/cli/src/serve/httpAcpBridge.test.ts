@@ -759,6 +759,77 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('modelServiceId honored at session create', () => {
+    /** Build a channel that records `unstable_setSessionModel` calls. */
+    function setup(opts: { setModelImpl?: () => Promise<unknown> } = {}) {
+      const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+      const factory: ChannelFactory = async () => {
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const fakeAgent = new FakeAgent();
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async (req: { sessionId: string; modelId: string }) => {
+                setModelCalls.push({
+                  sessionId: req.sessionId,
+                  modelId: req.modelId,
+                });
+                if (opts.setModelImpl) await opts.setModelImpl();
+                return {};
+              };
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return { stream: clientStream, kill: async () => {} };
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      return { bridge, setModelCalls };
+    }
+
+    it('applies modelServiceId via unstable_setSessionModel after newSession', async () => {
+      const { bridge, setModelCalls } = setup();
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: '/work/a',
+        modelServiceId: 'qwen3-coder',
+      });
+      expect(session.attached).toBe(false);
+      expect(setModelCalls).toHaveLength(1);
+      expect(setModelCalls[0]?.sessionId).toBe(session.sessionId);
+      expect(setModelCalls[0]?.modelId).toBe('qwen3-coder');
+      await bridge.shutdown();
+    });
+
+    it('does NOT call setSessionModel when modelServiceId is omitted', async () => {
+      const { bridge, setModelCalls } = setup();
+      await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      expect(setModelCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('rejects spawnOrAttach when the agent rejects the requested model', async () => {
+      const { bridge } = setup({
+        setModelImpl: async () => {
+          throw new Error('unknown model');
+        },
+      });
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: '/work/a',
+          modelServiceId: 'definitely-not-a-real-model',
+        }),
+      ).rejects.toBeTruthy();
+      // Failed spawn must NOT leave the half-initialized session in the maps.
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+  });
+
   describe('opts validation', () => {
     it('rejects an invalid sessionScope', () => {
       expect(() =>
@@ -914,7 +985,7 @@ describe('createHttpAcpBridge', () => {
       }
     });
 
-    it('readTextFile slices via line/limit', async () => {
+    it('readTextFile slices via line/limit (ACP 1-based line)', async () => {
       const { bridge, conn } = await setupForFs();
       const tmp = path.join(
         os.tmpdir(),
@@ -922,7 +993,8 @@ describe('createHttpAcpBridge', () => {
       );
       await fsp.writeFile(tmp, 'a\nb\nc\nd\ne', 'utf8');
       try {
-        const result = (await (
+        // line:1, limit:2 means "first two lines" per ACP spec (1-based).
+        const first = (await (
           conn as unknown as {
             readTextFile(p: {
               path: string;
@@ -937,7 +1009,25 @@ describe('createHttpAcpBridge', () => {
           line: 1,
           limit: 2,
         })) as { content: string };
-        expect(result.content).toBe('b\nc');
+        expect(first.content).toBe('a\nb');
+
+        // line:3, limit:2 → lines 3 and 4.
+        const middle = (await (
+          conn as unknown as {
+            readTextFile(p: {
+              path: string;
+              sessionId: string;
+              line?: number;
+              limit?: number;
+            }): Promise<{ content: string }>;
+          }
+        ).readTextFile({
+          sessionId: 'unused',
+          path: tmp,
+          line: 3,
+          limit: 2,
+        })) as { content: string };
+        expect(middle.content).toBe('c\nd');
       } finally {
         await fsp.rm(tmp, { force: true });
         await bridge.shutdown();

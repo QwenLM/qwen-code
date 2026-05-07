@@ -264,12 +264,17 @@ export function createServeApp(
         }
       } catch (err) {
         if (!res.writableEnded) {
+          // Don't burn an `id:` slot — `stream_error` is a terminal frame
+          // emitted on the daemon side when the bridge iterator throws, so
+          // it has no place in the per-session monotonic sequence and a
+          // hard-coded `id: 0` would regress the client's `Last-Event-ID`
+          // tracker. `formatSseFrame` omits the `id:` line when the input
+          // event has no id.
           res.write(
             formatSseFrame({
-              id: 0,
               v: 1,
               type: 'stream_error',
-              data: { error: err instanceof Error ? err.message : String(err) },
+              data: { error: errorMessage(err) },
             }),
           );
         }
@@ -301,12 +306,19 @@ function parseLastEventId(raw: unknown): number | undefined {
   return n;
 }
 
-function formatSseFrame(event: BridgeEvent): string {
+function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // SSE format: id (optional), event (optional), data, blank line.
-  // Splitting `data` on newlines lets browsers reassemble multi-line JSON.
+  // The `id:` line is intentionally omitted when `event.id` is absent —
+  // terminal/synthetic frames (e.g. daemon-side `stream_error`) must not
+  // burn a slot in the per-session monotonic sequence the client uses for
+  // `Last-Event-ID` reconnect tracking.
   const dataJson = JSON.stringify(event);
-  return `id: ${event.id}\nevent: ${event.type}\ndata: ${dataJson}\n\n`;
+  const idLine =
+    'id' in event && event.id !== undefined ? `id: ${event.id}\n` : '';
+  return `${idLine}event: ${event.type}\ndata: ${dataJson}\n\n`;
 }
+
+type OmitId<T> = Omit<T, 'id'>;
 
 function sendBridgeError(res: import('express').Response, err: unknown): void {
   if (err instanceof SessionNotFoundError) {
