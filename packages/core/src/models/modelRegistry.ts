@@ -125,8 +125,9 @@ export class ModelRegistry {
       isVision: model.capabilities?.vision ?? false,
       contextWindowSize:
         model.generationConfig.contextWindowSize ?? tokenLimit(model.id),
-      modalities:
-        model.generationConfig.modalities ?? defaultModalities(model.id),
+      // `modalities` is auto-filled in `resolveModelConfig`, so it is
+      // always defined on `ResolvedModelConfig` — no fallback needed here.
+      modalities: model.generationConfig.modalities,
       baseUrl: model.baseUrl,
       envKey: model.envKey,
     }));

@@ -190,7 +190,7 @@ export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
  * rebuilt its tool registry via {@link rebuildToolRegistryOnOverride}.
  *
  * Used by spawn sites that may be called with a wrapper-on-wrapper
- * argument (e.g. `subagent-manager.ts:maybeOverrideContentGenerator`
+ * argument (e.g. `subagent-manager.ts:buildSubagentContextOverride`
  * receiving `bgConfig = Object.create(agentConfig)` from the
  * background-agent path) to skip a redundant rebuild.
  */
@@ -203,7 +203,7 @@ export function hasRebuiltToolRegistry(config: Config): boolean {
  * Rebuilds the tool registry on `override` so core tools resolve
  * `this.config` to `override` instead of `base`. Used by both
  * {@link createApprovalModeOverride} and
- * `subagent-manager.ts:maybeOverrideContentGenerator` to avoid
+ * `subagent-manager.ts:buildSubagentContextOverride` to avoid
  * duplicated rebuild logic.
  *
  * - `override.createToolRegistry(...)` runs on the override (so the

@@ -94,7 +94,7 @@ describe('SubagentManager', () => {
         { name: 'write_file', displayName: 'Write File' },
         { name: 'grep', displayName: 'Search Files' },
       ]),
-      // `maybeOverrideContentGenerator` now rebuilds the tool registry on
+      // `buildSubagentContextOverride` now rebuilds the tool registry on
       // its override and copies discovered tools from this parent
       // registry. The real implementation iterates `source.tools.values()`,
       // so the stub needs a `tools` Map to avoid a TypeError.
@@ -1468,9 +1468,12 @@ System prompt 3`);
 
         await manager.createAgentHeadless(config, mockConfig);
 
+        // Owner is the runtimeContext passed to createAgentHeadless — assert
+        // the exact instance so a regression that swaps in a different Config
+        // (e.g. the override) gets caught.
         expect(mockCreateContentGenerator).toHaveBeenCalledWith(
           expect.objectContaining({ model: 'custom-model' }),
-          expect.anything(),
+          mockConfig,
         );
       });
 
@@ -1484,7 +1487,7 @@ System prompt 3`);
             model: 'claude-sonnet',
             authType: 'anthropic',
           }),
-          expect.anything(),
+          mockConfig,
         );
       });
 

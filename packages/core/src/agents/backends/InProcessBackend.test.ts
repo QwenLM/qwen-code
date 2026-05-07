@@ -582,6 +582,13 @@ describe('InProcessBackend', () => {
       await backend.spawnAgent(config);
 
       const mockCreate = createContentGenerator as ReturnType<typeof vi.fn>;
+      // Owner must be the per-agent override Config (the same instance
+      // AgentCore receives as runtimeContext) — NOT the parent. Asserting
+      // that match exactly catches a regression where `base` slips in.
+      const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+      const { runtimeContext: agentContext } = destructureAgentCoreCall(
+        MockAgentCore.mock.calls.at(-1)!,
+      );
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           authType: 'anthropic',
@@ -589,7 +596,7 @@ describe('InProcessBackend', () => {
           baseUrl: 'https://agent.example.com',
           model: 'test-model',
         }),
-        expect.anything(),
+        agentContext,
       );
     });
 
