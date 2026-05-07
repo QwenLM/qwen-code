@@ -417,6 +417,13 @@ The configuration resolution follows a strict layering model with one crucial ru
    - All fields **not defined** by the provider are set to `undefined` (not inherited from settings)
    - This ensures provider configurations act as a complete, self-contained "sealed package"
 
+   If a model is listed in `modelProviders`, put all model-specific
+   generation settings for that model in the matching provider entry. Top-level
+   `model.generationConfig` values, including `contextWindowSize`,
+   `modalities`, `customHeaders`, and `extra_body`, are ignored for provider
+   models. Configure those fields under
+   `modelProviders[authType][].generationConfig` for them to apply.
+
 2. **When NO modelProvider model is selected** (e.g., using `--model` with a raw model ID, or using CLI/env/settings directly):
    - The resolution falls through to lower layers
    - Fields are populated from CLI → env → settings → defaults

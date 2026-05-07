@@ -62,26 +62,31 @@ const PROMOTE_DRAIN_TIMEOUT_MS = 200;
 export function getShellAbortReasonKind(
   reason: unknown,
 ): ShellAbortReason['kind'] {
-  if (
-    reason !== null &&
-    typeof reason === 'object' &&
-    Object.prototype.hasOwnProperty.call(reason, 'kind')
-  ) {
+  if (reason !== null && typeof reason === 'object') {
     try {
-      const kind = (reason as { kind?: unknown }).kind;
-      // INVARIANT — three points must be kept in sync when extending
-      // `ShellAbortReason`:
-      //   (1) the discriminated union below (`type ShellAbortReason`),
-      //   (2) the value-equality whitelist on this line, and
-      //   (3) the `case` arms in both abort-handler switches (the
-      //       `default: { const _exhaustive: never = kind; ... }`
-      //       statically forces #3 when #1 grows, but #2 has no
-      //       compile-time tie to the union; if you forget to extend
-      //       it the new variant silently degrades to 'cancel' here
-      //       and the `case` you added in #3 is never reached).
-      if (kind === 'background' || kind === 'cancel') return kind;
+      // Both `hasOwnProperty.call` AND the `kind` read are inside the
+      // try: `hasOwnProperty.call` triggers the `[[GetOwnProperty]]`
+      // Proxy trap (`getOwnPropertyDescriptor` handler), so a Proxy
+      // whose `getOwnPropertyDescriptor` throws — separate from a
+      // throwing `get` trap — would otherwise propagate past the
+      // helper.
+      if (Object.prototype.hasOwnProperty.call(reason, 'kind')) {
+        const kind = (reason as { kind?: unknown }).kind;
+        // INVARIANT — three points must be kept in sync when extending
+        // `ShellAbortReason`:
+        //   (1) the discriminated union below (`type ShellAbortReason`),
+        //   (2) the value-equality whitelist on this line, and
+        //   (3) the `case` arms in both abort-handler switches (the
+        //       `default: { const _exhaustive: never = kind; ... }`
+        //       statically forces #3 when #1 grows, but #2 has no
+        //       compile-time tie to the union; if you forget to extend
+        //       it the new variant silently degrades to 'cancel' here
+        //       and the `case` you added in #3 is never reached).
+        if (kind === 'background' || kind === 'cancel') return kind;
+      }
     } catch {
-      // Throwing accessor / Proxy trap — fall back to safe kill below.
+      // Throwing accessor / Proxy trap (either `get` or
+      // `getOwnPropertyDescriptor`) — fall back to safe kill below.
     }
   }
   return 'cancel';

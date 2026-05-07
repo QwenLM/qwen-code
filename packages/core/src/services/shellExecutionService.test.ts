@@ -679,19 +679,57 @@ describe('ShellExecutionService', () => {
       // listeners now). Without dataDisposable.dispose() in the abort
       // handler, the listener-retention bug would let post-promote bytes
       // leak into the foreground consumer.
+      //
+      // Implementation note: PTY's handleOutput is async (`processingChain`
+      // queues microtasks for headlessTerminal.write callbacks), unlike
+      // child_process's sync handleOutput. Sync `expect` immediately
+      // after emit-then-abort would only see the call count BEFORE chain
+      // items run — both pre and post would read 0 and the assertion
+      // would tautologically pass without exercising the
+      // `listenersDetached` guard. We drive the test using the
+      // `simulateExecution` helper, which awaits `handle.result` — by
+      // the time the result resolves, the abort handler has run its
+      // drain (so all queued chain items have settled) and we can read
+      // the final emit count.
       const { result } = await simulateExecution(
         'tail -f /tmp/never.log',
-        (pty, abortController) => {
-          // Data BEFORE promote — fed via the live onData listener so it
+        (pty, ac) => {
+          // Pre-promote data — fed via the live onData listener so it
           // reaches the foreground onOutputEvent normally.
           pty.onData.mock.calls[0][0]('pre-promote-data\n');
-          abortController.abort({
+          ac.abort({
             kind: 'background',
             shellId: 'bg_test123',
           } satisfies ShellAbortReason);
         },
       );
       expect(result.promoted).toBe(true);
+      // Snapshot the count after promote settled. Pre-promote chain
+      // item ran AFTER abort set `listenersDetached = true` (chain
+      // items queue at handleOutput time but only execute when their
+      // .then microtask runs, which is after the sync abort dispatch
+      // that set the flag), so the pre-promote emit was already
+      // suppressed by the guard. Asserting `0` here pins both halves
+      // of the contract — pre-promote AND post-promote bytes are both
+      // suppressed once `listenersDetached` is set. Without the guard,
+      // pre-promote's render path would emit a `'data'` event into
+      // `onOutputEventMock` and this would be `>= 1`, failing the
+      // assertion.
+      const eventCountAfterSettle = onOutputEventMock.mock.calls.length;
+      expect(eventCountAfterSettle).toBe(0);
+      // Drive the data callback again after promote: production-side
+      // dataDisposable was disposed, but the mock stub doesn't actually
+      // detach the callback (the disposable returned by `vi.fn()` is a
+      // no-op). Re-invoking via `mock.calls[0][0]` exercises the
+      // production-side `listenersDetached` guard inside the chain
+      // callback, which is the real backstop against post-promote
+      // bytes leaking to the foreground onOutputEvent.
+      mockPtyProcess.onData.mock.calls[0][0]('post-promote-data\n');
+      // Wait one macrotask + a microtask flush to let any chain items
+      // queued by the post-promote dataCallback fully settle.
+      await new Promise((res) => setImmediate(res));
+      await new Promise((res) => setImmediate(res));
+      expect(onOutputEventMock.mock.calls.length).toBe(eventCountAfterSettle);
 
       // The disposable returned by mockPtyProcess.onData was disposed by
       // the abort handler — verify by calling .dispose's mock.
@@ -1878,6 +1916,27 @@ describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
       },
     );
     expect(getShellAbortReasonKind(proxyReason)).toBe('cancel');
+  });
+
+  it("returns 'cancel' when the `getOwnPropertyDescriptor` Proxy trap throws", () => {
+    // `Object.prototype.hasOwnProperty.call(reason, 'kind')` triggers
+    // the `[[GetOwnProperty]]` Proxy trap. A Proxy whose
+    // `getOwnPropertyDescriptor` handler throws (separate from the
+    // `get` trap covered by the test above) used to propagate past
+    // the helper because `hasOwnProperty.call` was outside the try.
+    // Now the helper wraps both the descriptor probe and the property
+    // read, so this also falls back to 'cancel'. (No `get` handler on
+    // the proxy: `hasOwnProperty.call` throws before the helper ever
+    // tries to read `kind`.)
+    const throwingDescriptorProxy = new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error('getOwnPropertyDescriptor blew up');
+        },
+      },
+    );
+    expect(getShellAbortReasonKind(throwingDescriptorProxy)).toBe('cancel');
   });
 
   it("returns 'background' for the canonical happy-path reason", () => {

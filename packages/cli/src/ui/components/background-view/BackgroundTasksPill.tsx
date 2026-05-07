@@ -74,7 +74,14 @@ export const BackgroundTasksPill: React.FC = () => {
 
   const onKeypress = useCallback(
     (key: Key) => {
-      if (key.name === 'return') {
+      // `return` and `down` both open the dialog. Down completes the
+      // focus chain Composer ↓ → AgentTabBar ↓ → Pill ↓ → Dialog,
+      // so users can `↓ ↓ (↓)` their way from an empty composer
+      // straight into the roster without having to remember the
+      // Enter shortcut. The LiveAgentPanel's overflow callout
+      // (`↓ to view all`) relies on this; without a Down handler
+      // the chain dead-ends at the highlighted pill.
+      if (key.name === 'return' || key.name === 'down') {
         openDialog();
       } else if (key.name === 'up' || key.name === 'escape') {
         setPillFocused(false);

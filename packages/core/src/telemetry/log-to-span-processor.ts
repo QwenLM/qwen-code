@@ -36,6 +36,12 @@ const SENSITIVE_ATTRIBUTE_KEYS = new Set([
   'response_text',
 ]);
 
+interface LogToSpanProcessorOptions {
+  flushIntervalMs?: number;
+  includeSensitiveSpanAttributes?: boolean;
+  maxBufferSize?: number;
+}
+
 /**
  * A LogRecordProcessor that converts each OTel log record into a span
  * and exports it directly through the provided SpanExporter.
@@ -56,13 +62,32 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private readonly flushIntervalMs: number;
   private cachedSessionId: string | undefined;
   private cachedTraceId: string | undefined;
+  private readonly includeSensitiveSpanAttributes: boolean;
+  private readonly maxBufferSize: number;
 
+  constructor(spanExporter: SpanExporter);
+  constructor(
+    spanExporter: SpanExporter,
+    flushIntervalMs: number,
+    maxBufferSize?: number,
+  );
+  constructor(spanExporter: SpanExporter, options: LogToSpanProcessorOptions);
   constructor(
     private readonly spanExporter: SpanExporter,
-    flushIntervalMs = 5000,
-    private readonly maxBufferSize = DEFAULT_MAX_BUFFER_SIZE,
+    flushIntervalMsOrOptions: number | LogToSpanProcessorOptions = 5000,
+    maxBufferSize = DEFAULT_MAX_BUFFER_SIZE,
   ) {
-    this.flushIntervalMs = flushIntervalMs;
+    if (typeof flushIntervalMsOrOptions === 'number') {
+      this.flushIntervalMs = flushIntervalMsOrOptions;
+      this.includeSensitiveSpanAttributes = false;
+      this.maxBufferSize = maxBufferSize;
+    } else {
+      this.flushIntervalMs = flushIntervalMsOrOptions.flushIntervalMs ?? 5000;
+      this.includeSensitiveSpanAttributes =
+        flushIntervalMsOrOptions.includeSensitiveSpanAttributes ?? false;
+      this.maxBufferSize =
+        flushIntervalMsOrOptions.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
+    }
     this.flushTimer = setInterval(() => {
       void this.flush();
     }, this.flushIntervalMs);
@@ -79,7 +104,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         if (
           value !== undefined &&
           value !== null &&
-          !SENSITIVE_ATTRIBUTE_KEYS.has(key)
+          (this.includeSensitiveSpanAttributes ||
+            !SENSITIVE_ATTRIBUTE_KEYS.has(key))
         ) {
           attributes[key] =
             typeof value === 'object'

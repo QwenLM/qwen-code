@@ -76,6 +76,24 @@ export function tildeifyPath(path: string): string {
 }
 
 /**
+ * Expands tilde (~) and Windows-style %userprofile% to the full home directory path.
+ * @param p - The path to expand.
+ * @returns The expanded path.
+ */
+export function expandHomeDir(p: string): string {
+  if (!p) {
+    return '';
+  }
+  let expandedPath = p;
+  if (p.toLowerCase().startsWith('%userprofile%')) {
+    expandedPath = os.homedir() + p.substring('%userprofile%'.length);
+  } else if (p === '~' || p.startsWith('~/')) {
+    expandedPath = os.homedir() + p.substring(1);
+  }
+  return path.normalize(expandedPath);
+}
+
+/**
  * Shortens a path string if it exceeds maxLen, prioritizing the start and end segments.
  * Shows root + first segment + "..." + end segments when middle segments are omitted.
  * Example: /path/to/a/very/long/file.txt -> /path/.../long/file.txt
