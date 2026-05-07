@@ -317,6 +317,7 @@ describe('<ToolMessage />', () => {
         terminateReason?: string;
       };
       isFocused?: boolean;
+      isPending?: boolean;
     }): ToolMessageProps => {
       const resultDisplay = {
         type: 'task_execution' as const,
@@ -331,6 +332,7 @@ describe('<ToolMessage />', () => {
         callId: 'gated-task-call',
         forceShowResult: true, // mirror ToolGroupMessage's forceShowResult
         isFocused: overrides.isFocused,
+        isPending: overrides.isPending,
       };
     };
 
@@ -355,7 +357,7 @@ describe('<ToolMessage />', () => {
       expect(output).not.toContain('Queued approval:');
     });
 
-    it('completed subagent → renders a one-line scrollback summary', () => {
+    it('committed (`!isPending`) terminal subagent → renders a one-line scrollback summary', () => {
       // The verbose 15-row inline frame is retired (it caused
       // scrollback flicker), but the conversation history needs to
       // keep a permanent record after the panel's 8s window expires
@@ -370,6 +372,7 @@ describe('<ToolMessage />', () => {
               taskPrompt: 'Already done',
               status: 'completed',
             },
+            isPending: false,
           })}
         />,
         StreamingState.Idle,
@@ -382,6 +385,33 @@ describe('<ToolMessage />', () => {
       // No approval prompt — completed subagents don't sit on the
       // focus lock.
       expect(output).not.toContain('MockApprovalPrompt');
+    });
+
+    it('live (`isPending`) terminal subagent → no scrollback summary (panel owns the row)', () => {
+      // While the parent turn is still in `pendingHistoryItems`,
+      // LiveAgentPanel below the composer renders the synthesized /
+      // terminal row — emitting the summary here too would duplicate
+      // it visually. The summary fires only when the tool message
+      // commits to <Static> (`isPending=false`), guaranteeing exactly
+      // one inline copy in the eventual scrollback record.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'live-terminal',
+              taskDescription: 'Just finished mid-turn',
+              taskPrompt: 'Mid-turn',
+              status: 'completed',
+            },
+            isPending: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      // No inline summary — the panel renders this row instead.
+      expect(output).not.toContain('✔');
+      expect(output).not.toContain('Just finished mid-turn');
     });
 
     it('failed subagent → renders summary with terminate reason', () => {

@@ -999,7 +999,7 @@ describe('BackgroundTaskRegistry', () => {
       }
     });
 
-    it('unregisterForeground removes the entry and emits a status change', () => {
+    it('unregisterForeground removes the entry and emits status change twice (pre + post delete)', () => {
       const onStatusChange = vi.fn();
       registry.setStatusChangeCallback(onStatusChange);
 
@@ -1016,7 +1016,56 @@ describe('BackgroundTaskRegistry', () => {
       registry.unregisterForeground('fg-5');
 
       expect(registry.get('fg-5')).toBeUndefined();
-      expect(onStatusChange).toHaveBeenCalledTimes(1);
+      // Two emits: the pre-delete one matches the
+      // complete/fail/cancel/finalize ordering so callbacks that
+      // re-read `registry.get(agentId)` see the entry; the post-delete
+      // one lets snapshot-based views (`useBackgroundTaskView` calling
+      // `registry.getAll()`) observe the entry-less state without
+      // needing per-tick reconciliation. Both fire synchronously, so
+      // React batches the resulting setState calls into one re-render.
+      expect(onStatusChange).toHaveBeenCalledTimes(2);
+    });
+
+    it('unregisterForeground post-delete emit observes registry-less state', () => {
+      // The second emit is the contract that lets snapshot consumers
+      // (e.g. BackgroundTasksDialog list mode) drop ghost rows for
+      // foreground subagents that just unregistered. Without it the
+      // snapshot would freeze at the pre-delete entry-as-running state
+      // until the next unrelated transition.
+      registry.register({
+        agentId: 'fg-post-delete',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      const observations: Array<{
+        getAtCallback: BackgroundTaskEntry | undefined;
+        getAllCount: number;
+      }> = [];
+      registry.setStatusChangeCallback((entry) => {
+        if (entry?.agentId !== 'fg-post-delete') return;
+        observations.push({
+          getAtCallback: registry.get('fg-post-delete'),
+          getAllCount: registry
+            .getAll()
+            .filter((e) => e.agentId === 'fg-post-delete').length,
+        });
+      });
+
+      registry.unregisterForeground('fg-post-delete');
+
+      expect(observations).toHaveLength(2);
+      // First emit (pre-delete): entry still in the registry.
+      expect(observations[0].getAtCallback?.agentId).toBe('fg-post-delete');
+      expect(observations[0].getAllCount).toBe(1);
+      // Second emit (post-delete): entry gone. This is what
+      // `useBackgroundTaskView.refresh()` sees, so its merged
+      // entries no longer include the agent.
+      expect(observations[1].getAtCallback).toBeUndefined();
+      expect(observations[1].getAllCount).toBe(0);
     });
 
     it('unregisterForeground throws if asked to remove a background entry', () => {
@@ -1078,10 +1127,15 @@ describe('BackgroundTaskRegistry', () => {
       expect(onRegister.mock.calls[0]![0].agentId).toBe('bg-fires-register-cb');
     });
 
-    it('unregisterForeground emits status change before removing the entry', () => {
-      // Mirrors the ordering used by complete/fail/cancel/finalize so a
-      // statusChange callback that re-reads `registry.get(agentId)` from
-      // inside the callback sees the entry across every terminal path.
+    it('unregisterForeground first emit sees entry; later emits see registry-less state', () => {
+      // The first emit mirrors the ordering used by
+      // complete/fail/cancel/finalize so a statusChange callback that
+      // re-reads `registry.get(agentId)` from inside the callback sees
+      // the entry across every terminal path. The second emit (added
+      // for snapshot consumers like `useBackgroundTaskView`) sees the
+      // registry-less state — both paths are documented + tested
+      // separately so a future refactor that collapsed the two emits
+      // would surface here.
       registry.register({
         agentId: 'fg-unregister-order',
         description: 'sync agent',
@@ -1091,17 +1145,21 @@ describe('BackgroundTaskRegistry', () => {
         abortController: new AbortController(),
       });
 
-      let observedFromCallback: BackgroundTaskEntry | undefined;
+      const observed: Array<BackgroundTaskEntry | undefined> = [];
       registry.setStatusChangeCallback((entry) => {
         if (entry?.agentId === 'fg-unregister-order') {
-          observedFromCallback = registry.get(entry.agentId);
+          observed.push(registry.get(entry.agentId));
         }
       });
 
       registry.unregisterForeground('fg-unregister-order');
 
-      expect(observedFromCallback).toBeDefined();
-      expect(observedFromCallback!.agentId).toBe('fg-unregister-order');
+      expect(observed).toHaveLength(2);
+      // First emit: pre-delete, callback sees the entry.
+      expect(observed[0]).toBeDefined();
+      expect(observed[0]!.agentId).toBe('fg-unregister-order');
+      // Second emit: post-delete, callback sees the registry-less state.
+      expect(observed[1]).toBeUndefined();
       expect(registry.get('fg-unregister-order')).toBeUndefined();
     });
 

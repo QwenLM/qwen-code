@@ -78,10 +78,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   isFocused = true,
-  // `isPending` stays on the props interface for upstream compat
-  // (HistoryItemDisplay et al. forward it) but the group body no
-  // longer reads it. Skip the destructure so TS catches accidental
-  // re-introductions of dead state.
+  isPending = false,
   activeShellPtyId,
   embeddedShellFocused,
   memoryWriteCount,
@@ -327,6 +324,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   isAgentWithPendingConfirmation(tool.resultDisplay)
                 }
                 isFocused={isSubagentFocused}
+                isPending={isPending}
               />
             </Box>
             {tool.status === ToolCallStatus.Confirming &&

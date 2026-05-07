@@ -262,6 +262,14 @@ const PlanResultRenderer: React.FC<{
  *   single-line scrollback summary so the conversation history retains
  *   a permanent record after the panel's 8s window expires and the
  *   dialog closes. Format: `<icon> <type>: <description> · N tools · Xs · Yk tokens`.
+ *
+ * The committed-phase summary is gated on `!isPending` — without the
+ * gate the summary would also paint into `pendingHistoryItems`
+ * (the live area) the moment a subagent terminates, duplicating the
+ * row LiveAgentPanel already renders synthesized below the composer.
+ * `isPending=true` means we're still in the live area; `isPending=false`
+ * means the item has committed to `<Static>` and the summary is the
+ * one and only place the user can find this run after the panel evicts.
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -269,7 +277,15 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth: number;
   config: Config;
   isFocused?: boolean;
-}> = ({ data, availableHeight, childWidth, config, isFocused }) => {
+  isPending?: boolean;
+}> = ({
+  data,
+  availableHeight,
+  childWidth,
+  config,
+  isFocused,
+  isPending = false,
+}) => {
   if (data.pendingConfirmation && isFocused) {
     const agentLabel = data.subagentName || 'agent';
     return (
@@ -308,10 +324,14 @@ const SubagentExecutionRenderer: React.FC<{
   // 8s visibility window expires (LiveAgentPanel evicts terminal rows;
   // BackgroundTasksDialog only retains them while open). Skip
   // `running` / `background` since the panel + dialog cover those.
+  // ALSO skip while `isPending` — the live area is already painted by
+  // the panel, so emitting the summary into `pendingHistoryItems` would
+  // duplicate the row visually until the parent turn commits.
   if (
-    data.status === 'completed' ||
-    data.status === 'failed' ||
-    data.status === 'cancelled'
+    !isPending &&
+    (data.status === 'completed' ||
+      data.status === 'failed' ||
+      data.status === 'cancelled')
   ) {
     return <SubagentScrollbackSummary data={data} />;
   }
@@ -478,6 +498,15 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
    * sibling subagents render a dim "Queued approval" marker instead.
    */
   isFocused?: boolean;
+  /**
+   * True while the tool message is rendered inside `pendingHistoryItems`
+   * (live area), false once committed to `<Static>`. Used by the
+   * subagent renderer to gate the scrollback summary so the live area
+   * stays panel-only — without this gate the summary would duplicate
+   * the synthesized row LiveAgentPanel already renders below the
+   * composer the moment a subagent terminates.
+   */
+  isPending?: boolean;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -495,6 +524,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   isFocused,
+  isPending,
   executionStartTime,
 }) => {
   const settings = useSettings();
@@ -649,6 +679,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={innerWidth}
                 config={config}
                 isFocused={isFocused}
+                isPending={isPending}
               />
             )}
             {effectiveDisplayRenderer.type === 'diff' && (

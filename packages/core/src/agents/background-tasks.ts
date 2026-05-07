@@ -275,11 +275,22 @@ export class BackgroundTaskRegistry {
           `Background entries must terminate via complete/fail/finalizeCancelled.`,
       );
     }
-    // Emit before delete so any future BackgroundStatusChangeCallback that
-    // re-reads `registry.get(agentId)` from inside the callback sees the
-    // entry, matching the ordering used by complete/fail/cancel/finalize.
+    // Emit BEFORE delete so callbacks that re-read `registry.get(agentId)`
+    // from inside see the entry — matches the ordering used by
+    // complete/fail/cancel/finalize. This is the "agent reached its
+    // last live state" signal.
     this.emitStatusChange(entry);
     this.agents.delete(agentId);
+    // Emit AGAIN after delete so views that re-snapshot the registry
+    // on statusChange (e.g. `useBackgroundTaskView.refresh()` calling
+    // `registry.getAll()`) see the entry-less state and stop showing
+    // a stale "running" row. Without this second emit the snapshot
+    // freezes at the pre-delete state until the next unrelated
+    // statusChange event, leaving ghost rows in `BackgroundTasksDialog`
+    // list mode and forcing each consumer to re-implement registry
+    // re-pull. The two emits are batched by React's setState batching,
+    // so consumers only re-render once.
+    this.emitStatusChange(entry);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
   }
 
