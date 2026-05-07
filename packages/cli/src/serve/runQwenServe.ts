@@ -69,12 +69,12 @@ export async function runQwenServe(
   // instead of silently stripping to a malformed `2001:db8::1]:8080`.
   let listenHostname = opts.hostname;
   if (opts.hostname.startsWith('[')) {
+    const inner = opts.hostname.slice(1, -1);
     if (
-      opts.hostname.endsWith(']') &&
-      !opts.hostname.slice(1, -1).includes(']')
+      !opts.hostname.endsWith(']') ||
+      inner.length === 0 ||
+      inner.includes(']')
     ) {
-      listenHostname = opts.hostname.slice(1, -1);
-    } else {
       throw new Error(
         `Invalid --hostname "${opts.hostname}": brackets indicate an ` +
           `IPv6 literal but the value isn't a clean [addr] form. Pass the ` +
@@ -82,6 +82,10 @@ export async function runQwenServe(
           `"--hostname [::1] --port 4170".`,
       );
     }
+    // Empty brackets `[]` would have stripped to `''`, which Node treats
+    // as "bind to all interfaces" — the operator's intent was specific,
+    // not wildcard. The check above (`inner.length === 0`) rejects.
+    listenHostname = inner;
   }
 
   return await new Promise<RunHandle>((resolve, reject) => {

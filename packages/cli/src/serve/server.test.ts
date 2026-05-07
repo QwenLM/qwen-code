@@ -790,6 +790,20 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/Invalid --hostname/);
   });
 
+  it('rejects empty-bracket `[]` --hostname (would bind to all interfaces)', async () => {
+    // Node's `listen('')` is interpreted as "all interfaces". An operator
+    // typing `[]` clearly meant something specific, not wildcard — fail
+    // loudly instead of silently exposing the daemon on every interface.
+    await expect(
+      runQwenServe({
+        hostname: '[]',
+        port: 0,
+        mode: 'http-bridge',
+        token: 'irrelevant',
+      }),
+    ).rejects.toThrow(/Invalid --hostname/);
+  });
+
   it('drains the bridge before closing the listener', async () => {
     const bridge = fakeBridge();
     handle = await runQwenServe(
