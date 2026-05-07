@@ -1290,7 +1290,6 @@ export const useGeminiStream = (
       } finally {
         dualOutput?.finalizeAssistantMessage();
       }
-      dualOutput?.finalizeAssistantMessage();
       if (toolCallRequests.length > 0) {
         scheduleToolCalls(toolCallRequests, signal);
         return StreamProcessingStatus.CompletedWithToolCalls;

@@ -275,6 +275,8 @@ describe('AppContainer State Management', () => {
       elapsedTime: '0.0s',
       currentLoadingPhrase: '',
     });
+    mockedUseRemoteInput.mockReturnValue(null);
+    mockedUseDualOutput.mockReturnValue(null);
 
     // Mock Config
     mockConfig = makeFakeConfig();
@@ -900,6 +902,17 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Terminal Title Update Feature', () => {
+    const getTitleWrites = () =>
+      mockStdout.write.mock.calls.filter((call) => call[0].includes('\x1b]2;'));
+
+    const expectTitleWrite = async (expectedWrite: string) => {
+      await vi.waitFor(() => {
+        const titleWrites = getTitleWrites();
+        expect(titleWrites).toHaveLength(1);
+        expect(titleWrites[0][0]).toBe(expectedWrite);
+      });
+    };
+
     beforeEach(() => {
       // Reset mock stdout for each test
       mockStdout = { write: vi.fn() };
@@ -930,9 +943,7 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that no title-related writes occurred
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      const titleWrites = getTitleWrites();
       expect(titleWrites).toHaveLength(0);
       unmount();
     });
@@ -962,14 +973,12 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that no title-related writes occurred
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      const titleWrites = getTitleWrites();
       expect(titleWrites).toHaveLength(0);
       unmount();
     });
 
-    it('should update terminal title with thought subject when in active state', () => {
+    it('should update terminal title with thought subject when in active state', async () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -1006,17 +1015,11 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that title was updated with thought subject
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
-      expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${thoughtSubject.padEnd(80, ' ')}\x07`,
-      );
+      await expectTitleWrite(`\x1b]2;${thoughtSubject.padEnd(80, ' ')}\x07`);
       unmount();
     });
 
-    it('should update terminal title with default text when in Idle state and no thought subject', () => {
+    it('should update terminal title with default text when in Idle state and no thought subject', async () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -1052,17 +1055,13 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that title was updated with default Idle text
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
-      expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
+      await expectTitleWrite(
         `\x1b]2;${'Gemini - workspace'.padEnd(80, ' ')}\x07`,
       );
       unmount();
     });
 
-    it('should update terminal title when in WaitingForConfirmation state with thought subject', () => {
+    it('should update terminal title when in WaitingForConfirmation state with thought subject', async () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -1099,17 +1098,11 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that title was updated with confirmation text
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
-      expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${thoughtSubject.padEnd(80, ' ')}\x07`,
-      );
+      await expectTitleWrite(`\x1b]2;${thoughtSubject.padEnd(80, ' ')}\x07`);
       unmount();
     });
 
-    it('should pad title to exactly 80 characters', () => {
+    it('should pad title to exactly 80 characters', async () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -1146,12 +1139,9 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that title is padded to exactly 80 characters
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
-      expect(titleWrites).toHaveLength(1);
-      const calledWith = titleWrites[0][0];
       const expectedTitle = shortTitle.padEnd(80, ' ');
+      await expectTitleWrite('\x1b]2;' + expectedTitle + '\x07');
+      const calledWith = getTitleWrites()[0][0];
 
       expect(calledWith).toContain(shortTitle);
       expect(calledWith).toContain('\x1b]2;');
@@ -1160,7 +1150,7 @@ describe('AppContainer State Management', () => {
       unmount();
     });
 
-    it('should use correct ANSI escape code format', () => {
+    it('should use correct ANSI escape code format', async () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -1197,16 +1187,12 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that the correct ANSI escape sequence is used
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
-      expect(titleWrites).toHaveLength(1);
       const expectedEscapeSequence = `\x1b]2;${title.padEnd(80, ' ')}\x07`;
-      expect(titleWrites[0][0]).toBe(expectedEscapeSequence);
+      await expectTitleWrite(expectedEscapeSequence);
       unmount();
     });
 
-    it('should use CLI_TITLE environment variable when set', () => {
+    it('should use CLI_TITLE environment variable when set', async () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -1245,11 +1231,7 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that title was updated with CLI_TITLE value
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
-      expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
+      await expectTitleWrite(
         `\x1b]2;${'Custom Gemini Title'.padEnd(80, ' ')}\x07`,
       );
       unmount();
@@ -1260,7 +1242,7 @@ describe('AppContainer State Management', () => {
     const mockedMeasureElement = measureElement as Mock;
     const mockedUseTerminalSize = useTerminalSize as Mock;
 
-    it('should prevent terminal height from being less than 1', () => {
+    it('should prevent terminal height from being less than 1', async () => {
       const resizePtySpy = vi.spyOn(ShellExecutionService, 'resizePty');
       // Arrange: Simulate a small terminal and a large footer
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 5 });
@@ -1288,7 +1270,9 @@ describe('AppContainer State Management', () => {
 
       // Assert: The shell should be resized to a minimum height of 1, not a negative number.
       // The old code would have tried to set a negative height.
-      expect(resizePtySpy).toHaveBeenCalled();
+      await vi.waitFor(() => {
+        expect(resizePtySpy).toHaveBeenCalled();
+      });
       const lastCall =
         resizePtySpy.mock.calls[resizePtySpy.mock.calls.length - 1];
       // Check the height argument specifically
