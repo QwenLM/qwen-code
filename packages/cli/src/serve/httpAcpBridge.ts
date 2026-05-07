@@ -810,7 +810,6 @@ async function withTimeout<T>(
  * cwd to a sandbox here would be theatre. Stage 4+ remote-sandbox swaps
  * this factory for a sandbox-aware variant; see issue #3803 §11.
  */
-// lgtm[js/shell-command-constructed-from-input]
 export const defaultSpawnChannelFactory: ChannelFactory = async (
   workspaceCwd,
 ) => {
@@ -841,6 +840,14 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // the token (it speaks to the daemon over stdio, not HTTP).
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
   delete childEnv['QWEN_SERVER_TOKEN'];
+  // CodeQL `js/path-injection`: `workspaceCwd` is operator-controlled HTTP
+  // input flowing into `spawn({ cwd })`. Stage 1 trust model accepts this
+  // — see the function-level comment above. Defense-in-depth: the cwd is
+  // canonicalized via `path.resolve()` upstream in `spawnOrAttach` (line
+  // ~531), and `spawn`'s `cwd` only changes the child's working directory,
+  // it doesn't pass through any shell. Suppress the alert with the
+  // matching query id.
+  // lgtm [js/path-injection]
   const child = spawn(process.execPath, [cliEntry, '--acp'], {
     cwd: workspaceCwd,
     stdio: ['pipe', 'pipe', 'inherit'],
