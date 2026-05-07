@@ -1272,7 +1272,13 @@ function ensureMinimalDist() {
   registerDistBackupSafetyNet();
 
   const distPath = path.resolve('dist');
-  const backupRoot = mkdtempSync(path.join(tmpdir(), 'qwen-dist-backup-'));
+  // Backup root must live on the same volume as dist/ so that renameSync
+  // is atomic. On Windows GitHub runners the workspace lives on D: while
+  // os.tmpdir() returns a path on C:; renaming across drives raises
+  // EXDEV. Keeping the backup as a sibling of dist/ avoids that.
+  const backupRoot = mkdtempSync(
+    path.join(path.dirname(distPath), '.qwen-dist-backup-'),
+  );
   const backupDist = path.join(backupRoot, 'dist');
   const hadExistingDist = existsSync(distPath);
 
@@ -1404,30 +1410,39 @@ function createWindowsTraversalStandaloneArchive(tmpDir) {
   mkdirSync(outDir, { recursive: true });
 
   const archive = path.join(outDir, 'qwen-code-win-x64.zip');
+  // PowerShell's `-Command` parser is fragile for multi-line scripts that
+  // include function definitions and quoted entry names. Joining with
+  // `; ` produces lines like `function f() {; ...; }; }` that older
+  // PowerShell versions reject. Write the script to a .ps1 file and run
+  // `-File` instead, which uses the same parser as a real script.
+  const scriptPath = path.join(tmpDir, 'create-traversal-archive.ps1');
+  writeFileSync(
+    scriptPath,
+    [
+      "$ErrorActionPreference = 'Stop'",
+      'Add-Type -AssemblyName System.IO.Compression.FileSystem',
+      'function Add-ZipEntry($zip, $name, $content) {',
+      '  $entry = $zip.CreateEntry($name)',
+      '  $writer = [System.IO.StreamWriter]::new($entry.Open())',
+      '  try { $writer.Write($content) } finally { $writer.Dispose() }',
+      '}',
+      '$zip = [System.IO.Compression.ZipFile]::Open(',
+      '  $env:QWEN_TEST_ZIP_ARCHIVE,',
+      '  [System.IO.Compression.ZipArchiveMode]::Create',
+      ')',
+      'try {',
+      "  Add-ZipEntry $zip '../qwen-slip' 'path traversal'",
+      '  Add-ZipEntry $zip \'qwen-code/bin/qwen.cmd\' "@echo off`r`necho 0.0.0-smoke`r`n"',
+      "  Add-ZipEntry $zip 'qwen-code/node/node.exe' 'fake node.exe'",
+      '  Add-ZipEntry $zip \'qwen-code/manifest.json\' \'{"name":"@qwen-code/qwen-code"}\'',
+      '} finally { $zip.Dispose() }',
+      '',
+    ].join('\r\n'),
+  );
+
   execFileSync(
     'powershell',
-    [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      [
-        "$ErrorActionPreference = 'Stop'",
-        'Add-Type -AssemblyName System.IO.Compression.FileSystem',
-        'function Add-ZipEntry($zip, $name, $content) {',
-        '  $entry = $zip.CreateEntry($name)',
-        '  $writer = [IO.StreamWriter]::new($entry.Open())',
-        '  try { $writer.Write($content) } finally { $writer.Dispose() }',
-        '}',
-        '$zip = [IO.Compression.ZipFile]::Open($env:QWEN_TEST_ZIP_ARCHIVE, [IO.Compression.ZipArchiveMode]::Create)',
-        'try {',
-        "  Add-ZipEntry $zip '../qwen-slip' 'path traversal'",
-        "  Add-ZipEntry $zip 'qwen-code/bin/qwen.cmd' '@echo off`r`necho 0.0.0-smoke`r`n'",
-        "  Add-ZipEntry $zip 'qwen-code/node/node.exe' 'fake node.exe'",
-        '  Add-ZipEntry $zip \'qwen-code/manifest.json\' \'{"name":"@qwen-code/qwen-code"}\'',
-        '} finally { $zip.Dispose() }',
-      ].join('; '),
-    ],
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
     {
       env: {
         ...process.env,
@@ -1442,6 +1457,11 @@ function createWindowsTraversalStandaloneArchive(tmpDir) {
 
 function createZipForTest(archive, cwd, entry) {
   if (process.platform === 'win32') {
+    // Mirror create-standalone-package.js: use CreateFromDirectory so
+    // entry names use forward slashes and match what the production
+    // builder ships. Compress-Archive would write backslashes, which
+    // the .bat installer's ValidateArchiveContents normalizes but the
+    // production archive shouldn't depend on that leniency.
     execFileSync(
       'powershell',
       [
@@ -1449,7 +1469,7 @@ function createZipForTest(archive, cwd, entry) {
         '-ExecutionPolicy',
         'Bypass',
         '-Command',
-        'Compress-Archive -LiteralPath $env:QWEN_TEST_ZIP_ENTRY -DestinationPath $env:QWEN_TEST_ZIP_ARCHIVE -Force',
+        'Add-Type -AssemblyName System.IO.Compression.FileSystem; if (Test-Path -LiteralPath $env:QWEN_TEST_ZIP_ARCHIVE) { Remove-Item -LiteralPath $env:QWEN_TEST_ZIP_ARCHIVE -Force }; [IO.Compression.ZipFile]::CreateFromDirectory($env:QWEN_TEST_ZIP_ENTRY, $env:QWEN_TEST_ZIP_ARCHIVE, [IO.Compression.CompressionLevel]::Optimal, $true)',
       ],
       {
         env: {

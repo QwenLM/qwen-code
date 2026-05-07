@@ -109,7 +109,9 @@ function replaceRequired(contents, search, replacement, output) {
   if (!contents.includes(search)) {
     fail(`Unable to stamp release version in ${output}`);
   }
-  return contents.replace(search, replacement);
+  // Use replaceAll so a future installer that adds a duplicate placeholder
+  // doesn't silently leave the trailing occurrence as `latest`.
+  return contents.replaceAll(search, replacement);
 }
 
 function stampVersionHelpText(contents, output, version) {
@@ -163,8 +165,4 @@ Options:
 `);
 }
 
-export {
-  assertInstallationAssetChecksums,
-  buildInstallationAssets,
-  INSTALLATION_ASSETS,
-};
+export { assertInstallationAssetChecksums, buildInstallationAssets };

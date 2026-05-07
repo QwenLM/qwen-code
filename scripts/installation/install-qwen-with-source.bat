@@ -221,7 +221,8 @@ set "QWEN_VALIDATE_NPM_REGISTRY=!NPM_REGISTRY!"
 set "QWEN_VALIDATE_INSTALL_BASE=!INSTALL_BASE!"
 set "QWEN_VALIDATE_INSTALL_DIR=!INSTALL_DIR!"
 set "QWEN_VALIDATE_INSTALL_BIN_DIR=!INSTALL_BIN_DIR!"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); foreach ($name in 'METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR') { $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }"
+set "QWEN_VALIDATE_SOURCE=!SOURCE!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); foreach ($name in 'METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR','SOURCE') { $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_VALIDATE_METHOD="
 set "QWEN_VALIDATE_MIRROR="
@@ -232,6 +233,7 @@ set "QWEN_VALIDATE_NPM_REGISTRY="
 set "QWEN_VALIDATE_INSTALL_BASE="
 set "QWEN_VALIDATE_INSTALL_DIR="
 set "QWEN_VALIDATE_INSTALL_BIN_DIR="
+set "QWEN_VALIDATE_SOURCE="
 if %PS_STATUS% NEQ 0 (
     echo ERROR: installer options contain unsafe command characters.
     exit /b 1
@@ -659,7 +661,13 @@ exit /b 0
 
 :ValidateArchiveContents
 set "QWEN_ARCHIVE_FILE=%~1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); try { foreach ($entry in $archive.Entries) { $name = $entry.FullName; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name.StartsWith('\') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)' -or $name.Contains('\')) { Write-Error ('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } finally { $archive.Dispose() }"
+REM Normalize backslashes to forward slashes before checking. Some Windows
+REM zip producers (including PowerShell's Compress-Archive) emit entries
+REM with backslash separators even though the ZIP spec requires '/'. We
+REM accept either separator and reject only entries that, after
+REM normalization, are empty, absolute, drive-rooted, or contain a '..'
+REM segment.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); try { foreach ($entry in $archive.Entries) { $name = $entry.FullName -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { Write-Error ('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } finally { $archive.Dispose() }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_ARCHIVE_FILE="
 if %PS_STATUS% NEQ 0 echo ERROR: Archive contains unsafe path entries.

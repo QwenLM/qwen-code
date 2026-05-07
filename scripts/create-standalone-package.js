@@ -493,6 +493,11 @@ function createArchive(outputExtension, outputPath, cwd) {
 
 function createZipArchive(outputPath, cwd) {
   if (process.platform === 'win32') {
+    // Use [IO.Compression.ZipFile]::CreateFromDirectory rather than
+    // Compress-Archive: the latter writes Windows-style backslash
+    // separators into ZIP entry names, which then trip the .bat
+    // installer's path-traversal guard against backslashes.
+    // CreateFromDirectory writes spec-compliant forward slashes.
     run(
       'powershell',
       [
@@ -500,7 +505,7 @@ function createZipArchive(outputPath, cwd) {
         '-ExecutionPolicy',
         'Bypass',
         '-Command',
-        'Compress-Archive -LiteralPath $env:QWEN_PACKAGE_ROOT -DestinationPath $env:QWEN_OUTPUT_PATH -Force',
+        'Add-Type -AssemblyName System.IO.Compression.FileSystem; if (Test-Path -LiteralPath $env:QWEN_OUTPUT_PATH) { Remove-Item -LiteralPath $env:QWEN_OUTPUT_PATH -Force }; [IO.Compression.ZipFile]::CreateFromDirectory($env:QWEN_PACKAGE_ROOT, $env:QWEN_OUTPUT_PATH, [IO.Compression.CompressionLevel]::Optimal, $true)',
       ],
       {
         env: {
