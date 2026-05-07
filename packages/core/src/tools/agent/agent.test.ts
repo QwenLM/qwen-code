@@ -695,6 +695,55 @@ describe('AgentTool', () => {
         undefined,
       );
     });
+
+    it('stops the per-subagent ToolRegistry after the fork body finishes', async () => {
+      // Regression: foreground-fork fires the body via
+      // `void runInForkContext(...)` and returns a placeholder
+      // synchronously. Without an inner try/finally, the per-subagent
+      // ToolRegistry built by `createApprovalModeOverride` would never
+      // be stopped, and any AgentTool / SkillTool the fork's model
+      // instantiates would leak its change-listener on shared
+      // SubagentManager / SkillManager. Other three spawn paths
+      // (foreground non-fork, background fork, background non-fork)
+      // already stop the registry in their finally blocks.
+      const stopSpy = vi.fn().mockResolvedValue(undefined);
+      const stubReg = {
+        copyDiscoveredToolsFrom: vi.fn(),
+        getAllTools: vi.fn().mockReturnValue([]),
+        getAllToolNames: vi.fn().mockReturnValue([]),
+        stop: stopSpy,
+      };
+      // The override Config built by `createApprovalModeOverride` calls
+      // `createToolRegistry` (returns the override's own registry) and
+      // `getToolRegistry` (during `copyDiscoveredToolsFrom(base...)`).
+      // The override's own getToolRegistry is then assigned to whatever
+      // `createToolRegistry` returned. Wire BOTH config getters so the
+      // post-override `agentConfig.getToolRegistry().stop()` reaches our
+      // spy.
+      vi.mocked(config.getToolRegistry).mockReturnValue(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        stubReg as any,
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked((config as any).createToolRegistry).mockResolvedValue(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        stubReg as any,
+      );
+
+      const params: AgentParams = {
+        description: 'fork task',
+        prompt: 'do the thing',
+      };
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      // Drain the detached fork body so its finally block runs.
+      await vi.runAllTimersAsync();
+
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('SubagentStart hook integration', () => {
