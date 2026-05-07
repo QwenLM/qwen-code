@@ -2880,6 +2880,44 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['MULTI_VAR_C']).toEqual('value_c');
       });
 
+      it('should never set QWEN_HOME or QWEN_RUNTIME_DIR from settings.env', () => {
+        // Storage-routing vars must not come from settings.json — even at
+        // user scope — because a workspace settings.json could otherwise
+        // redirect global state after the path bootstrap has run.
+        delete process.env['QWEN_HOME'];
+        delete process.env['QWEN_RUNTIME_DIR'];
+
+        const userSettingsContent: Settings = {
+          env: {
+            QWEN_HOME: '/redirected/by/settings',
+            QWEN_RUNTIME_DIR: '/redirected/runtime',
+            HARMLESS_VAR: 'ok',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['QWEN_HOME']).toBeUndefined();
+        expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
+        expect(process.env['HARMLESS_VAR']).toEqual('ok');
+      });
+
       it('should load settings.env from both user and workspace settings', () => {
         const workspaceSettingsContent = {
           env: {
@@ -3198,6 +3236,87 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['QWEN_HOME']).toEqual('/tmp/from-user-env');
         expect(loaded.user.path).toEqual(customSettingsPath);
         cwdSpy.mockRestore();
+      });
+
+      it('warns when QWEN_HOME redirects but the legacy ~/.qwen still has settings', () => {
+        const customHome = '/tmp/qwen-home-fresh';
+        process.env['QWEN_HOME'] = customHome;
+        const legacySettings = path.join(
+          '/mock/home/user',
+          QWEN_DIR,
+          'settings.json',
+        );
+        // Active QWEN_HOME has nothing yet; legacy ~/.qwen has settings.json.
+        const customSettingsPath = path.join(customHome, 'settings.json');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+          const s = p.toString();
+          // Legacy settings exist, active QWEN_HOME settings do not.
+          if (s === legacySettings) return true;
+          if (s === customSettingsPath) return false;
+          return false;
+        });
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+        const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+
+        const warningMatch = loaded.migrationWarnings.find((w) =>
+          w.includes('QWEN_HOME points to'),
+        );
+        expect(warningMatch).toBeDefined();
+        expect(warningMatch).toContain(customHome);
+        expect(warningMatch).toContain(path.join('/mock/home/user', QWEN_DIR));
+      });
+
+      it('does not warn when QWEN_HOME points to a directory with settings.json', () => {
+        const customHome = '/tmp/qwen-home-migrated';
+        process.env['QWEN_HOME'] = customHome;
+        const customSettingsPath = path.join(customHome, 'settings.json');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [customSettingsPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+        const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+
+        const warningMatch = loaded.migrationWarnings.find((w) =>
+          w.includes('QWEN_HOME points to'),
+        );
+        expect(warningMatch).toBeUndefined();
+      });
+
+      it('does not warn when QWEN_HOME is unset (default ~/.qwen)', () => {
+        delete process.env['QWEN_HOME'];
+        const legacySettings = path.join(
+          '/mock/home/user',
+          QWEN_DIR,
+          'settings.json',
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [legacySettings].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+        const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+
+        const warningMatch = loaded.migrationWarnings.find((w) =>
+          w.includes('QWEN_HOME points to'),
+        );
+        expect(warningMatch).toBeUndefined();
       });
 
       it('prefers QWEN_HOME/.env over ~/.env at the home-dir step', () => {

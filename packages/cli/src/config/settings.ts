@@ -564,6 +564,52 @@ function preResolveHomeEnvOverrides(): void {
 }
 
 /**
+ * Surfaces a one-shot warning when QWEN_HOME has been redirected but the
+ * user hasn't migrated their existing global state. We don't auto-copy
+ * OAuth tokens, settings, memory, etc. — that's a deliberate choice — but
+ * silently starting fresh is a footgun, so we tell the user explicitly.
+ *
+ * Returns null when there's nothing to warn about.
+ */
+function detectQwenHomeRedirectWithoutMigration(
+  activeUserSettingsPath: string,
+): string | null {
+  // Only fires when QWEN_HOME has actually been set — otherwise active and
+  // legacy paths agree by definition. We compute the legacy path by briefly
+  // unsetting QWEN_HOME so Storage uses its homedir-based default; this also
+  // ensures we use the same homedir resolution as the rest of the storage
+  // layer rather than picking up a separate `node:os` import.
+  if (!process.env['QWEN_HOME']) {
+    return null;
+  }
+  const activeQwenDir = Storage.getGlobalQwenDir();
+  const savedQwenHome = process.env['QWEN_HOME'];
+  delete process.env['QWEN_HOME'];
+  let legacyQwenDir: string;
+  try {
+    legacyQwenDir = Storage.getGlobalQwenDir();
+  } finally {
+    process.env['QWEN_HOME'] = savedQwenHome;
+  }
+  if (path.resolve(activeQwenDir) === path.resolve(legacyQwenDir)) {
+    return null;
+  }
+  if (fs.existsSync(activeUserSettingsPath)) {
+    return null;
+  }
+  const legacyUserSettings = path.join(legacyQwenDir, 'settings.json');
+  if (!fs.existsSync(legacyUserSettings)) {
+    return null;
+  }
+  return (
+    `QWEN_HOME points to "${activeQwenDir}" but no settings.json was found there. ` +
+    `Existing config remains at "${legacyQwenDir}" — OAuth tokens, settings, memory, ` +
+    `extensions, and skills are not auto-migrated. Copy them manually if you want them ` +
+    `to apply at the new location.`
+  );
+}
+
+/**
  * Finds the .env file to load, respecting workspace trust settings.
  *
  * When workspace is untrusted, only allow user-level .env files at:
@@ -725,9 +771,14 @@ export function loadEnvironment(settings: Settings): void {
   }
 
   // Step 2: Load environment variables from settings.env as fallback (lowest priority)
-  // Only set if not already present (no-override, after .env is loaded)
+  // Only set if not already present (no-override, after .env is loaded).
+  // Storage-routing vars must never come from settings.json — a workspace
+  // settings.json could otherwise redirect global state after path bootstrap.
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
+      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) {
+        continue;
+      }
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
       }
@@ -748,6 +799,8 @@ export function loadSettings(
   // return the post-bootstrap value.
   preResolveHomeEnvOverrides();
   const userSettingsPath = getUserSettingsPath();
+  const qwenHomeRedirectWarning =
+    detectQwenHomeRedirectWithoutMigration(userSettingsPath);
 
   let systemSettings: Settings = {};
   let systemDefaultSettings: Settings = {};
@@ -1006,6 +1059,7 @@ export function loadSettings(
 
   // Collect all migration warnings from all scopes
   const allMigrationWarnings: string[] = [
+    ...(qwenHomeRedirectWarning ? [qwenHomeRedirectWarning] : []),
     ...(systemResult.migrationWarnings ?? []),
     ...(systemDefaultsResult.migrationWarnings ?? []),
     ...(userResult.migrationWarnings ?? []),

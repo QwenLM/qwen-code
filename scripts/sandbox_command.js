@@ -103,15 +103,33 @@ if (!qwenSandbox) {
 }
 
 if (!qwenSandbox) {
+  // Walk up from cwd to find a project-level .env. Parse manually and copy
+  // only QWEN_SANDBOX — calling dotenv.config() here would inject every key,
+  // including QWEN_HOME / QWEN_RUNTIME_DIR that the main CLI hard-blocks via
+  // PROJECT_ENV_HARDCODED_EXCLUSIONS. A project file must not be able to
+  // redirect global state through this back door.
   let currentDir = process.cwd();
   while (true) {
     const qwenEnv = join(currentDir, '.qwen', '.env');
     const regularEnv = join(currentDir, '.env');
+    let candidate = null;
     if (existsSync(qwenEnv)) {
-      dotenv.config({ path: qwenEnv, quiet: true });
-      break;
+      candidate = qwenEnv;
     } else if (existsSync(regularEnv)) {
-      dotenv.config({ path: regularEnv, quiet: true });
+      candidate = regularEnv;
+    }
+    if (candidate) {
+      try {
+        const parsed = dotenv.parse(readFileSync(candidate, 'utf-8'));
+        if (
+          parsed.QWEN_SANDBOX &&
+          !Object.hasOwn(process.env, 'QWEN_SANDBOX')
+        ) {
+          process.env.QWEN_SANDBOX = parsed.QWEN_SANDBOX;
+        }
+      } catch (_e) {
+        // Match dotenv's quiet-mode behavior used elsewhere.
+      }
       break;
     }
     const parentDir = dirname(currentDir);
