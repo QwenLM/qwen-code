@@ -19,7 +19,7 @@ describe('<RenderInline />', () => {
 
   it('renders inline math only when explicitly enabled', () => {
     const { lastFrame } = renderWithProviders(
-      <RenderInline text="value $\\alpha$" enableInlineMath />,
+      <RenderInline text={String.raw`value $\alpha$`} enableInlineMath />,
     );
 
     expect(lastFrame()).toContain('α');
