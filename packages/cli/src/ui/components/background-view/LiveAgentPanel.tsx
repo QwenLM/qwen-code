@@ -262,42 +262,46 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
       ? ` · ${formatTokenCount(entry.stats.totalTokens)} tokens`
       : '';
 
-  // Single-Text row, layout order:
-  //   icon · elapsed · tokens · [type ·] description · activity
+  // Two-column row, layout order:
+  //   [icon · type · description · activity]   ·   [elapsed · tokens]
+  //         ^ flex-shrink:1, truncate-end          ^ flex-shrink:0
   //
-  // Time / cost go FIRST (right after the status icon) so they are
-  // never at risk of being truncated by a long description or
-  // activity label, and so the row reads as one tight left-to-right
-  // line. The prior two-column layout used `flex-grow:1` on the
-  // description column, which puffed it out to fill the row — leaving
-  // a visual gap between the description tail and the right-pinned
-  // elapsed when content was shorter than the terminal width.
-  // Description + activity become the truncatable tail; `truncate-end`
-  // cuts at the right edge when (and only when) the line overflows.
+  // Identity (type) and intent (description / activity) read in
+  // natural left-to-right order. Elapsed + tokens live in a
+  // flex-shrink:0 right column so they're never clipped — long
+  // descriptions truncate inside the left column with `truncate-end`.
+  // Crucially the left column does NOT have `flex-grow:1`, so when
+  // the row content fits comfortably (wide terminal) the two columns
+  // sit side by side with the empty space at the row tail rather
+  // than between description and elapsed (which is what `flex-grow`
+  // would have produced).
+  const tail =
+    tokenSuffix.length > 0 ? ` · ${elapsed}${tokenSuffix}` : ` · ${elapsed}`;
   return (
-    <Box>
-      <Text wrap="truncate-end">
-        {/*
-          Use a template literal for the icon-plus-spaces span so the
-          two-space breathing room after the glyph survives a prettier
-          pass — prettier sometimes collapses literal whitespace inside
-          JSX text expressions.
-        */}
-        <Text color={color}>{`${glyph}  `}</Text>
-        <Text
-          color={theme.text.secondary}
-        >{`${elapsed}${tokenSuffix} · `}</Text>
-        {showType && (
-          <>
-            <Text bold>{entry.subagentType}</Text>
-            <Text color={theme.text.secondary}>{' · '}</Text>
-          </>
-        )}
-        <Text color={theme.text.secondary}>{`${flavorPrefix}${label}`}</Text>
-        {activity && (
-          <Text color={theme.text.secondary}>{` · ${activity}`}</Text>
-        )}
-      </Text>
+    <Box flexDirection="row">
+      <Box flexShrink={1}>
+        <Text wrap="truncate-end">
+          {/*
+            Template literal preserves the two-space breathing room
+            after the status glyph — prettier can collapse literal
+            whitespace inside JSX text expressions.
+          */}
+          <Text color={color}>{`${glyph}  `}</Text>
+          {showType && (
+            <>
+              <Text bold>{entry.subagentType}</Text>
+              <Text color={theme.text.secondary}>{' · '}</Text>
+            </>
+          )}
+          <Text color={theme.text.secondary}>{`${flavorPrefix}${label}`}</Text>
+          {activity && (
+            <Text color={theme.text.secondary}>{` · ${activity}`}</Text>
+          )}
+        </Text>
+      </Box>
+      <Box flexShrink={0}>
+        <Text color={theme.text.secondary}>{tail}</Text>
+      </Box>
     </Box>
   );
 };
