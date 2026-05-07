@@ -537,6 +537,26 @@ describe('ControlDispatcher', () => {
     });
   });
 
+  describe('abortOutgoingRequests', () => {
+    it('rejects pending outgoing requests without shutting down controllers', async () => {
+      const timeoutId = setTimeout(() => {}, 1000);
+      const pending = new Promise<ControlResponse>((resolve, reject) => {
+        dispatcher.registerOutgoingRequest(
+          'outgoing-1',
+          'PermissionController',
+          resolve,
+          reject,
+          timeoutId,
+        );
+      });
+
+      dispatcher.abortOutgoingRequests('Interrupted');
+
+      await expect(pending).rejects.toThrow('Interrupted');
+      expect(mockSystemController.cleanup).not.toHaveBeenCalled();
+    });
+  });
+
   describe('handleCancel', () => {
     it('should cancel specific incoming request', () => {
       const requestId = 'cancel-req-1';

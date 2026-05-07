@@ -56,7 +56,8 @@ class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
-  private abortController: AbortController;
+  private readonly sessionAbortController = new AbortController();
+  private currentTurnAbortController: AbortController | null = null;
   private config: Config;
   private sessionId: string;
   private promptIdCounter: number = 0;
@@ -83,7 +84,6 @@ class Session {
   constructor(config: Config, initialPrompt?: CLIUserMessage) {
     this.config = config;
     this.sessionId = config.getSessionId();
-    this.abortController = new AbortController();
     this.initialPrompt = initialPrompt ?? null;
 
     this.inputReader = new StreamJsonInputReader();
@@ -145,7 +145,7 @@ class Session {
 
     const registry = this.config.getMonitorRegistry();
     registry.setNotificationCallback((displayText, modelText, meta) => {
-      if (this.isShuttingDown || this.abortController.signal.aborted) {
+      if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
         return;
       }
       this.enqueueMonitorNotification({
@@ -168,7 +168,7 @@ class Session {
 
     const registry = this.config.getMonitorRegistry();
     registry.setRegisterCallback((entry) => {
-      if (this.isShuttingDown || this.abortController.signal.aborted) {
+      if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
         return;
       }
       this.enqueueMonitorStarted({
@@ -222,7 +222,7 @@ class Session {
       config: this.config,
       streamJson: this.outputAdapter,
       sessionId: this.sessionId,
-      abortSignal: this.abortController.signal,
+      abortSignal: this.sessionAbortController.signal,
       permissionMode: this.config.getApprovalMode(),
       onInterrupt: () => this.handleInterrupt(),
     });
@@ -392,6 +392,8 @@ class Session {
     await this.waitForInitialization();
 
     const promptId = this.getNextPromptId();
+    const turnAbortController = new AbortController();
+    this.currentTurnAbortController = turnAbortController;
 
     try {
       await runNonInteractive(
@@ -400,7 +402,7 @@ class Session {
         input,
         promptId,
         {
-          abortController: this.abortController,
+          abortController: turnAbortController,
           adapter: this.outputAdapter,
           controlService: this.controlService ?? undefined,
           captureMonitorNotifications: false,
@@ -409,6 +411,10 @@ class Session {
       );
     } catch (error) {
       debugLogger.error('[Session] Query execution error:', error);
+    } finally {
+      if (this.currentTurnAbortController === turnAbortController) {
+        this.currentTurnAbortController = null;
+      }
     }
   }
 
@@ -424,25 +430,34 @@ class Session {
     );
 
     const promptId = this.getNextPromptId();
-    await runNonInteractive(
-      this.config,
-      createMinimalSettings(),
-      notification.modelText,
-      promptId,
-      {
-        abortController: this.abortController,
-        adapter: this.outputAdapter,
-        controlService: this.controlService ?? undefined,
-        sendMessageType: SendMessageType.Notification,
-        notificationDisplayText: notification.displayText,
-        captureMonitorNotifications: false,
-        captureMonitorRegistrations: false,
-      },
-    );
+    const turnAbortController = new AbortController();
+    this.currentTurnAbortController = turnAbortController;
+
+    try {
+      await runNonInteractive(
+        this.config,
+        createMinimalSettings(),
+        notification.modelText,
+        promptId,
+        {
+          abortController: turnAbortController,
+          adapter: this.outputAdapter,
+          controlService: this.controlService ?? undefined,
+          sendMessageType: SendMessageType.Notification,
+          notificationDisplayText: notification.displayText,
+          captureMonitorNotifications: false,
+          captureMonitorRegistrations: false,
+        },
+      );
+    } finally {
+      if (this.currentTurnAbortController === turnAbortController) {
+        this.currentTurnAbortController = null;
+      }
+    }
   }
 
   private async processPendingWork(): Promise<void> {
-    if (this.isShuttingDown || this.abortController.signal.aborted) {
+    if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
       return;
     }
 
@@ -451,7 +466,7 @@ class Session {
         this.monitorStartedQueue.length > 0 ||
         this.monitorQueue.length > 0) &&
       !this.isShuttingDown &&
-      !this.abortController.signal.aborted
+      !this.sessionAbortController.signal.aborted
     ) {
       if (this.userMessageQueue.length > 0) {
         const userMessage = this.userMessageQueue.shift()!;
@@ -513,7 +528,7 @@ class Session {
           this.monitorStartedQueue.length > 0 ||
           this.monitorQueue.length > 0) &&
         !this.isShuttingDown &&
-        !this.abortController.signal.aborted
+        !this.sessionAbortController.signal.aborted
       ) {
         this.ensureProcessingStarted();
       }
@@ -539,16 +554,16 @@ class Session {
 
   private handleInterrupt(): void {
     debugLogger.info('[Session] Interrupt requested');
-    this.abortController.abort();
-    // Do not create a new AbortController to prevent listener leaks.
-    // Subsequent queries will check signal.aborted and fail immediately.
+    this.currentTurnAbortController?.abort();
+    this.dispatcher?.abortOutgoingRequests('Interrupted');
   }
 
   private setupSignalHandlers(): void {
     this.shutdownHandler = () => {
       debugLogger.info('[Session] Shutdown signal received');
       this.isShuttingDown = true;
-      this.abortController.abort();
+      this.sessionAbortController.abort();
+      this.currentTurnAbortController?.abort();
     };
 
     process.on('SIGINT', this.shutdownHandler);
@@ -682,7 +697,7 @@ class Session {
 
       try {
         for await (const message of this.inputReader.read()) {
-          if (this.abortController.signal.aborted) {
+          if (this.sessionAbortController.signal.aborted) {
             break;
           }
 
