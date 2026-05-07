@@ -115,7 +115,7 @@ if /i "%~1"=="--registry" (
 if /i "%~1"=="-h" goto usage
 if /i "%~1"=="--help" goto usage
 
-echo ERROR: Unknown option: %~1
+echo ERROR: Unknown option.
 echo.
 goto usage_error
 
@@ -221,7 +221,8 @@ set "QWEN_VALIDATE_NPM_REGISTRY=!NPM_REGISTRY!"
 set "QWEN_VALIDATE_INSTALL_BASE=!INSTALL_BASE!"
 set "QWEN_VALIDATE_INSTALL_DIR=!INSTALL_DIR!"
 set "QWEN_VALIDATE_INSTALL_BIN_DIR=!INSTALL_BIN_DIR!"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); foreach ($name in 'METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR') { $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }"
+set "QWEN_VALIDATE_SOURCE=!SOURCE!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); foreach ($name in 'METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR','SOURCE') { $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_VALIDATE_METHOD="
 set "QWEN_VALIDATE_MIRROR="
@@ -232,6 +233,7 @@ set "QWEN_VALIDATE_NPM_REGISTRY="
 set "QWEN_VALIDATE_INSTALL_BASE="
 set "QWEN_VALIDATE_INSTALL_DIR="
 set "QWEN_VALIDATE_INSTALL_BIN_DIR="
+set "QWEN_VALIDATE_SOURCE="
 if %PS_STATUS% NEQ 0 (
     echo ERROR: installer options contain unsafe command characters.
     exit /b 1
@@ -359,7 +361,8 @@ exit /b 0
 
 :UrlExists
 set "QWEN_CHECK_URL=%~1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+rem Prefer Tls12+Tls13; fall back to Tls12 alone on older .NET Framework where the Tls13 enum is missing.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_CHECK_URL="
 exit /b %PS_STATUS%
@@ -367,7 +370,8 @@ exit /b %PS_STATUS%
 :DownloadFile
 set "QWEN_DOWNLOAD_URL=%~1"
 set "QWEN_DOWNLOAD_DEST=%~2"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $client = New-Object Net.WebClient; $client.DownloadFile($env:QWEN_DOWNLOAD_URL, $env:QWEN_DOWNLOAD_DEST); exit 0 } catch { exit 1 }"
+rem Prefer Tls12+Tls13; fall back to Tls12 alone on older .NET Framework where the Tls13 enum is missing.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $client = New-Object Net.WebClient; $client.DownloadFile($env:QWEN_DOWNLOAD_URL, $env:QWEN_DOWNLOAD_DEST); exit 0 } catch { exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="
@@ -481,8 +485,8 @@ if not "!ARCHIVE_PATH!"=="" (
         )
     )
 
-    set "TEMP_DIR=%TEMP%\qwen-code-install-%RANDOM%%RANDOM%"
-    mkdir "!TEMP_DIR!" >nul 2>&1
+    call :CreateTempDir
+    if !ERRORLEVEL! NEQ 0 exit /b 1
     set "ARCHIVE_FILE=!TEMP_DIR!\!ARCHIVE_NAME!"
 
     echo INFO: Downloading !ARCHIVE_URL!
@@ -495,8 +499,8 @@ if not "!ARCHIVE_PATH!"=="" (
 )
 
 if "!TEMP_DIR!"=="" (
-    set "TEMP_DIR=%TEMP%\qwen-code-install-%RANDOM%%RANDOM%"
-    mkdir "!TEMP_DIR!" >nul 2>&1
+    call :CreateTempDir
+    if !ERRORLEVEL! NEQ 0 exit /b 1
 )
 
 REM Verify integrity before extraction or changing the install directory.
@@ -509,6 +513,11 @@ if !ERRORLEVEL! NEQ 0 (
 REM Extract into a temporary directory, then validate required entry points.
 set "EXTRACT_DIR=!TEMP_DIR!\extract"
 mkdir "!EXTRACT_DIR!" >nul 2>&1
+call :ValidateArchiveContents "!ARCHIVE_FILE!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
 set "QWEN_ARCHIVE_FILE=!ARCHIVE_FILE!"
 set "QWEN_EXTRACT_DIR=!EXTRACT_DIR!"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:QWEN_ARCHIVE_FILE -DestinationPath $env:QWEN_EXTRACT_DIR -Force"
@@ -564,8 +573,22 @@ if !ERRORLEVEL! NEQ 0 (
     exit /b 1
 )
 
-if exist "!NEW_INSTALL_DIR!" rmdir /S /Q "!NEW_INSTALL_DIR!" >nul 2>&1
-if exist "!OLD_INSTALL_DIR!" rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
+if exist "!NEW_INSTALL_DIR!" (
+    rmdir /S /Q "!NEW_INSTALL_DIR!" >nul 2>&1
+    if !ERRORLEVEL! NEQ 0 (
+        if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+        echo ERROR: Failed to remove stale staging directory: !NEW_INSTALL_DIR!.
+        exit /b 1
+    )
+)
+if exist "!OLD_INSTALL_DIR!" (
+    rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
+    if !ERRORLEVEL! NEQ 0 (
+        if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+        echo ERROR: Failed to remove stale backup directory: !OLD_INSTALL_DIR!.
+        exit /b 1
+    )
+)
 move /Y "!EXTRACT_DIR!\qwen-code" "!NEW_INSTALL_DIR!" >nul
 if !ERRORLEVEL! NEQ 0 (
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
@@ -583,19 +606,23 @@ if exist "!INSTALL_DIR!" (
 )
 move /Y "!NEW_INSTALL_DIR!" "!INSTALL_DIR!" >nul
 if !ERRORLEVEL! NEQ 0 (
-    if exist "!OLD_INSTALL_DIR!" move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+    call :RestoreOldInstall
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
     echo ERROR: Failed to install standalone archive to !INSTALL_DIR!.
     exit /b 1
 )
 
+rem SAFETY: this writer expands !INSTALL_DIR! / !INSTALL_BIN_DIR! into a generated
+rem .cmd file. :ValidateOptions must continue to reject delayed-expansion sentinels
+rem (`!`) and other shell-metacharacters in those values; if that validator is ever
+rem loosened, the wrapper write below becomes a command injection sink.
 (
 echo @echo off
 echo call "!INSTALL_DIR!\bin\qwen.cmd" %%*
 ) > "!INSTALL_BIN_DIR!\qwen.cmd.new"
 if !ERRORLEVEL! NEQ 0 (
-    if exist "!INSTALL_DIR!" rmdir /S /Q "!INSTALL_DIR!" >nul 2>&1
-    if exist "!OLD_INSTALL_DIR!" move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+    call :RemoveInstalledDirWithWarning
+    call :RestoreOldInstall
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
     echo ERROR: Failed to create qwen wrapper in !INSTALL_BIN_DIR!.
     exit /b 1
@@ -603,14 +630,17 @@ if !ERRORLEVEL! NEQ 0 (
 move /Y "!INSTALL_BIN_DIR!\qwen.cmd.new" "!INSTALL_BIN_DIR!\qwen.cmd" >nul
 if !ERRORLEVEL! NEQ 0 (
     if exist "!INSTALL_BIN_DIR!\qwen.cmd.new" del /F /Q "!INSTALL_BIN_DIR!\qwen.cmd.new" >nul 2>&1
-    if exist "!INSTALL_DIR!" rmdir /S /Q "!INSTALL_DIR!" >nul 2>&1
-    if exist "!OLD_INSTALL_DIR!" move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+    call :RemoveInstalledDirWithWarning
+    call :RestoreOldInstall
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
     echo ERROR: Failed to create qwen wrapper in !INSTALL_BIN_DIR!.
     exit /b 1
 )
 
-if exist "!OLD_INSTALL_DIR!" rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
+if exist "!OLD_INSTALL_DIR!" (
+    rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
+    if !ERRORLEVEL! NEQ 0 echo WARNING: Failed to remove old install backup: !OLD_INSTALL_DIR!
+)
 
 set "PATH=!INSTALL_BIN_DIR!;!PATH!"
 call :CreateSourceJson
@@ -618,6 +648,44 @@ if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
 
 echo SUCCESS: Qwen Code standalone archive installed successfully.
 echo INFO: Installed to !INSTALL_DIR!
+exit /b 0
+
+:CreateTempDir
+set "TEMP_DIR="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $dir = Join-Path $env:TEMP ('qwen-code-install-' + [IO.Path]::GetRandomFileName()); New-Item -ItemType Directory -Path $dir -ErrorAction Stop | Out-Null; [Console]::Write($dir)"`) do set "TEMP_DIR=%%I"
+if "!TEMP_DIR!"=="" (
+    echo ERROR: Failed to create a temporary directory.
+    exit /b 1
+)
+exit /b 0
+
+:ValidateArchiveContents
+set "QWEN_ARCHIVE_FILE=%~1"
+REM Normalize backslashes to forward slashes before checking. Some Windows
+REM zip producers (including PowerShell's Compress-Archive) emit entries
+REM with backslash separators even though the ZIP spec requires '/'. We
+REM accept either separator and reject only entries that, after
+REM normalization, are empty, absolute, drive-rooted, or contain a '..'
+REM segment.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); try { foreach ($entry in $archive.Entries) { $name = $entry.FullName -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { Write-Error ('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } finally { $archive.Dispose() }"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_ARCHIVE_FILE="
+if %PS_STATUS% NEQ 0 echo ERROR: Archive contains unsafe path entries.
+exit /b %PS_STATUS%
+
+:RemoveInstalledDirWithWarning
+if not exist "!INSTALL_DIR!" exit /b 0
+rmdir /S /Q "!INSTALL_DIR!" >nul 2>&1
+if !ERRORLEVEL! NEQ 0 echo WARNING: Failed to remove failed install directory: !INSTALL_DIR!
+exit /b 0
+
+:RestoreOldInstall
+if not exist "!OLD_INSTALL_DIR!" exit /b 0
+move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+if !ERRORLEVEL! NEQ 0 (
+    echo WARNING: Failed to restore previous install from !OLD_INSTALL_DIR! to !INSTALL_DIR!.
+    exit /b 1
+)
 exit /b 0
 
 :RejectArchiveLinks

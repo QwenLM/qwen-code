@@ -34,40 +34,47 @@ GitHub releases publish these standalone archives:
 - `qwen-code-linux-arm64.tar.gz`
 - `qwen-code-linux-x64.tar.gz`
 - `qwen-code-win-x64.zip`
-- `install`
-- `install-qwen.sh`
-- `install-qwen.bat`
 - `SHA256SUMS`
 
-Release packaging copies these from the source-tracking installer scripts:
-`install` and `install-qwen.sh` come from `install-qwen-with-source.sh`, while
-`install-qwen.bat` comes from `install-qwen-with-source.bat`.
+The installer scripts (`install-qwen-with-source.sh`,
+`install-qwen-with-source.bat`) are not republished per release. They are
+served from a hosted installation endpoint and accept `--version` to pin a
+specific standalone release. This keeps the public install command on a stable
+hosted entrypoint while still allowing version pinning, rather than using
+per-release installer URLs.
 
-The installer scripts are published as release assets so version-specific
-install entrypoints can be distributed alongside the standalone archives after
-that release is created. The extensionless `install` asset is the Unix installer
-alias for future hosted endpoints such as `https://qwen-code.ai/install`; it is
-identical to `install-qwen.sh` and can be used interchangeably on Unix systems.
-Use `install-qwen.bat` on Windows. That hosted endpoint is not available yet;
-until it is live, use a concrete release version in the direct GitHub release
-URL and replace `vX.Y.Z` with the actual release tag:
+Latest hosted entrypoints used today:
 
 ```bash
-curl -fsSL https://github.com/QwenLM/qwen-code/releases/download/vX.Y.Z/install | bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash -s -- --version vX.Y.Z
 ```
+
+```powershell
+$installer = Join-Path $env:TEMP 'install-qwen.bat'
+Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile $installer
+& $installer --version vX.Y.Z
+```
+
+`QWEN_INSTALL_VERSION` is the equivalent environment variable when arguments
+cannot be passed through.
+
+Hosted installer assets are staged separately from GitHub Release archives:
+
+- `install-qwen.sh` is the Linux/macOS hosted entrypoint.
+- `install-qwen.bat` is the Windows hosted entrypoint.
+
+Build them with:
 
 ```bash
-curl -fsSL https://github.com/QwenLM/qwen-code/releases/download/vX.Y.Z/install-qwen.sh | bash
+npm run package:hosted-installation -- --out-dir dist/installation
 ```
 
-```bat
-powershell -Command "Invoke-WebRequest 'https://github.com/QwenLM/qwen-code/releases/download/vX.Y.Z/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
-```
-
-Public quick-install docs should switch to release asset URLs only after at
-least one published release includes `install-qwen.sh` and `install-qwen.bat`.
-Until then, keep public quick-install examples on the hosted installation URLs
-used in the README and user docs.
+The staged files should be uploaded byte-for-byte to the hosted installation
+path, for example `installation/install-qwen.sh` and
+`installation/install-qwen.bat`. The staging command also writes `SHA256SUMS`
+for upload verification. The hosted installers intentionally default to
+`latest`; use `--version` or `QWEN_INSTALL_VERSION` to pin a standalone release.
 
 Archive layout:
 
@@ -199,7 +206,7 @@ Use `--base-url` for private mirrors. The URL must contain
 base URLs must use `https://`.
 
 For Aliyun OSS/CDN, release publishing must upload byte-identical artifacts to
-both the versioned directory, for example `v0.16.0/`, and the `latest/`
+both the versioned directory, for example `vX.Y.Z/`, and the `latest/`
 directory used by the default installer path.
 
 ## Supported Source Values

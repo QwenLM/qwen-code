@@ -7,13 +7,17 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
-import { isReleaseChecksumAsset } from './release-asset-config.js';
+import { isStandaloneArchiveName } from './release-asset-config.js';
+import {
+  fail,
+  isMainModule,
+  parseCliArgs,
+  sha256File,
+} from './release-script-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,9 +55,19 @@ const DIST_ALLOWED_ENTRIES = new Set([
 const DIST_ALLOWED_ENTRY_PATTERNS = [
   /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,
 ];
+const DIST_IGNORED_ENTRIES = new Set(['.DS_Store', 'esbuild.json']);
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
+const CLI_OPTIONS = {
+  '--help': { name: 'help', type: 'boolean' },
+  '-h': { name: 'help', type: 'boolean' },
+  '--target': { name: 'target' },
+  '--node-archive': { name: 'nodeArchive' },
+  '--out-dir': { name: 'outDir' },
+  '--version': { name: 'version' },
+  '--skip-checksums': { name: 'skipChecksums', type: 'boolean' },
+};
 
-if (isMainModule()) {
+if (isMainModule(import.meta.url)) {
   try {
     await main();
   } catch (error) {
@@ -63,7 +77,14 @@ if (isMainModule()) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseCliArgs(process.argv.slice(2), CLI_OPTIONS, {
+    help: false,
+    nodeArchive: undefined,
+    outDir: undefined,
+    skipChecksums: false,
+    target: undefined,
+    version: undefined,
+  });
 
   if (args.help) {
     printUsage();
@@ -132,62 +153,6 @@ async function main() {
   }
 }
 
-function isMainModule() {
-  return process.argv[1] && path.resolve(process.argv[1]) === __filename;
-}
-
-function parseArgs(argv) {
-  const args = {
-    help: false,
-    outDir: undefined,
-    nodeArchive: undefined,
-    skipChecksums: false,
-    target: undefined,
-    version: undefined,
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    switch (arg) {
-      case '--help':
-      case '-h':
-        args.help = true;
-        break;
-      case '--target':
-        args.target = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--node-archive':
-        args.nodeArchive = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--out-dir':
-        args.outDir = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--version':
-        args.version = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--skip-checksums':
-        args.skipChecksums = true;
-        break;
-      default:
-        fail(`Unknown option: ${arg}`);
-    }
-  }
-
-  return args;
-}
-
-function readOptionValue(argv, index, optionName) {
-  const value = argv[index + 1];
-  if (!value || value.startsWith('-')) {
-    fail(`${optionName} requires a value`);
-  }
-  return value;
-}
-
 function printUsage() {
   console.log(`Qwen Code standalone package builder
 
@@ -235,7 +200,7 @@ function copyRuntimeAssets(packageRoot, outDir) {
   fs.mkdirSync(libDir, { recursive: true });
 
   for (const entry of fs.readdirSync(distDir)) {
-    if (entry === skippedDistEntry || entry === '.DS_Store') {
+    if (entry === skippedDistEntry || DIST_IGNORED_ENTRIES.has(entry)) {
       continue;
     }
     if (!isAllowedDistEntry(entry)) {
@@ -529,6 +494,11 @@ function createArchive(outputExtension, outputPath, cwd) {
 
 function createZipArchive(outputPath, cwd) {
   if (process.platform === 'win32') {
+    // Use [IO.Compression.ZipFile]::CreateFromDirectory rather than
+    // Compress-Archive: the latter writes Windows-style backslash
+    // separators into ZIP entry names, which then trip the .bat
+    // installer's path-traversal guard against backslashes.
+    // CreateFromDirectory writes spec-compliant forward slashes.
     run(
       'powershell',
       [
@@ -536,7 +506,7 @@ function createZipArchive(outputPath, cwd) {
         '-ExecutionPolicy',
         'Bypass',
         '-Command',
-        'Compress-Archive -LiteralPath $env:QWEN_PACKAGE_ROOT -DestinationPath $env:QWEN_OUTPUT_PATH -Force',
+        'Add-Type -AssemblyName System.IO.Compression.FileSystem; if (Test-Path -LiteralPath $env:QWEN_OUTPUT_PATH) { Remove-Item -LiteralPath $env:QWEN_OUTPUT_PATH -Force }; [IO.Compression.ZipFile]::CreateFromDirectory($env:QWEN_PACKAGE_ROOT, $env:QWEN_OUTPUT_PATH, [IO.Compression.CompressionLevel]::Optimal, $true)',
       ],
       {
         env: {
@@ -552,8 +522,13 @@ function createZipArchive(outputPath, cwd) {
   run('zip', ['-qr', outputPath, 'qwen-code'], { cwd });
 }
 
+/**
+ * Rebuild SHA256SUMS from scratch by scanning outDir for standalone release
+ * archives. This overwrites any existing SHA256SUMS, so callers must ensure
+ * all desired archives are present in outDir before calling.
+ */
 async function writeSha256Sums(outDir) {
-  const entries = fs.readdirSync(outDir).filter(isReleaseChecksumAsset).sort();
+  const entries = fs.readdirSync(outDir).filter(isStandaloneArchiveName).sort();
 
   if (entries.length === 0) {
     fail(
@@ -561,20 +536,15 @@ async function writeSha256Sums(outDir) {
     );
   }
 
-  const lines = [];
-  for (const entry of entries) {
-    const filePath = path.join(outDir, entry);
-    const hash = await sha256File(filePath);
-    lines.push(`${hash}  ${entry}`);
-  }
+  const lines = await Promise.all(
+    entries.map(async (entry) => {
+      const filePath = path.join(outDir, entry);
+      const hash = await sha256File(filePath);
+      return `${hash}  ${entry}`;
+    }),
+  );
 
   fs.writeFileSync(path.join(outDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
-}
-
-async function sha256File(filePath) {
-  const hash = crypto.createHash('sha256');
-  await pipeline(fs.createReadStream(filePath), hash);
-  return hash.digest('hex');
 }
 
 function run(command, args, options = {}) {
@@ -592,8 +562,4 @@ function run(command, args, options = {}) {
   }
 }
 
-function fail(message) {
-  throw new Error(`Error: ${message}`);
-}
-
-export { writeSha256Sums };
+export { TARGETS, writeSha256Sums };
