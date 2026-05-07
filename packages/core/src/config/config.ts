@@ -61,10 +61,16 @@ import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { MonitorRegistry } from '../services/monitorRegistry.js';
+import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
+import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
+  isTelemetrySdkInitialized,
   initializeTelemetry,
+  shutdownTelemetry,
   logStartSession,
   logRipgrepFallback,
   RipgrepFallbackEvent,
@@ -214,6 +220,12 @@ export interface TelemetrySettings {
   target?: TelemetryTarget;
   otlpEndpoint?: string;
   otlpProtocol?: 'grpc' | 'http';
+  /** Per-signal endpoint override for traces (HTTP only). Used as-is without path appending. */
+  otlpTracesEndpoint?: string;
+  /** Per-signal endpoint override for logs (HTTP only). Used as-is without path appending. */
+  otlpLogsEndpoint?: string;
+  /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
+  otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
   outfile?: string;
   useCollector?: boolean;
@@ -364,6 +376,14 @@ export interface ConfigParameters {
   telemetry?: TelemetrySettings;
   gitCoAuthor?: boolean;
   usageStatisticsEnabled?: boolean;
+  /**
+   * If true, disables the per-session FileReadCache short-circuit
+   * (file_unchanged placeholder). Useful for sessions that may undergo
+   * context compaction or transcript transformation, where the model
+   * cannot reliably retrieve a previously-emitted full file content
+   * from prior tool results. Defaults to false (cache active).
+   */
+  fileReadCacheDisabled?: boolean;
   fileFiltering?: {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
@@ -383,6 +403,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
@@ -544,6 +565,14 @@ export class Config {
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private readonly monitorRegistry = new MonitorRegistry();
+  private backgroundAgentResumeService?: BackgroundAgentResumeService;
+  private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  // Field initializer runs once on the parent Config; child Configs
+  // built via Object.create(parent) intentionally do NOT pick this up
+  // — see getFileReadCache() for the per-instance lazy initialization
+  // that keeps subagent caches isolated from the parent's.
+  private fileReadCache: FileReadCache = new FileReadCache();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -598,6 +627,7 @@ export class Config {
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
+  private readonly fileReadCacheDisabled: boolean;
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -631,6 +661,7 @@ export class Config {
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
@@ -682,6 +713,7 @@ export class Config {
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
+  private readonly modelChangeListeners = new Set<(model: string) => void>();
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -736,8 +768,11 @@ export class Config {
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
-      otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
+      otlpEndpoint: params.telemetry?.otlpEndpoint,
       otlpProtocol: params.telemetry?.otlpProtocol,
+      otlpTracesEndpoint: params.telemetry?.otlpTracesEndpoint,
+      otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
+      otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
       outfile: params.telemetry?.outfile,
       useCollector: params.telemetry?.useCollector,
@@ -748,6 +783,7 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
+    this.fileReadCacheDisabled = params.fileReadCacheDisabled ?? false;
     this.outputLanguageFilePath = params.outputLanguageFilePath;
 
     this.fileFiltering = {
@@ -773,6 +809,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
@@ -1329,6 +1366,16 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? new ChatRecordingService(this)
       : undefined;
+    // The file-read cache is session-scoped: its `file_unchanged`
+    // placeholder relies on the model having seen the prior full read
+    // earlier in the *current* conversation. Carrying entries across
+    // /clear or session resume would let a follow-up Read return the
+    // placeholder despite the new session never having received the
+    // file contents. Use the getter so the lazy own-property
+    // initialization in getFileReadCache() applies even for Configs
+    // constructed via Object.create — those should clear their own
+    // cache, not the parent's.
+    this.getFileReadCache().clear();
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }
@@ -1370,6 +1417,20 @@ export class Config {
     return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
   }
 
+  onModelChange(listener: (model: string) => void): () => void {
+    this.modelChangeListeners.add(listener);
+    return () => {
+      this.modelChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyModelChangeListeners(): void {
+    const model = this.getModel();
+    for (const listener of this.modelChangeListeners) {
+      listener(model);
+    }
+  }
+
   /**
    * Returns the fast model if one is configured and valid for the current auth type,
    * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
@@ -1406,6 +1467,7 @@ export class Config {
     if (this.contentGeneratorConfig) {
       this.contentGeneratorConfig.model = newModel;
     }
+    this.notifyModelChangeListeners();
   }
 
   /**
@@ -1420,11 +1482,9 @@ export class Config {
       return;
     }
 
-    // Strip thinking blocks from conversation history on model switch.
-    // reasoning_content is a non-standard field that causes strict
-    // OpenAI-compatible providers to reject requests with 422 errors
-    // when thought parts from a previous model leak into the payload (#3304).
-    this.geminiClient.stripThoughtsFromHistory();
+    // Keep full history (including thought parts) on model switch.
+    // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
+    // reasoning_content to be preserved across turns.
 
     // Hot update path: only supported for qwen-oauth.
     // For other auth types we always refresh to recreate the ContentGenerator.
@@ -1451,6 +1511,7 @@ export class Config {
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -1466,6 +1527,10 @@ export class Config {
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
           sources['contextWindowSize'];
+      }
+      if ('splitToolMedia' in sources) {
+        this.contentGeneratorConfigSources['splitToolMedia'] =
+          sources['splitToolMedia'];
       }
       return;
     }
@@ -1524,6 +1589,7 @@ export class Config {
     options?: { requireCachedCredentials?: boolean },
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
+    this.notifyModelChangeListeners();
   }
 
   getMaxSessionTurns(): number {
@@ -1583,11 +1649,12 @@ export class Config {
    * It handles the case where initialization was not completed.
    */
   async shutdown(): Promise<void> {
-    if (!this.initialized) {
-      // Nothing to clean up if not initialized
-      return;
-    }
     try {
+      if (!this.initialized) {
+        // Nothing else to clean up if not initialized.
+        return;
+      }
+
       // Finalize the current session's metadata before cleanup, then drain
       // the async write queue so no records are lost on exit.
       try {
@@ -1604,11 +1671,17 @@ export class Config {
       }
 
       this.backgroundTaskRegistry.abortAll();
+      this.monitorRegistry.abortAll({ notify: false });
+      this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
+    } finally {
+      if (isTelemetrySdkInitialized()) {
+        await shutdownTelemetry();
+      }
     }
   }
 
@@ -1949,12 +2022,24 @@ export class Config {
     return this.telemetrySettings.logPrompts ?? true;
   }
 
-  getTelemetryOtlpEndpoint(): string {
+  getTelemetryOtlpEndpoint(): string | undefined {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
 
   getTelemetryOtlpProtocol(): 'grpc' | 'http' {
     return this.telemetrySettings.otlpProtocol ?? 'grpc';
+  }
+
+  getTelemetryOtlpTracesEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpTracesEndpoint;
+  }
+
+  getTelemetryOtlpLogsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpLogsEndpoint;
+  }
+
+  getTelemetryOtlpMetricsEndpoint(): string | undefined {
+    return this.telemetrySettings.otlpMetricsEndpoint;
   }
 
   getTelemetryTarget(): TelemetryTarget {
@@ -1988,6 +2073,22 @@ export class Config {
     // Cron is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
     return this.cronEnabled;
+  }
+
+  /**
+   * Whether the turn loop should fire a fast-model call after each tool batch
+   * to emit a `tool_use_summary` message. Mirrors Claude Code's
+   * `CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES` gate, but defaults to on so the
+   * compact-mode UI benefits without configuration.
+   *
+   * Env overrides (either direction): `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0`
+   * to force off, `=1` to force on.
+   */
+  getEmitToolUseSummaries(): boolean {
+    const env = process.env['QWEN_CODE_EMIT_TOOL_USE_SUMMARIES'];
+    if (env === '0' || env === 'false') return false;
+    if (env === '1' || env === 'true') return true;
+    return this.emitToolUseSummaries;
   }
 
   getEnableRecursiveFileSearch(): boolean {
@@ -2467,6 +2568,92 @@ export class Config {
     return this.backgroundTaskRegistry;
   }
 
+  getMonitorRegistry(): MonitorRegistry {
+    return this.monitorRegistry;
+  }
+
+  getBackgroundAgentResumeService(): BackgroundAgentResumeService {
+    if (!this.backgroundAgentResumeService) {
+      this.backgroundAgentResumeService = new BackgroundAgentResumeService(
+        this,
+      );
+    }
+    return this.backgroundAgentResumeService;
+  }
+
+  async loadPausedBackgroundAgents(
+    sessionId: string = this.getSessionId(),
+  ): Promise<
+    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
+  > {
+    return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
+      sessionId,
+    );
+  }
+
+  async resumeBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<
+    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
+  > {
+    return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
+      agentId,
+      initialMessage,
+    );
+  }
+
+  abandonBackgroundAgent(agentId: string): boolean {
+    return this.getBackgroundAgentResumeService().abandonBackgroundAgent(
+      agentId,
+    );
+  }
+
+  getBackgroundShellRegistry(): BackgroundShellRegistry {
+    return this.backgroundShellRegistry;
+  }
+
+  /**
+   * Session-scoped cache that tracks Read / Edit / WriteFile operations
+   * on files. The cache must be **per-Config-instance** so that each
+   * subagent (which gets its own Config) does not inherit the parent's
+   * recorded reads via the prototype chain.
+   *
+   * The wrinkle: every subagent / scoped-agent / fork path in this
+   * codebase constructs its Config via `Object.create(parent)`. That
+   * does **not** run instance field initializers, so the parent's
+   * `fileReadCache` field is reachable on the child only by prototype
+   * lookup — i.e. child and parent end up sharing the same cache. The
+   * own-property check below detects "this instance was made by
+   * Object.create" and lazily attaches a fresh cache, ensuring
+   * isolation without requiring every Object.create site to remember
+   * to override the field.
+   */
+  getFileReadCache(): FileReadCache {
+    if (!Object.prototype.hasOwnProperty.call(this, 'fileReadCache')) {
+      // The own-property write needs to bypass `private`'s structural
+      // check — the field is conceptually still private to the class,
+      // we just need TS to let us install an own copy on a child
+      // instance produced by `Object.create(parent)`.
+      (this as unknown as { fileReadCache: FileReadCache }).fileReadCache =
+        new FileReadCache();
+    }
+    return this.fileReadCache;
+  }
+
+  /**
+   * When true, ReadFile / Edit / WriteFile must bypass the session
+   * FileReadCache entirely and behave as if it did not exist (no
+   * `file_unchanged` placeholder, no future prior-read enforcement).
+   * Intended as an escape hatch for sessions where the cache's "model
+   * has already seen this content earlier in the conversation"
+   * assumption is unreliable — e.g. after context compaction or
+   * transcript transformation.
+   */
+  getFileReadCacheDisabled(): boolean {
+    return this.fileReadCacheDisabled;
+  }
+
   /**
    * Whether interactive permission prompts should be auto-denied.
    * True for background agents that have no UI to show prompts.
@@ -2601,6 +2788,14 @@ export class Config {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
     });
+    await registerLazy(ToolNames.TASK_STOP, async () => {
+      const { TaskStopTool } = await import('../tools/task-stop.js');
+      return new TaskStopTool(this);
+    });
+    await registerLazy(ToolNames.SEND_MESSAGE, async () => {
+      const { SendMessageTool } = await import('../tools/send-message.js');
+      return new SendMessageTool(this);
+    });
     await registerLazy(ToolNames.SKILL, async () => {
       const { SkillTool } = await import('../tools/skill.js');
       return new SkillTool(this);
@@ -2707,6 +2902,12 @@ export class Config {
         return new CronDeleteTool(this);
       });
     }
+
+    // Register monitor tool
+    await registerLazy(ToolNames.MONITOR, async () => {
+      const { MonitorTool } = await import('../tools/monitor.js');
+      return new MonitorTool(this);
+    });
 
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();

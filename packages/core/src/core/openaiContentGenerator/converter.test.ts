@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { RequestContext } from './types.js';
 import {
   Type,
@@ -44,6 +45,21 @@ describe('OpenAIContentConverter', () => {
     return {
       ...requestContext,
       toolCallParser,
+    };
+  }
+
+  function withTaggedThinkingOptions(): RequestContext {
+    return {
+      ...requestContext,
+      responseParsingOptions: { taggedThinkingTags: true },
+    };
+  }
+
+  function withTaggedThinkingStreamParser(): RequestContext {
+    return {
+      ...withStreamParser(),
+      responseParsingOptions: { taggedThinkingTags: true },
+      taggedThinkingParser: new TaggedThinkingParser(),
     };
   }
 
@@ -380,6 +396,422 @@ describe('OpenAIContentConverter', () => {
       // No separate user message should be created
       const userMessage = messages.find((message) => message.role === 'user');
       expect(userMessage).toBeUndefined();
+    });
+
+    it('should split tool-result media into a follow-up user message when splitToolMedia is enabled (issue #3616)', () => {
+      // Same shape as the embedded-image test above, but with the strict
+      // OpenAI-compat opt-in flag set. The tool message must stay
+      // spec-compliant (string / text-part content only) and the image must
+      // arrive in a follow-up user message.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'Image content' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'base64encodedimagedata',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      // Tool message content is a plain string (or text-part array) — no media
+      expect(typeof toolMessage?.content === 'string').toBe(true);
+      expect(toolMessage?.content).toContain('Image content');
+
+      // The image lives in a follow-up user message
+      const userMessage = messages.find((m) => m.role === 'user');
+      expect(userMessage).toBeDefined();
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(Array.isArray(userContent)).toBe(true);
+      const imagePart = userContent.find((p) => p.type === 'image_url');
+      expect(imagePart?.image_url?.url).toBe(
+        'data:image/png;base64,base64encodedimagedata',
+      );
+    });
+
+    it('should keep all tool messages contiguous and merge split media into a single follow-up user message for parallel tool calls (issue #3616)', () => {
+      // Two assistant tool calls in parallel. Both responses come back in the
+      // same `user` content as separate functionResponse parts. The first
+      // returns an image; the second returns text only. OpenAI Chat
+      // Completions requires every `role: "tool"` response to appear
+      // contiguously before any non-tool message, so the synthesised user
+      // message carrying split media MUST come after BOTH tool messages,
+      // not interleaved between them.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_screenshot',
+                  name: 'browser_take_screenshot',
+                  args: {},
+                },
+              },
+              {
+                functionCall: {
+                  id: 'call_console',
+                  name: 'browser_console_messages',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_screenshot',
+                  name: 'browser_take_screenshot',
+                  response: { output: 'Captured screenshot' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'shotbase64',
+                      },
+                    },
+                  ],
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_console',
+                  name: 'browser_console_messages',
+                  response: { output: 'no console messages' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      // Locate the assistant turn (with the two tool calls) and assert that
+      // the next two messages are both `tool`, contiguously, before any
+      // user message.
+      const assistantIdx = messages.findIndex((m) => m.role === 'assistant');
+      expect(assistantIdx).toBeGreaterThanOrEqual(0);
+      expect(messages[assistantIdx + 1]?.role).toBe('tool');
+      expect(messages[assistantIdx + 2]?.role).toBe('tool');
+      expect(messages[assistantIdx + 3]?.role).toBe('user');
+
+      // Both tool messages have spec-compliant content (string OR array of
+      // text-typed parts only — no image_url / input_audio / video_url /
+      // file parts allowed by OpenAI on tool messages).
+      const isSpecCompliantToolContent = (content: unknown): boolean => {
+        if (typeof content === 'string') return true;
+        if (!Array.isArray(content)) return false;
+        return (content as Array<{ type: string }>).every(
+          (p) => p.type === 'text',
+        );
+      };
+      expect(
+        isSpecCompliantToolContent(
+          (messages[assistantIdx + 1] as { content: unknown }).content,
+        ),
+      ).toBe(true);
+      expect(
+        isSpecCompliantToolContent(
+          (messages[assistantIdx + 2] as { content: unknown }).content,
+        ),
+      ).toBe(true);
+
+      // Exactly one synthesised user message exists, and it carries the
+      // single image from the first tool response.
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(userMessages).toHaveLength(1);
+      const userContent = userMessages[0].content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      const imageParts = userContent.filter((p) => p.type === 'image_url');
+      expect(imageParts).toHaveLength(1);
+      expect(imageParts[0].image_url?.url).toBe(
+        'data:image/png;base64,shotbase64',
+      );
+    });
+
+    it('should merge media from multiple media-bearing parallel tool responses into one follow-up user message (issue #3616)', () => {
+      // Both tool responses return images. The accumulator must combine them
+      // into a single user message — we should NOT see two separate user
+      // messages (which would still violate the contiguity rule because the
+      // first user message would split the tool messages apart).
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_a', name: 'shot_a', args: {} },
+              },
+              {
+                functionCall: { id: 'call_b', name: 'shot_b', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'shot_a',
+                  response: { output: 'A' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
+                  ],
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_b',
+                  name: 'shot_b',
+                  response: { output: 'B' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'bbb' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      const toolMessages = messages.filter((m) => m.role === 'tool');
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(toolMessages).toHaveLength(2);
+      expect(userMessages).toHaveLength(1);
+
+      const userContent = userMessages[0].content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      const imageUrls = userContent
+        .filter((p) => p.type === 'image_url')
+        .map((p) => p.image_url?.url);
+      expect(imageUrls).toEqual([
+        'data:image/png;base64,aaa',
+        'data:image/png;base64,bbb',
+      ]);
+    });
+
+    it('should not synthesise a follow-up user message when splitToolMedia is enabled but the response has no media (issue #3616)', () => {
+      // Regression guard: when the flag is on but a tool response is text-only,
+      // the synthesis path must not emit any user message. Without this guard,
+      // a future refactor that always emits the follow-up could regress silently.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'c', name: 'echo', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c',
+                  name: 'echo',
+                  response: { output: 'plain text result' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      const toolMessages = messages.filter((m) => m.role === 'tool');
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(toolMessages).toHaveLength(1);
+      expect(userMessages).toHaveLength(0);
+    });
+
+    it('should fall back to a placeholder string when the tool response is media-only (issue #3616)', () => {
+      // When extractFunctionResponseContent returns empty AND parts contain
+      // only media, the tool message must end up with the placeholder string
+      // rather than an empty array (which would be invalid spec).
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'c', name: 'shot', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c',
+                  name: 'shot',
+                  // null response triggers extractFunctionResponseContent
+                  // to return "" — the empty-text branch we want to cover.
+                  response: null as unknown as Record<string, unknown>,
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'xxx' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage?.content).toBe(
+        '[media attached in following user message]',
+      );
+      const userMessage = messages.find((m) => m.role === 'user');
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        image_url?: { url: string };
+      }>;
+      const img = userContent.find((p) => p.type === 'image_url');
+      expect(img?.image_url?.url).toBe('data:image/png;base64,xxx');
+    });
+
+    it('should preserve prior embedded-media behavior when splitToolMedia is false (default) on parallel tool calls (issue #3616)', () => {
+      // Same input as the parallel-tool-calls split test, but with the flag
+      // off. Asserts that the opt-in is actually opt-in: media stays embedded
+      // in the tool message and no follow-up user message is synthesised.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'c1', name: 's1', args: {} } },
+              { functionCall: { id: 'c2', name: 's2', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 's1',
+                  response: { output: 'r1' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
+                  ],
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'c2',
+                  name: 's2',
+                  response: { output: 'r2' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      // requestContext default has splitToolMedia undefined / false
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const toolMessages = messages.filter((m) => m.role === 'tool');
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(toolMessages).toHaveLength(2);
+      expect(userMessages).toHaveLength(0);
+      // First tool message should still carry the embedded image
+      const firstToolContent = toolMessages[0].content as Array<{
+        type: string;
+        image_url?: { url: string };
+      }>;
+      const img = firstToolContent.find((p) => p.type === 'image_url');
+      expect(img?.image_url?.url).toBe('data:image/png;base64,aaa');
     });
 
     it('should convert function responses with fileData to tool message with embedded image_url', () => {
@@ -1474,6 +1906,241 @@ describe('OpenAIContentConverter', () => {
 
       const parts = chunk.candidates?.[0]?.content?.parts;
       expect(parts).toEqual([]);
+    });
+  });
+
+  describe('OpenAI -> Gemini tagged thinking content', () => {
+    it('should convert MiniMax <think> content to thought parts for non-streaming responses', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-minimax-1',
+          created: 123,
+          model: 'MiniMax-M2.7',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '<think>internal reasoning</think>final answer',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'internal reasoning', thought: true },
+        { text: 'final answer' },
+      ]);
+    });
+
+    it('should preserve ordering around <thinking> blocks', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-minimax-2',
+          created: 123,
+          model: 'MiniMax-M2.7',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'before<thinking>hidden</thinking>after',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'before' },
+        { text: 'hidden', thought: true },
+        { text: 'after' },
+      ]);
+    });
+
+    it('should parse multiple tagged thinking blocks case-insensitively', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-minimax-3',
+          created: 123,
+          model: 'MiniMax-M2.7',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '<THINK>a</THINK>visible<Thinking>b</Thinking>',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'a', thought: true },
+        { text: 'visible' },
+        { text: 'b', thought: true },
+      ]);
+    });
+
+    it('should leave tags visible when tagged thinking parsing is disabled', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-openai-1',
+          created: 123,
+          model: 'gpt-test',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '<think>visible xml example</think>',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<think>visible xml example</think>' },
+      ]);
+    });
+
+    it('should preserve incomplete tags as visible text on final non-streaming parse', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-minimax-4',
+          created: 123,
+          model: 'MiniMax-M2.7',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'final answer <thi',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'final answer <thi' },
+      ]);
+    });
+
+    it('should parse streaming tags split across chunks', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-minimax-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'pre <thi' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'MiniMax-M2.7',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const secondChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-minimax-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'nk>hidden</thi' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'MiniMax-M2.7',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-minimax-3',
+          created: 458,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'nk> visible' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'MiniMax-M2.7',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'pre ' },
+      ]);
+      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'hidden', thought: true },
+      ]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: ' visible' },
+      ]);
+    });
+
+    it('should flush unclosed streaming thinking content on finish', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const chunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-minimax-unclosed',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'answer <think>still thinking' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'MiniMax-M2.7',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(chunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'answer ' },
+        { text: 'still thinking', thought: true },
+      ]);
     });
   });
 

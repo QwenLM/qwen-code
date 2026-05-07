@@ -52,6 +52,25 @@ export interface UIActions {
     region: AlibabaStandardRegion,
     modelIdsInput: string,
   ) => Promise<void>;
+  handleOpenRouterSubmit: () => Promise<void>;
+  handleCustomApiKeySubmit: (
+    protocol:
+      | AuthType.USE_OPENAI
+      | AuthType.USE_ANTHROPIC
+      | AuthType.USE_GEMINI,
+    baseUrl: string,
+    apiKey: string,
+    modelIdsInput: string,
+    generationConfig?: {
+      enableThinking?: boolean;
+      multimodal?: {
+        image?: boolean;
+        video?: boolean;
+        audio?: boolean;
+      };
+      maxTokens?: number;
+    },
+  ) => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string | null) => void;
   cancelAuthentication: () => void;
@@ -64,6 +83,8 @@ export interface UIActions {
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  openManageModelsDialog: () => void;
+  closeManageModelsDialog: () => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;

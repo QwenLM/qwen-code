@@ -26,6 +26,11 @@ import {
   ALIBABA_STANDARD_API_KEY_ENDPOINTS,
   type AlibabaStandardRegion,
 } from '../../constants/alibabaStandardApiKey.js';
+import {
+  generateCustomApiKeyEnvKey,
+  normalizeCustomModelIds,
+  maskApiKey,
+} from './useAuth.js';
 
 const MODEL_PROVIDERS_DOCUMENTATION_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/';
@@ -43,8 +48,15 @@ function parseDefaultAuthType(
 }
 
 // Main menu option type
-type MainOption = typeof AuthType.QWEN_OAUTH | 'CODING_PLAN' | 'API_KEY';
-type ApiKeyOption = 'ALIBABA_STANDARD_API_KEY' | 'CUSTOM_API_KEY';
+type MainOption = 'OAUTH' | 'CODING_PLAN' | 'API_KEY';
+type ApiKeyOption =
+  | 'OPENROUTER_OAUTH'
+  | 'ALIBABA_STANDARD_API_KEY'
+  | 'CUSTOM_API_KEY';
+type OAuthOption =
+  | 'OPENROUTER_OAUTH'
+  | 'MODELSCOPE_OAUTH'
+  | 'QWEN_OAUTH_DISCONTINUED';
 
 // View level for navigation
 type ViewLevel =
@@ -55,7 +67,13 @@ type ViewLevel =
   | 'alibaba-standard-region-select'
   | 'alibaba-standard-api-key-input'
   | 'alibaba-standard-model-id-input'
-  | 'custom-info';
+  | 'custom-protocol-select'
+  | 'custom-base-url-input'
+  | 'custom-api-key-input'
+  | 'custom-model-id-input'
+  | 'custom-advanced-config'
+  | 'custom-review-json'
+  | 'oauth-provider-select';
 
 const ALIBABA_STANDARD_MODEL_IDS_PLACEHOLDER = 'qwen3.5-plus,glm-5,kimi-k2.5';
 const ALIBABA_STANDARD_API_DOCUMENTATION_URLS: Record<
@@ -77,6 +95,8 @@ export function AuthDialog(): React.JSX.Element {
     handleAuthSelect: onAuthSelect,
     handleCodingPlanSubmit,
     handleAlibabaStandardSubmit,
+    handleOpenRouterSubmit,
+    handleCustomApiKeySubmit,
     onAuthError,
   } = useUIActions();
   const config = useConfig();
@@ -90,6 +110,7 @@ export function AuthDialog(): React.JSX.Element {
   const [alibabaStandardRegionIndex, setAlibabaStandardRegionIndex] =
     useState<number>(0);
   const [apiKeyTypeIndex, setApiKeyTypeIndex] = useState<number>(0);
+  const [oauthProviderIndex, setOAuthProviderIndex] = useState<number>(0);
   const [alibabaStandardRegion, setAlibabaStandardRegion] =
     useState<AlibabaStandardRegion>('cn-beijing');
   const [alibabaStandardApiKey, setAlibabaStandardApiKey] = useState('');
@@ -99,6 +120,30 @@ export function AuthDialog(): React.JSX.Element {
   const [alibabaStandardModelId, setAlibabaStandardModelId] = useState('');
   const [alibabaStandardModelIdError, setAlibabaStandardModelIdError] =
     useState<string | null>(null);
+
+  // Custom API Key wizard state
+  const [customProtocolIndex, setCustomProtocolIndex] = useState<number>(0);
+  const [customProtocol, setCustomProtocol] = useState<AuthType>(
+    AuthType.USE_OPENAI,
+  );
+  const [customBaseUrl, setCustomBaseUrl] = useState('');
+  const [customBaseUrlError, setCustomBaseUrlError] = useState<string | null>(
+    null,
+  );
+  const [customApiKey, setCustomApiKey] = useState('');
+  const [customApiKeyError, setCustomApiKeyError] = useState<string | null>(
+    null,
+  );
+  const [customModelIds, setCustomModelIds] = useState('');
+  const [customModelIdsError, setCustomModelIdsError] = useState<string | null>(
+    null,
+  );
+
+  // Advanced generation config state
+  const [advancedThinkingEnabled, setAdvancedThinkingEnabled] = useState(false);
+  const [advancedModalityEnabled, setAdvancedModalityEnabled] = useState(false);
+  const [focusedConfigIndex, setFocusedConfigIndex] = useState(0);
+  // 0 = thinking, 1 = modality
 
   // Main authentication entries (flat three-option layout)
   const mainItems = [
@@ -119,11 +164,13 @@ export function AuthDialog(): React.JSX.Element {
       value: 'API_KEY' as MainOption,
     },
     {
-      key: AuthType.QWEN_OAUTH,
-      title: t('Qwen OAuth'),
-      label: t('Qwen OAuth'),
-      description: t('Discontinued — switch to Coding Plan or API Key'),
-      value: AuthType.QWEN_OAUTH as MainOption,
+      key: 'OAUTH',
+      title: t('OAuth'),
+      label: t('OAuth'),
+      description: t(
+        'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)',
+      ),
+      value: 'OAUTH' as MainOption,
     },
   ];
 
@@ -210,6 +257,38 @@ export function AuthDialog(): React.JSX.Element {
     },
   ];
 
+  const protocolItems = [
+    {
+      key: AuthType.USE_OPENAI,
+      title: t('OpenAI-compatible'),
+      label: t('OpenAI-compatible'),
+      description: t(
+        'OpenAI Chat Completions API (OpenRouter, vLLM, Ollama, LM Studio, Fireworks, etc.)',
+      ),
+      value: AuthType.USE_OPENAI as AuthType,
+    },
+    {
+      key: AuthType.USE_ANTHROPIC,
+      title: t('Anthropic-compatible'),
+      label: t('Anthropic-compatible'),
+      description: t('Anthropic Messages API'),
+      value: AuthType.USE_ANTHROPIC as AuthType,
+    },
+    {
+      key: AuthType.USE_GEMINI,
+      title: t('Gemini-compatible'),
+      label: t('Gemini-compatible'),
+      description: t('Google Gemini API'),
+      value: AuthType.USE_GEMINI as AuthType,
+    },
+  ];
+
+  const DEFAULT_CUSTOM_BASE_URLS: Partial<Record<AuthType, string>> = {
+    [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
+    [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
+    [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
+  };
+
   const apiKeyTypeItems = [
     {
       key: 'ALIBABA_STANDARD_API_KEY',
@@ -229,8 +308,36 @@ export function AuthDialog(): React.JSX.Element {
     },
   ];
 
+  const oauthProviderItems = [
+    {
+      key: 'OPENROUTER_OAUTH',
+      title: t('OpenRouter'),
+      label: t('OpenRouter'),
+      description: t(
+        'Browser OAuth · Auto-configure API key and OpenRouter models',
+      ),
+      value: 'OPENROUTER_OAUTH' as OAuthOption,
+    },
+    {
+      key: 'MODELSCOPE_OAUTH',
+      title: t('ModelScope'),
+      label: t('ModelScope'),
+      description: t(
+        'Browser OAuth · Auto-configure API key and ModelScope models',
+      ),
+      value: 'MODELSCOPE_OAUTH' as OAuthOption,
+    },
+    {
+      key: 'QWEN_OAUTH_DISCONTINUED',
+      title: t('Qwen'),
+      label: t('Qwen'),
+      description: t('Discontinued — switch to Coding Plan or API Key'),
+      value: 'QWEN_OAUTH_DISCONTINUED' as OAuthOption,
+    },
+  ];
+
   // Map an AuthType to the corresponding main menu option.
-  // QWEN_OAUTH maps directly; USE_OPENAI maps to:
+  // QWEN_OAUTH maps to 'OAUTH'; USE_OPENAI maps to:
   // - CODING_PLAN when current config matches coding plan
   // - API_KEY for other OpenAI / Anthropic / Gemini-compatible configs
   const contentGenConfig = config.getContentGeneratorConfig();
@@ -240,7 +347,7 @@ export function AuthDialog(): React.JSX.Element {
       contentGenConfig?.apiKeyEnvKey,
     ) !== false;
   const authTypeToMainOption = (authType: AuthType): MainOption => {
-    if (authType === AuthType.QWEN_OAUTH) return AuthType.QWEN_OAUTH;
+    if (authType === AuthType.QWEN_OAUTH) return 'OAUTH';
     if (authType === AuthType.USE_OPENAI && isCurrentlyCodingPlan) {
       return 'CODING_PLAN';
     }
@@ -269,8 +376,8 @@ export function AuthDialog(): React.JSX.Element {
         return item.value === authTypeToMainOption(defaultAuthType);
       }
 
-      // Priority 4: default to QWEN_OAUTH
-      return item.value === AuthType.QWEN_OAUTH;
+      // Priority 4: default to OAUTH
+      return item.value === 'OAUTH';
     }),
   );
 
@@ -289,13 +396,8 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    // Qwen OAuth free tier discontinued — show warning instead of proceeding
-    if (value === AuthType.QWEN_OAUTH) {
-      setErrorMessage(
-        t(
-          'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
-        ),
-      );
+    if (value === 'OAUTH') {
+      setViewLevel('oauth-provider-select');
       return;
     }
 
@@ -313,7 +415,53 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    setViewLevel('custom-info');
+    // Reset custom wizard state and go to protocol selection
+    setCustomProtocolIndex(0);
+    setCustomProtocol(AuthType.USE_OPENAI);
+    setCustomBaseUrl('');
+    setCustomBaseUrlError(null);
+    setCustomApiKey('');
+    setCustomApiKeyError(null);
+    setCustomModelIds('');
+    setCustomModelIdsError(null);
+    setAdvancedThinkingEnabled(false);
+    setAdvancedModalityEnabled(false);
+    setFocusedConfigIndex(0);
+    setViewLevel('custom-protocol-select');
+  };
+
+  const handleOAuthProviderSelect = async (value: OAuthOption) => {
+    setErrorMessage(null);
+    onAuthError(null);
+
+    if (value === 'OPENROUTER_OAUTH') {
+      await handleOpenRouterSubmit();
+      return;
+    }
+
+    // Qwen OAuth free tier discontinued — show warning instead of proceeding
+    if (value === 'QWEN_OAUTH_DISCONTINUED') {
+      setErrorMessage(
+        t(
+          'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
+        ),
+      );
+      return;
+    }
+
+    // Future: Add support for ModelScope OAuth when implemented
+    if (value === 'MODELSCOPE_OAUTH') {
+      // Currently not implemented, show message
+      setErrorMessage(
+        t(
+          'ModelScope OAuth is not yet implemented. Please select another option.',
+        ),
+      );
+      return;
+    }
+
+    // For other OAuth providers, you can extend the functionality here
+    await onAuthSelect(AuthType.USE_OPENAI);
   };
 
   const handleRegionSelect = async (selectedRegion: CodingPlanRegion) => {
@@ -381,6 +529,89 @@ export function AuthDialog(): React.JSX.Element {
     );
   };
 
+  const handleCustomProtocolSelect = (protocol: AuthType) => {
+    setErrorMessage(null);
+    onAuthError(null);
+    setCustomProtocol(protocol);
+    const defaultUrl = DEFAULT_CUSTOM_BASE_URLS[protocol] ?? '';
+    setCustomBaseUrl(defaultUrl);
+    setCustomBaseUrlError(null);
+    setViewLevel('custom-base-url-input');
+  };
+
+  const handleCustomBaseUrlSubmit = () => {
+    const trimmedUrl = customBaseUrl.trim();
+    if (!trimmedUrl) {
+      setCustomBaseUrlError(t('Base URL cannot be empty.'));
+      return;
+    }
+    if (!/^https?:\/\//i.test(trimmedUrl)) {
+      setCustomBaseUrlError(t('Base URL must start with http:// or https://.'));
+      return;
+    }
+    setCustomBaseUrlError(null);
+    setCustomApiKey('');
+    setCustomApiKeyError(null);
+    setViewLevel('custom-api-key-input');
+  };
+
+  const handleCustomApiKeySubmitLocal = () => {
+    const trimmedKey = customApiKey.trim();
+    if (!trimmedKey) {
+      setCustomApiKeyError(t('API key cannot be empty.'));
+      return;
+    }
+    setCustomApiKeyError(null);
+    setCustomModelIds('');
+    setCustomModelIdsError(null);
+    setViewLevel('custom-model-id-input');
+  };
+
+  const handleCustomModelIdSubmit = () => {
+    const normalized = normalizeCustomModelIds(customModelIds);
+    if (normalized.length === 0) {
+      setCustomModelIdsError(t('Model IDs cannot be empty.'));
+      return;
+    }
+    setCustomModelIdsError(null);
+    setViewLevel('custom-advanced-config');
+  };
+
+  const handleAdvancedConfigSubmit = () => {
+    setViewLevel('custom-review-json');
+  };
+
+  const handleCustomReviewSubmit = () => {
+    const trimmedBaseUrl = customBaseUrl.trim();
+    const trimmedApiKey = customApiKey.trim();
+    const trimmedModelIds = customModelIds;
+
+    // Build generationConfig only if any advanced option is set
+    const hasThinking = advancedThinkingEnabled;
+    const hasModality = advancedModalityEnabled;
+
+    const generationConfig =
+      hasThinking || hasModality
+        ? {
+            enableThinking: hasThinking ? true : undefined,
+            multimodal: hasModality
+              ? { image: true, video: true, audio: true }
+              : undefined,
+          }
+        : undefined;
+
+    void handleCustomApiKeySubmit(
+      customProtocol as
+        | AuthType.USE_OPENAI
+        | AuthType.USE_ANTHROPIC
+        | AuthType.USE_GEMINI,
+      trimmedBaseUrl,
+      trimmedApiKey,
+      trimmedModelIds,
+      generationConfig,
+    );
+  };
+
   const handleGoBack = () => {
     setErrorMessage(null);
     onAuthError(null);
@@ -391,14 +622,26 @@ export function AuthDialog(): React.JSX.Element {
       setViewLevel('region-select');
     } else if (viewLevel === 'api-key-type-select') {
       setViewLevel('main');
-    } else if (viewLevel === 'custom-info') {
+    } else if (viewLevel === 'custom-protocol-select') {
       setViewLevel('api-key-type-select');
+    } else if (viewLevel === 'custom-base-url-input') {
+      setViewLevel('custom-protocol-select');
+    } else if (viewLevel === 'custom-api-key-input') {
+      setViewLevel('custom-base-url-input');
+    } else if (viewLevel === 'custom-model-id-input') {
+      setViewLevel('custom-api-key-input');
+    } else if (viewLevel === 'custom-advanced-config') {
+      setViewLevel('custom-model-id-input');
+    } else if (viewLevel === 'custom-review-json') {
+      setViewLevel('custom-advanced-config');
     } else if (viewLevel === 'alibaba-standard-region-select') {
       setViewLevel('api-key-type-select');
     } else if (viewLevel === 'alibaba-standard-api-key-input') {
       setViewLevel('alibaba-standard-region-select');
     } else if (viewLevel === 'alibaba-standard-model-id-input') {
       setViewLevel('alibaba-standard-api-key-input');
+    } else if (viewLevel === 'oauth-provider-select') {
+      setViewLevel('main');
     }
   };
 
@@ -411,7 +654,18 @@ export function AuthDialog(): React.JSX.Element {
           return;
         }
 
-        if (viewLevel === 'api-key-input' || viewLevel === 'custom-info') {
+        if (viewLevel === 'api-key-input') {
+          handleGoBack();
+          return;
+        }
+        if (
+          viewLevel === 'custom-protocol-select' ||
+          viewLevel === 'custom-base-url-input' ||
+          viewLevel === 'custom-api-key-input' ||
+          viewLevel === 'custom-model-id-input' ||
+          viewLevel === 'custom-advanced-config' ||
+          viewLevel === 'custom-review-json'
+        ) {
           handleGoBack();
           return;
         }
@@ -419,7 +673,8 @@ export function AuthDialog(): React.JSX.Element {
           viewLevel === 'api-key-type-select' ||
           viewLevel === 'alibaba-standard-region-select' ||
           viewLevel === 'alibaba-standard-api-key-input' ||
-          viewLevel === 'alibaba-standard-model-id-input'
+          viewLevel === 'alibaba-standard-model-id-input' ||
+          viewLevel === 'oauth-provider-select'
         ) {
           handleGoBack();
           return;
@@ -438,6 +693,50 @@ export function AuthDialog(): React.JSX.Element {
           return;
         }
         onAuthSelect(undefined);
+      }
+    },
+    { isActive: true },
+  );
+
+  // Handle Enter key for review view to save
+  useKeypress(
+    (key) => {
+      if (key.name === 'return' && viewLevel === 'custom-review-json') {
+        handleCustomReviewSubmit();
+      }
+    },
+    { isActive: true },
+  );
+
+  // Advanced config keypress: ↑↓ to navigate, Space to toggle, Enter to submit
+  useKeypress(
+    (key) => {
+      if (viewLevel !== 'custom-advanced-config') return;
+
+      const { name } = key;
+
+      if (name === 'up') {
+        setFocusedConfigIndex((v) => (v <= 0 ? 1 : v - 1));
+        return;
+      }
+
+      if (name === 'down') {
+        setFocusedConfigIndex((v) => (v >= 1 ? 0 : v + 1));
+        return;
+      }
+
+      if (name === 'space') {
+        if (focusedConfigIndex === 0) {
+          setAdvancedThinkingEnabled((v) => !v);
+        } else {
+          setAdvancedModalityEnabled((v) => !v);
+        }
+        return;
+      }
+
+      if (name === 'return') {
+        handleAdvancedConfigSubmit();
+        return;
       }
     },
     { isActive: true },
@@ -625,26 +924,294 @@ export function AuthDialog(): React.JSX.Element {
     </Box>
   );
 
-  // Render custom mode info
-  const renderCustomInfoView = () => (
+  // Render custom protocol selection
+  const renderCustomProtocolSelectView = () => (
     <>
       <Box marginTop={1}>
+        <DescriptiveRadioButtonSelect
+          items={protocolItems}
+          initialIndex={customProtocolIndex}
+          onSelect={handleCustomProtocolSelect}
+          onHighlight={(value) => {
+            const index = protocolItems.findIndex(
+              (item) => item.value === value,
+            );
+            setCustomProtocolIndex(index);
+          }}
+          itemGap={1}
+        />
+      </Box>
+      <Box marginTop={1}>
+        <Text color={theme.text.secondary}>
+          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
+        </Text>
+      </Box>
+    </>
+  );
+
+  // Render custom base URL input
+  const renderCustomBaseUrlInputView = () => (
+    <Box marginTop={1} flexDirection="column">
+      <Box marginTop={1}>
         <Text color={theme.text.primary}>
-          {t('You can configure your API key and models in settings.json')}
+          {t('Enter the API endpoint for this protocol.')}
         </Text>
       </Box>
       <Box marginTop={1}>
-        <Text>{t('Refer to the documentation for setup instructions')}</Text>
+        <TextInput
+          value={customBaseUrl}
+          onChange={(value) => {
+            setCustomBaseUrl(value);
+            if (customBaseUrlError) {
+              setCustomBaseUrlError(null);
+            }
+          }}
+          onSubmit={handleCustomBaseUrlSubmit}
+          placeholder="https://api.openai.com/v1"
+        />
       </Box>
-      <Box marginTop={0}>
+      {customBaseUrlError && (
+        <Box marginTop={1}>
+          <Text color={theme.status.error}>{customBaseUrlError}</Text>
+        </Box>
+      )}
+      <Box marginTop={1}>
         <Link url={MODEL_PROVIDERS_DOCUMENTATION_URL} fallback={false}>
           <Text color={theme.text.link}>
-            {MODEL_PROVIDERS_DOCUMENTATION_URL}
+            {t(
+              'Need advanced generationConfig or capabilities? See documentation',
+            )}
           </Text>
         </Link>
       </Box>
       <Box marginTop={1}>
-        <Text color={theme.text.secondary}>{t('Esc to go back')}</Text>
+        <Text color={theme.text.secondary}>
+          {t('Enter to submit, Esc to go back')}
+        </Text>
+      </Box>
+    </Box>
+  );
+
+  // Render custom API key input
+  const renderCustomApiKeyInputView = () => (
+    <Box marginTop={1} flexDirection="column">
+      <Box marginTop={1}>
+        <Text color={theme.text.primary}>
+          {t('Enter the API key for this endpoint.')}
+        </Text>
+      </Box>
+      <Box marginTop={1}>
+        <TextInput
+          value={customApiKey}
+          onChange={(value) => {
+            setCustomApiKey(value);
+            if (customApiKeyError) {
+              setCustomApiKeyError(null);
+            }
+          }}
+          onSubmit={handleCustomApiKeySubmitLocal}
+          placeholder="sk-..."
+        />
+      </Box>
+      {customApiKeyError && (
+        <Box marginTop={1}>
+          <Text color={theme.status.error}>{customApiKeyError}</Text>
+        </Box>
+      )}
+      <Box marginTop={1}>
+        <Text color={theme.text.secondary}>
+          {t('Enter to submit, Esc to go back')}
+        </Text>
+      </Box>
+    </Box>
+  );
+
+  // Render custom model ID input
+  const renderCustomModelIdInputView = () => (
+    <Box marginTop={1} flexDirection="column">
+      <Box marginTop={1}>
+        <Text color={theme.text.primary}>
+          {t('Enter one or more model IDs, separated by commas.')}
+        </Text>
+      </Box>
+      <Box marginTop={1}>
+        <TextInput
+          value={customModelIds}
+          onChange={(value) => {
+            setCustomModelIds(value);
+            if (customModelIdsError) {
+              setCustomModelIdsError(null);
+            }
+          }}
+          onSubmit={handleCustomModelIdSubmit}
+          placeholder="qwen/qwen3-coder,openai/gpt-4.1"
+        />
+      </Box>
+      {customModelIdsError && (
+        <Box marginTop={1}>
+          <Text color={theme.status.error}>{customModelIdsError}</Text>
+        </Box>
+      )}
+      <Box marginTop={1}>
+        <Text color={theme.text.secondary}>
+          {t('Enter to submit, Esc to go back')}
+        </Text>
+      </Box>
+    </Box>
+  );
+
+  // Render custom advanced config
+  const renderCustomAdvancedConfigView = () => {
+    const checkmark = (v: boolean) => (v ? '◉' : '○');
+    const cursor = (index: number) =>
+      focusedConfigIndex === index ? '›' : ' ';
+
+    return (
+      <Box marginTop={1} flexDirection="column">
+        <Box marginTop={1}>
+          <Text color={theme.text.primary}>
+            {t('Optional: configure advanced generation settings.')}
+          </Text>
+        </Box>
+        <Box marginTop={1} marginLeft={2}>
+          <Text
+            color={focusedConfigIndex === 0 ? theme.status.success : undefined}
+          >
+            {cursor(0)} {checkmark(advancedThinkingEnabled)}{' '}
+            {t('Enable thinking')}
+          </Text>
+        </Box>
+        <Box marginTop={0} marginLeft={4}>
+          <Text color={theme.text.secondary}>
+            {t(
+              'Allows the model to perform extended reasoning before responding.',
+            )}
+          </Text>
+        </Box>
+        <Box marginTop={1} marginLeft={2}>
+          <Text
+            color={focusedConfigIndex === 1 ? theme.status.success : undefined}
+          >
+            {cursor(1)} {checkmark(advancedModalityEnabled)}{' '}
+            {t('Enable modality')}
+          </Text>
+        </Box>
+        <Box marginTop={0} marginLeft={4}>
+          <Text color={theme.text.secondary}>
+            {t('Enables image, video, and audio input/output capabilities.')}
+          </Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            {t(
+              '\u2191\u2193 to navigate, Space to toggle, Enter to continue, Esc to go back',
+            )}
+          </Text>
+        </Box>
+      </Box>
+    );
+  };
+
+  // Render custom review JSON
+  const renderCustomReviewJsonView = () => {
+    const generatedEnvKey = generateCustomApiKeyEnvKey(
+      customProtocol,
+      customBaseUrl.trim(),
+    );
+    const normalizedIds = normalizeCustomModelIds(customModelIds);
+    const maskedKey = maskApiKey(customApiKey);
+
+    // Build generationConfig preview lines
+    const hasThinking = advancedThinkingEnabled;
+    const hasModality = advancedModalityEnabled;
+    const hasGenConfig = hasThinking || hasModality;
+
+    let genConfig: Record<string, unknown> | undefined;
+    if (hasGenConfig) {
+      genConfig = {};
+      if (hasModality) {
+        genConfig['modalities'] = {
+          image: true,
+          video: true,
+          audio: true,
+        };
+      }
+      if (hasThinking) {
+        genConfig['extra_body'] = {
+          enable_thinking: true,
+        };
+      }
+    }
+
+    const modelEntries = normalizedIds.map((id) => {
+      const entry: Record<string, unknown> = {
+        id,
+        name: id,
+        baseUrl: customBaseUrl.trim(),
+        envKey: generatedEnvKey,
+      };
+      if (genConfig) {
+        entry['generationConfig'] = genConfig;
+      }
+      return entry;
+    });
+
+    const preview = {
+      env: { [generatedEnvKey]: maskedKey },
+      modelProviders: {
+        [customProtocol]: modelEntries,
+      },
+      security: {
+        auth: {
+          selectedType: customProtocol,
+        },
+      },
+      model: {
+        name: normalizedIds[0],
+      },
+    };
+
+    const jsonPreview = JSON.stringify(preview, null, 2);
+
+    return (
+      <Box marginTop={1} flexDirection="column">
+        <Box marginTop={1}>
+          <Text color={theme.text.primary}>
+            {t('The following JSON will be saved to settings.json:')}
+          </Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text>{jsonPreview}</Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            {t('Enter to save, Esc to go back')}
+          </Text>
+        </Box>
+      </Box>
+    );
+  };
+
+  const renderOAuthProviderSelectView = () => (
+    <>
+      <Box marginTop={1}>
+        <DescriptiveRadioButtonSelect
+          items={oauthProviderItems}
+          initialIndex={oauthProviderIndex}
+          onSelect={handleOAuthProviderSelect}
+          onHighlight={(value) => {
+            const index = oauthProviderItems.findIndex(
+              (item) => item.value === value,
+            );
+            setOAuthProviderIndex(index);
+          }}
+          itemGap={1}
+        />
+      </Box>
+      <Box marginTop={1}>
+        <Text color={theme?.text?.secondary}>
+          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
+        </Text>
       </Box>
     </>
   );
@@ -659,8 +1226,18 @@ export function AuthDialog(): React.JSX.Element {
         return t('Enter Coding Plan API Key');
       case 'api-key-type-select':
         return t('Select API Key Type');
-      case 'custom-info':
-        return t('Custom Configuration');
+      case 'custom-protocol-select':
+        return t('Step 1/6 \u00B7 Protocol');
+      case 'custom-base-url-input':
+        return t('Step 2/6 \u00B7 Base URL');
+      case 'custom-api-key-input':
+        return t('Step 3/6 \u00B7 API Key');
+      case 'custom-model-id-input':
+        return t('Step 4/6 \u00B7 Model IDs');
+      case 'custom-advanced-config':
+        return t('Step 5/6 \u00B7 Advanced Config');
+      case 'custom-review-json':
+        return t('Step 6/6 \u00B7 Review');
       case 'alibaba-standard-region-select':
         return t(
           'Select Region for Alibaba Cloud ModelStudio Standard API Key',
@@ -669,6 +1246,8 @@ export function AuthDialog(): React.JSX.Element {
         return t('Enter Alibaba Cloud ModelStudio Standard API Key');
       case 'alibaba-standard-model-id-input':
         return t('Enter Model IDs');
+      case 'oauth-provider-select':
+        return t('Select OAuth Provider');
       default:
         return t('Select Authentication Method');
     }
@@ -694,7 +1273,15 @@ export function AuthDialog(): React.JSX.Element {
         renderAlibabaStandardApiKeyInputView()}
       {viewLevel === 'alibaba-standard-model-id-input' &&
         renderAlibabaStandardModelIdInputView()}
-      {viewLevel === 'custom-info' && renderCustomInfoView()}
+      {viewLevel === 'custom-protocol-select' &&
+        renderCustomProtocolSelectView()}
+      {viewLevel === 'custom-base-url-input' && renderCustomBaseUrlInputView()}
+      {viewLevel === 'custom-api-key-input' && renderCustomApiKeyInputView()}
+      {viewLevel === 'custom-model-id-input' && renderCustomModelIdInputView()}
+      {viewLevel === 'custom-advanced-config' &&
+        renderCustomAdvancedConfigView()}
+      {viewLevel === 'custom-review-json' && renderCustomReviewJsonView()}
+      {viewLevel === 'oauth-provider-select' && renderOAuthProviderSelectView()}
 
       {(authError || errorMessage) && (
         <Box marginTop={1}>

@@ -1049,7 +1049,7 @@ export default {
   'Generating project summary...': '正在生成項目摘要...',
   'Failed to generate summary - no text content received from LLM response':
     '生成摘要失敗 - 未從 LLM 響應中接收到文本內容',
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切換此會話的模型（--fast 可設置建議模型）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '設置用於輸入建議和推測執行的輕量模型',
@@ -1057,6 +1057,8 @@ export default {
   'Authentication type not available.': '認證類型不可用',
   'No models available for the current authentication type ({{authType}}).':
     '當前認證類型 ({{authType}}) 沒有可用的模型',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
   'Starting a new session, resetting chat, and clearing terminal.':
     '正在開始新會話，重置聊天並清屏。',
   'Starting a new session and clearing.': '正在開始新會話並清屏。',
@@ -1163,6 +1165,8 @@ export default {
   'Alibaba Cloud Coding Plan': '阿里雲百鍊 Coding Plan',
   'Bring your own API key': '使用自己的 API 密鑰',
   'API-KEY': 'API-KEY',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    '基於瀏覽器的第三方提供商認證（例如 OpenRouter、ModelScope）',
   'Use coding plan credentials or your own api-keys/providers.':
     '使用 Coding Plan 憑證或您自己的 API 密鑰/提供商。',
   OpenAI: 'OpenAI',
@@ -1450,6 +1454,7 @@ export default {
   'Command Format Migration': '命令格式遷移',
   'Found {{count}} TOML command file:': '發現 {{count}} 個 TOML 命令文件：',
   'Found {{count}} TOML command files:': '發現 {{count}} 個 TOML 命令文件：',
+  'Current tasks': '目前任務',
   '... and {{count}} more': '... 以及其他 {{count}} 個',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'TOML 格式已棄用。是否將它們遷移到 Markdown 格式？',

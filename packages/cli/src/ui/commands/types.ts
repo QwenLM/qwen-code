@@ -173,6 +173,7 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'manage-models'
     | 'subagent_create'
     | 'subagent_list'
     | 'trust'

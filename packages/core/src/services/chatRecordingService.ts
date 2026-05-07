@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import {
   type PartListUnion,
   type Content,
+  type FunctionDeclaration,
   type GenerateContentResponseUsageMetadata,
   createUserContent,
   createModelContent,
@@ -24,7 +25,7 @@ import type {
   ToolCallResponseInfo,
 } from '../core/turn.js';
 import type { Status } from '../core/coreToolScheduler.js';
-import type { AgentResultDisplay } from '../tools/tools.js';
+import type { AgentResultDisplay, FileDiff } from '../tools/tools.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
@@ -35,6 +36,132 @@ const debugLogger = createDebugLogger('CHAT_RECORDING');
  * retrying across turns.
  */
 const AUTO_TITLE_ATTEMPT_CAP = 3;
+const SESSION_FILE_DIFF_AGGREGATE_CHAR_LIMIT = 100_000;
+const SESSION_FILE_DIFF_CHAR_LIMIT = 50_000;
+const SESSION_FILE_CONTENT_CHAR_LIMIT = 16_000;
+
+function isFileDiffDisplay(resultDisplay: unknown): resultDisplay is FileDiff {
+  if (
+    typeof resultDisplay !== 'object' ||
+    resultDisplay === null ||
+    !('fileDiff' in resultDisplay) ||
+    !('fileName' in resultDisplay) ||
+    !('originalContent' in resultDisplay) ||
+    !('newContent' in resultDisplay)
+  ) {
+    return false;
+  }
+
+  const display = resultDisplay as Record<string, unknown>;
+  const originalContent = display['originalContent'];
+  return (
+    typeof display['fileDiff'] === 'string' &&
+    typeof display['fileName'] === 'string' &&
+    typeof display['newContent'] === 'string' &&
+    (originalContent === null || typeof originalContent === 'string')
+  );
+}
+
+function stringLength(value: string | null | undefined): number {
+  return typeof value === 'string' ? value.length : 0;
+}
+
+function truncateMiddleForSession(value: string, limit: number): string {
+  if (value.length <= limit) {
+    return value;
+  }
+
+  const marker = `\n[... truncated for saved session preview; original length: ${value.length} characters ...]\n`;
+  const contentBudget = Math.max(0, limit - marker.length);
+  const headLength = Math.ceil(contentBudget * 0.6);
+  const tailLength = contentBudget - headLength;
+
+  return (
+    value.slice(0, headLength) +
+    marker +
+    (tailLength > 0 ? value.slice(value.length - tailLength) : '')
+  );
+}
+
+function buildSyntheticDiffPreview(display: FileDiff): string {
+  const originalLength = stringLength(display.originalContent);
+  return [
+    `--- ${display.fileName}`,
+    `+++ ${display.fileName}`,
+    '@@ -1 +1 @@',
+    `-Full diff omitted from saved session history; original fileDiff length: ${display.fileDiff.length} characters.`,
+    `+Saved session preview only; originalContent length: ${originalLength} characters, newContent length: ${display.newContent.length} characters.`,
+  ].join('\n');
+}
+
+function sanitizeFileDiffForRecording(display: FileDiff): FileDiff {
+  const fileDiffLength = display.fileDiff.length;
+  const originalContentLength = stringLength(display.originalContent);
+  const newContentLength = display.newContent.length;
+  const aggregateLength =
+    fileDiffLength + originalContentLength + newContentLength;
+
+  const fileDiffTruncated = fileDiffLength > SESSION_FILE_DIFF_CHAR_LIMIT;
+  const originalContentTruncated =
+    originalContentLength > SESSION_FILE_CONTENT_CHAR_LIMIT;
+  const newContentTruncated =
+    newContentLength > SESSION_FILE_CONTENT_CHAR_LIMIT;
+
+  if (
+    aggregateLength <= SESSION_FILE_DIFF_AGGREGATE_CHAR_LIMIT &&
+    !fileDiffTruncated &&
+    !originalContentTruncated &&
+    !newContentTruncated
+  ) {
+    return display;
+  }
+
+  return {
+    ...display,
+    fileDiff: fileDiffTruncated
+      ? buildSyntheticDiffPreview(display)
+      : display.fileDiff,
+    originalContent:
+      display.originalContent !== null && originalContentTruncated
+        ? truncateMiddleForSession(
+            display.originalContent,
+            SESSION_FILE_CONTENT_CHAR_LIMIT,
+          )
+        : display.originalContent,
+    newContent: newContentTruncated
+      ? truncateMiddleForSession(
+          display.newContent,
+          SESSION_FILE_CONTENT_CHAR_LIMIT,
+        )
+      : display.newContent,
+    truncatedForSession: true,
+    fileDiffLength,
+    originalContentLength,
+    newContentLength,
+    fileDiffTruncated,
+    originalContentTruncated,
+    newContentTruncated,
+  };
+}
+
+export function sanitizeToolCallResultForRecording<
+  T extends Partial<ToolCallResponseInfo>,
+>(toolCallResult: T): T {
+  const resultDisplay = toolCallResult.resultDisplay;
+  if (!isFileDiffDisplay(resultDisplay)) {
+    return toolCallResult;
+  }
+
+  const sanitizedResultDisplay = sanitizeFileDiffForRecording(resultDisplay);
+  if (sanitizedResultDisplay === resultDisplay) {
+    return toolCallResult;
+  }
+
+  return {
+    ...toolCallResult,
+    resultDisplay: sanitizedResultDisplay,
+  } as T;
+}
 
 /**
  * Users who don't want the fast model silently generating titles can opt
@@ -92,7 +219,9 @@ export interface ChatRecord {
     | 'notification'
     | 'cron'
     | 'custom_title'
-    | 'rewind';
+    | 'rewind'
+    | 'agent_bootstrap'
+    | 'agent_launch_prompt';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -135,11 +264,42 @@ export interface ChatRecord {
     | AtCommandRecordPayload
     | CustomTitleRecordPayload
     | NotificationRecordPayload
-    | RewindRecordPayload;
+    | RewindRecordPayload
+    | AgentBootstrapRecordPayload;
+
+  /** Background subagent that produced this record (e.g. "explore-7f3c"). */
+  agentId?: string;
+  /** Display name for the subagent (e.g. "Explore"). */
+  agentName?: string;
+  /** UI hint for tools rendering subagent transcripts. */
+  agentColor?: string;
+  /** True for records produced by a subagent (a sidechain off the parent session). */
+  isSidechain?: boolean;
 }
 
 export interface NotificationRecordPayload {
   displayText: string;
+}
+
+export interface AgentBootstrapRecordPayload {
+  /** Bootstrap kind for future-proof decoding. */
+  kind: 'fork';
+  /**
+   * Exact model-facing history prefix seeded before the agent emitted any
+   * runtime events. For forks, this includes the inherited parent context and
+   * the original first task prompt/user turn.
+   */
+  history: Content[];
+  /**
+   * Immutable launch-time system instruction for the fork runtime. Resume must
+   * reuse this exact value rather than reading the current parent config.
+   */
+  systemInstruction?: string | Content;
+  /**
+   * Immutable launch-time tool declarations / allowlist for the fork runtime.
+   * Resume must reuse this exact capability set or stay blocked.
+   */
+  tools?: Array<string | FunctionDeclaration>;
 }
 
 /**
@@ -678,23 +838,27 @@ export class ChatRecordingService {
       };
 
       if (toolCallResult) {
+        const recordingToolCallResult =
+          sanitizeToolCallResultForRecording(toolCallResult);
+
         // special case for task executions - we don't want to record the tool calls
         if (
-          typeof toolCallResult.resultDisplay === 'object' &&
-          toolCallResult.resultDisplay !== null &&
-          'type' in toolCallResult.resultDisplay &&
-          toolCallResult.resultDisplay.type === 'task_execution'
+          typeof recordingToolCallResult.resultDisplay === 'object' &&
+          recordingToolCallResult.resultDisplay !== null &&
+          'type' in recordingToolCallResult.resultDisplay &&
+          recordingToolCallResult.resultDisplay.type === 'task_execution'
         ) {
-          const taskResult = toolCallResult.resultDisplay as AgentResultDisplay;
+          const taskResult =
+            recordingToolCallResult.resultDisplay as AgentResultDisplay;
           record.toolCallResult = {
-            ...toolCallResult,
+            ...recordingToolCallResult,
             resultDisplay: {
               ...taskResult,
               toolCalls: [],
             },
           };
         } else {
-          record.toolCallResult = toolCallResult;
+          record.toolCallResult = recordingToolCallResult;
         }
       }
 

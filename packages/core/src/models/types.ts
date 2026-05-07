@@ -38,6 +38,7 @@ export type ModelGenerationConfig = Pick<
   | 'extra_body'
   | 'contextWindowSize'
   | 'modalities'
+  | 'splitToolMedia'
 >;
 
 /**

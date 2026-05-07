@@ -1175,7 +1175,7 @@ export default {
   // ============================================================================
   // Commandes - Modèle
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Changer le modèle pour cette session (--fast pour le modèle de suggestion)',
   'Set a lighter model for prompt suggestions and speculative execution':
     "Définir un modèle plus léger pour les suggestions d'invite et l'exécution spéculative",
@@ -1185,6 +1185,8 @@ export default {
     "Type d'authentification non disponible.",
   'No models available for the current authentication type ({{authType}}).':
     "Aucun modèle disponible pour le type d'authentification actuel ({{authType}}).",
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commandes - Effacer
@@ -1345,6 +1347,8 @@ export default {
     "Payant · Jusqu'à 6 000 requêtes/5h · Tous les modèles Alibaba Cloud Coding Plan",
   'Alibaba Cloud Coding Plan': 'Plan de codage Alibaba Cloud',
   'Bring your own API key': 'Apportez votre propre clé API',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Authentification basée sur le navigateur avec des fournisseurs tiers (par exemple OpenRouter, ModelScope)',
   'API-KEY': 'CLÉ-API',
   'Use coding plan credentials or your own api-keys/providers.':
     'Utilisez les identifiants du plan de codage ou vos propres clés API/fournisseurs.',
@@ -1671,6 +1675,7 @@ export default {
     'Trouvé {{count}} fichier de commande TOML :',
   'Found {{count}} TOML command files:':
     'Trouvé {{count}} fichiers de commande TOML :',
+  'Current tasks': 'Tâches actuelles',
   '... and {{count}} more': '... et {{count}} de plus',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Le format TOML est obsolète. Souhaitez-vous les migrer vers le format Markdown ?',

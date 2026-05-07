@@ -10,16 +10,20 @@ import { stripVTControlCharacters } from 'node:util';
 import stringWidth from 'string-width';
 
 /**
- * Calculates the maximum width of a multi-line ASCII art string.
+ * Calculates the maximum *visual* width (terminal cells) of a multi-line
+ * ASCII art string. Uses `string-width` semantics via `getCachedStringWidth`
+ * so CJK fullwidth characters count as 2 cells and emoji are sized
+ * correctly — `.length` would undercount these and let oversized art slip
+ * past the width budget that `pickAsciiArtTier` applies.
  * @param asciiArt The ASCII art string.
- * @returns The length of the longest line in the ASCII art.
+ * @returns The widest line's terminal-cell width.
  */
 export const getAsciiArtWidth = (asciiArt: string): number => {
   if (!asciiArt) {
     return 0;
   }
   const lines = asciiArt.split('\n');
-  return Math.max(...lines.map((line) => line.length));
+  return Math.max(...lines.map((line) => getCachedStringWidth(line)));
 };
 
 /*
@@ -141,6 +145,103 @@ export const getCachedStringWidth = (str: string): number => {
 
   return width;
 };
+
+export interface VisualHeightSlice {
+  text: string;
+  hiddenLinesCount: number;
+}
+
+interface SliceTextByVisualHeightOptions {
+  minHeight?: number;
+  reservedRows?: number;
+  overflowDirection?: 'top' | 'bottom';
+}
+
+/**
+ * Bounds text by terminal visual rows before it reaches Ink/Yoga layout.
+ *
+ * Explicit newlines and soft wraps caused by narrow terminals both count as
+ * visual rows. `overflowDirection: "top"` keeps the newest tail, which is
+ * useful for streaming logs; `"bottom"` keeps the beginning, which is useful
+ * for task prompts.
+ */
+export function sliceTextByVisualHeight(
+  text: string,
+  maxHeight: number | undefined,
+  maxWidth: number,
+  options: SliceTextByVisualHeightOptions = {},
+): VisualHeightSlice {
+  if (maxHeight === undefined) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const targetMaxHeight = Math.max(
+    Math.round(maxHeight),
+    options.minHeight ?? 1,
+  );
+  const visibleContentHeight = Math.max(
+    1,
+    targetMaxHeight - (options.reservedRows ?? 0),
+  );
+  const visualWidth = Math.max(1, Math.floor(maxWidth));
+  const overflowDirection = options.overflowDirection ?? 'top';
+  const visibleLines: string[] = [];
+  let visualLineCount = 0;
+  let currentLine = '';
+  let currentLineWidth = 0;
+
+  const appendVisibleLine = (line: string) => {
+    visualLineCount += 1;
+
+    if (overflowDirection === 'bottom') {
+      if (visibleLines.length < visibleContentHeight) {
+        visibleLines.push(line);
+      }
+      return;
+    }
+
+    visibleLines.push(line);
+    if (visibleLines.length > visibleContentHeight) {
+      visibleLines.shift();
+    }
+  };
+
+  const flushCurrentLine = () => {
+    appendVisibleLine(currentLine);
+    currentLine = '';
+    currentLineWidth = 0;
+  };
+
+  for (const char of toCodePoints(text)) {
+    if (char === '\n') {
+      flushCurrentLine();
+      continue;
+    }
+
+    const charWidth = Math.max(getCachedStringWidth(char), 1);
+    if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
+      flushCurrentLine();
+    }
+
+    currentLine += char;
+    currentLineWidth += charWidth;
+  }
+
+  flushCurrentLine();
+
+  // Compare against `visibleContentHeight`, not `targetMaxHeight`: when a
+  // caller asks us to reserve rows for a separate footer/header (e.g. the
+  // "...N task lines hidden..." line), the budget for the actual content is
+  // `visibleContentHeight` and exceeding it must still trigger truncation.
+  if (visualLineCount <= visibleContentHeight) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  return {
+    text: visibleLines.join('\n'),
+    hiddenLinesCount: visualLineCount - visibleContentHeight,
+  };
+}
 
 /**
  * Clear the string width cache

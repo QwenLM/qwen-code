@@ -8,7 +8,6 @@ import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
-import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { getResponseText } from '../utils/partUtils.js';
@@ -41,14 +40,78 @@ export const COMPRESSION_PRESERVE_THRESHOLD = 0.3;
 export const MIN_COMPRESSION_FRACTION = 0.05;
 
 /**
+ * When the trailing entry is an in-flight `model+functionCall` and the regular
+ * scan finds no clean split past the target fraction, the splitter falls back
+ * to compressing everything except the last few entries. This constant sets
+ * how many most-recent complete `(model+functionCall, user+functionResponse)`
+ * tool rounds are retained as working context (the trailing in-flight call is
+ * always retained on top of these).
+ */
+export const TOOL_ROUND_RETAIN_COUNT = 2;
+
+const hasFunctionCall = (content: Content | undefined): boolean =>
+  !!content?.parts?.some((part) => !!part.functionCall);
+
+const hasFunctionResponse = (content: Content | undefined): boolean =>
+  !!content?.parts?.some((part) => !!part.functionResponse);
+
+/**
+ * Walk backward from the trailing in-flight `model+functionCall` and return
+ * the index after which the most-recent `retainCount` complete tool-round
+ * pairs sit (plus the trailing fc itself). Used by the splitter's in-flight
+ * fallback path. Stops counting at the first non-pair encountered, so the
+ * retain count is best-effort: if there are fewer complete pairs than
+ * requested, all of them are retained.
+ */
+function splitPointRetainingTrailingPairs(
+  contents: Content[],
+  retainCount: number,
+): number {
+  let pairsFound = 0;
+  let i = contents.length - 2;
+  while (i >= 1 && pairsFound < retainCount) {
+    if (hasFunctionCall(contents[i - 1]) && hasFunctionResponse(contents[i])) {
+      pairsFound += 1;
+      i -= 2;
+    } else {
+      break;
+    }
+  }
+  return contents.length - (2 * pairsFound + 1);
+}
+
+/**
  * Returns the index of the oldest item to keep when compressing. May return
  * contents.length which indicates that everything should be compressed.
+ *
+ * The algorithm has two phases:
+ *
+ * 1. **Scan:** walk left-to-right looking for the first non-functionResponse
+ *    user message that lands past `fraction` of total chars. That's the
+ *    "clean" split — the kept slice starts with a fresh user prompt.
+ *
+ * 2. **Fallbacks** (no clean split found): the gate that gets us here has
+ *    already decided we need to compress, so all three fallbacks bias toward
+ *    *more* compression rather than less:
+ *
+ *    - last entry is `model` without functionCall → compress everything.
+ *    - last entry is `user` with functionResponse → compress everything (the
+ *      trailing tool round is complete; no orphans).
+ *    - last entry is `model` with functionCall (in-flight) → compress
+ *      everything except the trailing call plus the last `retainCount`
+ *      complete tool rounds. The kept slice may start with `model+fc`;
+ *      callers must inject a synthetic continuation user message between
+ *      `summary_ack_model` and the kept slice to preserve role alternation.
+ *
+ * The pre-fallback returns of `lastSplitPoint` (compress less) only happen
+ * for malformed histories that don't end in user/model.
  *
  * Exported for testing purposes.
  */
 export function findCompressSplitPoint(
   contents: Content[],
   fraction: number,
+  retainCount = TOOL_ROUND_RETAIN_COUNT,
 ): number {
   if (fraction <= 0 || fraction >= 1) {
     throw new Error('Fraction must be between 0 and 1');
@@ -58,14 +121,11 @@ export function findCompressSplitPoint(
   const totalCharCount = charCounts.reduce((a, b) => a + b, 0);
   const targetCharCount = totalCharCount * fraction;
 
-  let lastSplitPoint = 0; // 0 is always valid (compress nothing)
+  let lastSplitPoint = 0;
   let cumulativeCharCount = 0;
   for (let i = 0; i < contents.length; i++) {
     const content = contents[i];
-    if (
-      content.role === 'user' &&
-      !content.parts?.some((part) => !!part.functionResponse)
-    ) {
+    if (content.role === 'user' && !hasFunctionResponse(content)) {
       if (cumulativeCharCount >= targetCharCount) {
         return i;
       }
@@ -74,48 +134,57 @@ export function findCompressSplitPoint(
     cumulativeCharCount += charCounts[i];
   }
 
-  // We found no split points after targetCharCount.
-  // Check if it's safe to compress everything.
   const lastContent = contents[contents.length - 1];
-  if (
-    lastContent?.role === 'model' &&
-    !lastContent?.parts?.some((part) => part.functionCall)
-  ) {
+  if (lastContent?.role === 'model') {
+    if (!hasFunctionCall(lastContent)) return contents.length;
+    return splitPointRetainingTrailingPairs(contents, retainCount);
+  }
+  if (lastContent?.role === 'user' && hasFunctionResponse(lastContent)) {
     return contents.length;
   }
-  // Also safe to compress everything if the last message completes a tool call
-  // sequence (all function calls have matching responses).
-  if (
-    lastContent?.role === 'user' &&
-    lastContent?.parts?.some((part) => !!part.functionResponse)
-  ) {
-    return contents.length;
-  }
-
   return lastSplitPoint;
+}
+
+export interface CompressOptions {
+  promptId: string;
+  force: boolean;
+  model: string;
+  config: Config;
+  /**
+   * Whether a previous unforced compression attempt failed for this chat.
+   * Suppresses auto-compaction; manual `/compress` (force=true) overrides.
+   */
+  hasFailedCompressionAttempt: boolean;
+  /**
+   * Most recent prompt token count for this chat. Compared against
+   * `threshold * contextWindowSize` for the auto-compaction gate. Callers
+   * source this from the per-chat counter (main session, subagents alike) —
+   * the service does not read or write any global telemetry.
+   */
+  originalTokenCount: number;
+  signal?: AbortSignal;
 }
 
 export class ChatCompressionService {
   async compress(
     chat: GeminiChat,
-    promptId: string,
-    force: boolean,
-    model: string,
-    config: Config,
-    hasFailedCompressionAttempt: boolean,
-    signal?: AbortSignal,
+    opts: CompressOptions,
   ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
-    const curatedHistory = chat.getHistory(true);
+    const {
+      promptId,
+      force,
+      model,
+      config,
+      hasFailedCompressionAttempt,
+      originalTokenCount,
+      signal,
+    } = opts;
     const threshold =
       config.getChatCompression()?.contextPercentageThreshold ??
       COMPRESSION_TOKEN_THRESHOLD;
 
-    // Regardless of `force`, don't do anything if the history is empty.
-    if (
-      curatedHistory.length === 0 ||
-      threshold <= 0 ||
-      (hasFailedCompressionAttempt && !force)
-    ) {
+    // Cheap gates first — these don't need the curated history.
+    if (threshold <= 0 || (hasFailedCompressionAttempt && !force)) {
       return {
         newHistory: null,
         info: {
@@ -126,9 +195,9 @@ export class ChatCompressionService {
       };
     }
 
-    const originalTokenCount = uiTelemetryService.getLastPromptTokenCount();
-
-    // Don't compress if not forced and we are under the limit.
+    // Don't compress if not forced and we are under the limit. This is the
+    // steady-state path on every send; we want to exit before paying for the
+    // full `getHistory(true)` clone below.
     if (!force) {
       const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
@@ -143,6 +212,18 @@ export class ChatCompressionService {
           },
         };
       }
+    }
+
+    const curatedHistory = chat.getHistory(true);
+    if (curatedHistory.length === 0) {
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
     }
 
     // Fire PreCompact hook before compression begins
@@ -181,6 +262,10 @@ export class ChatCompressionService {
 
     const historyToCompress = historyForSplit.slice(0, splitPoint);
     const historyToKeep = historyForSplit.slice(splitPoint);
+    // The in-flight fallback path may produce a kept slice starting with
+    // model+functionCall; the post-summary history needs a synthetic user
+    // between the summary's model_ack and the kept entries.
+    const keepNeedsContinuationBridge = historyToKeep[0]?.role === 'model';
 
     if (historyToCompress.length === 0) {
       return {
@@ -196,10 +281,6 @@ export class ChatCompressionService {
     // Guard: if historyToCompress is too small relative to the total history,
     // skip compression. This prevents futile API calls where the model receives
     // almost no context and generates a useless "summary" that inflates tokens.
-    //
-    // Note: findCompressSplitPoint already computes charCounts internally but
-    // returns only the split index. We intentionally recompute here to keep
-    // the function signature simple; this is a minor, acceptable duplication.
     const compressCharCount = historyToCompress.reduce(
       (sum, c) => sum + JSON.stringify(c).length,
       0,
@@ -274,6 +355,22 @@ export class ChatCompressionService {
           role: 'model',
           parts: [{ text: 'Got it. Thanks for the additional context!' }],
         },
+        // When the kept slice starts with model+functionCall (because
+        // tool-round absorption pulled the only fresh user message into
+        // compress), inject a synthetic continuation prompt so the joined
+        // history alternates correctly.
+        ...(keepNeedsContinuationBridge
+          ? [
+              {
+                role: 'user' as const,
+                parts: [
+                  {
+                    text: 'Continue with the prior task using the context above.',
+                  },
+                ],
+              },
+            ]
+          : []),
         ...historyToKeep,
       ];
 
@@ -339,8 +436,6 @@ export class ChatCompressionService {
         },
       };
     } else {
-      uiTelemetryService.setLastPromptTokenCount(newTokenCount);
-
       // Fire SessionStart event after successful compression
       try {
         const permissionMode = String(
