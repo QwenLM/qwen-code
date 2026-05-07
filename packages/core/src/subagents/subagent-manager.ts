@@ -43,6 +43,10 @@ import { parseSubagentModelSelection } from './model-selection.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
+import {
+  hasRebuiltToolRegistry,
+  rebuildToolRegistryOnOverride,
+} from '../tools/agent/agent.js';
 
 const QWEN_CONFIG_DIR = '.qwen';
 const AGENT_CONFIG_DIR = 'agents';
@@ -659,21 +663,8 @@ export class SubagentManager {
         runtimeContext,
       );
 
-      // Thin prototype-delegation override: no method changes, but a
-      // distinct Config instance triggers the lazy own-property init in
-      // `Config.getFileReadCache()` so the subagent gets its own cache
-      // rather than inheriting the parent's recorded reads — which would
-      // silently weaken prior-read enforcement on its mutation paths.
-      //
-      // Caveat (same as in `agent.ts:createApprovalModeOverride`): the
-      // parent's tool registry was bound at init time, so tools still
-      // resolve `this.config` to the parent and hit the parent's cache.
-      // `InProcessBackend.createPerAgentConfig` already rebuilds the
-      // registry via `override.createToolRegistry()` +
-      // `copyDiscoveredToolsFrom(base.getToolRegistry())`; doing that
-      // here is the follow-up that closes the bound-tool path.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const subagentContext = Object.create(runtimeContext) as any as Config;
+      const subagentContext =
+        await this.buildSubagentContextOverride(runtimeContext);
 
       return await AgentHeadless.create(
         config.name,
@@ -699,15 +690,47 @@ export class SubagentManager {
   }
 
   /**
+   * Build the per-subagent Config override used as the AgentHeadless
+   * runtime context. The override is a thin prototype-delegation wrapper
+   * (`Object.create(runtimeContext)`): no method changes, but a distinct
+   * instance triggers the lazy own-property init in
+   * `Config.getFileReadCache()` so the subagent gets its own cache
+   * rather than inheriting the parent's recorded reads — which would
+   * silently weaken prior-read enforcement on its mutation paths.
+   *
+   * The tool registry is also rebuilt on the override so `EditTool` /
+   * `WriteFileTool` / `ReadFileTool` resolve `this.config` to the
+   * subagent — without that step, the parent's cached tool instances
+   * still reach the parent's FileReadCache. The rebuild is skipped when
+   * a wrapper above `runtimeContext` already rebuilt one (typically
+   * `agent.ts:createApprovalModeOverride`, which marks itself via a
+   * Symbol-keyed flag — Symbol lookup walks the prototype chain, so
+   * this also catches wrapper-on-wrapper layering like
+   * `bgConfig = Object.create(agentConfig)` from the background path).
+   * Rebuilding twice would waste work, leak listeners on shared
+   * managers, and split caches across registry layers.
+   */
+  private async buildSubagentContextOverride(
+    runtimeContext: Config,
+  ): Promise<Config> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const subagentContext = Object.create(runtimeContext) as any as Config;
+    if (!hasRebuiltToolRegistry(runtimeContext)) {
+      await rebuildToolRegistryOnOverride(subagentContext, runtimeContext);
+    }
+    return subagentContext;
+  }
+
+  /**
    * When a subagent's model selector specifies a model (bare ID or
    * authType-prefixed), build a dedicated ContentGenerator and the view
    * the agent runtime should publish via AsyncLocalStorage during the
    * run. Returns `undefined` for inherit selectors (no override needed).
    *
-   * FileReadCache isolation is handled separately in
-   * {@link createAgentHeadless} via `Object.create(runtimeContext)` —
-   * every subagent (inherit or explicit) gets that, regardless of
-   * whether a runtime view is built here.
+   * FileReadCache isolation and tool-registry rebuilding are handled
+   * separately in {@link buildSubagentContextOverride} — every subagent
+   * (inherit or explicit) gets that, regardless of whether a runtime
+   * view is built here.
    */
   private async buildRuntimeContentGeneratorView(
     config: SubagentConfig,
