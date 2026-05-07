@@ -679,33 +679,55 @@ describe('ShellExecutionService', () => {
       // listeners now). Without dataDisposable.dispose() in the abort
       // handler, the listener-retention bug would let post-promote bytes
       // leak into the foreground consumer.
+      //
+      // Implementation note: PTY's handleOutput is async (`processingChain`
+      // queues microtasks for headlessTerminal.write callbacks), unlike
+      // child_process's sync handleOutput. Sync `expect` immediately
+      // after emit-then-abort would only see the call count BEFORE chain
+      // items run — both pre and post would read 0 and the assertion
+      // would tautologically pass without exercising the
+      // `listenersDetached` guard. We drive the test using the
+      // `simulateExecution` helper, which awaits `handle.result` — by
+      // the time the result resolves, the abort handler has run its
+      // drain (so all queued chain items have settled) and we can read
+      // the final emit count.
+      const dataCallbackHolder: { current: (data: string) => void } = {
+        current: () => {},
+      };
       const { result } = await simulateExecution(
         'tail -f /tmp/never.log',
-        (pty, abortController) => {
-          // Data BEFORE promote — fed via the live onData listener so it
+        (pty, ac) => {
+          // Pre-promote data — fed via the live onData listener so it
           // reaches the foreground onOutputEvent normally.
-          const dataCallback = pty.onData.mock.calls[0][0];
-          dataCallback('pre-promote-data\n');
-          abortController.abort({
+          dataCallbackHolder.current = pty.onData.mock.calls[0][0];
+          dataCallbackHolder.current('pre-promote-data\n');
+          ac.abort({
             kind: 'background',
             shellId: 'bg_test123',
           } satisfies ShellAbortReason);
-          // Mirror the child_process equivalent test: emit data AFTER
-          // abort and assert onOutputEventMock call count does NOT
-          // increase. The mock disposable doesn't actually detach the
-          // callback (it's a vi.fn() stub), so invoking dataCallback
-          // directly here exercises the production-side
-          // `listenersDetached` guard inside handleOutput's chain
-          // callback. Without that guard, the foreground onOutputEvent
-          // would fire for post-promote bytes — exactly the leak the
-          // PR-1 review (round 4 by @tanzhenxin) flagged this test
-          // didn't actually verify.
-          const eventCountAtPromote = onOutputEventMock.mock.calls.length;
-          dataCallback('post-promote-data\n');
-          expect(onOutputEventMock.mock.calls.length).toBe(eventCountAtPromote);
         },
       );
       expect(result.promoted).toBe(true);
+      // Snapshot the count after promote settled — pre-promote chain
+      // item ran AFTER abort set listenersDetached=true (chain items
+      // queue at handleOutput time but only execute when their .then
+      // microtask runs), so even pre-promote emits may have been
+      // suppressed. We don't assert on the exact pre count; we just
+      // capture it as a baseline for the post-promote assertion below.
+      const eventCountAfterSettle = onOutputEventMock.mock.calls.length;
+      // Suppress the post-promote-emit unhandled rejection (mock chain
+      // items don't await; if production-side state has been torn
+      // down, the inner promise might reject — fine for this test).
+      // Drive the data callback again after promote: production-side
+      // dataDisposable was disposed (mock stub does not actually detach
+      // the callback, but production's listenersDetached guard inside
+      // chain callbacks suppresses onOutputEvent emits regardless).
+      dataCallbackHolder.current('post-promote-data\n');
+      // Wait one macrotask + a microtask flush to let any chain items
+      // queued by the post-promote dataCallback fully settle.
+      await new Promise((res) => setImmediate(res));
+      await new Promise((res) => setImmediate(res));
+      expect(onOutputEventMock.mock.calls.length).toBe(eventCountAfterSettle);
 
       // The disposable returned by mockPtyProcess.onData was disposed by
       // the abort handler — verify by calling .dispose's mock.
