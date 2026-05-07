@@ -121,7 +121,7 @@ async function addMcpServer(
     case 'sse':
       newServer = {
         url: commandOrUrl,
-        headers,
+        ...(headers && { headers }),
         timeout,
         trust,
         description,
@@ -133,7 +133,7 @@ async function addMcpServer(
     case 'http':
       newServer = {
         httpUrl: commandOrUrl,
-        headers,
+        ...(headers && { headers }),
         timeout,
         trust,
         description,
@@ -167,18 +167,26 @@ async function addMcpServer(
   }
 
   const existingSettings = settings.forScope(settingsScope).settings;
-  const mcpServers = existingSettings.mcpServers || {};
+  const existingMcpServers = existingSettings.mcpServers || {};
 
-  const isExistingServer = !!mcpServers[name];
+  const isExistingServer = !!existingMcpServers[name];
   if (isExistingServer) {
     writeStdoutLine(
       `MCP server "${name}" is already configured within ${scope} settings.`,
     );
   }
 
-  mcpServers[name] = newServer as MCPServerConfig;
+  // Build a new object with the updated/added server, instead of mutating
+  // the existing settings object in place.
+  const mcpServers = {
+    ...existingMcpServers,
+    [name]: newServer,
+  } as Record<string, unknown> as typeof existingMcpServers;
 
-  settings.setValue(settingsScope, 'mcpServers', mcpServers);
+  // Use setValueFullSave so the full settings object is written to disk,
+  // ensuring that stale server entries and removed config keys (e.g. old
+  // headers) are not carried forward by applyUpdates' merge semantics.
+  settings.setValueFullSave(settingsScope, 'mcpServers', mcpServers);
 
   if (isExistingServer) {
     writeStdoutLine(`MCP server "${name}" updated in ${scope} settings.`);

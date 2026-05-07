@@ -51,17 +51,17 @@ const mockedLoadSettings = loadSettings as Mock;
 
 describe('mcp add command', () => {
   let parser: Argv;
-  let mockSetValue: Mock;
+  let mockSetValueFullSave: Mock;
 
   beforeEach(() => {
     vi.resetAllMocks();
     const yargsInstance = yargs([]).command(addCommand);
     parser = yargsInstance;
-    mockSetValue = vi.fn();
+    mockSetValueFullSave = vi.fn();
     mockWriteStderrLine.mockClear();
     mockedLoadSettings.mockReturnValue({
-      forScope: () => ({ settings: {} }),
-      setValue: mockSetValue,
+      forScope: () => ({ settings: {}, originalSettings: {} }),
+      setValueFullSave: mockSetValueFullSave,
       workspace: { path: '/path/to/project' },
       user: { path: '/home/user' },
     });
@@ -72,7 +72,7 @@ describe('mcp add command', () => {
       'add my-server /path/to/server arg1 arg2 -e FOO=bar',
     );
 
-    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'my-server': {
         command: '/path/to/server',
         args: ['arg1', 'arg2'],
@@ -84,7 +84,7 @@ describe('mcp add command', () => {
   it('should auto-detect http transport when commandOrUrl is an https URL', async () => {
     await parser.parseAsync('add http-server https://example.com/mcp');
 
-    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'http-server': {
         httpUrl: 'https://example.com/mcp',
       },
@@ -94,7 +94,7 @@ describe('mcp add command', () => {
   it('should auto-detect http transport when commandOrUrl is an http URL', async () => {
     await parser.parseAsync('add http-server http://localhost:8080/mcp');
 
-    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'http-server': {
         httpUrl: 'http://localhost:8080/mcp',
       },
@@ -106,7 +106,7 @@ describe('mcp add command', () => {
       'add --transport sse sse-server https://example.com/sse-endpoint',
     );
 
-    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'sse-server': {
         url: 'https://example.com/sse-endpoint',
       },
@@ -118,7 +118,7 @@ describe('mcp add command', () => {
       'add --transport sse sse-server https://example.com/sse-endpoint --scope user -H "X-API-Key: your-key"',
     );
 
-    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'sse-server': {
         url: 'https://example.com/sse-endpoint',
         headers: { 'X-API-Key': 'your-key' },
@@ -131,7 +131,7 @@ describe('mcp add command', () => {
       'add --transport http http-server https://example.com/mcp -H "Authorization: Bearer your-token"',
     );
 
-    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'http-server': {
         httpUrl: 'https://example.com/mcp',
         headers: { Authorization: 'Bearer your-token' },
@@ -144,7 +144,7 @@ describe('mcp add command', () => {
       'add my-server npx -- -y http://example.com/some-package',
     );
 
-    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'my-server': {
         command: 'npx',
         args: ['-y', 'http://example.com/some-package'],
@@ -157,7 +157,7 @@ describe('mcp add command', () => {
       'add test-server npx -y http://example.com/some-package',
     );
 
-    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'test-server': {
         command: 'npx',
         args: ['-y', 'http://example.com/some-package'],
@@ -172,8 +172,8 @@ describe('mcp add command', () => {
     const setupMocks = (cwd: string, workspacePath: string) => {
       vi.spyOn(process, 'cwd').mockReturnValue(cwd);
       mockedLoadSettings.mockReturnValue({
-        forScope: () => ({ settings: {} }),
-        setValue: mockSetValue,
+        forScope: () => ({ settings: {}, originalSettings: {} }),
+        setValueFullSave: mockSetValueFullSave,
         workspace: { path: workspacePath },
         user: { path: '/home/user' },
       });
@@ -186,7 +186,7 @@ describe('mcp add command', () => {
 
       it('should use user scope by default', async () => {
         await parser.parseAsync(`add ${serverName} ${command}`);
-        expect(mockSetValue).toHaveBeenCalledWith(
+        expect(mockSetValueFullSave).toHaveBeenCalledWith(
           SettingScope.User,
           'mcpServers',
           expect.any(Object),
@@ -195,7 +195,7 @@ describe('mcp add command', () => {
 
       it('should use project scope when --scope=project is used', async () => {
         await parser.parseAsync(`add --scope project ${serverName} ${command}`);
-        expect(mockSetValue).toHaveBeenCalledWith(
+        expect(mockSetValueFullSave).toHaveBeenCalledWith(
           SettingScope.Workspace,
           'mcpServers',
           expect.any(Object),
@@ -204,7 +204,7 @@ describe('mcp add command', () => {
 
       it('should use user scope when --scope=user is used', async () => {
         await parser.parseAsync(`add --scope user ${serverName} ${command}`);
-        expect(mockSetValue).toHaveBeenCalledWith(
+        expect(mockSetValueFullSave).toHaveBeenCalledWith(
           SettingScope.User,
           'mcpServers',
           expect.any(Object),
@@ -219,7 +219,7 @@ describe('mcp add command', () => {
 
       it('should use user scope by default', async () => {
         await parser.parseAsync(`add ${serverName} ${command}`);
-        expect(mockSetValue).toHaveBeenCalledWith(
+        expect(mockSetValueFullSave).toHaveBeenCalledWith(
           SettingScope.User,
           'mcpServers',
           expect.any(Object),
@@ -234,7 +234,7 @@ describe('mcp add command', () => {
 
       it('should use user scope by default without error', async () => {
         await parser.parseAsync(`add ${serverName} ${command}`);
-        expect(mockSetValue).toHaveBeenCalledWith(
+        expect(mockSetValueFullSave).toHaveBeenCalledWith(
           SettingScope.User,
           'mcpServers',
           expect.any(Object),
@@ -257,12 +257,12 @@ describe('mcp add command', () => {
           'Error: Please use --scope user to edit settings in the home directory.',
         );
         expect(mockProcessExit).toHaveBeenCalledWith(1);
-        expect(mockSetValue).not.toHaveBeenCalled();
+        expect(mockSetValueFullSave).not.toHaveBeenCalled();
       });
 
       it('should use user scope when --scope=user is used', async () => {
         await parser.parseAsync(`add --scope user ${serverName} ${command}`);
-        expect(mockSetValue).toHaveBeenCalledWith(
+        expect(mockSetValueFullSave).toHaveBeenCalledWith(
           SettingScope.User,
           'mcpServers',
           expect.any(Object),
@@ -278,7 +278,7 @@ describe('mcp add command', () => {
 
       it('should use user scope by default', async () => {
         await parser.parseAsync(`add ${serverName} ${command}`);
-        expect(mockSetValue).toHaveBeenCalledWith(
+        expect(mockSetValueFullSave).toHaveBeenCalledWith(
           SettingScope.User,
           'mcpServers',
           expect.any(Object),
@@ -288,11 +288,11 @@ describe('mcp add command', () => {
       it('should write to the USER scope by default', async () => {
         await parser.parseAsync(`add my-new-server echo`);
 
-        // We expect setValue to be called once.
-        expect(mockSetValue).toHaveBeenCalledTimes(1);
+        // We expect setValueFullSave to be called once.
+        expect(mockSetValueFullSave).toHaveBeenCalledTimes(1);
 
-        // We get the scope that setValue was called with.
-        const calledScope = mockSetValue.mock.calls[0][0];
+        // We get the scope that setValueFullSave was called with.
+        const calledScope = mockSetValueFullSave.mock.calls[0][0];
 
         // We assert that the scope was User by default.
         expect(calledScope).toBe(SettingScope.User);
@@ -306,7 +306,7 @@ describe('mcp add command', () => {
 
       it('should use user scope by default', async () => {
         await parser.parseAsync(`add ${serverName} ${command}`);
-        expect(mockSetValue).toHaveBeenCalledWith(
+        expect(mockSetValueFullSave).toHaveBeenCalledWith(
           SettingScope.User,
           'mcpServers',
           expect.any(Object),
@@ -331,8 +331,15 @@ describe('mcp add command', () => {
               },
             },
           },
+          originalSettings: {
+            mcpServers: {
+              [serverName]: {
+                command: initialCommand,
+              },
+            },
+          },
         }),
-        setValue: mockSetValue,
+        setValueFullSave: mockSetValueFullSave,
         workspace: { path: '/path/to/project' },
         user: { path: '/home/user' },
       });
@@ -342,7 +349,7 @@ describe('mcp add command', () => {
       await parser.parseAsync(
         `add ${serverName} ${updatedCommand} ${updatedArgs.join(' ')}`,
       );
-      expect(mockSetValue).toHaveBeenCalledWith(
+      expect(mockSetValueFullSave).toHaveBeenCalledWith(
         SettingScope.User,
         'mcpServers',
         expect.objectContaining({
@@ -358,7 +365,7 @@ describe('mcp add command', () => {
       await parser.parseAsync(
         `add --scope user ${serverName} ${updatedCommand} ${updatedArgs.join(' ')}`,
       );
-      expect(mockSetValue).toHaveBeenCalledWith(
+      expect(mockSetValueFullSave).toHaveBeenCalledWith(
         SettingScope.User,
         'mcpServers',
         expect.objectContaining({
@@ -368,6 +375,74 @@ describe('mcp add command', () => {
           }),
         }),
       );
+    });
+  });
+
+  describe('when updating an existing server with headers', () => {
+    const serverName = 'existing-http-server';
+
+    beforeEach(() => {
+      mockedLoadSettings.mockReturnValue({
+        forScope: () => ({
+          settings: {
+            mcpServers: {
+              [serverName]: {
+                httpUrl: 'https://example.com/mcp',
+                headers: { 'X-Old-Key': 'old-value' },
+              },
+            },
+          },
+          originalSettings: {
+            mcpServers: {
+              [serverName]: {
+                httpUrl: 'https://example.com/mcp',
+                headers: { 'X-Old-Key': 'old-value' },
+              },
+            },
+          },
+        }),
+        setValueFullSave: mockSetValueFullSave,
+        workspace: { path: '/path/to/project' },
+        user: { path: '/home/user' },
+      });
+    });
+
+    it('should replace old headers when updating a server with new headers', async () => {
+      await parser.parseAsync(
+        `add --transport http ${serverName} https://example.com/mcp -H "Authorization: Bearer new-token"`,
+      );
+      expect(mockSetValueFullSave).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          [serverName]: expect.objectContaining({
+            httpUrl: 'https://example.com/mcp',
+            headers: { Authorization: 'Bearer new-token' },
+          }),
+        }),
+      );
+      // Verify old header is not present
+      const callArg = mockSetValueFullSave.mock.calls[0][2];
+      const serverConfig = callArg[serverName];
+      expect(serverConfig.headers).not.toHaveProperty('X-Old-Key');
+    });
+
+    it('should remove headers when updating a server without headers', async () => {
+      await parser.parseAsync(
+        `add --transport http ${serverName} https://example.com/mcp`,
+      );
+      expect(mockSetValueFullSave).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          [serverName]: expect.objectContaining({
+            httpUrl: 'https://example.com/mcp',
+          }),
+        }),
+      );
+      const callArg = mockSetValueFullSave.mock.calls[0][2];
+      const serverConfig = callArg[serverName];
+      expect(serverConfig).not.toHaveProperty('headers');
     });
   });
 
@@ -383,7 +458,7 @@ describe('mcp add command', () => {
           '--oauth-scopes read,write',
       );
 
-      expect(mockSetValue).toHaveBeenCalledWith(
+      expect(mockSetValueFullSave).toHaveBeenCalledWith(
         SettingScope.User,
         'mcpServers',
         expect.objectContaining({
@@ -409,7 +484,7 @@ describe('mcp add command', () => {
           '--oauth-redirect-uri https://example.com/oauth/callback',
       );
 
-      expect(mockSetValue).toHaveBeenCalledWith(
+      expect(mockSetValueFullSave).toHaveBeenCalledWith(
         SettingScope.User,
         'mcpServers',
         expect.objectContaining({
@@ -429,7 +504,7 @@ describe('mcp add command', () => {
         'add my-server https://example.com/mcp --transport http',
       );
 
-      expect(mockSetValue).toHaveBeenCalledWith(
+      expect(mockSetValueFullSave).toHaveBeenCalledWith(
         SettingScope.User,
         'mcpServers',
         expect.objectContaining({
@@ -460,7 +535,7 @@ describe('mcp add command', () => {
         ),
       );
       expect(mockProcessExit).toHaveBeenCalledWith(1);
-      expect(mockSetValue).not.toHaveBeenCalled();
+      expect(mockSetValueFullSave).not.toHaveBeenCalled();
     });
 
     it('should split comma-separated scopes and trim whitespace', async () => {
@@ -469,7 +544,7 @@ describe('mcp add command', () => {
           '--oauth-scopes "read, write , admin"',
       );
 
-      expect(mockSetValue).toHaveBeenCalledWith(
+      expect(mockSetValueFullSave).toHaveBeenCalledWith(
         SettingScope.User,
         'mcpServers',
         expect.objectContaining({

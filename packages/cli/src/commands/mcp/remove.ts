@@ -22,16 +22,23 @@ async function removeMcpServer(
   const settings = loadSettings();
 
   const existingSettings = settings.forScope(settingsScope).settings;
-  const mcpServers = existingSettings.mcpServers || {};
+  const existingMcpServers = existingSettings.mcpServers || {};
 
-  if (!mcpServers[name]) {
+  if (!existingMcpServers[name]) {
     writeStdoutLine(`Server "${name}" not found in ${scope} settings.`);
     return;
   }
 
-  delete mcpServers[name];
-
-  settings.setValue(settingsScope, 'mcpServers', mcpServers);
+  // Build a new object excluding the removed server, instead of mutating
+  // the existing settings object in place.
+  const { [name]: _, ...remainingServers } = existingMcpServers as Record<
+    string,
+    unknown
+  >;
+  // Use setValueFullSave so the full settings object is written to disk,
+  // ensuring the removed server entry is not carried forward by applyUpdates'
+  // merge semantics.
+  settings.setValueFullSave(settingsScope, 'mcpServers', remainingServers);
 
   // Clean up any stored OAuth tokens for this server
   try {

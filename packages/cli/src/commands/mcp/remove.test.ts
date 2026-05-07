@@ -51,14 +51,14 @@ const mockedLoadSettings = loadSettings as vi.Mock;
 
 describe('mcp remove command', () => {
   let parser: yargs.Argv;
-  let mockSetValue: vi.Mock;
+  let mockSetValueFullSave: vi.Mock;
   let mockSettings: Record<string, unknown>;
 
   beforeEach(() => {
     vi.resetAllMocks();
     const yargsInstance = yargs([]).command(removeCommand);
     parser = yargsInstance;
-    mockSetValue = vi.fn();
+    mockSetValueFullSave = vi.fn();
     mockSettings = {
       mcpServers: {
         'test-server': {
@@ -67,8 +67,8 @@ describe('mcp remove command', () => {
       },
     };
     mockedLoadSettings.mockReturnValue({
-      forScope: () => ({ settings: mockSettings }),
-      setValue: mockSetValue,
+      forScope: () => ({ settings: mockSettings, originalSettings: { ...mockSettings } }),
+      setValueFullSave: mockSetValueFullSave,
     });
     mockWriteStdoutLine.mockClear();
     mockDeleteCredentials.mockClear();
@@ -77,7 +77,7 @@ describe('mcp remove command', () => {
   it('should remove a server from user settings by default', async () => {
     await parser.parseAsync('remove test-server');
 
-    expect(mockSetValue).toHaveBeenCalledWith(
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(
       SettingScope.User,
       'mcpServers',
       {},
@@ -96,7 +96,7 @@ describe('mcp remove command', () => {
     await parser.parseAsync('remove test-server');
 
     // Server should still be removed from settings despite token cleanup failure
-    expect(mockSetValue).toHaveBeenCalledWith(
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(
       SettingScope.User,
       'mcpServers',
       {},
@@ -106,10 +106,42 @@ describe('mcp remove command', () => {
   it('should not clean up OAuth tokens if server not found', async () => {
     await parser.parseAsync('remove non-existent-server');
 
-    expect(mockSetValue).not.toHaveBeenCalled();
+    expect(mockSetValueFullSave).not.toHaveBeenCalled();
     expect(mockDeleteCredentials).not.toHaveBeenCalled();
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Server "non-existent-server" not found in user settings.',
     );
+  });
+
+  it('should remove only the specified server when multiple servers exist', async () => {
+    mockSettings = {
+      mcpServers: {
+        'server-alpha': {
+          command: 'echo "alpha"',
+        },
+        'server-beta': {
+          command: 'echo "beta"',
+        },
+        'server-gamma': {
+          url: 'https://gamma.example.com/mcp',
+        },
+      },
+    };
+    mockedLoadSettings.mockReturnValue({
+      forScope: () => ({ settings: mockSettings, originalSettings: { ...mockSettings } }),
+      setValueFullSave: mockSetValueFullSave,
+    });
+
+    await parser.parseAsync('remove server-beta');
+
+    expect(mockSetValueFullSave).toHaveBeenCalledWith(
+      SettingScope.User,
+      'mcpServers',
+      {
+        'server-alpha': { command: 'echo "alpha"' },
+        'server-gamma': { url: 'https://gamma.example.com/mcp' },
+      },
+    );
+    expect(mockDeleteCredentials).toHaveBeenCalledWith('server-beta');
   });
 });

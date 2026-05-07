@@ -439,6 +439,21 @@ export class LoadedSettings {
   }
 
   /**
+   * Set a value and persist using the full originalSettings, ensuring that
+   * the on-disk file exactly matches the in-memory state for all keys.
+   * Unlike setValue (which uses a minimal merge update), this replaces the
+   * entire file content. Use this for object-valued settings like mcpServers
+   * where entries may need to be removed.
+   */
+  setValueFullSave(scope: SettingScope, key: string, value: unknown): void {
+    const settingsFile = this.forScope(scope);
+    setNestedPropertySafe(settingsFile.settings, key, value);
+    setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    this._merged = this.computeMergedSettings();
+    saveSettings(settingsFile);
+  }
+
+  /**
    * Get user-level hooks from user settings (not merged with workspace).
    * These hooks should always be loaded regardless of folder trust.
    */
