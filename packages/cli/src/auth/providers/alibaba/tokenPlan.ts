@@ -6,7 +6,6 @@
 
 import { AuthType } from '@qwen-code/qwen-code-core';
 import type { ProviderConfig, ModelSpec } from '../../providerConfig.js';
-import { computeModelListVersion } from '../../providerConfig.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -40,14 +39,10 @@ export const tokenPlanProvider: ProviderConfig = {
   protocol: AuthType.USE_OPENAI,
   baseUrl: TOKEN_PLAN_BASE_URL,
   envKey: TOKEN_PLAN_ENV_KEY,
-  metadataKey: 'tokenPlan',
   authMethod: 'input',
   models: TOKEN_PLAN_MODELS,
   modelsEditable: true,
   modelNamePrefix: 'ModelStudio Token Plan',
-  getProviderState: (baseUrl, models) => ({
-    tokenPlan: { version: computeModelListVersion(models), baseUrl },
-  }),
   uiGroup: 'alibaba',
   uiLabels: { flowTitle: 'Alibaba ModelStudio' },
 };

@@ -7,6 +7,7 @@
 import type { ExtendedSystemInfo } from './systemInfo.js';
 import { t } from '../i18n/index.js';
 import { findProviderByCredentials } from '../auth/allProviders.js';
+import { resolveMetadataKey } from '../auth/providerConfig.js';
 
 /**
  * Field configuration for system information display
@@ -94,7 +95,7 @@ function formatAuth(info: ExtendedSystemInfo): string {
     info.baseUrl,
     info.apiKeyEnvKey,
   );
-  if (managedProvider?.metadataKey) {
+  if (managedProvider && resolveMetadataKey(managedProvider)) {
     return t(managedProvider.label);
   }
 

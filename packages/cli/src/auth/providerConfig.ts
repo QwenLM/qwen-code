@@ -89,18 +89,6 @@ export interface ProviderConfig {
   documentationUrl?: string | ((baseUrl: string) => string);
 
   /**
-   * Settings key for version tracking (e.g. 'codingPlan', 'tokenPlan').
-   * When set, the provider participates in auto-update detection.
-   */
-  metadataKey?: string;
-
-  /** Build extra provider state to persist (e.g. version tracking). */
-  getProviderState?: (
-    baseUrl: string,
-    models: ProviderModelConfig[],
-  ) => ProviderInstallState;
-
-  /**
    * Custom ownership check — identifies models belonging to this provider.
    * Auto-derived from `envKey` (string) + `modelNamePrefix` (string) when omitted.
    * Only needed for providers with function-typed envKey/prefix or non-standard logic.
@@ -163,7 +151,7 @@ function resolveModelNamePrefix(
     : config.modelNamePrefix;
 }
 
-function resolveOwnsModel(
+export function resolveOwnsModel(
   config: ProviderConfig,
 ): ((model: ProviderModelConfig) => boolean) | undefined {
   if (config.ownsModel) return config.ownsModel;
@@ -293,6 +281,31 @@ function buildModelConfigs(
 }
 
 // ---------------------------------------------------------------------------
+// Version tracking — auto-derived for providers with static model lists
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the settings key used to store version metadata for a provider.
+ * Auto-derived from `config.id` when `config.models` is defined.
+ */
+export function resolveMetadataKey(config: ProviderConfig): string | undefined {
+  if (config.models) return config.id;
+  return undefined;
+}
+
+function resolveProviderState(
+  config: ProviderConfig,
+  baseUrl: string,
+  models: ProviderModelConfig[],
+): ProviderInstallState | undefined {
+  const key = resolveMetadataKey(config);
+  if (key) {
+    return { [key]: { version: computeModelListVersion(models), baseUrl } };
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Build ProviderInstallPlan from config + inputs
 // ---------------------------------------------------------------------------
 
@@ -318,12 +331,12 @@ export function buildInstallPlan(
         ownsModel: resolveOwnsModel(config),
       },
     ],
-    providerState: config.getProviderState?.(inputs.baseUrl, models),
+    providerState: resolveProviderState(config, inputs.baseUrl, models),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Utility: version hash from model list (used by Alibaba plans)
+// Utility: version hash from model list
 // ---------------------------------------------------------------------------
 
 export function computeModelListVersion(models: ProviderModelConfig[]): string {

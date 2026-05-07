@@ -14,7 +14,7 @@ import {
 import { buildInstallPlan, shouldShowStep } from '../../providerConfig.js';
 
 describe('generateCustomEnvKey', () => {
-  it('produces a deterministic hash-based key', () => {
+  it('produces a deterministic URL-based key', () => {
     const key1 = generateCustomEnvKey(
       AuthType.USE_OPENAI,
       'https://api.example.com/v1',
@@ -24,8 +24,8 @@ describe('generateCustomEnvKey', () => {
       'https://api.example.com/v1',
     );
     expect(key1).toBe(key2);
-    expect(key1).toMatch(
-      new RegExp(`^${CUSTOM_API_KEY_ENV_PREFIX}[A-F0-9]{16}$`),
+    expect(key1).toBe(
+      `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTPS_API_EXAMPLE_COM_V1`,
     );
   });
 
@@ -47,10 +47,9 @@ describe('generateCustomEnvKey', () => {
     expect(k1).not.toBe(k2);
   });
 
-  it('avoids collision for similar URLs that old normalize would merge', () => {
+  it('normalizes special characters to underscores', () => {
     const k1 = generateCustomEnvKey(AuthType.USE_OPENAI, 'http://api.a-b.com');
-    const k2 = generateCustomEnvKey(AuthType.USE_OPENAI, 'http://api.a_b.com');
-    expect(k1).not.toBe(k2);
+    expect(k1).toBe(`${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTP_API_A_B_COM`);
   });
 
   it('handles empty strings', () => {

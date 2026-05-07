@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import type { ProviderConfig } from '../../providerConfig.js';
 
@@ -14,11 +13,15 @@ export function generateCustomEnvKey(
   protocol: AuthType,
   baseUrl: string,
 ): string {
-  const hash = createHash('sha256')
-    .update(`${protocol}\0${baseUrl}`)
-    .digest('hex')
-    .slice(0, 16);
-  return `${CUSTOM_API_KEY_ENV_PREFIX}${hash.toUpperCase()}`;
+  const normalize = (value: string) =>
+    value
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+
+  return `${CUSTOM_API_KEY_ENV_PREFIX}${normalize(protocol)}_${normalize(baseUrl)}`;
 }
 
 export const customProvider: ProviderConfig = {

@@ -105,7 +105,7 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     shellConfirmationRequest: null,
     confirmationRequest: null,
     confirmUpdateExtensionRequests: [],
-    codingPlanUpdateRequest: undefined,
+    providerUpdateRequest: undefined,
     settingInputRequests: [],
     pluginChoiceRequests: [],
     loopDetectionConfirmationRequest: null,

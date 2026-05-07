@@ -53,7 +53,7 @@ describe('coding plan provider', () => {
       },
     ]);
     expect(plan.providerState).toEqual({
-      codingPlan: {
+      'coding-plan': {
         baseUrl: CODING_PLAN_CHINA_BASE_URL,
         version,
       },

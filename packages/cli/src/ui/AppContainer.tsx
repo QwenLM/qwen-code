@@ -123,7 +123,7 @@ import {
   useSettingInputRequests,
   usePluginChoiceRequests,
 } from './hooks/useExtensionUpdates.js';
-import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
+import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import { t } from '../i18n/index.js';
@@ -284,8 +284,11 @@ export const AppContainer = (props: AppContainerProps) => {
     config.getWorkingDir(),
   );
 
-  const { codingPlanUpdateRequest, dismissCodingPlanUpdate } =
-    useCodingPlanUpdates(settings, config, historyManager.addItem);
+  const { providerUpdateRequest, dismissProviderUpdate } = useProviderUpdates(
+    settings,
+    config,
+    historyManager.addItem,
+  );
 
   const [isTrustDialogOpen, setTrustDialogOpen] = useState(false);
   const openTrustDialog = useCallback(() => setTrustDialogOpen(true), []);
@@ -1545,7 +1548,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
-    !!codingPlanUpdateRequest ||
+    !!providerUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
@@ -2261,7 +2264,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
-      codingPlanUpdateRequest,
+      providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -2376,7 +2379,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
-      codingPlanUpdateRequest,
+      providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -2487,7 +2490,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissCodingPlanUpdate,
+      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -2554,7 +2557,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissCodingPlanUpdate,
+      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,

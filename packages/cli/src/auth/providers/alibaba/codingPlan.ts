@@ -6,7 +6,6 @@
 
 import { AuthType } from '@qwen-code/qwen-code-core';
 import type { ProviderConfig, ModelSpec } from '../../providerConfig.js';
-import { computeModelListVersion } from '../../providerConfig.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -75,7 +74,6 @@ export const codingPlanProvider: ProviderConfig = {
     },
   ],
   envKey: CODING_PLAN_ENV_KEY,
-  metadataKey: 'codingPlan',
   authMethod: 'input',
   models: MODELSTUDIO_MODELS,
   modelsEditable: true,
@@ -88,9 +86,6 @@ export const codingPlanProvider: ProviderConfig = {
     baseUrl === CODING_PLAN_CHINA_BASE_URL && !key.startsWith('sk-sp-')
       ? 'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.'
       : null,
-  getProviderState: (baseUrl, models) => ({
-    codingPlan: { version: computeModelListVersion(models), baseUrl },
-  }),
   ownsModel: (model) =>
     model.envKey === CODING_PLAN_ENV_KEY &&
     typeof model.baseUrl === 'string' &&

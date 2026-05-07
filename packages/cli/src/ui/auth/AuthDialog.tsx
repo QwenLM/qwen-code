@@ -24,7 +24,10 @@ import {
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
 } from '../../auth/allProviders.js';
-import type { ProviderConfig } from '../../auth/providerConfig.js';
+import {
+  resolveMetadataKey,
+  type ProviderConfig,
+} from '../../auth/providerConfig.js';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 
@@ -249,10 +252,13 @@ export function AuthDialog(): React.JSX.Element {
   // -- Default main index from current auth state ---------------------------
 
   const contentGenConfig = config.getContentGeneratorConfig();
-  const isCurrentlyCodingPlan = !!findProviderByCredentials(
+  const matchedProvider = findProviderByCredentials(
     contentGenConfig?.baseUrl,
     contentGenConfig?.apiKeyEnvKey,
-  )?.metadataKey;
+  );
+  const isCurrentlyCodingPlan = !!(
+    matchedProvider && resolveMetadataKey(matchedProvider)
+  );
 
   const defaultMainIndex = useMemo(() => {
     const currentAuth = pendingAuthType ?? config.getAuthType();

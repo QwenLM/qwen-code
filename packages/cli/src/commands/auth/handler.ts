@@ -19,6 +19,7 @@ import { createOpenRouterProviderInstallPlan } from '../../auth/providers/oauth/
 import {
   buildInstallPlan,
   resolveBaseUrl,
+  resolveMetadataKey,
   getDefaultModelIds,
 } from '../../auth/providerConfig.js';
 import { findProviderByCredentials } from '../../auth/allProviders.js';
@@ -520,15 +521,16 @@ export async function showAuthStatus(): Promise<void> {
               providerConfig.envKey,
             ),
           )
-          .find((p) => p?.metadataKey);
+          .find((p) => p && resolveMetadataKey(p));
 
         if (managedProvider) {
           const envKey =
             typeof managedProvider.envKey === 'string'
               ? managedProvider.envKey
               : '';
+          const metaKey = resolveMetadataKey(managedProvider)!;
           const metadata = (mergedSettings as Record<string, unknown>)[
-            managedProvider.metadataKey!
+            metaKey
           ] as { version?: string; baseUrl?: string } | undefined;
           const hasApiKey =
             !!process.env[envKey] || !!mergedSettings.env?.[envKey];

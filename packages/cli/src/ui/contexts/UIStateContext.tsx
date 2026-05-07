@@ -34,7 +34,7 @@ import type { UpdateObject } from '../utils/updateCheck.js';
 
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
-import { type CodingPlanUpdateRequest } from '../hooks/useCodingPlanUpdates.js';
+import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 
 export interface UIState {
@@ -66,7 +66,7 @@ export interface UIState {
   shellConfirmationRequest: ShellConfirmationRequest | null;
   confirmationRequest: ConfirmationRequest | null;
   confirmUpdateExtensionRequests: ConfirmationRequest[];
-  codingPlanUpdateRequest: CodingPlanUpdateRequest | undefined;
+  providerUpdateRequest: ProviderUpdateRequest | undefined;
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;

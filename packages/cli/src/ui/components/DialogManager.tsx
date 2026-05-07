@@ -11,6 +11,7 @@ import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
+import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
 import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
@@ -134,12 +135,12 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.codingPlanUpdateRequest) {
+  if (uiState.providerUpdateRequest) {
     return (
-      <ConsentPrompt
-        prompt={uiState.codingPlanUpdateRequest.prompt}
-        onConfirm={uiState.codingPlanUpdateRequest.onConfirm}
-        terminalWidth={terminalWidth}
+      <ProviderUpdatePrompt
+        providerLabel={uiState.providerUpdateRequest.providerLabel}
+        diff={uiState.providerUpdateRequest.diff}
+        onConfirm={uiState.providerUpdateRequest.onConfirm}
       />
     );
   }
