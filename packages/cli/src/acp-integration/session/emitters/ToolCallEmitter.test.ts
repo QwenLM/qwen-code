@@ -233,6 +233,41 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('should not replay truncated session previews as full diffs', async () => {
+      await emitter.emitResult({
+        toolName: 'edit_file',
+        callId: 'call-edit',
+        success: true,
+        message: [],
+        resultDisplay: {
+          fileName: '/test/file.ts',
+          originalContent: 'old preview',
+          newContent: 'new preview',
+          truncatedForSession: true,
+          fileDiffLength: 200000,
+          fileDiffTruncated: true,
+        },
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-edit',
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'Full diff omitted from saved session history for /test/file.ts. Original fileDiff length: 200000 chars.',
+              },
+            },
+          ],
+          _meta: { toolName: 'edit_file' },
+        }),
+      );
+    });
+
     it('should transform message parts to content', async () => {
       await emitter.emitResult({
         toolName: 'test_tool',

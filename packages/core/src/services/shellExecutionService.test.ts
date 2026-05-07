@@ -17,8 +17,14 @@ import EventEmitter from 'node:events';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
 import pkg from '@xterm/headless';
-import type { ShellOutputEvent } from './shellExecutionService.js';
-import { ShellExecutionService } from './shellExecutionService.js';
+import type {
+  ShellAbortReason,
+  ShellOutputEvent,
+} from './shellExecutionService.js';
+import {
+  getShellAbortReasonKind,
+  ShellExecutionService,
+} from './shellExecutionService.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
 const { Terminal } = pkg;
@@ -225,8 +231,12 @@ describe('ShellExecutionService', () => {
     };
     mockPtyProcess.pid = 12345;
     mockPtyProcess.kill = vi.fn();
-    mockPtyProcess.onData = vi.fn();
-    mockPtyProcess.onExit = vi.fn();
+    // node-pty's onData/onExit return IDisposable; the production
+    // background-promote path calls .dispose() on those handles to detach
+    // its listeners cleanly. Mock them to return a disposable stub so the
+    // promote path doesn't crash on `undefined.dispose()`.
+    mockPtyProcess.onData = vi.fn().mockReturnValue({ dispose: vi.fn() });
+    mockPtyProcess.onExit = vi.fn().mockReturnValue({ dispose: vi.fn() });
     mockPtyProcess.write = vi.fn();
     mockPtyProcess.resize = vi.fn();
 
@@ -608,6 +618,192 @@ describe('ShellExecutionService', () => {
       expect(result.aborted).toBe(true);
       // The process kill is mocked, so we just check that the flag is set.
     });
+
+    it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (pty, abortController) => {
+          abortController.abort({ kind: 'cancel' } satisfies ShellAbortReason);
+          pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.promoted).toBeUndefined();
+      // The default kill path runs: SIGTERM via process.kill on the
+      // process-group pid. Pinning that we DID try to kill — i.e., reason
+      // === 'cancel' is NOT mistakenly routed through the background branch.
+      expect(mockProcessKill).toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGTERM',
+      );
+    });
+
+    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true', async () => {
+      // Critical: do NOT fire onExit — the child is still alive after the
+      // background-promote abort. The result Promise must resolve via the
+      // abort handler's own immediate resolve, not via the exit handler.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (_pty, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.promoted).toBe(true);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.error).toBeNull();
+      expect(result.pid).toBe(mockPtyProcess.pid);
+      // Verify the kill path did NOT run: neither the PTY's own kill() nor
+      // process.kill on the group pid. Caller now owns the child.
+      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+      expect(mockProcessKill).not.toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGTERM',
+      );
+      expect(mockProcessKill).not.toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGKILL',
+      );
+    });
+
+    it('post-promotion: PTY data is no longer routed to onOutputEvent (handoff boundary)', async () => {
+      // Pin the ownership contract: after background-promote, PTY data
+      // arriving on the still-running child must NOT surface through the
+      // foreground execute()'s onOutputEvent (the caller has its own
+      // listeners now). Without dataDisposable.dispose() in the abort
+      // handler, the listener-retention bug would let post-promote bytes
+      // leak into the foreground consumer.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (pty, abortController) => {
+          // Data BEFORE promote — fed via the live onData listener so it
+          // reaches the foreground onOutputEvent normally.
+          pty.onData.mock.calls[0][0]('pre-promote-data\n');
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+      expect(result.promoted).toBe(true);
+
+      // The disposable returned by mockPtyProcess.onData was disposed by
+      // the abort handler — verify by calling .dispose's mock.
+      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      expect(dataDisposableStub.dispose).toHaveBeenCalled();
+      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
+        .value as { dispose: Mock };
+      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+    });
+
+    it('post-exit race: PTY background-promote refuses if process.kill(pid, 0) reports the pid is gone', async () => {
+      // Mirror of the child_process post-exit race test. The PTY may
+      // have already exited but our `exitDisposable` (onExit) handler
+      // hasn't run yet — node-pty delivers the exit event async after
+      // the native SIGCHLD. Promoting in that window would detach our
+      // exit listener, miss the real exit status, and report
+      // `promoted: true` for a dead PTY. Production guard:
+      // process.kill(pid, 0); if it throws ESRCH, fall through.
+      mockProcessKill.mockImplementationOnce((pid, signal) => {
+        // Only fail the very first liveness probe with signal 0 — let
+        // any subsequent kill calls (e.g. cleanup() at process exit)
+        // succeed so the test teardown stays clean.
+        if (signal === 0) {
+          throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+        }
+        return true;
+      });
+      const { result } = await simulateExecution(
+        'fast-and-cancelled',
+        (pty, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+          // Drain the pending onExit (production code falls through;
+          // normal exit path resolves with the real exit info).
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: undefined });
+        },
+      );
+
+      // Result is the normal exit shape, not the promoted shape.
+      expect(result.promoted).toBeUndefined();
+      expect(result.exitCode).toBe(0);
+      // Our PTY listeners stayed registered — the disposables are
+      // disposed by the natural onExit, not the abort handler.
+      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      // dataDisposable is NOT disposed by our abort handler in the
+      // race-fallthrough path (the normal onExit handler doesn't
+      // dispose it either — it relies on the PTY tearing down its own
+      // event source). What matters is that we did NOT pre-dispose it
+      // and lose the exit info.
+      void dataDisposableStub; // referenced for the future expansion
+    });
+
+    it("post-promotion: ptyProcess error listener is removed via 'removeListener', NOT 'off' (regression guard for @lydell/node-pty)", async () => {
+      // node EventEmitter exposes both `off` (Node 10+) and the legacy
+      // `removeListener`, but @lydell/node-pty's IPty interface only
+      // surfaces `removeListener` — calling `.off(...)` on a real PTY
+      // throws TypeError. Pin that the production code path uses
+      // `removeListener` so a future refactor swapping to `.off()`
+      // doesn't silently regress under the EventEmitter mock (which
+      // tolerates both).
+      const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
+      const offSpy = vi.spyOn(mockPtyProcess, 'off');
+
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (_pty, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      // The 'error' handler is removed via legacy API; `.off` must not
+      // appear in the production teardown path.
+      expect(removeListenerSpy).toHaveBeenCalledWith(
+        'error',
+        expect.any(Function),
+      );
+      const offErrorCalls = offSpy.mock.calls.filter(
+        ([event]) => event === 'error',
+      );
+      expect(offErrorCalls).toEqual([]);
+    });
+
+    it('post-promotion: PTY exit does NOT re-resolve the result (already resolved with promoted)', async () => {
+      // Pin: even if the still-running child later exits naturally and the
+      // caller's own exit listener fires, our foreground result Promise
+      // must NOT be re-resolved with a different shape (Promise can only
+      // resolve once). The exit disposable being disposed prevents our
+      // own onExit from firing at all in the first place — but verify the
+      // final resolved shape stays `promoted: true` regardless.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (_pty, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      // Resolved as promoted, with no exit info from a post-promote exit.
+      expect(result.promoted).toBe(true);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+    });
   });
 
   describe('Binary Output', () => {
@@ -943,6 +1139,22 @@ describe('ShellExecutionService child_process fallback', () => {
       value: 12345,
       configurable: true,
     });
+    // Mirror real Node ChildProcess: `exitCode` / `signalCode` are `null`
+    // while the child is alive and become a number / signal name on
+    // exit. The background-promote liveness guard reads these to detect
+    // an exit that fired between abort dispatch and the abort handler
+    // run, and a default of `undefined` would mistakenly look terminal
+    // and skip the promote.
+    Object.defineProperty(mockChildProcess, 'exitCode', {
+      value: null,
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(mockChildProcess, 'signalCode', {
+      value: null,
+      writable: true,
+      configurable: true,
+    });
 
     mockCpSpawn.mockReturnValue(mockChildProcess);
   });
@@ -1138,6 +1350,168 @@ describe('ShellExecutionService child_process fallback', () => {
         });
       },
     );
+
+    it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
+      mockPlatform.mockReturnValue('linux');
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (cp, abortController) => {
+          abortController.abort({ kind: 'cancel' } satisfies ShellAbortReason);
+          cp.emit('exit', null, 'SIGKILL');
+          cp.emit('close', null, 'SIGKILL');
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.promoted).toBeUndefined();
+      // Default kill path ran — pin that reason === 'cancel' is NOT
+      // mistakenly routed through the background branch.
+      expect(mockProcessKill).toHaveBeenCalledWith(
+        -mockChildProcess.pid!,
+        'SIGTERM',
+      );
+    });
+
+    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true', async () => {
+      mockPlatform.mockReturnValue('linux');
+      // Critical: do NOT fire 'exit' — the child is still alive after the
+      // background-promote abort. The result Promise must resolve via the
+      // abort handler's own immediate resolve.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (cp, abortController) => {
+          // Emit some output first so the snapshot has content.
+          cp.stdout?.emit('data', Buffer.from('line1\nline2\n'));
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.promoted).toBe(true);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.error).toBeNull();
+      expect(result.pid).toBe(mockChildProcess.pid);
+      // Output captured up to the promote moment is preserved as the
+      // snapshot for the caller to seed the BackgroundShellEntry's output
+      // file from.
+      expect(result.output).toContain('line1');
+      expect(result.output).toContain('line2');
+      // Verify the kill path did NOT run.
+      expect(mockProcessKill).not.toHaveBeenCalledWith(
+        -mockChildProcess.pid!,
+        'SIGTERM',
+      );
+      expect(mockProcessKill).not.toHaveBeenCalledWith(
+        -mockChildProcess.pid!,
+        'SIGKILL',
+      );
+      expect(mockChildProcess.kill).not.toHaveBeenCalled();
+    });
+
+    it('post-promotion: stdout / stderr data is no longer routed to onOutputEvent (handoff boundary)', async () => {
+      mockPlatform.mockReturnValue('linux');
+      // Pin the ownership contract: after background-promote, stdout/stderr
+      // arriving on the still-running child must NOT surface through the
+      // foreground execute()'s onOutputEvent. Without off()'ing the
+      // stdoutHandler / stderrHandler in the abort handler, post-promote
+      // bytes would re-enter handleOutput, which then calls
+      // decoder.decode() on a now-finalized decoder (cleanup() called
+      // .decode() without stream:true) → TypeError crash, OR routes to
+      // onOutputEvent → ownership leak / duplicated emit.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (cp, abortController) => {
+          cp.stdout?.emit('data', Buffer.from('pre-promote\n'));
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+          // Capture call count at the moment of promote, then emit more
+          // data on the still-live child stream and assert onOutputEvent
+          // was NOT called again. (Also verifies no TypeError from
+          // decoding through the finalized decoder.)
+          const eventCountAtPromote = onOutputEventMock.mock.calls.length;
+          cp.stdout?.emit('data', Buffer.from('post-promote-stdout\n'));
+          cp.stderr?.emit('data', Buffer.from('post-promote-stderr\n'));
+          expect(onOutputEventMock.mock.calls.length).toBe(eventCountAtPromote);
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      // Pre-promote data made it into the snapshot; post-promote did not.
+      expect(result.output).toContain('pre-promote');
+      expect(result.output).not.toContain('post-promote-stdout');
+      expect(result.output).not.toContain('post-promote-stderr');
+    });
+
+    it('post-exit race: background-promote refuses if child is already terminal (exitCode/signalCode non-null)', async () => {
+      // Race window: the child may have exited (exitCode set) but the
+      // 'exit' event hasn't reached our handler yet because Node delivers
+      // child_process events on the next microtask. Promoting in that
+      // window would detach our exit listener and report `promoted: true`
+      // for a process that's already dead — the caller would hold an
+      // inert pid expecting to take over. Production code reads
+      // exitCode / signalCode before detaching; if either is non-null,
+      // it falls through and lets the pending exit handler resolve
+      // normally with the real exit info.
+      mockPlatform.mockReturnValue('linux');
+      const { result } = await simulateExecution(
+        'fast-and-cancelled',
+        (cp, abortController) => {
+          // Simulate the race: pretend the child has already exited
+          // (exitCode set on the ChildProcess) but the 'exit' event
+          // emit is queued behind the abort dispatch.
+          Object.defineProperty(cp, 'exitCode', {
+            value: 0,
+            writable: true,
+            configurable: true,
+          });
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+          // Now drain the pending exit + close events; the normal
+          // exit path should resolve the result.
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      // Result is the normal exit shape, not the promoted shape.
+      expect(result.promoted).toBeUndefined();
+      expect(result.aborted).toBe(true); // abortSignal.aborted is still true
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('post-promotion: child exit does NOT re-resolve the result with a non-promoted shape', async () => {
+      mockPlatform.mockReturnValue('linux');
+      // Pin: even if the still-running child later exits naturally and the
+      // caller's own exit listener fires, our foreground result Promise
+      // must NOT be re-resolved (Promise can only resolve once). The
+      // detached exit handler prevents our own handler from firing.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (cp, abortController) => {
+          abortController.abort({
+            kind: 'background',
+            shellId: 'bg_test123',
+          } satisfies ShellAbortReason);
+          // Simulate the still-running child exiting later; this should
+          // NOT route through our handleExit because the exit listener
+          // was off()'d in the background-promote branch.
+          cp.emit('exit', 42, null);
+          cp.emit('close', 42, null);
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+    });
 
     it('should gracefully attempt SIGKILL on linux if SIGTERM fails', async () => {
       mockPlatform.mockReturnValue('linux');
@@ -1335,8 +1709,12 @@ describe('ShellExecutionService execution method selection', () => {
     };
     mockPtyProcess.pid = 12345;
     mockPtyProcess.kill = vi.fn();
-    mockPtyProcess.onData = vi.fn();
-    mockPtyProcess.onExit = vi.fn();
+    // node-pty's onData/onExit return IDisposable; the production
+    // background-promote path calls .dispose() on those handles to detach
+    // its listeners cleanly. Mock them to return a disposable stub so the
+    // promote path doesn't crash on `undefined.dispose()`.
+    mockPtyProcess.onData = vi.fn().mockReturnValue({ dispose: vi.fn() });
+    mockPtyProcess.onExit = vi.fn().mockReturnValue({ dispose: vi.fn() });
     mockPtyProcess.write = vi.fn();
     mockPtyProcess.resize = vi.fn();
 
@@ -1354,6 +1732,21 @@ describe('ShellExecutionService execution method selection', () => {
     mockChildProcess.kill = vi.fn();
     Object.defineProperty(mockChildProcess, 'pid', {
       value: 54321,
+      configurable: true,
+    });
+    // Mirror real Node ChildProcess: `exitCode` / `signalCode` are
+    // `null` while alive. Kept in sync with the `child_process
+    // fallback` describe block's mock setup so any future promote-
+    // related test that lands here doesn't trip the production
+    // `child.exitCode !== null` race guard with a stale `undefined`.
+    Object.defineProperty(mockChildProcess, 'exitCode', {
+      value: null,
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(mockChildProcess, 'signalCode', {
+      value: null,
+      writable: true,
       configurable: true,
     });
     mockCpSpawn.mockReturnValue(mockChildProcess);
@@ -1422,5 +1815,79 @@ describe('ShellExecutionService execution method selection', () => {
     expect(mockPtySpawn).not.toHaveBeenCalled();
     expect(mockCpSpawn).toHaveBeenCalled();
     expect(result.executionMethod).toBe('child_process');
+  });
+});
+
+describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
+  it("returns 'cancel' for null reason (e.g. plain abortController.abort())", () => {
+    expect(getShellAbortReasonKind(null)).toBe('cancel');
+    expect(getShellAbortReasonKind(undefined)).toBe('cancel');
+  });
+
+  it("returns 'cancel' for non-object reasons (string / number / DOMException)", () => {
+    expect(getShellAbortReasonKind('background')).toBe('cancel');
+    expect(getShellAbortReasonKind(42)).toBe('cancel');
+    expect(getShellAbortReasonKind(true)).toBe('cancel');
+    // DOMException-like object — not the real DOMException constructor in
+    // the test runtime, but the principle is the same: a non-discriminated
+    // object reason without an own `kind` falls back to cancel.
+    expect(getShellAbortReasonKind(new Error('aborted'))).toBe('cancel');
+  });
+
+  it("returns 'cancel' for an empty object (no own kind)", () => {
+    expect(getShellAbortReasonKind({})).toBe('cancel');
+  });
+
+  it("returns 'cancel' when 'kind' lives only on the prototype (pollution defense)", () => {
+    const polluted: Record<string, unknown> = Object.create({
+      kind: 'background',
+    });
+    // hasOwnProperty('kind') is false → helper rejects the prototype-only kind
+    expect(getShellAbortReasonKind(polluted)).toBe('cancel');
+  });
+
+  it("returns 'cancel' for an unknown kind value (typo / future-untyped variant)", () => {
+    expect(getShellAbortReasonKind({ kind: 'suspend' })).toBe('cancel');
+    expect(getShellAbortReasonKind({ kind: 'BACKGROUND' })).toBe('cancel');
+    expect(getShellAbortReasonKind({ kind: 42 })).toBe('cancel');
+  });
+
+  it("returns 'cancel' when reading 'kind' throws (accessor / Proxy trap)", () => {
+    const throwingReason = Object.defineProperty({}, 'kind', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw new Error('accessor blew up');
+      },
+    });
+    expect(getShellAbortReasonKind(throwingReason)).toBe('cancel');
+
+    const proxyReason = new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          if (prop === 'kind') throw new Error('proxy trap blew up');
+          return undefined;
+        },
+        getOwnPropertyDescriptor(_target, prop) {
+          if (prop === 'kind') {
+            return { configurable: true, enumerable: true, value: 'unused' };
+          }
+          return undefined;
+        },
+      },
+    );
+    expect(getShellAbortReasonKind(proxyReason)).toBe('cancel');
+  });
+
+  it("returns 'background' for the canonical happy-path reason", () => {
+    expect(getShellAbortReasonKind({ kind: 'background' })).toBe('background');
+    expect(
+      getShellAbortReasonKind({ kind: 'background', shellId: 'bg_x' }),
+    ).toBe('background');
+  });
+
+  it("returns 'cancel' for the canonical cancel reason", () => {
+    expect(getShellAbortReasonKind({ kind: 'cancel' })).toBe('cancel');
   });
 });

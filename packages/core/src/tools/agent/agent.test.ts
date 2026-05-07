@@ -111,6 +111,19 @@ describe('AgentTool', () => {
       queueMessage: vi.fn(),
       appendActivity: vi.fn(),
     };
+    // Stub registry exposed on both `parent.getToolRegistry()` and the
+    // override built by `createApprovalModeOverride`. The override path
+    // calls `createToolRegistry` on the override Config (Object.create
+    // walks the prototype chain to this mock) and then
+    // `copyDiscoveredToolsFrom(parent.getToolRegistry())`. Without these
+    // mocks the override helper throws and every subagent test that
+    // exercises foreground execution fails.
+    const stubToolRegistry = {
+      copyDiscoveredToolsFrom: vi.fn(),
+      getAllTools: vi.fn().mockReturnValue([]),
+      getAllToolNames: vi.fn().mockReturnValue([]),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -122,6 +135,8 @@ describe('AgentTool', () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
+      getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
+      createToolRegistry: vi.fn().mockResolvedValue(stubToolRegistry),
     } as unknown as Config;
 
     changeListeners = [];

@@ -274,6 +274,27 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
+  it('renders a saved-session preview notice for truncated diff results', () => {
+    const diffResult = {
+      fileDiff: '--- file.txt\n+++ file.txt\n@@ -1 +1 @@\n-omitted\n+preview',
+      fileName: 'file.txt',
+      originalContent: 'old preview',
+      newContent: 'new preview',
+      truncatedForSession: true,
+      fileDiffLength: 123456,
+      fileDiffTruncated: true,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} resultDisplay={diffResult} />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain(
+      'Saved session preview only; full diff omitted from JSONL (123456 chars).',
+    );
+    expect(lastFrame()).toContain('MockDiff:--- file.txt');
+  });
+
   it('renders emphasis correctly', () => {
     const { lastFrame: highEmphasisFrame } = renderWithContext(
       <ToolMessage {...baseProps} emphasis="high" />,

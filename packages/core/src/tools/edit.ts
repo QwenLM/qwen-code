@@ -29,7 +29,9 @@ import {
 } from '../services/fileSystemService.js';
 import type { LineEnding } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
@@ -50,6 +52,8 @@ import {
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
+
+const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
 
 export function applyReplacement(
   currentContent: string | null,
@@ -152,6 +156,41 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let useBOM = false;
     let detectedEncoding = 'utf-8';
     let detectedLineEnding: LineEnding = 'lf';
+    // Prior-read enforcement runs before any content is read so that
+    // the read pipeline below (and the content-derived error codes
+    // it can produce — NO_OCCURRENCE_FOUND, EXPECTED_OCCURRENCE_MISMATCH,
+    // NO_CHANGE) cannot be used as a read-less content oracle on a
+    // file the model has never legitimately Read.
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead
+    // re-stats so a file that sprang into existence between
+    // isFilefileExists() and here — the same TOCTOU window WriteFile
+    // had — is now caught. ENOENT (genuinely absent) returns ok:true
+    // and falls through to the new-file path; an existing file that
+    // appeared in the race window is rejected as unread.
+    if (!this.config.getFileReadCacheDisabled()) {
+      const decision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        params.file_path,
+        'editing',
+      );
+      if (!decision.ok) {
+        return {
+          currentContent: null,
+          newContent: '',
+          occurrences: 0,
+          error: {
+            display: decision.displayMessage,
+            raw: decision.rawMessage,
+            type: decision.type,
+          },
+          isNewFile: false,
+          encoding: 'utf-8',
+          bom: false,
+          lineEnding: 'lf',
+        };
+      }
+    }
     if (fileExists) {
       try {
         const fileInfo = await this.config
@@ -177,6 +216,48 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           throw err;
         }
         fileExists = false;
+      }
+    }
+
+    // Post-read freshness re-check. The pre-read checkPriorRead above
+    // and readTextFile are two separate syscalls; if the file is
+    // modified between them, currentContent reflects post-write bytes
+    // the model never saw and any edit applied to it would still be
+    // a stale-write. Re-running checkPriorRead here closes the TOCTOU
+    // window: a stale state now (mtime/size drifted) means we read
+    // bytes the cache no longer trusts, and we reject before
+    // returning a CalculatedEdit that the call sites would honour.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        params.file_path,
+        'editing',
+        { expectExisting: true },
+      );
+      if (!postDecision.ok) {
+        // Forensic trail for post-read TOCTOU rejections. These are
+        // rare ("file changed between stat and read") and the model
+        // self-heals by re-reading, so without a debug record an
+        // operator investigating "why did this Edit fail once?" has
+        // nothing to grep.
+        debugLogger.warn('post-read TOCTOU rejection', {
+          path: params.file_path,
+          reason: postDecision.type,
+        });
+        return {
+          currentContent: null,
+          newContent: '',
+          occurrences: 0,
+          error: {
+            display: postDecision.displayMessage,
+            raw: postDecision.rawMessage,
+            type: postDecision.type,
+          },
+          isNewFile: false,
+          encoding: 'utf-8',
+          bom: false,
+          lineEnding: 'lf',
+        };
       }
     }
 
@@ -301,7 +382,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     if (editData.error) {
-      throw new Error(`Edit error: ${editData.error.display}`);
+      // Use the full `raw` message, not the short `display` form:
+      // the scheduler propagates `error.message` straight into the
+      // model-facing tool response. `raw` carries the remediation
+      // detail (file path, stale-vs-unread distinction, "without
+      // offset / limit / pages" hint) that `execute()` already
+      // surfaces — confirmation-required flows should not lose it.
+      throw new StructuredToolError(editData.error.raw, editData.error.type);
     }
 
     const fileName = path.basename(this.params.file_path);
@@ -388,6 +475,67 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     try {
+      // Final pre-write freshness check. calculateEdit() ran a
+      // post-read check, but execute() can be called arbitrarily
+      // long after that (user approval, modify-and-confirm, etc.).
+      // Between the post-read check and the writeTextFile below,
+      // an external mutation could land and be silently overwritten.
+      // This last guard tightens the window from "post-read →
+      // writeTextFile (unbounded)" to "stat → writeTextFile (two
+      // adjacent syscalls)".
+      //
+      // It does NOT eliminate the race. A concurrent writer that
+      // lands between this stat and the writeTextFile call below
+      // can still be clobbered — that residual is an OS-level
+      // limitation of the stat-then-write pattern, and the only
+      // way to close it is an atomic write (write to a temp file,
+      // then rename) or a content-hash post-check that re-reads
+      // the bytes after the write. Both are deferred to a follow-up
+      // PR; operators who care about strict overwrite-protection
+      // should set `fileReadCacheDisabled: true` and rely on
+      // application-level locking.
+      //
+      // Run unconditionally (not gated on `editData.isNewFile`):
+      // `isNewFile` was decided back in calculateEdit, but a file
+      // could be created in the gap between then and now and a
+      // confirmation-pending Edit would otherwise clobber it
+      // without enforcement. ENOENT inside checkPriorRead returns
+      // ok:true so genuine new-file creation is unaffected.
+      if (!this.config.getFileReadCacheDisabled()) {
+        const writeDecision = await checkPriorRead(
+          this.config.getFileReadCache(),
+          this.params.file_path,
+          'editing',
+          // For an in-place edit (`!isNewFile`), the file existed at
+          // read time and must still exist now — an ENOENT here
+          // means the original target disappeared and we should
+          // reject rather than fall through to a new-file write
+          // that would silently re-create a file from stale bytes.
+          // For genuine new-file creation, ENOENT is the expected
+          // pre-write state (ok:true → writeTextFile creates).
+          { expectExisting: !editData.isNewFile },
+        );
+        if (!writeDecision.ok) {
+          debugLogger.warn('pre-write TOCTOU rejection', {
+            path: this.params.file_path,
+            reason: writeDecision.type,
+          });
+          return {
+            llmContent: writeDecision.rawMessage,
+            returnDisplay: `Error: ${writeDecision.displayMessage}`,
+            error: {
+              message: writeDecision.rawMessage,
+              type: writeDecision.type,
+            },
+          };
+        }
+      }
+
+      // Create parent directories AFTER the pre-write enforcement
+      // check passes. Doing it before would leak intermediate
+      // directories on the failure path — a real (if minor) FS
+      // litter that the previous order created on every rejected
+      // edit.
       this.ensureParentDirectoriesExist(this.params.file_path);
 
       // For new files, apply default file encoding setting

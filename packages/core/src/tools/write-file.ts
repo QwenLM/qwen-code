@@ -35,6 +35,7 @@ import type { LineEnding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ModifiableDeclarativeTool,
@@ -119,7 +120,35 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     let originalContent = '';
-    const fileExists = await isFilefileExists(this.params.file_path);
+    let fileExists = await isFilefileExists(this.params.file_path);
+    // Run prior-read enforcement *before* we read the file to render
+    // a confirmation diff. Otherwise the user could approve a diff
+    // computed from current bytes that the model has never received,
+    // and the subsequent execute() would still reject the call —
+    // confusing UX for any approve flow.
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead's
+    // own stat decides whether the file actually exists right now.
+    // ENOENT means the path is genuinely absent → ok:true → fall
+    // through to the new-file diff; any other "stat says yes" outcome
+    // (including the file appearing between isFilefileExists() and
+    // here, a race window the pre-fix gating left wide open) means
+    // the model is about to clobber bytes it never read → reject.
+    if (!this.config.getFileReadCacheDisabled()) {
+      const decision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        this.params.file_path,
+        'overwriting',
+      );
+      if (!decision.ok) {
+        // Surface the structured ToolErrorType through scheduler.
+        // A plain `throw new Error` would hit the scheduler's catch
+        // block and be reported as UNHANDLED_EXCEPTION — losing the
+        // EDIT_REQUIRES_PRIOR_READ / FILE_CHANGED_SINCE_READ contract
+        // for any flow that requires confirmation.
+        throw new StructuredToolError(decision.rawMessage, decision.type);
+      }
+    }
     if (fileExists) {
       try {
         const { content } = await this.config
@@ -127,8 +156,43 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           .readTextFile({ path: this.params.file_path });
         originalContent = content;
       } catch (err) {
-        throw new Error(
-          `Error reading existing file for confirmation: ${getErrorMessage(err)}`,
+        // ENOENT here means the file disappeared between
+        // isFilefileExists() and readTextFile (a disappearance
+        // race). The pre-read checkPriorRead above already returned
+        // ok:true for ENOENT and let us fall through; mirror that
+        // in this read by falling back to the new-file diff (empty
+        // originalContent) instead of throwing a plain Error that
+        // the scheduler would surface as UNHANDLED_EXCEPTION.
+        if (isNodeError(err) && err.code === 'ENOENT') {
+          fileExists = false;
+        } else {
+          throw new Error(
+            `Error reading existing file for confirmation: ${getErrorMessage(err)}`,
+          );
+        }
+      }
+    }
+
+    // Post-read freshness re-check. Closes the TOCTOU window between
+    // the pre-read checkPriorRead above and the readTextFile that
+    // produced `originalContent`: showing the user a diff computed
+    // from bytes the model never saw is the very confusing-approval
+    // UX this enforcement block exists to prevent.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        this.params.file_path,
+        'overwriting',
+        { expectExisting: true },
+      );
+      if (!postDecision.ok) {
+        debugLogger.warn('post-read TOCTOU rejection (confirmation)', {
+          path: this.params.file_path,
+          reason: postDecision.type,
+        });
+        throw new StructuredToolError(
+          postDecision.rawMessage,
+          postDecision.type,
         );
       }
     }
@@ -175,6 +239,37 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     let detectedEncoding: string | undefined;
     let detectedLineEnding: LineEnding | undefined;
     const dirName = path.dirname(file_path);
+
+    // Prior-read enforcement runs BEFORE we read the existing file:
+    //  - rejecting a write should not first slurp the entire file
+    //    into memory (wasted I/O on every reject), and
+    //  - we should not be holding bytes of a file the model never
+    //    legitimately saw, even transiently.
+    // Mirrors the order in getConfirmationDetails() above.
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead
+    // re-stats so a file that sprang into existence between
+    // isFilefileExists() and here — exactly the TOCTOU window pointed
+    // out in review — is now caught and rejected instead of being
+    // silently overwritten.
+    if (!this.config.getFileReadCacheDisabled()) {
+      const decision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        file_path,
+        'overwriting',
+      );
+      if (!decision.ok) {
+        return {
+          llmContent: decision.rawMessage,
+          returnDisplay: `Error: ${decision.displayMessage}`,
+          error: {
+            message: decision.rawMessage,
+            type: decision.type,
+          },
+        };
+      }
+    }
+
     if (fileExists) {
       try {
         const fileInfo = await this.config
@@ -214,8 +309,36 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       }
     }
 
+    // Post-read freshness re-check. Closes the TOCTOU window between
+    // the pre-read checkPriorRead above and the readTextFile that
+    // produced `originalContent`: an external write that lands
+    // between those two syscalls would otherwise overwrite bytes the
+    // model never saw, even though enforcement was supposed to block
+    // exactly that.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        file_path,
+        'overwriting',
+        { expectExisting: true },
+      );
+      if (!postDecision.ok) {
+        debugLogger.warn('post-read TOCTOU rejection (execute)', {
+          path: file_path,
+          reason: postDecision.type,
+        });
+        return {
+          llmContent: postDecision.rawMessage,
+          returnDisplay: `Error: ${postDecision.displayMessage}`,
+          error: {
+            message: postDecision.rawMessage,
+            type: postDecision.type,
+          },
+        };
+      }
+    }
+
     if (!fileExists) {
-      fs.mkdirSync(dirName, { recursive: true });
       const userEncoding = this.config.getDefaultFileEncoding();
       if (userEncoding === FileEncoding.UTF8_BOM) {
         // User explicitly configured UTF-8 BOM for all new files
@@ -228,6 +351,68 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       }
       // else: user explicitly set 'utf-8' (no BOM) — respect it
       detectedEncoding = undefined;
+    }
+
+    // Final pre-write freshness check. The earlier post-read check
+    // ran before encoding detection; we re-stat here so an external
+    // mutation that lands in the gap between those operations and
+    // the writeTextFile below is caught.
+    //
+    // It does NOT eliminate the race. A concurrent writer that
+    // lands between this stat and the writeTextFile call below
+    // can still be clobbered — that residual is an OS-level
+    // limitation of the stat-then-write pattern, and the only way
+    // to close it is an atomic write (write-to-temp + rename) or
+    // a content-hash post-check that re-reads the bytes after the
+    // write. Both are deferred to a follow-up; operators who care
+    // about strict overwrite-protection should set
+    // `fileReadCacheDisabled: true` and rely on application-level
+    // locking.
+    //
+    // Run unconditionally (not gated on `fileExists`): if the path
+    // was absent during the earlier checkPriorRead but a different
+    // process creates it before this writeTextFile, the gated form
+    // would skip enforcement and silently overwrite a pre-existing
+    // file the model never read. ENOENT inside checkPriorRead
+    // returns ok:true so the genuine new-file creation path is
+    // unchanged.
+    if (!this.config.getFileReadCacheDisabled()) {
+      const writeDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        file_path,
+        'overwriting',
+        // If the file existed when we read it (`fileExists` is still
+        // true after readTextFile), ENOENT here means the original
+        // target disappeared between the post-read check and now —
+        // reject rather than fall through and silently re-create the
+        // file from stale bytes. For new-file creation
+        // (`fileExists === false`), ENOENT is the expected pre-write
+        // state (ok:true → writeTextFile creates).
+        { expectExisting: fileExists },
+      );
+      if (!writeDecision.ok) {
+        debugLogger.warn('pre-write TOCTOU rejection', {
+          path: file_path,
+          reason: writeDecision.type,
+        });
+        return {
+          llmContent: writeDecision.rawMessage,
+          returnDisplay: `Error: ${writeDecision.displayMessage}`,
+          error: {
+            message: writeDecision.rawMessage,
+            type: writeDecision.type,
+          },
+        };
+      }
+    }
+
+    // Create parent directories AFTER the pre-write enforcement
+    // check passes. Doing it before would leak intermediate
+    // directories on the failure path (rejected new-file writes
+    // would otherwise litter the filesystem with empty mkdir'd
+    // ancestors).
+    if (!fileExists) {
+      fs.mkdirSync(dirName, { recursive: true });
     }
 
     try {

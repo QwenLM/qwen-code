@@ -168,13 +168,81 @@ function permissionModeToApprovalMode(mode: PermissionMode): ApprovalMode {
 }
 
 /**
- * Creates a Config override with a different approval mode.
- * Uses prototype delegation to avoid mutating the parent config.
+ * Marker that signals "this Config wrapper has rebuilt its own tool
+ * registry so bound EditTool / WriteFileTool / ReadFileTool resolve to
+ * the wrapper instead of the parent". Stored as a Symbol-keyed property
+ * so that JavaScript's normal property lookup (which walks the
+ * prototype chain) lets a downstream wrapper detect a rebuild that
+ * happened on any ancestor without manually walking the chain.
+ *
+ * `Symbol.for` is used so the marker survives bundle-deduping; two
+ * independent imports of this module observe the same Symbol identity.
  */
-function createApprovalModeOverride(base: Config, mode: ApprovalMode): Config {
+export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
+  'qwen-code:tool-registry-rebuilt',
+);
+
+/**
+ * `true` if any Config in this wrapper's prototype chain has already
+ * rebuilt its tool registry via {@link rebuildToolRegistryOnOverride}.
+ *
+ * Used by spawn sites that may be called with a wrapper-on-wrapper
+ * argument (e.g. `subagent-manager.ts:maybeOverrideContentGenerator`
+ * receiving `bgConfig = Object.create(agentConfig)` from the
+ * background-agent path) to skip a redundant rebuild.
+ */
+export function hasRebuiltToolRegistry(config: Config): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (config as any)[TOOL_REGISTRY_REBUILT] === true;
+}
+
+/**
+ * Rebuilds the tool registry on `override` so core tools resolve
+ * `this.config` to `override` instead of `base`. Used by both
+ * {@link createApprovalModeOverride} and
+ * `subagent-manager.ts:maybeOverrideContentGenerator` to avoid
+ * duplicated rebuild logic.
+ *
+ * - `override.createToolRegistry(...)` runs on the override (so the
+ *   lazy factories close over `this = override`).
+ * - Discovered tools (MCP / command-discovered) are copied from `base`
+ *   rather than re-discovered, since discovery is expensive.
+ * - The {@link TOOL_REGISTRY_REBUILT} marker is set so wrapper-of-wrapper
+ *   layers downstream skip the rebuild via {@link hasRebuiltToolRegistry}.
+ */
+export async function rebuildToolRegistryOnOverride(
+  override: Config,
+  base: Config,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ov = override as any;
+  const agentRegistry = await ov.createToolRegistry(undefined, {
+    skipDiscovery: true,
+  });
+  agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
+  ov.getToolRegistry = () => agentRegistry;
+  ov[TOOL_REGISTRY_REBUILT] = true;
+}
+
+/**
+ * Creates a Config override with a different approval mode.
+ *
+ * Uses prototype delegation (Object.create) to avoid mutating the parent
+ * config, then delegates to {@link rebuildToolRegistryOnOverride} so the
+ * override's tool registry has core tools bound to the override rather
+ * than to the parent. Without that rebuild, the parent's cached tool
+ * instances continue to resolve `this.config` to the parent, defeating
+ * per-Config isolation of FileReadCache / approval mode for any code
+ * path that goes through the bound tool.
+ */
+export async function createApprovalModeOverride(
+  base: Config,
+  mode: ApprovalMode,
+): Promise<Config> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   override.getApprovalMode = (): ApprovalMode => mode;
+  await rebuildToolRegistryOnOverride(override as Config, base);
   return override as Config;
 }
 
@@ -987,10 +1055,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.config.isTrustedFolder(),
       );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
-      const agentConfig =
-        resolvedApprovalMode !== this.config.getApprovalMode()
-          ? createApprovalModeOverride(this.config, resolvedApprovalMode)
-          : this.config;
+      // ALWAYS produce a child Config via Object.create, even when the
+      // approval mode is identical to the parent. Subagents must run
+      // against an isolated FileReadCache so a parent's prior_read
+      // entries cannot satisfy enforcement on a path the subagent's
+      // transcript never contained — see the per-Config own-property
+      // machinery in `Config.getFileReadCache()`. Reusing
+      // `this.config` directly here would short-circuit that
+      // isolation for the same-mode path, which is the common case.
+      //
+      // The override also rebuilds its own tool registry so core
+      // tools (`EditTool` / `WriteFileTool` / `ReadFileTool`) are
+      // bound to the override Config rather than the parent. Without
+      // that rebuild, the parent's cached tool instances continue to
+      // resolve `this.config` to the parent, reaching the parent's
+      // FileReadCache rather than the subagent's. See
+      // `createApprovalModeOverride` above for details.
+      const agentConfig = await createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode,
+      );
 
       // Create the subagent. Fork bypasses SubagentManager because its
       // runtime configs are synthesized from the parent's cache-safe params.
@@ -1309,6 +1393,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
             bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
             cleanupJsonl?.();
+            // Release the per-subagent ToolRegistry now that the
+            // background agent has finished — see the matching call in
+            // the foreground finally for why. Stopping here, after
+            // bgSubagent.execute resolves, is safe: by this point the
+            // detached body cannot invoke any more tool factories on
+            // this registry.
+            void agentConfig
+              .getToolRegistry()
+              .stop()
+              .catch(() => {});
           }
         };
         // Wrap in the agent-identity frame so nested `agent` tool calls
@@ -1469,6 +1563,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // this in finally guarantees we clean up on success, failure,
         // cancel, AND any unexpected throw inside runFramed.
         registry.unregisterForeground(hookOpts.agentId);
+        // Release the per-subagent ToolRegistry so any AgentTool /
+        // SkillTool the model instantiated during execution disposes
+        // its change-listeners on shared SubagentManager / SkillManager.
+        // Without this, repeated foreground subagent runs accumulate
+        // listeners for the rest of the session. Fire-and-forget; the
+        // subagent has already returned its result, and stop() logs its
+        // own errors.
+        void agentConfig
+          .getToolRegistry()
+          .stop()
+          .catch(() => {});
       }
     } catch (error) {
       const errorMessage =

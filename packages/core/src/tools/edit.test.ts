@@ -82,6 +82,7 @@ describe('EditTool', () => {
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
+      getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -95,6 +96,21 @@ describe('EditTool', () => {
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
+
+  /**
+   * Simulate the model having read `filePath` earlier in the session,
+   * so the EditTool's prior-read enforcement does not reject the
+   * subsequent edit. Tests that exercise pure Edit-business behaviour
+   * (diffing, encoding, replace_all, etc.) should call this after
+   * writing the fixture file and before invoking `tool.execute`.
+   */
+  function seedPriorRead(filePath: string) {
+    const stats = fs.statSync(filePath);
+    fileReadCache.recordRead(filePath, stats, {
+      full: true,
+      cacheable: true,
+    });
+  }
 
   describe('applyReplacement', () => {
     it('should return newString if isNewFile is true', () => {
@@ -308,6 +324,7 @@ describe('EditTool', () => {
 
     it('should request confirmation for valid edit', async () => {
       fs.writeFileSync(filePath, 'some old content here');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'old',
@@ -328,6 +345,7 @@ describe('EditTool', () => {
 
     it('should throw if old_string is not found', async () => {
       fs.writeFileSync(filePath, 'some content here');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'not_found',
@@ -341,6 +359,7 @@ describe('EditTool', () => {
 
     it('should throw if multiple occurrences of old_string are found', async () => {
       fs.writeFileSync(filePath, 'old old content here');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'old',
@@ -461,6 +480,7 @@ describe('EditTool', () => {
       const initialContent = 'This is some old text.';
       const newContent = 'This is some new text.'; // old -> new
       fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'old',
@@ -573,6 +593,7 @@ describe('EditTool', () => {
       // Create file with BOM (BOM is \ufeff character in string)
       const originalContent = '\ufeff// Original line\nconst x = 1;';
       fs.writeFileSync(bomFilePath, originalContent, 'utf8');
+      seedPriorRead(bomFilePath);
 
       const params: EditToolParams = {
         file_path: bomFilePath,
@@ -594,6 +615,7 @@ describe('EditTool', () => {
 
     it('should return error if old_string is not found in file', async () => {
       fs.writeFileSync(filePath, 'Some content.', 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'nonexistent',
@@ -611,6 +633,7 @@ describe('EditTool', () => {
 
     it('should return error if multiple occurrences of old_string are found and replace_all is false', async () => {
       fs.writeFileSync(filePath, 'multiple old old strings', 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'old',
@@ -626,6 +649,7 @@ describe('EditTool', () => {
 
     it('should successfully replace multiple occurrences when replace_all is true', async () => {
       fs.writeFileSync(filePath, 'old text\nold text\nold text', 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'old',
@@ -661,6 +685,7 @@ describe('EditTool', () => {
 
     it('should return error if trying to create a file that already exists (empty old_string)', async () => {
       fs.writeFileSync(filePath, 'Existing content', 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: '',
@@ -718,6 +743,7 @@ describe('EditTool', () => {
     it('should return error if old_string and new_string are identical', async () => {
       const initialContent = 'This is some identical text.';
       fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'identical',
@@ -733,6 +759,7 @@ describe('EditTool', () => {
       // This can happen if the literal string replacement with `replaceAll` results in no change.
       const initialContent = 'line 1\nline  2\nline 3'; // Note the double space
       fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         // old_string has a single space, so it won't be found by replaceAll
@@ -773,6 +800,7 @@ describe('EditTool', () => {
 
     it('should return ATTEMPT_TO_CREATE_EXISTING_FILE error', async () => {
       fs.writeFileSync(filePath, 'existing content', 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: '',
@@ -787,6 +815,7 @@ describe('EditTool', () => {
 
     it('should return NO_OCCURRENCE_FOUND error', async () => {
       fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'not-found',
@@ -799,6 +828,7 @@ describe('EditTool', () => {
 
     it('should return EXPECTED_OCCURRENCE_MISMATCH error when replace_all is false and text is not unique', async () => {
       fs.writeFileSync(filePath, 'one one two', 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'one',
@@ -813,6 +843,7 @@ describe('EditTool', () => {
 
     it('should return NO_CHANGE error', async () => {
       fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'content',
@@ -836,6 +867,7 @@ describe('EditTool', () => {
       'should return FILE_WRITE_FAILURE on write error',
       async () => {
         fs.writeFileSync(filePath, 'content', 'utf8');
+        seedPriorRead(filePath);
         // Make file readonly to trigger a write error
         fs.chmodSync(filePath, '444');
 
@@ -959,6 +991,357 @@ describe('EditTool', () => {
     });
   });
 
+  describe('prior-read enforcement', () => {
+    const abortSignal = new AbortController().signal;
+    let filePath: string;
+
+    beforeEach(() => {
+      filePath = path.join(rootDir, 'enforce_target.txt');
+    });
+
+    it('rejects an edit when the file has not been read in this session', async () => {
+      fs.writeFileSync(filePath, 'untouched content', 'utf8');
+      // No seedPriorRead call — simulate the model trying to Edit a
+      // file it has never received via ReadFile.
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'untouched',
+        new_string: 'modified',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(result.error?.message).toMatch(
+        /has not been fully read in this session/,
+      );
+      // File must remain untouched.
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
+    });
+
+    it('rejects an edit when the previous read was ranged (offset/limit)', async () => {
+      // A model that only Read part of a file has not seen the bytes
+      // a free-form old_string would touch. Treat this the same as
+      // "no prior read".
+      fs.writeFileSync(filePath, 'line a\nline b\nline c\n', 'utf8');
+      const stats = fs.statSync(filePath);
+      // Record as a ranged read: lastReadWasFull = false.
+      fileReadCache.recordRead(filePath, stats, {
+        full: false,
+        cacheable: true,
+      });
+
+      const result = await tool
+        .build({ file_path: filePath, old_string: 'line a', new_string: 'X' })
+        .execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(
+        'line a\nline b\nline c\n',
+      );
+    });
+
+    it('rejects an edit when the previous read was non-cacheable (binary / pdf / image)', async () => {
+      // ReadFile records every successful read into the cache,
+      // including binary / PDF / image reads that produce a
+      // structured payload rather than text. lastReadCacheable=false
+      // marks those — Edit must not accept them.
+      fs.writeFileSync(filePath, 'pretend this is binary', 'utf8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: true,
+        cacheable: false,
+      });
+
+      const result = await tool
+        .build({
+          file_path: filePath,
+          old_string: 'pretend',
+          new_string: 'X',
+        })
+        .execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      // Telling the model to re-read with read_file would loop the
+      // agent forever: a binary/image/PDF read also leaves
+      // lastReadCacheable=false. The message must explain the dead
+      // end instead of asking for another read.
+      expect(result.error?.message).toMatch(
+        /binary \/ image \/ audio \/ video \/ PDF \/ notebook payload/,
+      );
+      expect(result.error?.message).not.toMatch(/Use the read_file tool first/);
+      // EditTool's verb is "edit", not "overwrite" — using the
+      // wrong one here would be confusing for in-place edits.
+      expect(result.error?.message).toMatch(/if you need to edit it\./);
+      expect(result.error?.message).not.toMatch(
+        /if you need to overwrite it\./,
+      );
+    });
+
+    it('rejects an edit on a directory with TARGET_IS_DIRECTORY', async () => {
+      // Pre-fix, the directory exemption returned ok:true and
+      // readTextFile would either throw EISDIR (caught by execute as
+      // EDIT_PREPARATION_FAILURE) or — in WriteFile.getConfirmationDetails —
+      // collapse into UNHANDLED_EXCEPTION. The structured rejection
+      // here gives a stable error code regardless of where the call
+      // hits in the pipeline.
+      const dirPath = path.join(rootDir, 'enforce-dir');
+      fs.mkdirSync(dirPath);
+      const result = await tool
+        .build({
+          file_path: dirPath,
+          old_string: 'foo',
+          new_string: 'bar',
+        })
+        .execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+      expect(result.error?.message).toMatch(/is a directory/);
+    });
+
+    it('rejects an edit with a stat failure other than ENOENT (fail-closed)', async () => {
+      // Symmetric with WriteFile's EACCES test. checkPriorRead is
+      // shared today, but if a future change adds an Edit-side
+      // fallback that downgrades a real verify failure to
+      // EDIT_REQUIRES_PRIOR_READ, only the write path would catch
+      // it without this test.
+      fs.writeFileSync(filePath, 'untouched', 'utf8');
+      const statSpy = vi
+        .spyOn(fs.promises, 'stat')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+        );
+
+      const result = await tool
+        .build({
+          file_path: filePath,
+          old_string: 'untouched',
+          new_string: 'modified',
+        })
+        .execute(abortSignal);
+
+      expect(result.error?.type).toBe(
+        ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      );
+      expect(result.error?.message).toMatch(/Could not stat .*\(EACCES\)/);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched');
+
+      statSpy.mockRestore();
+    });
+
+    it('does not let an unread file be probed via NO_OCCURRENCE_FOUND', async () => {
+      // Regression for the read-less content oracle: pre-fix, a model
+      // could call Edit with candidate old_strings on an unread file
+      // and observe NO_OCCURRENCE_FOUND vs OCCURRENCE_MATCH to
+      // reverse-engineer the contents. With enforcement before
+      // calculateEdit, the call must be rejected with the prior-read
+      // error code regardless of whether the candidate string would
+      // have matched.
+      fs.writeFileSync(filePath, 'sensitive token: hunter2', 'utf8');
+
+      const result = await tool
+        .build({
+          file_path: filePath,
+          old_string: 'hunter2',
+          new_string: 'redacted',
+        })
+        .execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(result.error?.type).not.toBe(
+        ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+      );
+    });
+
+    it('rejects confirmation requests on an unread file before showing a diff', async () => {
+      // The user must not see a diff computed from current bytes the
+      // model never received — they would approve under a false
+      // assumption that the model worked from those bytes.
+      fs.writeFileSync(filePath, 'unread content', 'utf8');
+      const invocation = tool.build({
+        file_path: filePath,
+        old_string: 'unread',
+        new_string: 'modified',
+      });
+      await expect(
+        invocation.getConfirmationDetails(abortSignal),
+      ).rejects.toThrow(/has not been fully read in this session/);
+    });
+
+    it('rejects an edit when the file has been modified since the last read', async () => {
+      fs.writeFileSync(filePath, 'one', 'utf8');
+      seedPriorRead(filePath);
+      // Simulate an out-of-band modification: change content + bump
+      // mtime far enough into the future that even coarse-resolution
+      // filesystems detect the change.
+      fs.writeFileSync(filePath, 'two with more bytes', 'utf8');
+      const future = new Date(Date.now() + 60_000);
+      fs.utimesSync(filePath, future, future);
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'two',
+        new_string: 'three',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      expect(result.error?.message).toMatch(/has been modified since/);
+      // File must remain at the externally-modified content.
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('two with more bytes');
+    });
+
+    it('exempts new-file creation from prior-read enforcement', async () => {
+      // old_string === '' on a non-existent path is the new-file
+      // creation idiom in EditTool. The model has nothing to read
+      // first, so enforcement must not trigger.
+      const newPath = path.join(rootDir, 'brand-new-edit.txt');
+      const params: EditToolParams = {
+        file_path: newPath,
+        old_string: '',
+        new_string: 'fresh creation',
+      };
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(newPath, 'utf8')).toBe('fresh creation');
+    });
+
+    it('allows a create-then-edit-then-edit chain without an intervening read', async () => {
+      // The author of a brand-new file has, by definition, "seen"
+      // the bytes it just wrote. Without recordWrite seeding read
+      // metadata, the second edit would be rejected because
+      // lastReadWasFull / lastReadCacheable would still be unset on
+      // the entry recordWrite created during the create step.
+      const newPath = path.join(rootDir, 'create-then-edit.txt');
+      (mockConfig.getApprovalMode as Mock).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const created = await tool
+        .build({
+          file_path: newPath,
+          old_string: '',
+          new_string: 'first content\n',
+        })
+        .execute(abortSignal);
+      expect(created.error).toBeUndefined();
+
+      const edited = await tool
+        .build({
+          file_path: newPath,
+          old_string: 'first',
+          new_string: 'second',
+        })
+        .execute(abortSignal);
+      expect(edited.error).toBeUndefined();
+      expect(fs.readFileSync(newPath, 'utf8')).toBe('second content\n');
+    });
+
+    it('allows Edit after Write→partial-Read (sticky-on-true preserves write-author rights)', async () => {
+      // Reproduction for the maintainer-review regression: pre-fix,
+      // a partial read recorded `lastReadWasFull = false` and
+      // clobbered the `true` that recordWrite had stamped at
+      // create time, so this Edit would then be rejected with
+      // EDIT_REQUIRES_PRIOR_READ even though the model had
+      // authored the file's full content.
+      const newPath = path.join(rootDir, 'write-then-partial-read.txt');
+      (mockConfig.getApprovalMode as Mock).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const created = await tool
+        .build({
+          file_path: newPath,
+          old_string: '',
+          new_string: 'line one\nline two\nline three\n',
+        })
+        .execute(abortSignal);
+      expect(created.error).toBeUndefined();
+
+      // Simulate a partial follow-up Read (offset/limit). Pre-fix
+      // this overwrote lastReadWasFull/lastReadCacheable to false.
+      fileReadCache.recordRead(newPath, fs.statSync(newPath), {
+        full: false,
+        cacheable: true,
+      });
+
+      const edited = await tool
+        .build({
+          file_path: newPath,
+          old_string: 'line two',
+          new_string: 'second line',
+        })
+        .execute(abortSignal);
+      expect(edited.error).toBeUndefined();
+      expect(fs.readFileSync(newPath, 'utf8')).toBe(
+        'line one\nsecond line\nline three\n',
+      );
+    });
+
+    it('allows a chain of edits without re-reading between them', async () => {
+      // After the first Edit, recordWrite stamps `lastWriteAt`. The
+      // second Edit's stat will still match the cache entry (because
+      // recordWrite refreshed the fingerprint), so it is `fresh` and
+      // proceeds without requiring an intervening Read.
+      fs.writeFileSync(filePath, 'alpha', 'utf8');
+      seedPriorRead(filePath);
+
+      const first = await tool
+        .build({ file_path: filePath, old_string: 'alpha', new_string: 'beta' })
+        .execute(abortSignal);
+      expect(first.error).toBeUndefined();
+
+      const second = await tool
+        .build({ file_path: filePath, old_string: 'beta', new_string: 'gamma' })
+        .execute(abortSignal);
+      expect(second.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('gamma');
+    });
+
+    it('bypasses enforcement entirely when fileReadCacheDisabled is true', async () => {
+      fs.writeFileSync(filePath, 'untouched', 'utf8');
+      // No seed: with the cache disabled, the model is on the
+      // pre-cache contract — Edit must succeed without a prior Read.
+      // Use mockReturnValue (not mockReturnValueOnce): calculateEdit
+      // now calls getFileReadCacheDisabled twice — once before
+      // readTextFile and once after, for the post-read TOCTOU
+      // re-check — and both must see disabled=true to actually bypass.
+      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'untouched',
+        new_string: 'modified',
+      };
+      const result = await tool.build(params).execute(abortSignal);
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('modified');
+    });
+
+    it('attaches a structured ToolErrorType when getConfirmationDetails rejects', async () => {
+      // Without an `errorType` field on the thrown Error, the tool
+      // scheduler reports every confirmation-time rejection as
+      // UNHANDLED_EXCEPTION — losing the EDIT_REQUIRES_PRIOR_READ /
+      // FILE_CHANGED_SINCE_READ contract this PR introduces.
+      fs.writeFileSync(filePath, 'unread content', 'utf8');
+      const invocation = tool.build({
+        file_path: filePath,
+        old_string: 'unread',
+        new_string: 'modified',
+      });
+      let caught: unknown;
+      try {
+        await invocation.getConfirmationDetails(abortSignal);
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as { errorType?: string })?.errorType).toBe(
+        ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      );
+    });
+  });
+
   describe.skipIf(process.platform === 'win32')(
     'escaped paths with spaces (end-to-end)',
     () => {
@@ -967,6 +1350,11 @@ describe('EditTool', () => {
         const realFileName = 'my spaced file.txt';
         const realPath = path.join(rootDir, realFileName);
         fs.writeFileSync(realPath, 'Hello old world!', 'utf8');
+        // The Edit's prior-read enforcement is keyed off the
+        // *unescaped* path that EditTool resolves internally; seed
+        // the cache against that real path so this test exercises
+        // the escape-handling, not the enforcement layer.
+        seedPriorRead(realPath);
 
         // Pass an ESCAPED path (as the LLM might from at-completion)
         const escapedPath = path.join(rootDir, 'my\\ spaced\\ file.txt');

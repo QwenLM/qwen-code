@@ -260,6 +260,85 @@
           "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
           "type": "number",
           "default": 5
+        },
+        "hideBanner": {
+          "description": "Hide the startup ASCII banner and info panel.",
+          "type": "boolean",
+          "default": false
+        },
+        "customBannerTitle": {
+          "description": "Replace the default \">_ Qwen Code\" title shown in the banner info panel. The version suffix is always appended.",
+          "type": "string",
+          "default": ""
+        },
+        "customBannerSubtitle": {
+          "description": "Optional subtitle line rendered between the banner title and the auth/model line. When unset, the info panel keeps its blank spacer row.",
+          "type": "string",
+          "default": ""
+        },
+        "customAsciiArt": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "small": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "large": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "description": "Replace the default QWEN ASCII art. Accepts an inline string, {\"path\": \"...\"}, or {\"small\": ..., \"large\": ...} for width-aware selection."
         }
       }
     },
