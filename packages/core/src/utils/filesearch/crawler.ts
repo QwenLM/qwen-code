@@ -105,6 +105,16 @@ function logCommandProblem(
   console.warn(parts.join(' '));
 }
 
+function withSafeGitConfig(args: string[]): string[] {
+  return [
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    'core.untrackedCache=false',
+    ...args,
+  ];
+}
+
 function getStateKey(options: CrawlOptions): string {
   return [
     normalizePath(options.crawlDirectory),
@@ -644,7 +654,7 @@ async function maybeYield(index: number): Promise<void> {
 async function findGitRoot(dir: string): Promise<string | null> {
   const result = await commandRunner(
     'git',
-    ['rev-parse', '--show-toplevel'],
+    withSafeGitConfig(['rev-parse', '--show-toplevel']),
     dir,
     5_000,
     { silentOnFailure: true },
@@ -709,7 +719,7 @@ async function listUntrackedFiles(
 
   const untrackedResult = await commandRunner(
     'git',
-    untrackedArgs,
+    withSafeGitConfig(untrackedArgs),
     gitRoot,
     10_000,
   );
@@ -731,7 +741,7 @@ async function listDeletedTrackedFiles(
 
   const deletedResult = await commandRunner(
     'git',
-    deletedArgs,
+    withSafeGitConfig(deletedArgs),
     gitRoot,
     10_000,
   );
@@ -839,6 +849,7 @@ async function crawlWithGitLsFiles(
   const fileFilter = options.ignore.getFileFilter();
 
   const trackedArgs = ['--literal-pathspecs', 'ls-files', '--cached'];
+  trackedArgs.push('-t');
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     trackedArgs.push(relativeToGitRoot);
   }
@@ -851,12 +862,34 @@ async function crawlWithGitLsFiles(
 
   const fileSet = new Set<string>();
   let budgetedFileCount = 0;
+  const parseTrackedLine = (
+    line: string,
+  ): { status: string | null; filePath: string } | null => {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    // `git ls-files -t` emits "<status> <path>" (e.g., "H foo.ts", "S bar.ts").
+    const statusMatch = trimmed.match(/^([A-Z])\s+(.+)$/);
+    if (statusMatch) {
+      return { status: statusMatch[1], filePath: statusMatch[2] };
+    }
+    return { status: null, filePath: trimmed };
+  };
   const processTrackedFile = (file: string): boolean => {
     if (hasReachedFileBudget(budgetedFileCount, options.maxFiles)) {
       return false;
     }
 
-    const normalizedFile = normalizePath(file);
+    const parsed = parseTrackedLine(file);
+    if (!parsed) {
+      return true;
+    }
+    if (parsed.status === 'S') {
+      return true;
+    }
+
+    const normalizedFile = normalizePath(parsed.filePath);
     if (deletedSet.has(normalizedFile)) {
       return true;
     }
@@ -894,7 +927,7 @@ async function crawlWithGitLsFiles(
 
   const trackedResult = await commandRunner(
     'git',
-    trackedArgs,
+    withSafeGitConfig(trackedArgs),
     gitRoot,
     20_000,
     {
