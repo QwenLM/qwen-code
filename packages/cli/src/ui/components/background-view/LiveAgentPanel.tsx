@@ -231,7 +231,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   // BackgroundTasksDialog's detail body, which re-reads the registry
   // on its own activity tick.
   //
-  // Three reconciliation paths between the snapshot and the registry:
+  // Four reconciliation paths between the snapshot and the registry:
   //   1. Both agree → use live (newest `recentActivities`).
   //   2. Snap says still-live (running / paused) but registry forgot
   //      → most commonly a foreground subagent that finished:
@@ -239,12 +239,25 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   //      it deletes the entry, so the snapshot captures the old
   //      "still running" state and the next render's `registry.get`
   //      returns undefined. Synthesize a terminal version with
-  //      `endTime = now` so the 8s visibility window gives the user
-  //      a "the agent finished" beat instead of either a ghost-running
-  //      row that never clears OR an instant disappearance the moment
-  //      the tool returns.
-  //   3. Snap is already terminal but registry forgot → nothing useful
-  //      to keep showing; drop.
+  //      `endTime = first-seen-missing` (pinned so subsequent ticks
+  //      don't re-stamp it) and `synthesized: true` so the 8s
+  //      visibility window gives the user a "the agent finished"
+  //      beat without claiming a green ✔ on a run we can't
+  //      actually verify (foreground subagents don't transition
+  //      through complete / fail / cancel before unregister, so the
+  //      true outcome is unknowable here).
+  //   3. Snap is already terminal AND has `endTime` → keep the snap
+  //      as-is. Canonical case: a foreground subagent that was
+  //      cancelled / failed (which stamps `endTime` and emits
+  //      statusChange) and then `unregisterForeground`'d. The snap
+  //      carries the real terminal state and timestamp, so the row
+  //      reads accurately; the visibleAgents filter evicts it once
+  //      `now - endTime > TERMINAL_VISIBLE_MS` like any other
+  //      terminal entry.
+  //   4. Snap is terminal but has NO `endTime` → drop. This is an
+  //      upstream invariant violation (`complete`/`fail`/`cancel`
+  //      always stamp endTime); rendering would leave a row the
+  //      visibility window has no way to evict.
   //
   // When `config` itself is undefined (test fixtures that render
   // without ConfigContext) the panel degrades to snapshot-only —
@@ -383,8 +396,14 @@ const LiveAgentPanelBody: React.FC<{
   const overflow = Math.max(0, visibleAgents.length - maxRows);
   const visible = overflow > 0 ? visibleAgents.slice(-maxRows) : visibleAgents;
 
-  const runningCount = visibleAgents.filter(
-    (e) => e.status === 'running',
+  // Include paused entries in the "active" tally — they appear in
+  // the panel as active rows (same warning color, ⏸ glyph) and the
+  // header read "Active agents (0/1)" with one paused agent visible
+  // is misleading. The tally now matches what the user sees: the
+  // numerator counts every row that's NOT in a terminal/synthesized
+  // resting state.
+  const activeCount = visibleAgents.filter(
+    (e) => e.status === 'running' || e.status === 'paused',
   ).length;
 
   // Borderless layout, mirroring Claude Code's CoordinatorTaskPanel
@@ -401,7 +420,7 @@ const LiveAgentPanelBody: React.FC<{
         </Text>
         <Text
           color={theme.text.secondary}
-        >{` (${runningCount}/${visibleAgents.length})`}</Text>
+        >{` (${activeCount}/${visibleAgents.length})`}</Text>
       </Box>
       {overflow > 0 && (
         <Box>

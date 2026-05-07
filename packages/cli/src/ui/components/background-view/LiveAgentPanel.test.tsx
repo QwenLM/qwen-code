@@ -277,6 +277,27 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('2.4k tokens');
   });
 
+  it('counts paused agents as active in the header tally', () => {
+    // The header read "Active agents (running/total)" but the
+    // panel ALSO renders paused agents as active rows (warning
+    // color, ⏸ glyph). With only paused entries the tally would
+    // read "(0/1)" — visually contradicting the row that's clearly
+    // present. Numerator now includes paused.
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'paused-1',
+          subagentType: 'researcher',
+          description: 'researcher: paused waiting on resume',
+          status: 'paused',
+        }),
+      ],
+    });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('(1/1)');
+    expect(frame).toContain('⏸');
+  });
+
   it.each([
     ['paused', '⏸'],
     ['failed', '✖'],
