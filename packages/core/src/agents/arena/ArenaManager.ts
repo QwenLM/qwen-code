@@ -9,11 +9,13 @@ import * as path from 'node:path';
 import { GitWorktreeService } from '../../services/gitWorktreeService.js';
 import { Storage } from '../../config/storage.js';
 import type { Config } from '../../config/config.js';
+import type { ContentGenerator } from '../../core/contentGenerator.js';
 import { getCoreSystemPrompt } from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
+import { getResponseText } from '../../utils/partUtils.js';
 import { ArenaEventEmitter, ArenaEventType } from './arena-events.js';
 import type { AgentSpawnConfig, Backend, DisplayMode } from '../index.js';
 import { detectBackend, DISPLAY_MODE } from '../index.js';
@@ -51,10 +53,30 @@ import {
   makeArenaSessionEndedEvent,
 } from '../../telemetry/index.js';
 import type { ArenaSessionEndedStatus } from '../../telemetry/index.js';
+import {
+  buildFallbackApproachSummary,
+  summarizeUnifiedDiff,
+} from './diff-summary.js';
 
 const debugLogger = createDebugLogger('ARENA');
 
 const ARENA_POLL_INTERVAL_MS = 500;
+const ARENA_SUMMARY_TIMEOUT_MS = 20_000;
+const ARENA_SUMMARY_MAX_DIFF_CHARS = 6_000;
+const ARENA_SUMMARY_MAX_TRANSCRIPT_CHARS = 6_000;
+
+interface ArenaTranscriptEntry {
+  role: 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'info';
+  content: string;
+  thought?: boolean;
+  metadata?: Record<string, unknown>;
+  timestamp: number;
+}
+
+interface ArenaSummaryInput {
+  result: ArenaAgentResult;
+  transcript?: ArenaTranscriptEntry[];
+}
 
 /**
  * ArenaManager orchestrates multi-model competitive execution.
@@ -1438,6 +1460,9 @@ export class ArenaManager {
           ...agent.stats,
           ...statusFile.stats,
         };
+        if (statusFile.finalSummary) {
+          agent.accumulatedText = statusFile.finalSummary;
+        }
 
         // Detect state transitions from the sideband status file
         const resolved = this.resolveTransition(
@@ -1605,21 +1630,173 @@ export class ArenaManager {
     }
   }
 
+  private getAgentTranscript(
+    agentId: string,
+  ): ArenaTranscriptEntry[] | undefined {
+    if (this.backend?.type !== DISPLAY_MODE.IN_PROCESS) {
+      return undefined;
+    }
+
+    const interactive = (this.backend as InProcessBackend).getAgent(agentId);
+    const messages = interactive?.getMessages();
+    if (!messages || messages.length === 0) {
+      return undefined;
+    }
+
+    return messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      thought: message.thought,
+      metadata: message.metadata,
+      timestamp: message.timestamp,
+    }));
+  }
+
+  private getFinalTextFromTranscript(
+    transcript: ArenaTranscriptEntry[] | undefined,
+  ): string | undefined {
+    if (!transcript) return undefined;
+
+    for (let i = transcript.length - 1; i >= 0; i--) {
+      const message = transcript[i]!;
+      if (
+        message.role === 'assistant' &&
+        !message.thought &&
+        message.content.trim()
+      ) {
+        return message.content.trim();
+      }
+    }
+
+    return undefined;
+  }
+
+  private async addApproachSummaries(
+    summaryInputs: ArenaSummaryInput[],
+  ): Promise<void> {
+    await Promise.all(
+      summaryInputs.map(async (summaryInput) => {
+        summaryInput.result.approachSummary =
+          await this.generateAgentApproachSummary(summaryInput);
+      }),
+    );
+  }
+
+  private getAgentSummaryGenerator(
+    agentId: string,
+  ): ContentGenerator | undefined {
+    if (this.backend?.type !== DISPLAY_MODE.IN_PROCESS) {
+      return undefined;
+    }
+
+    return (this.backend as InProcessBackend).getAgentContentGenerator(agentId);
+  }
+
+  private async generateAgentApproachSummary(
+    summaryInput: ArenaSummaryInput,
+  ): Promise<string> {
+    const { result } = summaryInput;
+    const generator = this.getAgentSummaryGenerator(result.agentId);
+    if (!generator) {
+      return buildFallbackApproachSummary(result);
+    }
+
+    const abortController = new AbortController();
+    const timeout = setTimeout(
+      () => abortController.abort(),
+      ARENA_SUMMARY_TIMEOUT_MS,
+    );
+
+    try {
+      const response = await generator.generateContent(
+        {
+          model: result.model.modelId,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: this.buildAgentApproachSummaryPrompt(summaryInput),
+                },
+              ],
+            },
+          ],
+          config: {
+            abortSignal: abortController.signal,
+            thinkingConfig: { includeThoughts: false },
+          },
+        },
+        'arena_approach_summary',
+      );
+
+      return (
+        parseApproachSummaryResponse(getResponseText(response) ?? '')?.trim() ||
+        buildFallbackApproachSummary(result)
+      );
+    } catch (error) {
+      debugLogger.error(
+        `Failed to generate Arena approach summary for ${result.agentId}:`,
+        error,
+      );
+      return buildFallbackApproachSummary(result);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private buildAgentApproachSummaryPrompt({
+    result: agent,
+    transcript,
+  }: ArenaSummaryInput): string {
+    const payload = {
+      task: this.arenaConfig?.task ?? '',
+      instruction:
+        'Summarize this Arena agent approach for user comparison. Use git diff as the source of truth for what changed. Use transcript/finalText only to infer intent and architectural decisions. Do not pick a winner. Return only compact JSON: {"summary":"one sentence summary"}.',
+      agent: {
+        agentId: agent.agentId,
+        model: agent.model.modelId,
+        status: agent.status,
+        metrics: {
+          files: agent.diffSummary?.files.length ?? 0,
+          additions: agent.diffSummary?.additions ?? 0,
+          deletions: agent.diffSummary?.deletions ?? 0,
+          tokens: agent.stats.totalTokens,
+          durationMs: agent.stats.durationMs,
+          toolCalls: agent.stats.toolCalls,
+        },
+        files: agent.diffSummary?.files ?? [],
+        finalText: truncateForPrompt(agent.finalText ?? '', 2_000),
+        transcript: truncateForPrompt(formatTranscript(transcript), 6_000),
+        diff: truncateForPrompt(agent.diff ?? '', ARENA_SUMMARY_MAX_DIFF_CHARS),
+      },
+    };
+
+    return JSON.stringify(payload, null, 2);
+  }
+
   private async collectResults(): Promise<ArenaSessionResult> {
     if (!this.arenaConfig) {
       throw new Error('Arena config not initialized');
     }
 
     const agents: ArenaAgentResult[] = [];
+    const summaryInputs: ArenaSummaryInput[] = [];
 
     for (const agent of this.agents.values()) {
       const result = this.buildAgentResult(agent);
+      const transcript = this.getAgentTranscript(agent.agentId);
+      result.finalText =
+        result.finalText ?? this.getFinalTextFromTranscript(transcript);
 
       // Get diff for agents that finished their task (IDLE or COMPLETED)
       if (isSuccessStatus(agent.status)) {
         try {
           result.diff = await this.worktreeService.getWorktreeDiff(
             agent.worktree.path,
+          );
+          result.diffSummary = summarizeUnifiedDiff(result.diff);
+          result.modifiedFiles = result.diffSummary.files.map(
+            (file) => file.path,
           );
         } catch (error) {
           debugLogger.error(
@@ -1628,9 +1805,16 @@ export class ArenaManager {
           );
         }
       }
+      result.diffSummary ??= summarizeUnifiedDiff(result.diff);
+      result.modifiedFiles ??= result.diffSummary.files.map(
+        (file) => file.path,
+      );
 
       agents.push(result);
+      summaryInputs.push({ result, transcript });
     }
+
+    await this.addApproachSummaries(summaryInputs);
 
     const endedAt = Date.now();
 
@@ -1645,4 +1829,74 @@ export class ArenaManager {
       wasRepoInitialized: false,
     };
   }
+}
+
+function truncateForPrompt(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n...[truncated]`;
+}
+
+function formatTranscript(
+  transcript: ArenaTranscriptEntry[] | undefined,
+): string {
+  if (!transcript || transcript.length === 0) {
+    return '';
+  }
+
+  const lines: string[] = [];
+  for (const entry of transcript) {
+    if (entry.thought) continue;
+    const metadata = entry.metadata ?? {};
+    const toolName =
+      typeof metadata['toolName'] === 'string'
+        ? metadata['toolName']
+        : undefined;
+    const success =
+      typeof metadata['success'] === 'boolean'
+        ? metadata['success']
+        : undefined;
+    const label = toolName ? `${entry.role}:${toolName}` : entry.role;
+    const suffix =
+      success === undefined ? '' : ` (${success ? 'ok' : 'failed'})`;
+    lines.push(`${label}${suffix}: ${entry.content}`);
+  }
+
+  return truncateForPrompt(
+    lines.join('\n'),
+    ARENA_SUMMARY_MAX_TRANSCRIPT_CHARS,
+  );
+}
+
+function parseApproachSummaryResponse(text: string): string | undefined {
+  const jsonText = extractJsonObject(text);
+  if (!jsonText) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(jsonText) as unknown;
+    if (!isRecord(parsed)) {
+      return undefined;
+    }
+    const summary = parsed['summary'];
+    if (typeof summary === 'string') {
+      return summary;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function extractJsonObject(text: string): string | null {
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+  if (firstBrace < 0 || lastBrace <= firstBrace) {
+    return null;
+  }
+  return text.slice(firstBrace, lastBrace + 1);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

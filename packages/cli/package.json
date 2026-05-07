@@ -1,6 +1,6 @@
 {
-  "name": "@alife/dataworks-qwen-code",
-  "version": "0.14.8",
+  "name": "@qwen-code/qwen-code",
+  "version": "0.15.7",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -16,6 +16,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./export": {
+      "types": "./dist/src/export/index.d.ts",
+      "import": "./dist/src/export/index.js"
     }
   },
   "scripts": {
@@ -27,17 +31,13 @@
     "test": "vitest run",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
-    "check-i18n": "tsx ../../scripts/check-i18n.ts",
-    "prepublishOnly": "node ../../scripts/prepare-cli-for-publish.js"
+    "check-i18n": "tsx ../../scripts/check-i18n.ts"
   },
   "files": [
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.8"
-  },
-  "publishConfig": {
-    "registry": "https://registry.anpm.alibaba-inc.com"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.15.7"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",

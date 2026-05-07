@@ -24,7 +24,7 @@ These commands help you save, restore, and summarize work progress.
 | `/summary`  | Generate project summary based on conversation history    | `/summary`                           |
 | `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
 | `/resume`   | Resume a previous conversation session                    | `/resume`                            |
-| `/recap`    | Show a 1-3 sentence "where you left off" summary          | `/recap`                             |
+| `/recap`    | Generate a one-line session recap now                     | `/recap`                             |
 | `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
 
 ### 1.2 Interface and Workspace Control
@@ -163,9 +163,9 @@ The `/recap` command generates a short "where you left off" summary of the
 current session, so you can resume an old conversation without scrolling
 back through pages of history.
 
-| Command  | Description                                      |
-| -------- | ------------------------------------------------ |
-| `/recap` | Generate and show a 1-3 sentence session summary |
+| Command  | Description                                |
+| -------- | ------------------------------------------ |
+| `/recap` | Generate and show a one-line session recap |
 
 **How it works:**
 
@@ -240,9 +240,10 @@ In addition to the in-session `/auth` slash command, Qwen Code provides standalo
 | Command                                              | Description                                                   |
 | ---------------------------------------------------- | ------------------------------------------------------------- |
 | `qwen auth`                                          | Interactive authentication setup                              |
-| `qwen auth qwen-oauth`                               | ~~Authenticate with Qwen OAuth~~ (discontinued on 2026-04-15) |
 | `qwen auth coding-plan`                              | Authenticate with Alibaba Cloud Coding Plan                   |
 | `qwen auth coding-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting)             |
+| `qwen auth api-key`                                  | Authenticate with an API key                                  |
+| `qwen auth qwen-oauth`                               | ~~Authenticate with Qwen OAuth~~ (discontinued on 2026-04-15) |
 | `qwen auth status`                                   | Show current authentication status                            |
 
 > [!tip]

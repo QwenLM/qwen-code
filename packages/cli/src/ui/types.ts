@@ -12,6 +12,7 @@ import type {
   ToolConfirmationOutcome,
   ToolResultDisplay,
   AgentStatus,
+  ArenaDiffSummary,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import { type ReactNode } from 'react';
@@ -69,6 +70,7 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
+  executionStartTime?: number;
   /** If this tool call operated on a managed-auto-memory file, indicates whether it was a read or write. */
   isMemoryOp?: 'read' | 'write';
 }
@@ -206,6 +208,19 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+};
+
+/**
+ * Short LLM-generated label summarizing a preceding tool batch. Emitted after
+ * the batch completes and consumed by compact-mode rendering to replace the
+ * generic "Tool × N" line with something like "Searched in auth/". Also
+ * surfaces to SDK clients as a `tool_use_summary` stream message.
+ */
+export type HistoryItemToolUseSummary = HistoryItemBase & {
+  type: 'tool_use_summary';
+  summary: string;
+  /** Tool callIds this summary describes. Used to locate the target tool_group. */
+  precedingToolUseIds: string[];
 };
 
 export type HistoryItemNotification = HistoryItemBase & {
@@ -353,6 +368,9 @@ export interface ArenaAgentCardData {
   rounds: number;
   error?: string;
   diff?: string;
+  diffSummary?: ArenaDiffSummary;
+  modifiedFiles?: string[];
+  approachSummary?: string;
 }
 
 export type HistoryItemArenaAgentComplete = HistoryItemBase & {
@@ -389,8 +407,9 @@ export type HistoryItemBtw = HistoryItemBase & {
 
 /**
  * Away-summary recap shown when the user returns to the session after a
- * period of inactivity (or via /recap). Rendered in dim color so it is
- * visually distinct from real assistant replies.
+ * period of inactivity (or via /recap). Rendered inline as a regular
+ * history item (matching Claude Code's away_summary message); scrolls
+ * with the conversation, no sticky pinning.
  */
 export type HistoryItemAwayRecap = HistoryItemBase & {
   type: 'away_recap';
@@ -465,6 +484,7 @@ export type HistoryItemWithoutId =
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
+  | HistoryItemToolUseSummary
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats

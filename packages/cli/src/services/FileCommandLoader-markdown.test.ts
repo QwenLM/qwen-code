@@ -27,6 +27,7 @@ describe('FileCommandLoader - Markdown support', () => {
     // Create a test markdown command file
     const mdContent = `---
 description: Test markdown command
+argument-hint: "[issue-number]"
 ---
 
 This is a test prompt from markdown.`;
@@ -47,6 +48,7 @@ This is a test prompt from markdown.`;
       expect(commands).toHaveLength(1);
       expect(commands[0].name).toBe('test-command');
       expect(commands[0].description).toBe('Test markdown command');
+      expect(commands[0].argumentHint).toBe('[issue-number]');
     } finally {
       // Restore original method
       loader['getCommandDirectories'] = originalMethod;

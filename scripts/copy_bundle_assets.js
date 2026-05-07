@@ -84,42 +84,6 @@ if (existsSync(userDocsDir)) {
   console.warn(`Warning: User docs directory not found at ${userDocsDir}`);
 }
 
-// Copy i18n locales so the bundled CLI can load translations at runtime.
-// In the esbuild bundle `import.meta.url` resolves to dist/cli.js, so
-// `i18n/index.ts`'s `getBuiltinLocalesDir()` looks at dist/locales/.
-// Without this copy step, translations never load and the UI silently
-// falls back to English regardless of `general.language` / `QWEN_CODE_LANG`.
-const localesDir = join(root, 'packages', 'cli', 'src', 'i18n', 'locales');
-if (existsSync(localesDir)) {
-  const destLocalesDir = join(distDir, 'locales');
-  copyRecursiveSync(localesDir, destLocalesDir);
-  console.log('Copied i18n locales to dist/locales/');
-} else {
-  console.warn(`Warning: i18n locales directory not found at ${localesDir}`);
-}
-
-// Copy extension examples so `/extensions` can read them at runtime.
-// In the bundle these live at dist/examples/ (relative to dist/cli.js),
-// matching what `prepare-cli-for-publish.js` expects to pick up.
-const extensionExamplesDir = join(
-  root,
-  'packages',
-  'cli',
-  'src',
-  'commands',
-  'extensions',
-  'examples',
-);
-if (existsSync(extensionExamplesDir)) {
-  const destExamplesDir = join(distDir, 'examples');
-  copyRecursiveSync(extensionExamplesDir, destExamplesDir);
-  console.log('Copied extension examples to dist/examples/');
-} else {
-  console.warn(
-    `Warning: extension examples directory not found at ${extensionExamplesDir}`,
-  );
-}
-
 console.log('\n✅ All bundle assets copied to dist/');
 
 /**

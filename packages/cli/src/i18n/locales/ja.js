@@ -315,6 +315,8 @@ export default {
   'Vision Model Preview': 'ビジョンモデルプレビュー',
   'Tool Schema Compliance': 'ツールスキーマ準拠',
   'Auto (detect from system)': '自動(システムから検出)',
+  'Auto (detect terminal theme)': '自動（端末テーマを検出）',
+  Auto: '自動',
   'check session stats. Usage: /stats [model|tools]':
     'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
@@ -783,7 +785,7 @@ export default {
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'このセッションのモデルを切り替え（--fast で提案モデルを設定）',
   'Set a lighter model for prompt suggestions and speculative execution':
     'プロンプト提案と投機的実行用の軽量モデルを設定',
@@ -792,6 +794,8 @@ export default {
   'Authentication type not available.': '認証タイプが利用できません',
   'No models available for the current authentication type ({{authType}}).':
     '現在の認証タイプ({{authType}})で利用可能なモデルはありません',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
   // Clear
   'Starting a new session, resetting chat, and clearing terminal.':
     '新しいセッションを開始し、チャットをリセットし、ターミナルをクリアしています',
@@ -989,6 +993,8 @@ export default {
     '進捗: {{done}}/{{total}} タスク完了',
   ', {{inProgress}} in progress': '、{{inProgress}} 進行中',
   'Pending Tasks:': '保留中のタスク:',
+  'Current tasks': '現在のタスク',
+  '... and {{count}} more': '... 他 {{count}} 件',
   'What would you like to do?': '何をしますか?',
   'Choose how to proceed with your session:':
     'セッションの続行方法を選択してください:',
@@ -1020,6 +1026,8 @@ export default {
     '有料 \u00B7 5時間最大6,000リクエスト \u00B7 すべての Alibaba Cloud Coding Plan モデル',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': '自分のAPIキーを使用',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'サードパーティプロバイダーによるブラウザベースの認証（例：OpenRouter、ModelScope）',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Coding Planの認証情報またはご自身のAPIキー/プロバイダーをご利用ください。',
@@ -1222,20 +1230,6 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
-  // DataWorks input placeholder
-  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"':
-    'メッセージを入力してください。例：「DataWorksでのIDとよく使うワークスペースを確認してください？」',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 ID確認：「DataWorksでのIDと権限を確認させていただけますか？」',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 タスク分析：「dataworks_analyzeワークスペースで過去1週間に新規作成されたノードを分析し、何をしているか教えてください」',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 タスクガバナンス：「dataworks_analyzeワークスペースで、作成から時間が経っているのにまだ公開されていないノードを見つけてください」',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 問題特定：「dwd_is_it_software_released_dfとads_is_it_sfw_moni_key_released_recycled_dfのデータが不一致です。両方とも上流にods_ism_it_software_key_released_dfがあります。ロジックの違いを確認してください」',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ 問題修正：「従業員テーブルmy_project.ods_emp_info_dで、従業員EMP001の部署データが空です。原因を調査し、修正案を提示してください」',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     'Ctrl+O でコンパクトモードを切り替え — ツール出力と思考を非表示にしてすっきり表示。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':

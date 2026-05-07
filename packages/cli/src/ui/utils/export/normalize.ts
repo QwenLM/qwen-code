@@ -7,6 +7,7 @@
 import type { Part } from '@google/genai';
 import { ToolNames } from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Config, Kind } from '@qwen-code/qwen-code-core';
+import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 import type { ExportMessage, ExportSessionData } from './types.js';
 
 /**
@@ -283,6 +284,18 @@ function extractDiffContent(
 
   const display = resultDisplay as Record<string, unknown>;
   if ('fileName' in display && 'newContent' in display) {
+    if (display['truncatedForSession'] === true) {
+      return [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: buildTruncatedDiffPreviewText(display),
+          },
+        },
+      ];
+    }
+
     return [
       {
         type: 'diff',

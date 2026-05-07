@@ -432,6 +432,8 @@ export default {
   'Tool Schema Compliance': 'Tool Schema Compliance',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
+  'Auto (detect terminal theme)': 'Auto (detect terminal theme)',
+  Auto: 'Auto',
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
@@ -573,6 +575,8 @@ export default {
   'Updates all extensions or a named extension to the latest version.':
     'Updates all extensions or a named extension to the latest version.',
   'Update all extensions.': 'Update all extensions.',
+  'The name of the extension to update.':
+    'The name of the extension to update.',
   'Either an extension name or --all must be provided':
     'Either an extension name or --all must be provided',
   'Lists installed extensions.': 'Lists installed extensions.',
@@ -724,6 +728,7 @@ export default {
   'User Settings': 'User Settings',
   'System Settings': 'System Settings',
   Extensions: 'Extensions',
+  'Session (temporary)': 'Session (temporary)',
   // Hooks - Status
   '✓ Enabled': '✓ Enabled',
   '✗ Disabled': '✗ Disabled',
@@ -1195,8 +1200,8 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
-    'Switch the model for this session (--fast for suggestion model)',
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
+    'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':
@@ -1204,6 +1209,8 @@ export default {
   'Authentication type not available.': 'Authentication type not available.',
   'No models available for the current authentication type ({{authType}}).':
     'No models available for the current authentication type ({{authType}}).',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
@@ -1356,6 +1363,8 @@ export default {
     'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': 'Bring your own API key',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Use coding plan credentials or your own api-keys/providers.',
@@ -1607,20 +1616,6 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
-  // DataWorks input placeholder
-  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"':
-    'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 Identity: "Help me verify my identity and permissions in DataWorks?"',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
@@ -1698,6 +1693,7 @@ export default {
   'Command Format Migration': 'Command Format Migration',
   'Found {{count}} TOML command file:': 'Found {{count}} TOML command file:',
   'Found {{count}} TOML command files:': 'Found {{count}} TOML command files:',
+  'Current tasks': 'Current tasks',
   '... and {{count}} more': '... and {{count}} more',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'The TOML format is deprecated. Would you like to migrate them to Markdown format?',
@@ -1908,6 +1904,8 @@ export default {
   // Coding Plan Authentication
   // ============================================================================
   'API key cannot be empty.': 'API key cannot be empty.',
+  'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
+    'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
   'You can get your Coding Plan API key here':
     'You can get your Coding Plan API key here',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
@@ -1985,6 +1983,8 @@ export default {
     'Show context window usage breakdown.',
   'Run /context detail for per-item breakdown.':
     'Run /context detail for per-item breakdown.',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
   'body loaded': 'body loaded',
   memory: 'memory',
   '{{region}} configuration updated successfully.':

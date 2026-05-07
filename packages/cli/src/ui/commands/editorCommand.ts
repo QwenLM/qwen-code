@@ -17,7 +17,7 @@ export const editorCommand: SlashCommand = {
     return t('set external editor preference');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: (): OpenDialogActionReturn => ({
     type: 'dialog',
     dialog: 'editor',

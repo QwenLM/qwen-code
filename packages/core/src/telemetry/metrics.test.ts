@@ -216,16 +216,6 @@ describe('Telemetry Metrics', () => {
         model: 'gemini-pro',
         type: 'cache',
       });
-
-      recordTokenUsageMetricsModule(mockConfig, 125, {
-        model: 'gemini-pro',
-        type: 'tool',
-      });
-      expect(mockCounterAddFn).toHaveBeenCalledWith(125, {
-        'session.id': 'test-session-id',
-        model: 'gemini-pro',
-        type: 'tool',
-      });
     });
 
     it('should handle different models', () => {

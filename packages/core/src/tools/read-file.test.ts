@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -25,6 +26,7 @@ vi.mock('../telemetry/loggers.js', () => ({
 describe('ReadFileTool', () => {
   let tempRootDir: string;
   let tool: ReadFileTool;
+  let fileReadCache: FileReadCache;
   const abortSignal = new AbortController().signal;
 
   beforeEach(async () => {
@@ -32,6 +34,7 @@ describe('ReadFileTool', () => {
     tempRootDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'read-file-tool-root-'),
     );
+    fileReadCache = new FileReadCache();
 
     const mockConfigInstance = {
       getFileService: () => new FileDiscoveryService(tempRootDir),
@@ -40,6 +43,7 @@ describe('ReadFileTool', () => {
       getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+        getProjectDir: () => path.join(tempRootDir, '.project'),
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
       getTruncateToolOutputThreshold: () => 2500,
@@ -47,6 +51,8 @@ describe('ReadFileTool', () => {
       getContentGeneratorConfig: () => ({
         modalities: { image: true, pdf: true, audio: true, video: true },
       }),
+      getFileReadCache: () => fileReadCache,
+      getFileReadCacheDisabled: () => false,
     } as unknown as Config;
     tool = new ReadFileTool(mockConfigInstance);
   });
@@ -75,6 +81,21 @@ describe('ReadFileTool', () => {
         'File path must be absolute, but was relative: relative/path.txt. You must provide an absolute path.',
       );
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped spaces in file_path',
+      () => {
+        const escapedPath = path.join(tempRootDir, 'my\\ file.txt');
+        const params: ReadFileToolParams = {
+          file_path: escapedPath,
+        };
+        const invocation = tool.build(params);
+        expect(invocation).toBeDefined();
+        expect(invocation.params.file_path).toBe(
+          path.join(tempRootDir, 'my file.txt'),
+        );
+      },
+    );
 
     it('should allow path outside root (external path support)', () => {
       const params: ReadFileToolParams = {
@@ -167,6 +188,21 @@ describe('ReadFileTool', () => {
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
     });
+
+    it('should return allow for paths within the subagent transcripts dir', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(
+          tempRootDir,
+          '.project',
+          'subagents',
+          'session-1',
+          'agent-a.jsonl',
+        ),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
   });
 
   describe('getDescription', () => {
@@ -246,6 +282,29 @@ describe('ReadFileTool', () => {
         returnDisplay: '',
       });
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should read a file with spaces in its name when given an escaped path',
+      async () => {
+        const realFileName = 'my spaced read.txt';
+        const realPath = path.join(tempRootDir, realFileName);
+        const fileContent = 'Content with spaces in filename.';
+        await fsp.writeFile(realPath, fileContent, 'utf-8');
+
+        // Pass an ESCAPED path (as the LLM might from at-completion)
+        const escapedPath = path.join(tempRootDir, 'my\\ spaced\\ read.txt');
+        const params: ReadFileToolParams = { file_path: escapedPath };
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+
+        expect(await invocation.execute(abortSignal)).toEqual({
+          llmContent: fileContent,
+          returnDisplay: '',
+        });
+      },
+    );
 
     it('should return error if path is a directory', async () => {
       const dirPath = path.join(tempRootDir, 'directory');
@@ -480,6 +539,14 @@ describe('ReadFileTool', () => {
       expect(() => tool.build(params)).not.toThrow();
     });
 
+    it('should treat empty pages parameter as unset', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.txt'),
+        pages: '',
+      };
+      expect(() => tool.build(params)).not.toThrow();
+    });
+
     it('should support offset and limit for text files', async () => {
       const filePath = path.join(tempRootDir, 'paginated.txt');
       const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
@@ -546,6 +613,274 @@ describe('ReadFileTool', () => {
       } finally {
         await fsp.rm(osTempFile, { recursive: true, force: true });
       }
+    });
+
+    describe('with FileReadCache', () => {
+      // Helper to build + execute a Read in one shot.
+      async function read(
+        params: ReadFileToolParams,
+        toolOverride: ReadFileTool = tool,
+      ): Promise<ToolResult> {
+        const invocation = toolOverride.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+        return invocation.execute(abortSignal);
+      }
+
+      it('returns the file_unchanged placeholder on a second full Read of an unchanged text file', async () => {
+        const filePath = path.join(tempRootDir, 'note.txt');
+        await fsp.writeFile(filePath, 'hello world', 'utf-8');
+
+        const first = await read({ file_path: filePath });
+        expect(first.llmContent).toBe('hello world');
+
+        const second = await read({ file_path: filePath });
+        expect(typeof second.llmContent).toBe('string');
+        expect(second.llmContent).toMatch(
+          /unchanged since last read in this session/,
+        );
+        // Placeholder must not echo the original content.
+        expect(second.llmContent).not.toContain('hello world');
+        expect(second.returnDisplay).toMatch(/^Unchanged: /);
+      });
+
+      it('serves a fresh full Read after an external modification (stale)', async () => {
+        const filePath = path.join(tempRootDir, 'mut.txt');
+        await fsp.writeFile(filePath, 'one', 'utf-8');
+        await read({ file_path: filePath });
+
+        // Bump mtime well into the future to defeat low-precision filesystems
+        // that share the second across rapid writes.
+        await fsp.writeFile(filePath, 'two', 'utf-8');
+        const future = new Date(Date.now() + 60_000);
+        await fsp.utimes(filePath, future, future);
+
+        const after = await read({ file_path: filePath });
+        expect(after.llmContent).toBe('two');
+      });
+
+      it('forces a full Read after recordWrite even if mtime/size still match', async () => {
+        // Models that mix Read with Edit / Write should see the post-write
+        // bytes on their next Read, not a placeholder pointing at the
+        // pre-write content. The lastReadAt < lastWriteAt branch enforces
+        // this even when the file's stats happen to match (which can
+        // happen when an Edit is a no-op or filesystems coalesce mtime).
+        const filePath = path.join(tempRootDir, 'edited.txt');
+        await fsp.writeFile(filePath, 'before', 'utf-8');
+        await read({ file_path: filePath });
+
+        const stats = fs.statSync(filePath);
+        fileReadCache.recordWrite(filePath, stats);
+
+        const after = await read({ file_path: filePath });
+        expect(after.llmContent).toBe('before');
+        expect(after.llmContent).not.toMatch(/unchanged since/);
+      });
+
+      it('never short-circuits a ranged Read (offset/limit set)', async () => {
+        const filePath = path.join(tempRootDir, 'multi.txt');
+        await fsp.writeFile(filePath, 'a\nb\nc\nd\ne', 'utf-8');
+        await read({ file_path: filePath });
+
+        const ranged = await read({
+          file_path: filePath,
+          offset: 1,
+          limit: 2,
+        });
+        expect(typeof ranged.llmContent).toBe('string');
+        expect(ranged.llmContent).not.toMatch(/unchanged since/);
+        expect(ranged.llmContent).toContain('b');
+      });
+
+      it('does not arm the placeholder if the first Read was truncated', async () => {
+        // Truncation means the model has not seen the full file even
+        // though no offset/limit was passed. A follow-up no-args Read
+        // must therefore re-emit the truncated window rather than
+        // claiming "you've already seen this file".
+        const filePath = path.join(tempRootDir, 'long.txt');
+        // Write more lines than the mock Config's truncate-lines limit
+        // (500) so the read pipeline reports isTruncated = true.
+        const bigContent = Array.from(
+          { length: 700 },
+          (_, i) => `line ${i + 1}`,
+        ).join('\n');
+        await fsp.writeFile(filePath, bigContent, 'utf-8');
+
+        const first = await read({ file_path: filePath });
+        expect(typeof first.llmContent).toBe('string');
+        // Truncation kicks in (either by line or character cap depending
+        // on Config); we only need the read to actually be truncated,
+        // not match a specific line count.
+        expect(first.returnDisplay).toMatch(/Read lines .* of 700/);
+
+        const second = await read({ file_path: filePath });
+        expect(typeof second.llmContent).toBe('string');
+        expect(second.llmContent).not.toMatch(/unchanged since/);
+        expect(second.returnDisplay).toMatch(/Read lines .* of 700/);
+      });
+
+      it('does not arm the placeholder if the first Read was ranged', async () => {
+        // First Read covers only a slice — lastReadWasFull = false. A
+        // follow-up no-args Read must therefore go through the full
+        // pipeline, since the cache cannot prove the model has already
+        // seen the entire file.
+        const filePath = path.join(tempRootDir, 'big.txt');
+        await fsp.writeFile(filePath, 'a\nb\nc\nd\ne', 'utf-8');
+
+        await read({ file_path: filePath, offset: 0, limit: 2 });
+        const followUp = await read({ file_path: filePath });
+        expect(typeof followUp.llmContent).toBe('string');
+        expect(followUp.llmContent).not.toMatch(/unchanged since/);
+        expect(followUp.llmContent).toContain('e');
+      });
+
+      it('does not return the placeholder for binary files', async () => {
+        const binPath = path.join(tempRootDir, 'blob.bin');
+        await fsp.writeFile(binPath, Buffer.from([0x00, 0xff, 0x00, 0xff]));
+        const first = await read({ file_path: binPath });
+        expect(typeof first.llmContent).toBe('string');
+        expect(first.llmContent).toMatch(/Cannot display content of binary/);
+
+        const second = await read({ file_path: binPath });
+        expect(second.llmContent).not.toMatch(/unchanged since/);
+        expect(second.llmContent).toMatch(/Cannot display content of binary/);
+      });
+
+      it('records an auto-memory read in the cache so a follow-up Edit can pass enforcement', async () => {
+        // Auto-memory files skip the file_unchanged fast-path (they
+        // own a per-read freshness `<system-reminder>` that must be
+        // re-emitted) but they MUST still be recorded in the cache
+        // — otherwise the prior-read enforcement on Edit / WriteFile
+        // would refuse to mutate a file the model legitimately just
+        // read. Put a file under .qwen/<auto-memory>/ via
+        // QWEN_CODE_MEMORY_LOCAL=1 and assert recordRead happened.
+        const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+        try {
+          const { getAutoMemoryRoot, clearAutoMemoryRootCache } = await import(
+            '../memory/paths.js'
+          );
+          clearAutoMemoryRootCache();
+          const memRoot = getAutoMemoryRoot(tempRootDir);
+          await fsp.mkdir(memRoot, { recursive: true });
+          const memFile = path.join(memRoot, 'AGENTS.md');
+          await fsp.writeFile(memFile, '# memory', 'utf-8');
+
+          const result = await read({ file_path: memFile });
+          // Slow path returned the actual content (not a placeholder).
+          expect(typeof result.llmContent).toBe('string');
+          expect(result.llmContent).not.toMatch(/unchanged since/);
+          // The cache must contain the auto-memory file's entry, AND
+          // the entry must be in a shape that satisfies prior-read
+          // enforcement on Edit / WriteFile (fresh + lastReadAt set +
+          // full + cacheable). Asserting only `fresh` would let a
+          // future regression that records auto-memory reads as
+          // partial/non-cacheable slip through silently — those reads
+          // would still report fresh but enforcement would reject
+          // every follow-up Edit.
+          const status = fileReadCache.check(fs.statSync(memFile));
+          expect(status.state).toBe('fresh');
+          if (status.state === 'fresh') {
+            expect(status.entry.lastReadAt).toBeDefined();
+            expect(status.entry.lastReadWasFull).toBe(true);
+            expect(status.entry.lastReadCacheable).toBe(true);
+          }
+        } finally {
+          if (previousLocal === undefined) {
+            delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+          } else {
+            process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+          }
+        }
+      });
+
+      it('records SVG-as-text reads with cacheable=true so a follow-up Edit passes enforcement', async () => {
+        // Pre-fix the SVG branch in fileUtils.ts returned content
+        // without `originalLineCount`, which collapsed
+        // ReadFileToolInvocation's `cacheable` derivation to
+        // false. EditTool's prior-read enforcement then mistook
+        // the just-read SVG for a "non-text payload" and rejected
+        // a subsequent in-place edit.
+        const svgPath = path.join(tempRootDir, 'icon.svg');
+        await fsp.writeFile(
+          svgPath,
+          '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n',
+          'utf-8',
+        );
+
+        const result = await read({ file_path: svgPath });
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.returnDisplay).toMatch(/^Read SVG as text:/);
+
+        // The cache must record this as a full, cacheable read so
+        // that prior-read enforcement on Edit / WriteFile would
+        // recognise it as the model having seen the bytes.
+        const status = fileReadCache.check(fs.statSync(svgPath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
+          expect(status.entry.lastReadAt).toBeDefined();
+          expect(status.entry.lastReadWasFull).toBe(true);
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
+      });
+
+      it('does not return the placeholder for image files', async () => {
+        const imagePath = path.join(tempRootDir, 'pic.png');
+        const pngHeader = Buffer.from([
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        ]);
+        await fsp.writeFile(imagePath, pngHeader);
+
+        const first = await read({ file_path: imagePath });
+        // Image returns a Part, not a string.
+        expect(typeof first.llmContent).not.toBe('string');
+
+        const second = await read({ file_path: imagePath });
+        // Must remain a Part — never collapsed to a string placeholder.
+        expect(typeof second.llmContent).not.toBe('string');
+      });
+
+      it('completely bypasses the cache when getFileReadCacheDisabled() is true', async () => {
+        // Build a fresh ReadFileTool with a Config whose cache is
+        // disabled. Two consecutive full Reads must both return the
+        // file content — never the placeholder, and the cache itself
+        // must remain empty so prior-read enforcement (added in a
+        // follow-up) cannot accidentally trip on a recorded entry.
+        const isolatedCache = new FileReadCache();
+        const disabledConfig = {
+          getFileService: () => new FileDiscoveryService(tempRootDir),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, pdf: true, audio: true, video: true },
+          }),
+          getFileReadCache: () => isolatedCache,
+          getFileReadCacheDisabled: () => true,
+        } as unknown as Config;
+        const disabledTool = new ReadFileTool(disabledConfig);
+
+        const filePath = path.join(tempRootDir, 'bypass.txt');
+        await fsp.writeFile(filePath, 'plain text', 'utf-8');
+
+        const first = await read({ file_path: filePath }, disabledTool);
+        const second = await read({ file_path: filePath }, disabledTool);
+
+        expect(first.llmContent).toBe('plain text');
+        expect(second.llmContent).toBe('plain text');
+        expect(second.llmContent).not.toMatch(/unchanged since/);
+        expect(isolatedCache.size()).toBe(0);
+      });
     });
 
     describe('with .qwenignore', () => {

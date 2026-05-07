@@ -374,6 +374,8 @@ export default {
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
+  'Auto (detect terminal theme)': 'Automático (detectar tema do terminal)',
+  Auto: 'Automático',
   Text: 'Texto',
   JSON: 'JSON',
   Plan: 'Planejamento',
@@ -1038,7 +1040,7 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Trocar o modelo para esta sessão (--fast para modelo de sugestões)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Definir modelo mais leve para sugestões de prompt e execução especulativa',
@@ -1047,6 +1049,8 @@ export default {
   'Authentication type not available.': 'Tipo de autenticação não disponível.',
   'No models available for the current authentication type ({{authType}}).':
     'Nenhum modelo disponível para o tipo de autenticação atual ({{authType}}).',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
@@ -1307,6 +1311,8 @@ export default {
     'Pago \u00B7 Até 6.000 solicitações/5 hrs \u00B7 Todos os modelos Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': 'Traga sua própria chave API',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Autenticação baseada em navegador com provedores terceiros (por exemplo, OpenRouter, ModelScope)',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Use credenciais do Coding Plan ou suas próprias chaves API/provedores.',
@@ -1562,20 +1568,6 @@ export default {
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
-  // DataWorks input placeholder
-  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"':
-    'Digite sua mensagem, por exemplo：「Ajude-me a confirmar minha identidade e espaços de trabalho comuns no DataWorks?」',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 Confirmação de identidade：「Ajude-me a confirmar minha identidade e permissões no DataWorks?」',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 Análise de tarefas：「Analise os nós recém-criados no espaço de trabalho dataworks_analyze na última semana e o que estão fazendo」',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 Governança de tarefas：「No espaço de trabalho dataworks_analyze, ajude-me a encontrar nós criados há muito tempo, mas nunca publicados」',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 Diagnóstico de problemas：「Os dados em dwd_is_it_software_released_df e ads_is_it_sfw_moni_key_released_recycled_df são inconsistentes, ambos têm a fonte ods_ism_it_software_key_released_df. Verifique a diferença na lógica deles」',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ Correção de problemas：「Na tabela de funcionários my_project.ods_emp_info_d, os dados do departamento para o funcionário EMP001 estão vazios. Ajude-me a investigar a causa e fornecer sugestões de correção」',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     'Pressione Ctrl+O para alternar o modo compacto — ocultar saída de ferramentas e raciocínio.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
@@ -1655,6 +1647,7 @@ export default {
     'Encontrado {{count}} arquivo de comando TOML:',
   'Found {{count}} TOML command files:':
     'Encontrados {{count}} arquivos de comando TOML:',
+  'Current tasks': 'Tarefas atuais',
   '... and {{count}} more': '... e mais {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'O formato TOML está obsoleto. Você gostaria de migrá-los para o formato Markdown?',

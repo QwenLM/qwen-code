@@ -183,7 +183,7 @@ export const languageCommand: SlashCommand = {
     return t('View or change the language setting');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
 
   action: async (
     context: CommandContext,
@@ -269,7 +269,7 @@ export const languageCommand: SlashCommand = {
         return t('Set UI language');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local-jsx',
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
 
       action: async (
         context: CommandContext,
@@ -324,7 +324,7 @@ export const languageCommand: SlashCommand = {
             });
           },
           kind: CommandKind.BUILT_IN,
-          commandType: 'local-jsx',
+          supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
           action: async (context, args) => {
             if (args.trim()) {
               return {
@@ -348,7 +348,7 @@ export const languageCommand: SlashCommand = {
         return t('Set LLM output language');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local-jsx',
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
 
       action: async (
         context: CommandContext,

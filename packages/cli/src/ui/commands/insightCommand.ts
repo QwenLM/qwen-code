@@ -29,18 +29,52 @@ export const insightCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext) => {
     try {
       context.ui.setDebugMessage(t('Generating insights...'));
 
       const projectsDir = join(Storage.getRuntimeBaseDir(), 'projects');
       if (!context.services.config) {
+        if (context.executionMode !== 'interactive') {
+          return {
+            type: 'message' as const,
+            messageType: 'error' as const,
+            content: 'Config service is not available.',
+          };
+        }
         throw new Error('Config service is not available');
       }
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
       );
+
+      if (context.executionMode === 'non_interactive') {
+        // non_interactive: run synchronously and return a single message
+        try {
+          const outputPath = await insightGenerator.generateStaticInsight(
+            projectsDir,
+            () => {
+              // progress callback is no-op in non_interactive mode
+            },
+          );
+          return {
+            type: 'message' as const,
+            messageType: 'info' as const,
+            content: t('Insight report generated at: {{path}}', {
+              path: outputPath,
+            }),
+          };
+        } catch (error) {
+          return {
+            type: 'message' as const,
+            messageType: 'error' as const,
+            content: t('Failed to generate insights: {{error}}', {
+              error: (error as Error).message,
+            }),
+          };
+        }
+      }
 
       if (context.executionMode === 'acp') {
         const pendingMessages: Array<{
@@ -215,6 +249,14 @@ export const insightCommand: SlashCommand = {
     } catch (error) {
       context.ui.setPendingItem(null);
 
+      if (context.executionMode !== 'interactive') {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content: `Failed to generate insights: ${(error as Error).message}`,
+        };
+      }
+
       context.ui.addItem(
         {
           type: MessageType.ERROR,
@@ -228,5 +270,6 @@ export const insightCommand: SlashCommand = {
       logger.error('Insight generation error:', error);
       return;
     }
+    return;
   },
 };

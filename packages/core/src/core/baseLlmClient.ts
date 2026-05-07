@@ -17,7 +17,7 @@ import type { Config } from '../config/config.js';
 import type { ContentGenerator } from './contentGenerator.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
@@ -117,6 +117,13 @@ export class BaseLlmClient {
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        persistentMode: isUnattendedMode(),
+        signal: abortSignal,
+        heartbeatFn: (info) => {
+          process.stderr.write(
+            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
       });
 
       const functionCalls = getFunctionCalls(result);

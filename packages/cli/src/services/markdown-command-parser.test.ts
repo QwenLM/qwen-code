@@ -14,6 +14,7 @@ describe('parseMarkdownCommand', () => {
   it('should parse markdown with YAML frontmatter', () => {
     const content = `---
 description: Test command
+argument-hint: "[issue-number]"
 ---
 
 This is the prompt content.`;
@@ -23,6 +24,7 @@ This is the prompt content.`;
     expect(result).toEqual({
       frontmatter: {
         description: 'Test command',
+        'argument-hint': '[issue-number]',
       },
       prompt: 'This is the prompt content.',
     });
@@ -146,6 +148,7 @@ describe('MarkdownCommandDefSchema', () => {
     const validDef = {
       frontmatter: {
         description: 'Test description',
+        'argument-hint': '[issue-number]',
       },
       prompt: 'Test prompt',
     };

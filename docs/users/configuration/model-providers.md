@@ -417,6 +417,13 @@ The configuration resolution follows a strict layering model with one crucial ru
    - All fields **not defined** by the provider are set to `undefined` (not inherited from settings)
    - This ensures provider configurations act as a complete, self-contained "sealed package"
 
+   If a model is listed in `modelProviders`, put all model-specific
+   generation settings for that model in the matching provider entry. Top-level
+   `model.generationConfig` values, including `contextWindowSize`,
+   `modalities`, `customHeaders`, and `extra_body`, are ignored for provider
+   models. Configure those fields under
+   `modelProviders[authType][].generationConfig` for them to apply.
+
 2. **When NO modelProvider model is selected** (e.g., using `--model` with a raw model ID, or using CLI/env/settings directly):
    - The resolution falls through to lower layers
    - Fields are populated from CLI → env → settings → defaults
@@ -480,6 +487,69 @@ When using a raw model via `--model gpt-4` (not from modelProviders, creates a R
 - `samplingParams.max_tokens` = 1000 (from settings)
 
 The merge strategy for `modelProviders` itself is REPLACE: the entire `modelProviders` from project settings will override the corresponding section in user settings, rather than merging the two.
+
+## Reasoning / thinking configuration
+
+The optional `reasoning` field under `generationConfig` controls how aggressively the model reasons before responding. The Anthropic and Gemini converters always honor it. The OpenAI-compatible pipeline honors it **unless** `generationConfig.samplingParams` is set — see the "Interaction with `samplingParams`" caveat below.
+
+```jsonc
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "deepseek-v4-pro",
+        "name": "DeepSeek V4 Pro",
+        "baseUrl": "https://api.deepseek.com/v1",
+        "envKey": "DEEPSEEK_API_KEY",
+        "generationConfig": {
+          // The four-tier scale:
+          //   'low'    | 'medium' — server-mapped to 'high' on DeepSeek
+          //   'high'   — default reasoning intensity
+          //   'max'    — DeepSeek-specific extra-strong tier
+          // Or set `false` to disable reasoning entirely.
+          "reasoning": { "effort": "max" },
+        },
+      },
+    ],
+  },
+}
+```
+
+### Per-provider behavior
+
+| Protocol / provider                          | Wire shape                                                           | Notes                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **OpenAI / DeepSeek** (`api.deepseek.com`)   | Flat `reasoning_effort: <effort>` body parameter                     | When `reasoning.effort` is set in the nested config shape, it's rewritten to flat `reasoning_effort` and `'low'`/`'medium'` are normalized to `'high'`, `'xhigh'` to `'max'` — mirroring DeepSeek's [server-side back-compat](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion). Top-level `samplingParams.reasoning_effort` or `extra_body.reasoning_effort` overrides skip this normalization and ship verbatim. |
+| **OpenAI** (other compatible servers)        | `reasoning: { effort, ... }` passed through verbatim                 | Set via `samplingParams` (e.g. `samplingParams.reasoning_effort` for GPT-5/o-series) when the provider expects a different shape.                                                                                                                                                                                                                                                                                                |
+| **Anthropic** (real `api.anthropic.com`)     | `output_config: { effort }` plus the `effort-2025-11-24` beta header | Real Anthropic accepts `'low'`/`'medium'`/`'high'` only. `'max'` is **clamped to `'high'`** with a `debugLogger.warn` line (once per generator); if you want max effort, switch the baseURL to a DeepSeek-compatible endpoint that supports it.                                                                                                                                                                                  |
+| **Anthropic** (`api.deepseek.com/anthropic`) | Same `output_config: { effort }` + beta header                       | `'max'` is passed through unchanged.                                                                                                                                                                                                                                                                                                                                                                                             |
+| **Gemini** (`@google/genai`)                 | `thinkingConfig: { includeThoughts: true, thinkingLevel }`           | `'low'` → `LOW`, `'high'`/`'max'` → `HIGH`, others → `THINKING_LEVEL_UNSPECIFIED` (Gemini has no `MAX` tier).                                                                                                                                                                                                                                                                                                                    |
+
+### `reasoning: false`
+
+Setting `reasoning: false` (the literal boolean) explicitly disables thinking on every provider — useful for cheap side queries that don't benefit from reasoning. This is honored at the request level too via `request.config.thinkingConfig.includeThoughts: false` for one-off calls (e.g. suggestion generation).
+
+On a `api.deepseek.com` baseURL, the OpenAI pipeline emits the explicit `thinking: { type: 'disabled' }` field that DeepSeek V4+ requires — the server-side default is `'enabled'`, so simply omitting `reasoning_effort` would still pay thinking latency/cost. Self-hosted DeepSeek backends (sglang/vllm) and other OpenAI-compatible servers do **not** receive this field; if you need to disable thinking on those, inject `thinking: { type: 'disabled' }` (or whatever knob your inference framework exposes) via `samplingParams`/`extra_body`.
+
+### Interaction with `samplingParams` (OpenAI-compatible only)
+
+> [!warning]
+>
+> When `generationConfig.samplingParams` is set on an OpenAI-compatible provider, the pipeline ships those keys to the wire **verbatim** and skips the separate `reasoning` injection entirely. So a config like `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` will silently drop the reasoning field on OpenAI/DeepSeek requests.
+>
+> If you set `samplingParams`, include the reasoning knob inside it directly — for DeepSeek that's `samplingParams.reasoning_effort`, for GPT-5/o-series it's `samplingParams.reasoning_effort` (their flat field) or `samplingParams.reasoning` (the nested object). For OpenRouter and other providers the field name varies; consult the provider docs.
+>
+> The Anthropic and Gemini converters are unaffected — they always read `reasoning.effort` directly regardless of `samplingParams`.
+
+### `budget_tokens`
+
+You can pin an exact thinking-token budget by including `budget_tokens` alongside `effort`:
+
+```jsonc
+"reasoning": { "effort": "high", "budget_tokens": 50000 }
+```
+
+For Anthropic this becomes `thinking.budget_tokens`. For OpenAI/DeepSeek the field is preserved but currently ignored by the server — `reasoning_effort` is the load-bearing knob.
 
 ## Provider Models vs Runtime Models
 

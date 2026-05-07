@@ -963,11 +963,25 @@ describe('SettingsDialog', () => {
         </KeypressProvider>,
       );
 
-      // Trigger a restart-required setting change: navigate to "Language: UI" (2nd item) and toggle it.
-      stdin.write(TerminalKeys.DOWN_ARROW as string);
-      await wait();
-      stdin.write(TerminalKeys.ENTER as string);
-      await wait();
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Tool Approval Mode');
+      });
+
+      const languageIndex = getDialogSettingKeys().indexOf('general.language');
+      expect(languageIndex).toBeGreaterThanOrEqual(0);
+
+      const press = async (key: string) => {
+        act(() => {
+          stdin.write(key);
+        });
+        await wait();
+      };
+
+      // Trigger a restart-required setting change by toggling the UI language setting.
+      for (let i = 0; i < languageIndex; i++) {
+        await press(TerminalKeys.DOWN_ARROW as string);
+      }
+      await press(TerminalKeys.ENTER as string);
 
       await waitFor(() => {
         expect(lastFrame()).toContain(
@@ -976,10 +990,8 @@ describe('SettingsDialog', () => {
       });
 
       // Switch scopes; restart prompt should remain visible.
-      stdin.write(TerminalKeys.TAB as string);
-      await wait();
-      stdin.write('2');
-      await wait();
+      await press(TerminalKeys.TAB as string);
+      await press('2');
 
       await waitFor(() => {
         expect(lastFrame()).toContain(

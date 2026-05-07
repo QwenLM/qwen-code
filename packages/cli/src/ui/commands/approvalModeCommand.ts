@@ -34,14 +34,15 @@ export const approvalModeCommand: SlashCommand = {
     return t('View or change the approval mode for tool usage');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<OpenDialogActionReturn | MessageActionReturn> => {
     const mode = parseApprovalModeArg(args);
 
-    // If no argument provided, open the dialog
+    // If no argument provided, open dialog in interactive mode;
+    // in non-interactive/ACP, return current state instead
     if (!args.trim()) {
       return {
         type: 'dialog',

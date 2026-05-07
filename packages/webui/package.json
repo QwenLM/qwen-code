@@ -1,6 +1,6 @@
 {
-  "name": "@alife/dataworks-qwen-code-webui",
-  "version": "0.14.8",
+  "name": "@qwen-code/webui",
+  "version": "0.15.7",
   "description": "Shared UI components for Qwen Code packages",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -28,8 +28,7 @@
     "**/*.css"
   ],
   "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.anpm.alibaba-inc.com"
+    "access": "public"
   },
   "scripts": {
     "dev": "vite build --watch",
@@ -48,13 +47,6 @@
     "markdown-it": "^14.1.0"
   },
   "devDependencies": {
-    "@chromatic-com/storybook": "^5.0.0",
-    "@qwen-code/qwen-code-core": "file:../core",
-    "@storybook/addon-a11y": "^10.1.11",
-    "@storybook/addon-docs": "^10.1.11",
-    "@storybook/addon-onboarding": "^10.1.11",
-    "@storybook/addon-vitest": "^10.1.11",
-    "@storybook/react-vite": "^10.1.11",
     "@types/markdown-it": "^14.1.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
@@ -66,6 +58,12 @@
     "vite": "^5.0.0",
     "vite-plugin-dts": "^4.5.4",
     "storybook": "^10.1.11",
+    "@storybook/react-vite": "^10.1.11",
+    "@chromatic-com/storybook": "^5.0.0",
+    "@storybook/addon-vitest": "^10.1.11",
+    "@storybook/addon-a11y": "^10.1.11",
+    "@storybook/addon-docs": "^10.1.11",
+    "@storybook/addon-onboarding": "^10.1.11",
     "eslint-plugin-storybook": "^10.1.11",
     "playwright": "^1.57.0",
     "@vitest/browser": "^3.2.4",

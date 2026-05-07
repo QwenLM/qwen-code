@@ -10,15 +10,14 @@ import { Text } from 'ink';
 import type React from 'react';
 import { ToolGroupMessage } from './ToolGroupMessage.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
-import { ToolCallStatus, StreamingState } from '../../types.js';
+import { ToolCallStatus } from '../../types.js';
 import type {
+  AgentResultDisplay,
   Config,
   ToolCallConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
-import { StreamingContext } from '../../contexts/StreamingContext.js';
-import { CompactModeProvider } from '../../contexts/CompactModeContext.js';
 
 // Mock child components to isolate ToolGroupMessage behavior
 vi.mock('./ToolMessage.js', () => ({
@@ -28,12 +27,16 @@ vi.mock('./ToolMessage.js', () => ({
     description,
     status,
     emphasis,
+    resultDisplay,
+    isFocused,
   }: {
     callId: string;
     name: string;
     description: string;
     status: ToolCallStatus;
     emphasis: string;
+    resultDisplay?: unknown;
+    isFocused?: boolean;
   }) {
     // Use the same constants as the real component
     const statusSymbolMap: Record<ToolCallStatus, string> = {
@@ -45,6 +48,18 @@ vi.mock('./ToolMessage.js', () => ({
       [ToolCallStatus.Error]: TOOL_STATUS.ERROR,
     };
     const statusSymbol = statusSymbolMap[status] || '?';
+    if (
+      resultDisplay &&
+      typeof resultDisplay === 'object' &&
+      (resultDisplay as { type?: string }).type === 'task_execution'
+    ) {
+      return (
+        <Text>
+          MockSubagent[{callId}]: focused={String(isFocused)}
+        </Text>
+      );
+    }
+
     return (
       <Text>
         MockTool[{callId}]: {statusSymbol} {name} - {description} ({emphasis})
@@ -89,24 +104,11 @@ describe('<ToolGroupMessage />', () => {
     isFocused: true,
   };
 
-  // Helper to wrap component with required providers.
-  //
-  // NOTE: ToolGroupMessage uses a compact rendering path when compactMode is on
-  // (and other guards). The Golden Snapshots / Border Color Logic / Height
-  // Calculation suites validate the *non-compact* (bordered, multi-line) layout,
-  // so we default to `compactMode: false` here. Compact rendering has its own
-  // dedicated suite further down.
-  const renderWithProviders = (
-    component: React.ReactElement,
-    { compactMode = false }: { compactMode?: boolean } = {},
-  ) =>
+  // Helper to wrap component with required providers
+  const renderWithProviders = (component: React.ReactElement) =>
     render(
       <ConfigContext.Provider value={mockConfig}>
-        <StreamingContext.Provider value={StreamingState.Idle}>
-          <CompactModeProvider value={{ compactMode }}>
-            {component}
-          </CompactModeProvider>
-        </StreamingContext.Provider>
+        {component}
       </ConfigContext.Provider>,
     );
 
@@ -273,6 +275,198 @@ describe('<ToolGroupMessage />', () => {
     });
   });
 
+  describe('SubAgent focus', () => {
+    // Helper to build a running SubAgent result display
+    const createRunningSubagentDisplay = (
+      name: string,
+    ): AgentResultDisplay => ({
+      type: 'task_execution',
+      subagentName: name,
+      taskDescription: `${name} task`,
+      taskPrompt: `Run ${name}`,
+      status: 'running',
+      toolCalls: [
+        {
+          callId: `${name}-read-1`,
+          name: 'read_file',
+          status: 'success',
+          description: 'Read file',
+        },
+      ],
+    });
+
+    // Helper to build a completed SubAgent result display
+    const createCompletedSubagentDisplay = (
+      name: string,
+    ): AgentResultDisplay => ({
+      type: 'task_execution',
+      subagentName: name,
+      taskDescription: `${name} task`,
+      taskPrompt: `Run ${name}`,
+      status: 'completed',
+      toolCalls: [
+        {
+          callId: `${name}-read-1`,
+          name: 'read_file',
+          status: 'success',
+          description: 'Read file',
+        },
+      ],
+    });
+
+    it('keeps a normal running subagent focused so Ctrl+E can expand it', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[
+            createToolCall({
+              callId: 'agent-1',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('reviewer'),
+            }),
+          ]}
+        />,
+      );
+
+      expect(lastFrame()).toContain('MockSubagent[agent-1]: focused=true');
+    });
+
+    it('does not focus a running subagent when the parent group is not focused', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          isFocused={false}
+          toolCalls={[
+            createToolCall({
+              callId: 'agent-1',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('reviewer'),
+            }),
+          ]}
+        />,
+      );
+
+      expect(lastFrame()).toContain('MockSubagent[agent-1]: focused=false');
+    });
+
+    it('gives focus to only the first running subagent when multiple are running', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[
+            createToolCall({
+              callId: 'agent-1',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('first'),
+            }),
+            createToolCall({
+              callId: 'agent-2',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('second'),
+            }),
+          ]}
+        />,
+      );
+
+      expect(lastFrame()).toContain('MockSubagent[agent-1]: focused=true');
+      expect(lastFrame()).toContain('MockSubagent[agent-2]: focused=false');
+    });
+
+    it('pending confirmation wins over running fallback', () => {
+      const pendingDisplay: AgentResultDisplay = {
+        ...createRunningSubagentDisplay('pending-agent'),
+        pendingConfirmation: {
+          type: 'info',
+          title: 'Approve?',
+          prompt: 'Allow this action?',
+          onConfirm: vi.fn(),
+        },
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[
+            createToolCall({
+              callId: 'agent-running',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('runner'),
+            }),
+            createToolCall({
+              callId: 'agent-pending',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: pendingDisplay,
+            }),
+          ]}
+        />,
+      );
+
+      // The subagent with pending confirmation gets focus, not the first running one
+      expect(lastFrame()).toContain(
+        'MockSubagent[agent-running]: focused=false',
+      );
+      expect(lastFrame()).toContain(
+        'MockSubagent[agent-pending]: focused=true',
+      );
+    });
+
+    it('direct tool-level confirmation blocks all subagent shortcut focus', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[
+            createToolCall({
+              callId: 'tool-confirm',
+              name: 'write_file',
+              status: ToolCallStatus.Confirming,
+              confirmationDetails: {
+                type: 'info',
+                title: 'Write file?',
+                prompt: 'Allow write?',
+                onConfirm: vi.fn(),
+              },
+            }),
+            createToolCall({
+              callId: 'agent-running',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('runner'),
+            }),
+          ]}
+        />,
+      );
+
+      // Direct tool confirmation active → subagent gets no shortcut focus
+      expect(lastFrame()).toContain(
+        'MockSubagent[agent-running]: focused=false',
+      );
+    });
+
+    it('completed subagent does not receive focus', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[
+            createToolCall({
+              callId: 'agent-done',
+              name: 'agent',
+              status: ToolCallStatus.Success,
+              resultDisplay: createCompletedSubagentDisplay('finished'),
+            }),
+          ]}
+        />,
+      );
+
+      expect(lastFrame()).toContain('MockSubagent[agent-done]: focused=false');
+    });
+  });
+
   describe('Border Color Logic', () => {
     it('uses yellow border when tools are pending', () => {
       const toolCalls = [createToolCall({ status: ToolCallStatus.Pending })];
@@ -336,51 +530,6 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       expect(lastFrame()).toMatchSnapshot();
-    });
-  });
-
-  describe('Compact Mode (dataworks fork)', () => {
-    it('uses CompactToolGroupDisplay when compactMode is true', () => {
-      const toolCalls = [
-        createToolCall({
-          callId: 'tool-1',
-          name: 'first-tool',
-          status: ToolCallStatus.Success,
-        }),
-        createToolCall({
-          callId: 'tool-2',
-          name: 'second-tool',
-          status: ToolCallStatus.Executing,
-        }),
-      ];
-      const { lastFrame } = renderWithProviders(
-        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
-        { compactMode: true },
-      );
-      // Compact path delegates to CompactToolGroupDisplay, which only shows
-      // the "active" tool (Executing > Confirming > last). It must NOT render
-      // the verbose-mode bordered MockTool layout, and it must include the
-      // Ctrl+O hint line (i18n key default en).
-      const frame = lastFrame() ?? '';
-      expect(frame).toContain('second-tool');
-      expect(frame).toContain('Press Ctrl+O to show full tool output');
-      expect(frame).not.toContain('MockTool[');
-      expect(frame).toMatchSnapshot();
-    });
-
-    it('falls back to verbose layout when isUserInitiated is true', () => {
-      const toolCalls = [createToolCall({ name: 'shell-cmd' })];
-      const { lastFrame } = renderWithProviders(
-        <ToolGroupMessage
-          {...baseProps}
-          toolCalls={toolCalls}
-          isUserInitiated={true}
-        />,
-        { compactMode: true },
-      );
-      // isUserInitiated short-circuits the compact branch, so the
-      // bordered MockTool layout from the verbose path should appear.
-      expect(lastFrame()).toContain('MockTool[tool-123]');
     });
   });
 

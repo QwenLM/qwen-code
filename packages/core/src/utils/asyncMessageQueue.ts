@@ -7,18 +7,16 @@
 /**
  * @fileoverview Generic non-blocking message queue.
  *
- * Queue for producer/consumer patterns with FIFO dequeue and LIFO
- * pop. All operations are non-blocking — they return null when empty.
- * The consumer decides when and how to process items.
+ * Simple FIFO queue for producer/consumer patterns. Dequeue is
+ * non-blocking — returns null when empty. The consumer decides
+ * when and how to process items.
  */
 
 /**
  * A generic non-blocking message queue.
  *
  * - `enqueue(item)` adds an item. Silently dropped after `drain()`.
- * - `dequeue()` returns the next item (FIFO), or `null` if empty.
- * - `popLast()` returns the last item (LIFO), or `null` if empty.
- *   Useful for retrieving the most recently queued item for editing.
+ * - `dequeue()` returns the next item, or `null` if empty.
  * - `drain()` signals that no more items will be enqueued.
  */
 export class AsyncMessageQueue<T> {
@@ -47,14 +45,6 @@ export class AsyncMessageQueue<T> {
   /** Number of items currently in the queue. */
   get size(): number {
     return this.items.length;
-  }
-
-  /** Remove and return the last item, or null if empty. */
-  popLast(): T | null {
-    if (this.items.length > 0) {
-      return this.items.pop()!;
-    }
-    return null;
   }
 
   /** Whether `drain()` has been called. */

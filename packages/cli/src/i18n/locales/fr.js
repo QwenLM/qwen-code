@@ -443,6 +443,8 @@ export default {
   'Vision Model Preview': 'Aperçu du modèle de vision',
   'Tool Schema Compliance': 'Conformité au schéma des outils',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
+  'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
+  Auto: 'Auto',
   Text: 'Texte',
   JSON: 'JSON',
   Plan: 'Plan',
@@ -1173,7 +1175,7 @@ export default {
   // ============================================================================
   // Commandes - Modèle
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Changer le modèle pour cette session (--fast pour le modèle de suggestion)',
   'Set a lighter model for prompt suggestions and speculative execution':
     "Définir un modèle plus léger pour les suggestions d'invite et l'exécution spéculative",
@@ -1183,6 +1185,8 @@ export default {
     "Type d'authentification non disponible.",
   'No models available for the current authentication type ({{authType}}).':
     "Aucun modèle disponible pour le type d'authentification actuel ({{authType}}).",
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commandes - Effacer
@@ -1343,6 +1347,8 @@ export default {
     "Payant · Jusqu'à 6 000 requêtes/5h · Tous les modèles Alibaba Cloud Coding Plan",
   'Alibaba Cloud Coding Plan': 'Plan de codage Alibaba Cloud',
   'Bring your own API key': 'Apportez votre propre clé API',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Authentification basée sur le navigateur avec des fournisseurs tiers (par exemple OpenRouter, ModelScope)',
   'API-KEY': 'CLÉ-API',
   'Use coding plan credentials or your own api-keys/providers.':
     'Utilisez les identifiants du plan de codage ou vos propres clés API/fournisseurs.',
@@ -1602,20 +1608,6 @@ export default {
     'Vous pouvez changer rapidement le mode de permission avec Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Essayez /insight pour générer des insights personnalisés depuis votre historique de chat.',
-  // DataWorks input placeholder
-  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"':
-    'Saisissez votre message, par exemple：« Aidez-moi à vérifier mon identité et mes espaces de travail courants dans DataWorks ? »',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 Identité : « Aidez-moi à vérifier mon identité et mes permissions dans DataWorks ? »',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    "📊 Analyse : « Analysez les nœuds récemment créés dans l'espace de travail dataworks_analyze au cours de la dernière semaine et ce qu'ils font »",
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    "🧹 Gouvernance : « Dans l'espace de travail dataworks_analyze, aidez-moi à trouver des nœuds créés il y a longtemps mais qui n'ont jamais été publiés »",
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 Diagnostic : « Les données dans dwd_is_it_software_released_df et ads_is_it_sfw_moni_key_released_recycled_df sont incohérentes, toutes deux ont la source ods_ism_it_software_key_released_df. Vérifiez ce qui diffère dans leur logique »',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    "🛠️ Correction : « Dans la table des employés my_project.ods_emp_info_d, les données du service pour l'employé EMP001 sont vides. Aidez-moi à identifier la cause et à proposer des solutions »",
 
   // ============================================================================
   // Écran de sortie / Stats
@@ -1683,6 +1675,7 @@ export default {
     'Trouvé {{count}} fichier de commande TOML :',
   'Found {{count}} TOML command files:':
     'Trouvé {{count}} fichiers de commande TOML :',
+  'Current tasks': 'Tâches actuelles',
   '... and {{count}} more': '... et {{count}} de plus',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Le format TOML est obsolète. Souhaitez-vous les migrer vers le format Markdown ?',

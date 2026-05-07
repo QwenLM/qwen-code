@@ -130,7 +130,6 @@ function getCommonAttributes(config: Config): LogAttributes {
 }
 
 export { getCommonAttributes };
-export { isInternalPromptId } from '../utils/internalPromptIds.js';
 
 export function logStartSession(
   config: Config,
@@ -509,10 +508,6 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
   recordTokenUsageMetrics(config, event.thoughts_token_count, {
     model: event.model,
     type: 'thought',
-  });
-  recordTokenUsageMetrics(config, event.tool_token_count, {
-    model: event.model,
-    type: 'tool',
   });
 }
 

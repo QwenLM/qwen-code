@@ -348,6 +348,8 @@ export default {
   'Tool Schema Compliance': 'Werkzeug-Schema-Konformität',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
+  'Auto (detect terminal theme)': 'Automatisch (Terminal-Theme erkennen)',
+  Auto: 'Automatisch',
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
@@ -1029,7 +1031,7 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Modell für diese Sitzung wechseln (--fast für Vorschlagsmodell)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Leichteres Modell für Eingabevorschläge und spekulative Ausführung festlegen',
@@ -1039,6 +1041,8 @@ export default {
     'Authentifizierungstyp nicht verfügbar.',
   'No models available for the current authentication type ({{authType}}).':
     'Keine Modelle für den aktuellen Authentifizierungstyp ({{authType}}) verfügbar.',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
@@ -1299,6 +1303,8 @@ export default {
     'Kostenpflichtig \u00B7 Bis zu 6.000 Anfragen/5 Std. \u00B7 Alle Alibaba Cloud Coding Plan Modelle',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': 'Eigenen API-Schlüssel verwenden',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Browserbasierte Authentifizierung mit externen Anbietern (z. B. OpenRouter, ModelScope)',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Verwenden Sie Coding Plan-Anmeldedaten oder Ihre eigenen API-Schlüssel/Anbieter.',
@@ -1613,6 +1619,7 @@ export default {
   'Found {{count}} TOML command file:': '{{count}} TOML-Befehlsdatei gefunden:',
   'Found {{count}} TOML command files:':
     '{{count}} TOML-Befehlsdateien gefunden:',
+  'Current tasks': 'Aktuelle Aufgaben',
   '... and {{count}} more': '... und {{count}} weitere',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Das TOML-Format ist veraltet. Möchten Sie sie ins Markdown-Format migrieren?',
@@ -1827,20 +1834,6 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
-  // DataWorks input placeholder
-  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"':
-    'Geben Sie Ihre Nachricht ein, z. B.：「Helfen Sie mir, meine Identität und gängigen Arbeitsbereiche in DataWorks zu bestätigen?」',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 Identitätsbestätigung：「Helfen Sie mir, meine Identität und Berechtigungen in DataWorks zu bestätigen?」',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 Aufgabenanalyse：「Analysieren Sie die neu erstellten Knoten im Arbeitsbereich dataworks_analyze der letzten Woche und was sie tun」',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 Aufgabengovernance：「Finden Sie im Arbeitsbereich dataworks_analyze Knoten, die vor langer Zeit erstellt, aber nie veröffentlicht wurden」',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 Problembehebung：「Die Daten in dwd_is_it_software_released_df und ads_is_it_sfw_moni_key_released_recycled_df sind inkonsistent, beide haben die Quelle ods_ism_it_software_key_released_df. Prüfen Sie den Unterschied in ihrer Logik」',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ Problemlösung：「In der Mitarbeitertabelle my_project.ods_emp_info_d sind die Abteilungsdaten für Mitarbeiter EMP001 leer. Helfen Sie bei der Ursachenforschung und schlagen Sie Lösungen vor」',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     'Strg+O drücken, um den Kompaktmodus umzuschalten — Tool-Ausgabe und Denkprozess ausblenden.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':

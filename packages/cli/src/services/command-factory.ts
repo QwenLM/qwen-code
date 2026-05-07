@@ -37,6 +37,9 @@ import { AtFileProcessor } from './prompt-processors/atFileProcessor.js';
 export interface CommandDefinition {
   prompt: string;
   description?: string;
+  argumentHint?: string;
+  whenToUse?: string;
+  disableModelInvocation?: boolean;
 }
 
 const debugLogger = createDebugLogger('COMMAND_FACTORY');
@@ -116,8 +119,11 @@ export function createSlashCommandFromDefinition(
       ? 'plugin-command'
       : 'skill-dir-command') as CommandSource,
     sourceLabel: extensionName ? `Plugin: ${extensionName}` : 'Custom',
-    commandType: 'prompt' as const,
-    modelInvocable: !extensionName,
+    modelInvocable: definition.disableModelInvocation
+      ? false
+      : !extensionName || !!(definition.description || definition.whenToUse),
+    argumentHint: definition.argumentHint,
+    whenToUse: definition.whenToUse,
     action: async (
       context: CommandContext,
       _args: string,

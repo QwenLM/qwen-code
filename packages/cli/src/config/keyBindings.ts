@@ -46,13 +46,13 @@ export enum Command {
 
   // App level bindings
   TOGGLE_TOOL_DESCRIPTIONS = 'toggleToolDescriptions',
-  TOGGLE_VERBOSE_MODE = 'toggleVerboseMode',
   TOGGLE_IDE_CONTEXT_DETAIL = 'toggleIDEContextDetail',
   QUIT = 'quit',
   EXIT = 'exit',
   SHOW_MORE_LINES = 'showMoreLines',
   RETRY_LAST = 'retryLast',
   TOGGLE_COMPACT_MODE = 'toggleCompactMode',
+  TOGGLE_RENDER_MODE = 'toggleRenderMode',
 
   // Shell commands
   REVERSE_SEARCH = 'reverseSearch',
@@ -169,13 +169,13 @@ export const defaultKeyBindings: KeyBindingConfig = {
 
   // App level bindings
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
-  [Command.TOGGLE_VERBOSE_MODE]: [{ key: 'o', ctrl: true }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
   [Command.QUIT]: [{ key: 'c', ctrl: true }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
   [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
+  [Command.TOGGLE_RENDER_MODE]: [{ key: 'm', meta: true }],
 
   // Shell commands
   [Command.REVERSE_SEARCH]: [{ key: 'r', ctrl: true }],

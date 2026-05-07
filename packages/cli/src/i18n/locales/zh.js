@@ -413,6 +413,8 @@ export default {
   'Tool Schema Compliance': '工具 Schema 兼容性',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
+  'Auto (detect terminal theme)': '自动（检测终端主题）',
+  Auto: '自动',
   Text: '文本',
   JSON: 'JSON',
   Plan: '规划',
@@ -576,6 +578,7 @@ export default {
   '(user)': '（用户）',
   '[not set]': '［未设置］',
   '[value stored in keychain]': '［值存储在钥匙串中］',
+  'Value:': '值：',
   'Manage extension settings.': '管理扩展设置。',
   'You need to specify a command (set or list).':
     '您需要指定命令（set 或 list）。',
@@ -1035,6 +1038,8 @@ export default {
   'Command:': '命令：',
   'Working Directory:': '工作目录：',
   'Capabilities:': '功能：',
+  'No server selected': '未选择服务器',
+  prompts: '提示',
 
   // MCP Tool List
   'No tools available for this server.': '此服务器没有可用工具。',
@@ -1047,7 +1052,9 @@ export default {
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
+  required: '必需',
   Type: '类型',
+  Enum: '枚举',
   Parameters: '参数',
   'No tool selected': '未选择工具',
   Annotations: '注解',
@@ -1135,7 +1142,7 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '设置用于输入建议和推测执行的轻量模型',
@@ -1143,6 +1150,8 @@ export default {
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
     '当前认证类型 ({{authType}}) 没有可用的模型',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
@@ -1284,6 +1293,8 @@ export default {
     '付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
   'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
   'Bring your own API key': '使用自己的 API 密钥',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    '基于浏览器的第三方提供商认证（例如 OpenRouter、ModelScope）',
   'Use coding plan credentials or your own api-keys/providers.':
     '使用 Coding Plan 凭证或您自己的 API 密钥/提供商。',
   OpenAI: 'OpenAI',
@@ -1523,21 +1534,6 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
-  // DataWorks input placeholder
-  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"':
-    '输入您的消息, 比如:帮我确认下在 DataWorks 的身份和常用工作空间？',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 身份确认："帮我确认下在 DataWorks 的身份和权限？"',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 任务分析："帮我分析下 dataworks_analyze 这个工作空间最近一周新建的节点有哪些，并分析下具体在做什么？"',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 任务治理："在 dataworks_analyze 工作空间中，帮我找出创建时间长但一直没有发布的节点。"',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 问题定位："现在发现 dwd_is_it_software_released_df 和 ads_is_it_sfw_moni_key_released_recycled_df 的数据不一致，他们上游都是 ods_ism_it_software_key_released_df。帮我看一下他们的逻辑有什么不一样？"',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ 问题修复："员工信息表 my_project.ods_emp_info_d 中，工号 EMP001 的部门数据为空。请帮我排查原因并提供修复建议。"',
-  // Contextual tips (from upstream)
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     '按 Ctrl+O 切换紧凑模式 ── 隐藏工具输出和思考过程，界面更简洁。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
@@ -1615,6 +1611,7 @@ export default {
   'Command Format Migration': '命令格式迁移',
   'Found {{count}} TOML command file:': '发现 {{count}} 个 TOML 命令文件：',
   'Found {{count}} TOML command files:': '发现 {{count}} 个 TOML 命令文件：',
+  'Current tasks': '当前任务',
   '... and {{count}} more': '... 以及其他 {{count}} 个',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'TOML 格式已弃用。是否将它们迁移到 Markdown 格式？',

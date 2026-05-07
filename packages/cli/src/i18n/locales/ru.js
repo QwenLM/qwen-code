@@ -369,6 +369,8 @@ export default {
   'Tool Schema Compliance': 'Соответствие схеме инструмента',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
+  'Auto (detect terminal theme)': 'Авто (определить тему терминала)',
+  Auto: 'Авто',
   Text: 'Текст',
   JSON: 'JSON',
   Plan: 'План',
@@ -1037,7 +1039,7 @@ export default {
   // ============================================================================
   // Команды - Модель
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Переключение модели для этой сессии (--fast для модели подсказок)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Установить облегчённую модель для подсказок и спекулятивного выполнения',
@@ -1046,6 +1048,8 @@ export default {
   'Authentication type not available.': 'Тип авторизации недоступен.',
   'No models available for the current authentication type ({{authType}}).':
     'Нет доступных моделей для текущего типа авторизации ({{authType}}).',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Команды - Очистка
@@ -1229,6 +1233,8 @@ export default {
     'Платно \u00B7 До 6 000 запросов/5 часов \u00B7 Все модели Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
   'Bring your own API key': 'Используйте свой API-ключ',
+  'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
+    'Браузерная аутентификация с использованием сторонних провайдеров (например, OpenRouter, ModelScope)',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Используйте учетные данные Coding Plan или свои собственные API-ключи/провайдеры.',
@@ -1536,6 +1542,7 @@ export default {
   'Found {{count}} TOML command file:': 'Найден {{count}} файл команд TOML:',
   'Found {{count}} TOML command files:':
     'Найдено {{count}} файлов команд TOML:',
+  'Current tasks': 'Текущие задачи',
   '... and {{count}} more': '... и ещё {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Формат TOML устарел. Хотите перенести их в формат Markdown?',
@@ -1754,20 +1761,6 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
-  // DataWorks input placeholder
-  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"':
-    'Введите сообщение, например：「Помогите подтвердить мою личность и частые рабочие области в DataWorks?」',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 Подтверждение личности：「Помогите подтвердить мою личность и права в DataWorks?」',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 Анализ задач：「Проанализируйте новые узлы в рабочей области dataworks_analyze за последнюю неделю и что они делают」',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 Управление задачами：「В рабочей области dataworks_analyze помогите найти узлы, созданные давно, но никогда не опубликованные」',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 Диагностика проблем：「Данные в dwd_is_it_software_released_df и ads_is_it_sfw_moni_key_released_recycled_df несовместимы, оба имеют источник ods_ism_it_software_key_released_df. Проверьте разницу в их логике」',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ Исправление проблем：「В таблице сотрудников my_project.ods_emp_info_d данные отдела для сотрудника EMP001 пусты. Помогите диагностировать причину и предложите варианты исправления」',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     'Нажмите Ctrl+O для переключения компактного режима — скрыть вывод инструментов и рассуждения.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':

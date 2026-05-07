@@ -7,24 +7,24 @@
 import type {
   SessionMetrics,
   ComputedSessionStats,
-  ModelMetrics,
+  ModelMetricsCore,
 } from '../contexts/SessionContext.js';
 
-export function calculateErrorRate(metrics: ModelMetrics): number {
+export function calculateErrorRate(metrics: ModelMetricsCore): number {
   if (metrics.api.totalRequests === 0) {
     return 0;
   }
   return (metrics.api.totalErrors / metrics.api.totalRequests) * 100;
 }
 
-export function calculateAverageLatency(metrics: ModelMetrics): number {
+export function calculateAverageLatency(metrics: ModelMetricsCore): number {
   if (metrics.api.totalRequests === 0) {
     return 0;
   }
   return metrics.api.totalLatencyMs / metrics.api.totalRequests;
 }
 
-export function calculateCacheHitRate(metrics: ModelMetrics): number {
+export function calculateCacheHitRate(metrics: ModelMetricsCore): number {
   if (metrics.tokens.prompt === 0) {
     return 0;
   }

@@ -2,9 +2,6 @@
 .env
 .env~
 
-# prepack backup
-package.json.bak
-
 # gemini-cli settings
 # We want to keep the .gemini in the root of the repo and ignore any .gemini
 # in subdirectories. In our root .gemini we want to allow for version control
@@ -29,6 +26,16 @@ package-lock.json
 .qoder
 .claude
 CLAUDE.md
+.codex
+
+# Qwen Code Configs
+.qwen/*
+!.qwen/commands/
+!.qwen/commands/**
+!.qwen/skills/
+!.qwen/skills/**
+!.qwen/agents/
+!.qwen/agents/**
 
 # OS metadata
 .DS_Store
@@ -56,15 +63,6 @@ packages/web-templates/src/generated/
 .integration-tests/
 packages/vscode-ide-companion/*.vsix
 
-# Qwen Code Configs
-
-.qwen/*
-!.qwen/commands/
-!.qwen/commands/**
-!.qwen/skills/
-!.qwen/skills/**
-!.qwen/agents/
-!.qwen/agents/**
 logs/
 # GHA credentials
 gha-creds-*.json
@@ -91,3 +89,4 @@ storybook-static
 
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs
+tmp/

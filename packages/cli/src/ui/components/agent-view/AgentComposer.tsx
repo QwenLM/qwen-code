@@ -30,7 +30,6 @@ import {
   useAgentViewActions,
 } from '../../contexts/AgentViewContext.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
-import { useSettings } from '../../contexts/SettingsContext.js';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
 import { StreamingState } from '../../types.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
@@ -66,9 +65,6 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   const interactiveAgent = agent?.interactiveAgent;
 
   const config = useConfig();
-  const settings = useSettings();
-  const showQueuedMessageDisplay =
-    settings.merged.features?.queuedMessageDisplay !== false;
   const { columns: terminalWidth } = useTerminalSize();
   const { inputWidth } = calculatePromptWidths(terminalWidth);
   const { stdin, setRawMode } = useStdin();
@@ -283,9 +279,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           </Box>
         )}
 
-        {showQueuedMessageDisplay && (
-          <QueuedMessageDisplay messageQueue={messageQueue} />
-        )}
+        <QueuedMessageDisplay messageQueue={messageQueue} />
 
         {/* Input prompt — always visible, like the main Composer */}
         <BaseTextInput

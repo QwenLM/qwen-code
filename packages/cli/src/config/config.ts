@@ -30,6 +30,7 @@ import {
   NativeLspService,
   isBareMode,
   isToolEnabled,
+  type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -45,6 +46,7 @@ import { hideBin } from 'yargs/helpers';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import stripJsonComments from 'strip-json-comments';
 
 import { resolvePath } from '../utils/resolvePath.js';
 import { getCliVersion } from '../utils/version.js';
@@ -52,6 +54,7 @@ import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
+import { reviewCommand } from '../commands/review.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -62,12 +65,11 @@ const SESSION_ID_REGEX =
  * Accepts a standard UUID, or a UUID followed by `-agent-{suffix}`
  * (used by Arena to give each agent a deterministic session ID).
  */
-function isValidSessionId(value: string): boolean {
+export function isValidSessionId(value: string): boolean {
   return SESSION_ID_REGEX.test(value);
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import { buildWebSearchConfig } from './webSearch.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('CONFIG');
@@ -126,6 +128,7 @@ export interface CliArgs {
   telemetryLogPrompts: boolean | undefined;
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
+  mcpConfig: string | undefined;
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
@@ -138,10 +141,6 @@ export interface CliArgs {
   openaiLoggingDir: string | undefined;
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
-  tavilyApiKey: string | undefined;
-  googleApiKey: string | undefined;
-  googleSearchEngineId: string | undefined;
-  webSearchDefault: string | undefined;
   screenReader: boolean | undefined;
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
@@ -378,6 +377,11 @@ export async function parseArguments(): Promise<CliArgs> {
               mcpServerName.split(',').map((m) => m.trim()),
             ),
         })
+        .option('mcp-config', {
+          type: 'string',
+          description:
+            'MCP server configuration as JSON string or file path. Can be a path to a JSON file or inline JSON with {"mcpServers": {...}} format.',
+        })
         .option('allowed-tools', {
           type: 'array',
           string: true,
@@ -430,23 +434,6 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('openai-base-url', {
           type: 'string',
           description: 'OpenAI base URL (for custom endpoints)',
-        })
-        .option('tavily-api-key', {
-          type: 'string',
-          description: 'Tavily API key for web search',
-        })
-        .option('google-api-key', {
-          type: 'string',
-          description: 'Google Custom Search API key',
-        })
-        .option('google-search-engine-id', {
-          type: 'string',
-          description: 'Google Custom Search Engine ID',
-        })
-        .option('web-search-default', {
-          type: 'string',
-          description:
-            'Default web search provider (dashscope, tavily, google)',
         })
         .option('screen-reader', {
           type: 'boolean',
@@ -524,13 +511,6 @@ export async function parseArguments(): Promise<CliArgs> {
           coerce: (tools: string[]) =>
             tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
         })
-        .option('allowed-tools', {
-          type: 'array',
-          string: true,
-          description: 'Tools to allow, will bypass confirmation',
-          coerce: (tools: string[]) =>
-            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
-        })
         .option('disabled-slash-commands', {
           type: 'array',
           string: true,
@@ -541,6 +521,13 @@ export async function parseArguments(): Promise<CliArgs> {
             'against the final command name.',
           coerce: (names: string[]) =>
             names.flatMap((n) => n.split(',').map((t) => t.trim())),
+        })
+        .option('allowed-tools', {
+          type: 'array',
+          string: true,
+          description: 'Tools to allow, will bypass confirmation',
+          coerce: (tools: string[]) =>
+            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
         })
         .option('auth-type', {
           type: 'string',
@@ -612,9 +599,7 @@ export async function parseArguments(): Promise<CliArgs> {
           ) {
             return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
-          if (argv['resume'] && !isValidSessionId(argv['resume'] as string)) {
-            return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
-          }
+          // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
             return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
           }
@@ -630,7 +615,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Hooks subcommands
     .command(hooksCommand)
     // Register Channel subcommands
-    .command(channelCommand);
+    .command(channelCommand)
+    // Register /review skill helpers (presubmit checks, cleanup)
+    .command(reviewCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -652,9 +639,13 @@ export async function parseArguments(): Promise<CliArgs> {
     (result._[0] === 'mcp' ||
       result._[0] === 'extensions' ||
       result._[0] === 'hooks' ||
-      result._[0] === 'channel')
+      result._[0] === 'channel' ||
+      result._[0] === 'review')
   ) {
-    // MCP/Extensions/Hooks commands handle their own execution and process exit
+    // MCP/Extensions/Hooks/Channel/Review commands handle their own
+    // execution and exit. Returning here would let the main interactive
+    // flow run, which would prompt for stdin input despite the user
+    // having already invoked a subcommand.
     process.exit(0);
   }
 
@@ -740,6 +731,84 @@ export function isDebugMode(argv: CliArgs): boolean {
       (v) => v === 'true' || v === '1',
     )
   );
+}
+
+/**
+ * Validates that the provided config is a valid MCP server configuration object.
+ */
+function validateMcpServerConfig(
+  config: unknown,
+): config is Record<string, MCPServerConfig> {
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+    return false;
+  }
+
+  // Basic validation - each entry should be an object
+  return Object.values(config).every(
+    (server) => typeof server === 'object' && server !== null,
+  );
+}
+
+/**
+ * Parses MCP configuration from command-line argument.
+ * Supports both file paths and inline JSON strings.
+ * Handles both {"mcpServers": {...}} and direct {...} formats.
+ *
+ * @param mcpConfigArg - The --mcp-config value (file path or JSON string)
+ * @returns Record of MCP server configurations, or null if no config provided
+ * @throws FatalConfigError if the configuration is invalid
+ */
+function parseMcpConfig(
+  mcpConfigArg: string | undefined,
+): Record<string, MCPServerConfig> | null {
+  if (!mcpConfigArg) {
+    return null;
+  }
+
+  try {
+    let parsed: unknown;
+
+    // Check if it's a file path
+    if (fs.existsSync(mcpConfigArg)) {
+      debugLogger.debug(`Reading MCP config from file: ${mcpConfigArg}`);
+      const content = fs.readFileSync(mcpConfigArg, 'utf-8');
+      parsed = JSON.parse(stripJsonComments(content));
+    } else {
+      // Try parsing as JSON string
+      debugLogger.debug('Parsing MCP config as JSON string');
+      parsed = JSON.parse(mcpConfigArg);
+    }
+
+    // Handle both {"mcpServers": {...}} and direct {...} formats
+    let servers: unknown;
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'mcpServers' in parsed &&
+      typeof (parsed as { mcpServers: unknown }).mcpServers === 'object'
+    ) {
+      servers = (parsed as { mcpServers: unknown }).mcpServers;
+    } else {
+      servers = parsed;
+    }
+
+    // Validate the structure
+    if (!validateMcpServerConfig(servers)) {
+      throw new Error(
+        'Invalid MCP server configuration format. Expected an object with server names as keys.',
+      );
+    }
+
+    debugLogger.debug(
+      `Loaded ${Object.keys(servers).length} MCP server(s) from --mcp-config`,
+    );
+    return servers as Record<string, MCPServerConfig>;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    throw new FatalConfigError(
+      `Invalid MCP configuration provided via --mcp-config: ${errorMessage}`,
+    );
+  }
 }
 
 export async function loadCliConfig(
@@ -966,16 +1035,8 @@ export async function loadCliConfig(
   // to preserve the original behaviour where "ShellTool", "Shell", and
   // "run_shell_command" are all accepted as the same tool.
   const isExplicitlyAllowed = (toolName: ToolName): boolean => {
-    const name = toolName as string;
     // 1. Check permissions.allow / allowedTools rules.
-    if (
-      mergedAllow.some((rule) => {
-        const openParen = rule.indexOf('(');
-        const ruleName =
-          openParen === -1 ? rule.trim() : rule.substring(0, openParen).trim();
-        return ruleName === name;
-      })
-    ) {
+    if (mergedAllow.some((rule) => isToolEnabled(toolName, [rule], []))) {
       return true;
     }
     // 2. Check coreTools whitelist (with alias matching).
@@ -1009,12 +1070,14 @@ export async function loadCliConfig(
       case ApprovalMode.DEFAULT:
         // Deny all write/execute tools unless explicitly allowed.
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
         denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
         break;
       case ApprovalMode.AUTO_EDIT:
-        // Only shell requires a prompt in auto-edit mode.
+        // Shell-like execute tools still require a prompt in auto-edit mode.
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         break;
       case ApprovalMode.YOLO:
         // No extra denials for YOLO mode.
@@ -1082,6 +1145,9 @@ export async function loadCliConfig(
     }
 
     if (argv.resume) {
+      // By the time we get here, argv.resume has been resolved to a valid
+      // session UUID by gemini.tsx (which handles custom title lookup and
+      // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
       sessionData = await sessionService.loadSession(argv.resume);
       if (!sessionData) {
@@ -1155,7 +1221,13 @@ export async function loadCliConfig(
       : settings.tools?.discoveryCommand,
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
-    mcpServers: bareMode ? {} : settings.mcpServers || {},
+    mcpServers: bareMode
+      ? {}
+      : (() => {
+          const base = settings.mcpServers || {};
+          const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+          return cliMcpServers ? { ...base, ...cliMcpServers } : base;
+        })(),
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -1175,6 +1247,7 @@ export async function loadCliConfig(
       argv.checkpointing || settings.general?.checkpointing?.enabled,
     proxy:
       argv.proxy ||
+      settings.proxy ||
       process.env['HTTPS_PROXY'] ||
       process.env['https_proxy'] ||
       process.env['HTTP_PROXY'] ||
@@ -1189,6 +1262,7 @@ export async function loadCliConfig(
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
+    emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
@@ -1205,9 +1279,6 @@ export async function loadCliConfig(
       ? []
       : (settings.security?.allowedHttpHookUrls ?? []),
     cliVersion: await getCliVersion(),
-    webSearch: bareMode
-      ? undefined
-      : buildWebSearchConfig(argv, settings, selectedAuthType),
     ideMode,
     chatCompression: settings.model?.chatCompression,
     folderTrust,

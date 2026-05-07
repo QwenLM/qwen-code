@@ -18,6 +18,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
+import { isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import { extractPDFText, parsePDFPageRange } from './pdf.js';
@@ -529,6 +530,14 @@ export interface ProcessedFileReadResult {
   originalLineCount?: number; // For text files, the total number of lines in the original file
   isTruncated?: boolean; // For text files, indicates if content was truncated
   linesShown?: [number, number]; // For text files [startLine, endLine] (1-based for display)
+  /**
+   * The Stats taken at the start of the read pipeline, before the
+   * actual content read. Surfaced so the FileReadCache can record
+   * a fingerprint that matches the bytes the model actually
+   * received — a post-read re-stat would describe a possibly-
+   * mutated file rather than the file the read returned.
+   */
+  stats?: import('node:fs').Stats;
 }
 
 /**
@@ -581,17 +590,24 @@ export async function processSingleFileContent(
 ): Promise<ProcessedFileReadResult> {
   const rootDirectory = config.getTargetDir();
   try {
-    if (!fs.existsSync(filePath)) {
-      // Sync check is acceptable before async read
-      return {
-        llmContent:
-          'Could not read file because no file was found at the specified path.',
-        returnDisplay: 'File not found.',
-        error: `File not found: ${filePath}`,
-        errorType: ToolErrorType.FILE_NOT_FOUND,
-      };
+    let stats: import('node:fs').Stats;
+    try {
+      // Async stat doubles as the existence check — ENOENT is handled below
+      // and surfaces the same FILE_NOT_FOUND error type as the old explicit
+      // existsSync gate, with one fewer sync syscall on the hot path.
+      stats = await fs.promises.stat(filePath);
+    } catch (error: unknown) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        return {
+          llmContent:
+            'Could not read file because no file was found at the specified path.',
+          returnDisplay: 'File not found.',
+          error: `File not found: ${filePath}`,
+          errorType: ToolErrorType.FILE_NOT_FOUND,
+        };
+      }
+      throw error;
     }
-    const stats = await fs.promises.stat(filePath);
     if (stats.isDirectory()) {
       return {
         llmContent:
@@ -679,6 +695,7 @@ export async function processSingleFileContent(
         return {
           llmContent: `Cannot display content of binary file: ${relativePathForDisplay}`,
           returnDisplay: `Skipped binary file: ${relativePathForDisplay}`,
+          stats,
         };
       }
       case 'svg': {
@@ -687,12 +704,25 @@ export async function processSingleFileContent(
           return {
             llmContent: `Cannot display content of SVG file larger than 1MB: ${relativePathForDisplay}`,
             returnDisplay: `Skipped large SVG file (>1MB): ${relativePathForDisplay}`,
+            stats,
           };
         }
         const content = await readFileWithEncoding(filePath);
+        // Populate `originalLineCount` and `isTruncated` so the
+        // ReadFile cache treats this exactly like a successful text
+        // read: ReadFileToolInvocation derives `cacheable` from
+        // those two fields, and an SVG-as-text read needs to be
+        // cacheable to keep working as an editable text file. Pre-fix,
+        // the absent `originalLineCount` collapsed cacheable to false
+        // and a follow-up Edit on the just-read SVG would be rejected
+        // as a "non-text payload" — a regression flagged by the
+        // independent maintainer review.
         return {
           llmContent: content,
           returnDisplay: `Read SVG as text: ${relativePathForDisplay}`,
+          originalLineCount: content.split('\n').length,
+          isTruncated: false,
+          stats,
         };
       }
       case 'text': {
@@ -770,6 +800,7 @@ export async function processSingleFileContent(
           isTruncated,
           originalLineCount,
           linesShown: [startLine + 1, actualEndLine],
+          stats,
         };
       }
       case 'image':

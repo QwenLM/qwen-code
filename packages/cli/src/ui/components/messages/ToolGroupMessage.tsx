@@ -30,12 +30,32 @@ function isAgentWithPendingConfirmation(
   );
 }
 
+function isRunningAgent(
+  rd: IndividualToolCallDisplay['resultDisplay'],
+): rd is AgentResultDisplay {
+  return (
+    typeof rd === 'object' &&
+    rd !== null &&
+    'type' in rd &&
+    (rd as AgentResultDisplay).type === 'task_execution' &&
+    (rd as AgentResultDisplay).status === 'running'
+  );
+}
+
 interface ToolGroupMessageProps {
   groupId: number;
   toolCalls: IndividualToolCallDisplay[];
   availableTerminalHeight?: number;
   contentWidth: number;
   isFocused?: boolean;
+  /**
+   * True when this tool group is being rendered live (in
+   * `pendingHistoryItems`). False once it commits to Ink's `<Static>`.
+   * Currently consumed by upstream callers but not by the group body
+   * itself — the subagent renderer used to gate its live frame on
+   * this; that gating moved to LiveAgentPanel + BackgroundTasksDialog.
+   */
+  isPending?: boolean;
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   onShellInputSubmit?: (input: string) => void;
@@ -44,6 +64,12 @@ interface ToolGroupMessageProps {
   /** Pre-computed count of read ops from managed-auto-memory files. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+  /**
+   * Short LLM-generated label for this batch. Used in compact mode in place
+   * of the "active tool name × count" line. Undefined when summary
+   * generation is disabled, still in-flight, or failed.
+   */
+  compactLabel?: string;
 }
 
 // Main component renders the border and maps the tools using ToolMessage
@@ -52,11 +78,16 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   isFocused = true,
+  // `isPending` stays on the props interface for upstream compat
+  // (HistoryItemDisplay et al. forward it) but the group body no
+  // longer reads it. Skip the destructure so TS catches accidental
+  // re-introductions of dead state.
   activeShellPtyId,
   embeddedShellFocused,
   memoryWriteCount,
   memoryReadCount,
   isUserInitiated,
+  compactLabel,
 }) => {
   const config = useConfig();
   const { compactMode } = useCompactMode();
@@ -121,6 +152,18 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
 
   const focusedSubagentCallId = focusedSubagentRef.current;
+  // When no subagent has a pending confirmation, fall back to the *first*
+  // running subagent for Ctrl+E/Ctrl+F shortcut focus. "First" (array order)
+  // is the oldest — the one most likely to have accumulated tool calls and
+  // display the "+N more (ctrl+e to expand)" hint.
+  const runningSubagentCallId = useMemo(
+    () =>
+      toolCalls.find((tc) => isRunningAgent(tc.resultDisplay))?.callId ?? null,
+    [toolCalls],
+  );
+  // Pending confirmation takes strict priority over running fallback.
+  const keyboardFocusedSubagentCallId =
+    focusedSubagentCallId ?? runningSubagentCallId;
 
   // Compact mode: entire group → single line summary
   // Force-expand when: user must interact (Confirming or subagent pending
@@ -139,6 +182,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
       <CompactToolGroupDisplay
         toolCalls={toolCalls}
         contentWidth={contentWidth}
+        compactLabel={compactLabel}
       />
     );
   }
@@ -247,19 +291,18 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         })()}
       {toolCalls.map((tool) => {
         const isConfirming = toolAwaitingApproval?.callId === tool.callId;
-        // A subagent's inline confirmation should only receive keyboard focus
-        // when (1) there is no direct tool-level confirmation active, and
-        // (2) this tool currently holds the focus lock.
+        // A subagent's inline approval prompt should only receive keyboard
+        // focus when (1) there is no direct tool-level confirmation active
+        // and (2) this tool currently holds the subagent keyboard focus.
+        // Pending confirmations keep the first-come focus lock so users
+        // answer one approval at a time; LiveAgentPanel + BackgroundTasksDialog
+        // own all live progress / drill-down (the legacy Ctrl+E / Ctrl+F
+        // shortcuts on the inline AgentExecutionDisplay frame were retired
+        // alongside the frame itself).
         const isSubagentFocused =
           isFocused &&
           !toolAwaitingApproval &&
-          focusedSubagentCallId === tool.callId;
-        // Show the waiting indicator only when this subagent genuinely has a
-        // pending confirmation AND another subagent holds the focus lock.
-        const isWaitingForOtherApproval =
-          isAgentWithPendingConfirmation(tool.resultDisplay) &&
-          focusedSubagentCallId !== null &&
-          focusedSubagentCallId !== tool.callId;
+          keyboardFocusedSubagentCallId === tool.callId;
         return (
           <Box key={tool.callId} flexDirection="column" minHeight={1}>
             <Box flexDirection="row" alignItems="center">
@@ -284,7 +327,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   isAgentWithPendingConfirmation(tool.resultDisplay)
                 }
                 isFocused={isSubagentFocused}
-                isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             </Box>
             {tool.status === ToolCallStatus.Confirming &&

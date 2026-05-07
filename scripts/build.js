@@ -18,15 +18,8 @@
 // limitations under the License.
 
 import { execSync } from 'node:child_process';
-import {
-  existsSync,
-  lstatSync,
-  symlinkSync,
-  mkdirSync,
-  rmSync,
-  realpathSync,
-} from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -35,57 +28,6 @@ const root = join(__dirname, '..');
 // npm install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
 if (!existsSync(join(root, 'node_modules'))) {
   execSync('npm install', { stdio: 'inherit', cwd: root });
-}
-
-// Ensure workspace package symlinks exist in node_modules.
-// When npm resolves `npm:@alife/...@*` aliases, it may install a stale
-// registry version instead of symlinking to the local workspace.  This
-// check fixes those links so that TypeScript project references (which
-// rely on node_modules resolution) always see the local source.
-const workspaceLinks = [
-  ['@qwen-code/qwen-code-core', 'packages/core'],
-  ['@qwen-code/channel-base', 'packages/channels/base'],
-  ['@qwen-code/channel-telegram', 'packages/channels/telegram'],
-  ['@qwen-code/channel-weixin', 'packages/channels/weixin'],
-  ['@qwen-code/channel-dingtalk', 'packages/channels/dingtalk'],
-  ['@qwen-code/web-templates', 'packages/web-templates'],
-];
-
-for (const [pkg, localPath] of workspaceLinks) {
-  const linkPath = join(root, 'node_modules', ...pkg.split('/'));
-  const targetPath = resolve(root, localPath);
-  let needsLink = false;
-
-  if (!existsSync(linkPath)) {
-    needsLink = true;
-  } else {
-    try {
-      const stat = lstatSync(linkPath);
-      if (stat.isSymbolicLink()) {
-        const resolved = realpathSync(linkPath);
-        if (resolved !== targetPath) {
-          needsLink = true;
-        }
-      } else {
-        // It's a real directory (installed from registry), replace it
-        needsLink = true;
-      }
-    } catch {
-      needsLink = true;
-    }
-  }
-
-  if (needsLink) {
-    console.log(`Fixing workspace link: ${pkg} -> ${localPath}`);
-    try {
-      rmSync(linkPath, { recursive: true, force: true });
-    } catch {
-      /* ignore */
-    }
-    const parentDir = dirname(linkPath);
-    mkdirSync(parentDir, { recursive: true });
-    symlinkSync(targetPath, linkPath);
-  }
 }
 
 // build all workspaces/packages in dependency order
