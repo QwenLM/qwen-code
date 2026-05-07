@@ -90,9 +90,10 @@ function terminalStatusPresentation(
   }
 }
 
-// Foreground agent rows get this prefix so users can tell at a glance
-// that cancelling one will end the parent's current turn — a much heavier
-// consequence than cancelling a truly async background entry.
+// Live foreground rows get this prefix to warn the user that cancelling
+// one ends the parent's current turn — a much heavier consequence than
+// cancelling a truly async background entry. Settled foreground rows
+// drop the prefix because there's nothing left to cancel.
 const FOREGROUND_ROW_PREFIX = '[in turn]';
 const SHELL_ROW_PREFIX = '[shell]';
 
@@ -100,7 +101,8 @@ function rowLabel(entry: DialogEntry): string {
   switch (entry.kind) {
     case 'agent': {
       const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-      return entry.flavor === 'foreground'
+      const isLive = entry.status === 'running' || entry.status === 'paused';
+      return entry.flavor === 'foreground' && isLive
         ? `${FOREGROUND_ROW_PREFIX} ${label}`
         : label;
     }

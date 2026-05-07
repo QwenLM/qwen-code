@@ -14,10 +14,11 @@
  * - `background` entries persist across turns, emit a `<task-notification>`
  *   on terminal status (the parent's only return channel), and contribute to
  *   `hasUnfinalizedTasks()` so headless callers keep their loop alive.
- * - `foreground` entries live for the duration of the parent's tool-call,
- *   are unregistered as soon as `execute()` returns, deliver their result
- *   through the normal tool-result channel (no XML envelope), and don't
- *   participate in the headless holdback.
+ * - `foreground` entries deliver their result through the normal tool-result
+ *   channel (no XML envelope), don't participate in the headless holdback,
+ *   and on tool-call return are settled into a terminal status and retained
+ *   (bounded by `MAX_RETAINED_TERMINAL_BACKGROUND_TASKS`) so the dialog can
+ *   drill into finished foreground agents.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -28,6 +29,13 @@ const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
 const MAX_DESCRIPTION_LENGTH = 40;
 const MAX_RECENT_ACTIVITIES = 5;
+
+// Mirrors `MonitorRegistry.MAX_RETAINED_TERMINAL_MONITORS`. Foreground
+// agents leave their entry in the registry after their tool-call returns
+// (in a terminal status) so the dialog can drill into them — but the cap
+// keeps memory bounded across long sessions. Eviction is FIFO over all
+// terminal entries (foreground + background), oldest endTime first.
+export const MAX_RETAINED_TERMINAL_BACKGROUND_TASKS = 128;
 
 // Grace period after cancel() before emitting a fallback cancelled
 // notification. The natural handler (bgBody) almost always settles and
@@ -80,6 +88,16 @@ export type BackgroundTaskStatus =
   | 'completed'
   | 'failed'
   | 'cancelled';
+
+const TERMINAL_STATUSES: ReadonlySet<BackgroundTaskStatus> = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
+function isTerminalStatus(status: BackgroundTaskStatus): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
 
 export interface AgentCompletionStats {
   totalTokens: number;
@@ -255,33 +273,73 @@ export class BackgroundTaskRegistry {
     debugLogger.info(`Background agent completed: ${agentId}`);
 
     this.emitNotification(entry);
+    this.pruneTerminalEntries();
     this.emitStatusChange(entry);
   }
 
   /**
-   * Remove a foreground entry from the registry without emitting any
-   * terminal notification. Called by the foreground tool-call's `finally`
-   * path, which has already delivered the result through the tool-result
-   * channel — the registry entry has served its UI-surfacing purpose.
-   * Background entries must go through complete/fail/finalizeCancelled
-   * instead, so this throws if asked to remove one.
+   * Transition a foreground entry to a terminal status and retain it
+   * (bounded by `MAX_RETAINED_TERMINAL_BACKGROUND_TASKS`). Called by the
+   * foreground tool-call's `finally` path, which has already delivered
+   * the result through the tool-result channel — the registry entry now
+   * sticks around so the dialog can drill into it. Background entries
+   * must go through complete/fail/finalizeCancelled instead, so this
+   * throws if asked to settle one.
+   *
+   * Cancel-then-settle race: external `cancel()` may have already flipped
+   * the entry to `'cancelled'` before this finally runs. In that case the
+   * status stays at the cancel's verdict (user intent wins), but the
+   * final stats from `getExecutionSummary()` and any error string are
+   * still attached — the live-refresh path stops once status leaves
+   * `'running'`, so without this re-attach the dialog would render with
+   * potentially stale token / tool counts.
    */
-  unregisterForeground(agentId: string): void {
+  settleForeground(
+    agentId: string,
+    status: 'completed' | 'failed' | 'cancelled',
+    details: { error?: string; stats?: AgentCompletionStats } = {},
+  ): void {
     const entry = this.agents.get(agentId);
     if (!entry) return;
     if (entry.flavor !== 'foreground') {
       throw new Error(
-        `unregisterForeground called on non-foreground entry ${agentId} ` +
+        `settleForeground called on non-foreground entry ${agentId} ` +
           `(flavor=${entry.flavor ?? 'undefined'}). ` +
           `Background entries must terminate via complete/fail/finalizeCancelled.`,
       );
     }
-    // Emit before delete so any future BackgroundStatusChangeCallback that
-    // re-reads `registry.get(agentId)` from inside the callback sees the
-    // entry, matching the ordering used by complete/fail/cancel/finalize.
+
+    // Track mutation so a pure no-op (no status change, no new details)
+    // skips prune + emit and avoids triggering a redundant UI refresh.
+    let mutated = false;
+
+    if (entry.status === 'running') {
+      entry.status = status;
+      entry.endTime = Date.now();
+      mutated = true;
+      debugLogger.info(`Settled foreground agent: ${agentId} (${status})`);
+    }
+    // First-write-wins for error so a prior `cancel()` reason (if any
+    // future caller sets one) isn't clobbered by a later settle.
+    if (details.error !== undefined && entry.error === undefined) {
+      entry.error = details.error;
+      mutated = true;
+    }
+    // Final stats always win — `getExecutionSummary()` from the
+    // tool-call's finally is authoritative even if `cancel()` raced
+    // ahead of it.
+    if (details.stats !== undefined) {
+      entry.stats = details.stats;
+      mutated = true;
+    }
+
+    if (!mutated) return;
+
+    // Prune before emit so subscribers that snapshot `registry.getAll()`
+    // from inside the callback see the post-prune state. Mirrors
+    // `MonitorRegistry.settle()`'s order.
+    this.pruneTerminalEntries();
     this.emitStatusChange(entry);
-    this.agents.delete(agentId);
-    debugLogger.info(`Unregistered foreground agent: ${agentId}`);
   }
 
   // See complete() for the cancelled → terminal path rationale.
@@ -298,6 +356,7 @@ export class BackgroundTaskRegistry {
     debugLogger.info(`Background agent failed: ${agentId}`);
 
     this.emitNotification(entry);
+    this.pruneTerminalEntries();
     this.emitStatusChange(entry);
   }
 
@@ -359,6 +418,7 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     entry.notified = true;
     debugLogger.info(`Abandoned paused background agent: ${agentId}`);
+    this.pruneTerminalEntries();
     this.emitStatusChange(entry);
   }
 
@@ -382,6 +442,7 @@ export class BackgroundTaskRegistry {
     if (partialResult) entry.result = partialResult;
     entry.stats = stats;
     this.emitNotification(entry);
+    this.pruneTerminalEntries();
     this.emitStatusChange(entry);
   }
 
@@ -394,6 +455,7 @@ export class BackgroundTaskRegistry {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'cancelled' || entry.notified) return;
     this.emitNotification(entry);
+    this.pruneTerminalEntries();
     this.emitStatusChange(entry);
   }
 
@@ -636,6 +698,33 @@ export class BackgroundTaskRegistry {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('Failed to emit background status change:', error);
+    }
+  }
+
+  /**
+   * Cap retained terminal entries at `MAX_RETAINED_TERMINAL_BACKGROUND_TASKS`,
+   * FIFO by `endTime`. Background entries are only eligible once
+   * `notified === true`, so a `cancelled`-but-not-finalized entry
+   * survives until its terminal task-notification fires (otherwise we'd
+   * orphan the SDK-contract notification and strand headless callers).
+   * Foreground entries never emit a notification, so they're eligible
+   * the moment they reach a terminal status.
+   */
+  private pruneTerminalEntries(): void {
+    const terminal = Array.from(this.agents.values())
+      .filter((e) => {
+        if (!isTerminalStatus(e.status)) return false;
+        if (e.flavor !== 'foreground' && !e.notified) return false;
+        return true;
+      })
+      .sort(
+        (a, b) =>
+          (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) ||
+          a.startTime - b.startTime,
+      );
+    while (terminal.length > MAX_RETAINED_TERMINAL_BACKGROUND_TASKS) {
+      const oldest = terminal.shift();
+      if (oldest) this.agents.delete(oldest.agentId);
     }
   }
 

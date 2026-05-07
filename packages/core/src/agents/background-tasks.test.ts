@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   BackgroundTaskRegistry,
+  MAX_RETAINED_TERMINAL_BACKGROUND_TASKS,
   type BackgroundTaskEntry,
 } from './background-tasks.js';
 import * as transcript from './agent-transcript.js';
@@ -1047,7 +1048,7 @@ describe('BackgroundTaskRegistry', () => {
       }
     });
 
-    it('unregisterForeground removes the entry and emits a status change', () => {
+    it('settleForeground transitions to terminal status, retains the entry, and emits a status change', () => {
       const onStatusChange = vi.fn();
       registry.setStatusChangeCallback(onStatusChange);
 
@@ -1061,13 +1062,41 @@ describe('BackgroundTaskRegistry', () => {
       });
       onStatusChange.mockClear();
 
-      registry.unregisterForeground('fg-5');
+      registry.settleForeground('fg-5', 'completed');
 
-      expect(registry.get('fg-5')).toBeUndefined();
+      const settled = registry.get('fg-5');
+      expect(settled).toBeDefined();
+      expect(settled!.status).toBe('completed');
+      expect(settled!.endTime).toBeGreaterThan(0);
       expect(onStatusChange).toHaveBeenCalledTimes(1);
     });
 
-    it('unregisterForeground throws if asked to remove a background entry', () => {
+    it('settleForeground attaches details (error, stats) for failed runs', () => {
+      registry.register({
+        agentId: 'fg-failed',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.settleForeground('fg-failed', 'failed', {
+        error: 'tool error: syntax',
+        stats: { totalTokens: 42, toolUses: 3, durationMs: 1200 },
+      });
+
+      const settled = registry.get('fg-failed');
+      expect(settled!.status).toBe('failed');
+      expect(settled!.error).toBe('tool error: syntax');
+      expect(settled!.stats).toEqual({
+        totalTokens: 42,
+        toolUses: 3,
+        durationMs: 1200,
+      });
+    });
+
+    it('settleForeground throws if asked to settle a background entry', () => {
       // Background entries must terminate via complete/fail/finalizeCancelled
       // so the task-notification + headless holdback invariants stay intact.
       // A silent no-op would mask caller bugs, so this throws.
@@ -1080,17 +1109,50 @@ describe('BackgroundTaskRegistry', () => {
         abortController: new AbortController(),
       });
 
-      expect(() => registry.unregisterForeground('bg-1')).toThrow(
+      expect(() => registry.settleForeground('bg-1', 'completed')).toThrow(
         /non-foreground entry bg-1/,
       );
-      expect(registry.get('bg-1')).toBeDefined();
+      // Background entry's status is unchanged.
+      expect(registry.get('bg-1')!.status).toBe('running');
     });
 
-    it('unregisterForeground is a no-op for unknown agent ids', () => {
+    it('settleForeground is a no-op for unknown agent ids', () => {
       // Idempotent for already-unregistered/never-registered ids — the
       // foreground finally path runs unconditionally and shouldn't throw
       // if a parallel cancel already cleared the entry.
-      expect(() => registry.unregisterForeground('missing')).not.toThrow();
+      expect(() =>
+        registry.settleForeground('missing', 'completed'),
+      ).not.toThrow();
+    });
+
+    it('settleForeground is idempotent on already-terminal entries', () => {
+      // Already-terminal entries early-return: no mutation, no prune,
+      // no status-change emit — avoids a redundant UI refresh in the
+      // double-settle case (external `cancel()` racing the tool-call's
+      // finally).
+      const onStatusChange = vi.fn();
+      registry.setStatusChangeCallback(onStatusChange);
+
+      registry.register({
+        agentId: 'fg-twice',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.settleForeground('fg-twice', 'completed', { error: 'first' });
+      const firstEnd = registry.get('fg-twice')!.endTime;
+      onStatusChange.mockClear();
+
+      registry.settleForeground('fg-twice', 'failed', { error: 'second' });
+
+      const settled = registry.get('fg-twice');
+      expect(settled!.status).toBe('completed');
+      expect(settled!.endTime).toBe(firstEnd);
+      expect(settled!.error).toBe('first');
+      expect(onStatusChange).not.toHaveBeenCalled();
     });
 
     it('does not invoke the register callback for foreground entries', () => {
@@ -1126,12 +1188,14 @@ describe('BackgroundTaskRegistry', () => {
       expect(onRegister.mock.calls[0]![0].agentId).toBe('bg-fires-register-cb');
     });
 
-    it('unregisterForeground emits status change before removing the entry', () => {
-      // Mirrors the ordering used by complete/fail/cancel/finalize so a
-      // statusChange callback that re-reads `registry.get(agentId)` from
-      // inside the callback sees the entry across every terminal path.
+    it('settleForeground prunes before emitting so subscribers see post-prune state', () => {
+      // Subscribers that snapshot `registry.getAll()` from inside the
+      // status-change callback must observe the registry with the cap
+      // already enforced — otherwise an over-cap settle would briefly
+      // expose a phantom entry that is gone from the registry by the
+      // next read. Mirrors `MonitorRegistry.settle()`'s order.
       registry.register({
-        agentId: 'fg-unregister-order',
+        agentId: 'fg-settle-order',
         description: 'sync agent',
         flavor: 'foreground',
         status: 'running',
@@ -1141,16 +1205,18 @@ describe('BackgroundTaskRegistry', () => {
 
       let observedFromCallback: BackgroundTaskEntry | undefined;
       registry.setStatusChangeCallback((entry) => {
-        if (entry?.agentId === 'fg-unregister-order') {
+        if (entry?.agentId === 'fg-settle-order') {
           observedFromCallback = registry.get(entry.agentId);
         }
       });
 
-      registry.unregisterForeground('fg-unregister-order');
+      registry.settleForeground('fg-settle-order', 'completed');
 
+      // The just-settled entry has the newest endTime, so prune never
+      // evicts it. The callback sees it with terminal status.
       expect(observedFromCallback).toBeDefined();
-      expect(observedFromCallback!.agentId).toBe('fg-unregister-order');
-      expect(registry.get('fg-unregister-order')).toBeUndefined();
+      expect(observedFromCallback!.status).toBe('completed');
+      expect(registry.get('fg-settle-order')).toBeDefined();
     });
 
     it('default flavor (absent) behaves as background for emitNotification', () => {
@@ -1170,6 +1236,231 @@ describe('BackgroundTaskRegistry', () => {
       registry.complete('legacy-1', 'done');
 
       expect(callback).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('terminal entry retention (cap + FIFO eviction)', () => {
+    function registerForeground(
+      id: string,
+      startTime: number,
+    ): BackgroundTaskEntry {
+      const entry: BackgroundTaskEntry = {
+        agentId: id,
+        description: id,
+        flavor: 'foreground',
+        status: 'running',
+        startTime,
+        abortController: new AbortController(),
+      };
+      registry.register(entry);
+      return entry;
+    }
+
+    it('retains terminal foreground entries up to the cap', () => {
+      const cap = MAX_RETAINED_TERMINAL_BACKGROUND_TASKS;
+      // Sanity-check the constant matches the design intent before
+      // committing to a slow eviction test below.
+      expect(cap).toBe(128);
+
+      for (let i = 0; i < cap; i++) {
+        registerForeground(`fg-${i}`, 1_000 + i);
+        registry.settleForeground(`fg-${i}`, 'completed');
+      }
+      expect(registry.getAll().length).toBe(cap);
+      // Spot-check the first and last entries are still retained.
+      expect(registry.get('fg-0')).toBeDefined();
+      expect(registry.get(`fg-${cap - 1}`)).toBeDefined();
+    });
+
+    it('evicts the oldest terminal entry when the cap is exceeded (FIFO by endTime)', () => {
+      vi.useFakeTimers();
+      try {
+        const cap = MAX_RETAINED_TERMINAL_BACKGROUND_TASKS;
+        // Settle each entry at a strictly increasing endTime so FIFO order
+        // is unambiguous. After cap+1 settles, the very first one (oldest
+        // endTime) must be the eviction victim.
+        for (let i = 0; i < cap + 1; i++) {
+          vi.setSystemTime(new Date(2_000_000_000_000 + i * 1000));
+          registerForeground(`fg-${i}`, 2_000_000_000_000 + i * 1000);
+          registry.settleForeground(`fg-${i}`, 'completed');
+        }
+        expect(registry.getAll().length).toBe(cap);
+        expect(registry.get('fg-0')).toBeUndefined();
+        expect(registry.get('fg-1')).toBeDefined();
+        expect(registry.get(`fg-${cap}`)).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('eviction is uniform across foreground and background flavors', () => {
+      vi.useFakeTimers();
+      try {
+        const cap = MAX_RETAINED_TERMINAL_BACKGROUND_TASKS;
+        // Settle one background entry first (oldest), then `cap` foreground
+        // entries. The background entry should be evicted because its
+        // endTime is the smallest.
+        vi.setSystemTime(new Date(3_000_000_000_000));
+        registry.register({
+          agentId: 'bg-oldest',
+          description: 'bg',
+          flavor: 'background',
+          status: 'running',
+          startTime: 3_000_000_000_000,
+          abortController: new AbortController(),
+        });
+        registry.complete('bg-oldest', 'done');
+
+        for (let i = 0; i < cap; i++) {
+          vi.setSystemTime(new Date(3_000_000_000_000 + (i + 1) * 1000));
+          registerForeground(`fg-${i}`, 3_000_000_000_000 + (i + 1) * 1000);
+          registry.settleForeground(`fg-${i}`, 'completed');
+        }
+
+        expect(registry.getAll().length).toBe(cap);
+        expect(registry.get('bg-oldest')).toBeUndefined();
+        expect(registry.get('fg-0')).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not evict a cancelled-but-not-finalized background entry', () => {
+      // `cancel()` sets status to 'cancelled' but does NOT emit the terminal
+      // task-notification — the natural handler (or grace timer) does that
+      // later via `finalizeCancelled` / `finalizeCancellationIfPending`.
+      // Pruning the entry before finalization would orphan the
+      // task-notification and strand any headless caller waiting on the
+      // holdback. The guard requires `notified === true` for background
+      // entries before they're considered prunable.
+      vi.useFakeTimers();
+      try {
+        const cap = MAX_RETAINED_TERMINAL_BACKGROUND_TASKS;
+        vi.setSystemTime(new Date(5_000_000_000_000));
+        registry.register({
+          agentId: 'bg-cancelling',
+          description: 'mid-cancel',
+          flavor: 'background',
+          status: 'running',
+          startTime: 5_000_000_000_000,
+          abortController: new AbortController(),
+        });
+        // Plain cancel() schedules the grace timer; the entry is now
+        // status='cancelled' but notified is still false. (Passing
+        // notify:false would set notified=true intentionally — that's
+        // the session-reset path, not what we're modeling here.)
+        registry.cancel('bg-cancelling');
+
+        // Push the cap with foreground settles. Without the guard, the
+        // oldest (cancelled-not-notified) bg entry would be evicted.
+        for (let i = 0; i < cap + 5; i++) {
+          vi.setSystemTime(new Date(5_000_000_000_000 + (i + 1) * 1000));
+          registerForeground(`fg-${i}`, 5_000_000_000_000 + (i + 1) * 1000);
+          registry.settleForeground(`fg-${i}`, 'completed');
+        }
+
+        // Cancelled-not-notified entry survives; foreground entries beyond
+        // the cap are evicted instead.
+        expect(registry.get('bg-cancelling')).toBeDefined();
+        expect(registry.get('bg-cancelling')!.status).toBe('cancelled');
+        expect(registry.get('bg-cancelling')!.notified).not.toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('background terminal transitions trigger the cap (no foreground required)', () => {
+      // A session that runs many background agents to completion without
+      // ever spawning a foreground subagent must still enforce the cap —
+      // otherwise `complete()` / `fail()` / `finalizeCancelled()` would
+      // accumulate forever.
+      vi.useFakeTimers();
+      try {
+        const cap = MAX_RETAINED_TERMINAL_BACKGROUND_TASKS;
+        for (let i = 0; i < cap + 3; i++) {
+          vi.setSystemTime(new Date(6_000_000_000_000 + i * 1000));
+          registry.register({
+            agentId: `bg-${i}`,
+            description: `bg ${i}`,
+            flavor: 'background',
+            status: 'running',
+            startTime: 6_000_000_000_000 + i * 1000,
+            abortController: new AbortController(),
+          });
+          registry.complete(`bg-${i}`, 'done');
+        }
+        expect(registry.getAll().length).toBe(cap);
+        // Oldest 3 evicted, newest cap retained.
+        expect(registry.get('bg-0')).toBeUndefined();
+        expect(registry.get('bg-1')).toBeUndefined();
+        expect(registry.get('bg-2')).toBeUndefined();
+        expect(registry.get(`bg-${cap + 2}`)).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('settleForeground after cancel() attaches final stats and runs prune', () => {
+      // Cancel-then-settle race: the dialog's `x` confirms cancellation
+      // (which sets entry.status='cancelled' synchronously), then the
+      // tool-call's finally calls settleForeground with the agent's
+      // authoritative final stats. The settle must NOT skip on the
+      // already-terminal status — otherwise the dialog row would render
+      // with the live-refresh's last snapshot rather than the final
+      // execution-summary numbers.
+      registry.register({
+        agentId: 'fg-cancel-race',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        stats: { totalTokens: 100, toolUses: 1, durationMs: 50 },
+      });
+
+      registry.cancel('fg-cancel-race');
+      // Foreground entries don't notify, but cancel set status='cancelled'.
+      expect(registry.get('fg-cancel-race')!.status).toBe('cancelled');
+
+      const finalStats = { totalTokens: 250, toolUses: 3, durationMs: 200 };
+      registry.settleForeground('fg-cancel-race', 'cancelled', {
+        stats: finalStats,
+      });
+
+      const settled = registry.get('fg-cancel-race');
+      // Status preserved (user intent wins), but final stats attached.
+      expect(settled!.status).toBe('cancelled');
+      expect(settled!.stats).toEqual(finalStats);
+    });
+
+    it('does not evict still-running entries', () => {
+      vi.useFakeTimers();
+      try {
+        const cap = MAX_RETAINED_TERMINAL_BACKGROUND_TASKS;
+        // A long-running background entry registered at t=0 (oldest of all)
+        // must survive even when `cap+5` foreground entries settle around it.
+        vi.setSystemTime(new Date(4_000_000_000_000));
+        registry.register({
+          agentId: 'bg-running',
+          description: 'still running',
+          flavor: 'background',
+          status: 'running',
+          startTime: 4_000_000_000_000,
+          abortController: new AbortController(),
+        });
+        for (let i = 0; i < cap + 5; i++) {
+          vi.setSystemTime(new Date(4_000_000_000_000 + (i + 1) * 1000));
+          registerForeground(`fg-${i}`, 4_000_000_000_000 + (i + 1) * 1000);
+          registry.settleForeground(`fg-${i}`, 'completed');
+        }
+
+        // Running entry stays; total is cap (terminal) + 1 (running).
+        expect(registry.get('bg-running')).toBeDefined();
+        expect(registry.get('bg-running')!.status).toBe('running');
+        expect(registry.getAll().length).toBe(cap + 1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

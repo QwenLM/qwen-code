@@ -340,6 +340,32 @@ describe('BackgroundTasksDialog', () => {
     expect(h.cancel).toHaveBeenCalledWith('bg-1');
   });
 
+  it('drops the [in turn] prefix on settled foreground rows', () => {
+    // The prefix exists to warn users that cancelling will end the parent's
+    // turn. Once the entry is terminal there is nothing to cancel, so the
+    // warning would just be noise alongside the dimmed-row presentation.
+    const running = entry({
+      agentId: 'fg-running',
+      status: 'running',
+      flavor: 'foreground',
+      description: 'still going',
+    });
+    const completed = entry({
+      agentId: 'fg-done',
+      status: 'completed',
+      flavor: 'foreground',
+      description: 'finished work',
+    });
+    const h = setup([running, completed]);
+    h.call(() => h.probe.current!.actions.openDialog());
+
+    const frame = h.lastFrame() ?? '';
+    expect(frame).toContain('[in turn] still going');
+    // The settled row keeps the description but loses the prefix.
+    expect(frame).toContain('finished work');
+    expect(frame).not.toContain('[in turn] finished work');
+  });
+
   it('ignores `x` on a terminal foreground entry (no arm, no cancel call)', () => {
     // A foreground entry briefly stays visible after settling but before
     // the tool-call's finally path unregisters it. The dialog's hint

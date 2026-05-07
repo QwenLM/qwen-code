@@ -99,7 +99,7 @@ describe('AgentTool', () => {
     // enough for these tests — they don't assert on registry behavior.
     const stubRegistry = {
       register: vi.fn(),
-      unregisterForeground: vi.fn(),
+      settleForeground: vi.fn(),
       complete: vi.fn(),
       fail: vi.fn(),
       finalizeCancelled: vi.fn(),
@@ -1510,7 +1510,7 @@ describe('AgentTool', () => {
     let mockContextState: ContextState;
     let mockRegistry: {
       register: ReturnType<typeof vi.fn>;
-      unregisterForeground: ReturnType<typeof vi.fn>;
+      settleForeground: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
       fail: ReturnType<typeof vi.fn>;
       finalizeCancelled: ReturnType<typeof vi.fn>;
@@ -1547,7 +1547,7 @@ describe('AgentTool', () => {
 
       mockRegistry = {
         register: vi.fn(),
-        unregisterForeground: vi.fn(),
+        settleForeground: vi.fn(),
         complete: vi.fn(),
         fail: vi.fn(),
         finalizeCancelled: vi.fn(),
@@ -1694,9 +1694,9 @@ describe('AgentTool', () => {
       expect(llmText).not.toContain('Background agent launched');
       // Foreground subagents register in the same registry with
       // flavor: 'foreground' so the pill+dialog can surface them while
-      // the parent's tool-call awaits, then unregister in the finally
-      // path once the call returns. (The tool-result is the durable
-      // record — the entry does not persist.)
+      // the parent's tool-call awaits. After the call returns the entry
+      // is settled to a terminal status and retained (bounded by the
+      // registry cap) so the dialog can drill into it.
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
           flavor: 'foreground',
@@ -1705,8 +1705,10 @@ describe('AgentTool', () => {
           status: 'running',
         }),
       );
-      expect(mockRegistry.unregisterForeground).toHaveBeenCalledWith(
+      expect(mockRegistry.settleForeground).toHaveBeenCalledWith(
         expect.stringContaining('file-search-'),
+        'completed',
+        expect.any(Object),
       );
     });
 

@@ -1443,11 +1443,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const runFramedFork = () =>
           runWithAgentContext({ agentId: hookOpts.agentId }, async () => {
             try {
-              await this.runSubagentWithHooks(
-                subagent,
-                contextState,
-                hookOpts,
-              );
+              await this.runSubagentWithHooks(subagent, contextState, hookOpts);
             } finally {
               void agentConfig
                 .getToolRegistry()
@@ -1537,11 +1533,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
       this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
+      // Tracked across try/finally so the finally can settle the registry
+      // entry with the right terminal status. Defaults to `'failed'` so an
+      // unexpected throw inside `runFramed` (which lands in the outer
+      // catch, AFTER the inner finally has already run) still settles the
+      // entry as failed rather than leaving it stuck on `running`.
+      let terminalStatus: 'completed' | 'failed' | 'cancelled' = 'failed';
+      let terminalError: string | undefined;
       try {
         await runFramed();
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
         if (terminateMode === AgentTerminateMode.ERROR) {
+          terminalStatus = 'failed';
+          terminalError = finalText || 'Subagent execution failed.';
           return {
             llmContent: finalText || 'Subagent execution failed.',
             returnDisplay: this.currentDisplay!,
@@ -1557,6 +1562,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // `<status>cancelled</status>` XML envelope; the foreground path
           // has no equivalent envelope, so the marker has to ride the
           // llmContent payload itself.
+          terminalStatus = 'cancelled';
           const partial = finalText || '(no partial result captured)';
           return {
             llmContent: [
@@ -1567,6 +1573,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             returnDisplay: this.currentDisplay!,
           };
         }
+        // Only `GOAL` is a true success. `TIMEOUT`, `MAX_TURNS`, and
+        // `SHUTDOWN` end execution early without reaching the goal — the
+        // dialog should surface them as failures so users aren't misled
+        // by a green ✓ on a run that hit a turn limit or got killed.
+        // The LLM-facing return shape stays unchanged (today's behavior)
+        // so this is purely a UI accuracy fix on the registry side.
+        if (terminateMode === AgentTerminateMode.GOAL) {
+          terminalStatus = 'completed';
+        } else {
+          terminalStatus = 'failed';
+          terminalError =
+            finalText || `Agent terminated with mode: ${terminateMode}`;
+        }
         return {
           llmContent: [{ text: finalText }],
           returnDisplay: this.currentDisplay!,
@@ -1575,11 +1594,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
         signal?.removeEventListener('abort', onParentAbort);
-        // Foreground entries leave the registry as soon as the tool-call
-        // returns — the parent's tool-result is the durable record. Doing
-        // this in finally guarantees we clean up on success, failure,
-        // cancel, AND any unexpected throw inside runFramed.
-        registry.unregisterForeground(hookOpts.agentId);
+        // Pass authoritative final stats so the retained dialog row
+        // doesn't depend on a last-event race against settle — the live
+        // refresh path stops updating once the entry leaves `running`.
+        const finalSummary = subagent.getExecutionSummary();
+        registry.settleForeground(hookOpts.agentId, terminalStatus, {
+          error: terminalError,
+          stats: {
+            totalTokens: finalSummary.totalTokens,
+            toolUses: fgLiveToolCallCount,
+            durationMs: finalSummary.totalDurationMs,
+          },
+        });
         // Release the per-subagent ToolRegistry so any AgentTool /
         // SkillTool the model instantiated during execution disposes
         // its change-listeners on shared SubagentManager / SkillManager.
