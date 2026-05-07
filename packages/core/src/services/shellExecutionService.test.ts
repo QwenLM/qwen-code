@@ -684,11 +684,25 @@ describe('ShellExecutionService', () => {
         (pty, abortController) => {
           // Data BEFORE promote — fed via the live onData listener so it
           // reaches the foreground onOutputEvent normally.
-          pty.onData.mock.calls[0][0]('pre-promote-data\n');
+          const dataCallback = pty.onData.mock.calls[0][0];
+          dataCallback('pre-promote-data\n');
           abortController.abort({
             kind: 'background',
             shellId: 'bg_test123',
           } satisfies ShellAbortReason);
+          // Mirror the child_process equivalent test: emit data AFTER
+          // abort and assert onOutputEventMock call count does NOT
+          // increase. The mock disposable doesn't actually detach the
+          // callback (it's a vi.fn() stub), so invoking dataCallback
+          // directly here exercises the production-side
+          // `listenersDetached` guard inside handleOutput's chain
+          // callback. Without that guard, the foreground onOutputEvent
+          // would fire for post-promote bytes — exactly the leak the
+          // PR-1 review (round 4 by @tanzhenxin) flagged this test
+          // didn't actually verify.
+          const eventCountAtPromote = onOutputEventMock.mock.calls.length;
+          dataCallback('post-promote-data\n');
+          expect(onOutputEventMock.mock.calls.length).toBe(eventCountAtPromote);
         },
       );
       expect(result.promoted).toBe(true);
@@ -1878,6 +1892,28 @@ describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
       },
     );
     expect(getShellAbortReasonKind(proxyReason)).toBe('cancel');
+  });
+
+  it("returns 'cancel' when the `getOwnPropertyDescriptor` Proxy trap throws (regression for @tanzhenxin's PR-1 review note)", () => {
+    // `Object.prototype.hasOwnProperty.call(reason, 'kind')` triggers
+    // the `[[GetOwnProperty]]` Proxy trap. A Proxy whose
+    // `getOwnPropertyDescriptor` handler throws (separate from the
+    // `get` trap covered by the test above) used to propagate past
+    // the helper because `hasOwnProperty.call` was outside the try.
+    // Now the helper wraps both the descriptor probe and the property
+    // read, so this also falls back to 'cancel'.
+    const throwingDescriptorProxy = new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error('getOwnPropertyDescriptor blew up');
+        },
+        get() {
+          return undefined;
+        },
+      },
+    );
+    expect(getShellAbortReasonKind(throwingDescriptorProxy)).toBe('cancel');
   });
 
   it("returns 'background' for the canonical happy-path reason", () => {
