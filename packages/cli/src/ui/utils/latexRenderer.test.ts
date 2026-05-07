@@ -28,4 +28,11 @@ describe('latexRenderer', () => {
       String.raw`\mathbb{E}[X]`,
     );
   });
+
+  it('bounds nested command rendering depth', () => {
+    const nested = String.raw`\frac{`.repeat(20) + 'x' + '}{1}'.repeat(20);
+
+    expect(() => renderInlineLatex(nested)).not.toThrow();
+    expect(renderInlineLatex(nested)).toContain(String.raw`\frac`);
+  });
 });

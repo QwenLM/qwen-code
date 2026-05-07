@@ -95,6 +95,16 @@ const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
 const BLOCKQUOTE_PREFIX_PADDING = 1;
 const MATH_BLOCK_PREFIX_PADDING = 1;
+const INLINE_MATH_MAX_CHARS = 1024;
+const TABLE_INLINE_MATH_SPAN_RE = new RegExp(
+  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
+  'y',
+);
+
+function readTableInlineMathSpan(row: string, index: number): string | null {
+  TABLE_INLINE_MATH_SPAN_RE.lastIndex = index;
+  return TABLE_INLINE_MATH_SPAN_RE.exec(row)?.[0] ?? null;
+}
 
 function splitMarkdownTableRow(row: string): string[] {
   const cells: string[] = [];
@@ -127,6 +137,15 @@ function splitMarkdownTableRow(row: string): string[] {
       current += '`'.repeat(runLength);
       index += runLength - 1;
       continue;
+    }
+
+    if (char === '$' && activeCodeFenceLength === 0) {
+      const mathSpan = readTableInlineMathSpan(row, index);
+      if (mathSpan) {
+        current += mathSpan;
+        index += mathSpan.length - 1;
+        continue;
+      }
     }
 
     if (char === '|' && activeCodeFenceLength === 0) {

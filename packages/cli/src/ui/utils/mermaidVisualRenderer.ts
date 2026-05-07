@@ -5,6 +5,7 @@
  */
 
 import stringWidth from 'string-width';
+import stripAnsi from 'strip-ansi';
 
 interface FlowNode {
   id: string;
@@ -101,22 +102,39 @@ function center(text: string, width: number): string {
   return ' '.repeat(left) + text + ' '.repeat(padding - left);
 }
 
+function sanitizeTerminalText(text: string): string {
+  let result = '';
+  for (const char of stripAnsi(text)) {
+    const code = char.charCodeAt(0);
+    if ((code <= 31 && code !== 10) || code === 127) continue;
+    result += char;
+  }
+  return result;
+}
+
 function stripMermaidPunctuation(text: string): string {
-  return text
+  return sanitizeTerminalText(text)
     .trim()
     .replace(/[;,]+$/g, '')
     .trim();
 }
 
 function normalizePreviewLine(line: string): string {
-  const trimmed = line.trim();
+  const trimmed = sanitizeTerminalText(line).trim();
   return trimmed.length > MAX_PREVIEW_SOURCE_LINE_LENGTH
     ? trimmed.slice(0, MAX_PREVIEW_SOURCE_LINE_LENGTH)
     : trimmed;
 }
 
+function sanitizePreviewSourceLine(line: string): string {
+  const sanitized = sanitizeTerminalText(line);
+  return sanitized.length > MAX_PREVIEW_SOURCE_LINE_LENGTH
+    ? sanitized.slice(0, MAX_PREVIEW_SOURCE_LINE_LENGTH)
+    : sanitized;
+}
+
 function normalizeNodeLabel(label: string): string {
-  return label
+  return sanitizeTerminalText(label)
     .replace(/^["']|["']$/g, '')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/\\n/g, '\n');
@@ -139,7 +157,10 @@ function previewSourceFallback(
   type: string,
   warning?: string,
 ): MermaidVisualResult {
-  const allSourceLines = source.trim().split(/\r?\n/);
+  const allSourceLines = sanitizeTerminalText(source)
+    .trim()
+    .split(/\r?\n/)
+    .map(sanitizePreviewSourceLine);
   const sourceLines = allSourceLines.slice(0, MAX_SOURCE_FALLBACK_LINES);
   const truncated = allSourceLines.length > sourceLines.length;
   const lines = ['```mermaid', ...sourceLines, '```'].map((line) =>
@@ -1473,10 +1494,11 @@ function renderIndentedTreeDiagram(
   const rawLines = allLines.slice(0, MAX_GENERIC_PREVIEW_LINES);
   const truncated = allLines.length > rawLines.length;
   const lines = rawLines.map((line) => {
-    const indentation = /^\s*/.exec(line)?.[0].length ?? 0;
+    const safeLine = sanitizeTerminalText(line);
+    const indentation = /^\s*/.exec(safeLine)?.[0].length ?? 0;
     const depth = Math.floor(indentation / 2);
     return truncateToWidth(
-      `${'  '.repeat(depth)}• ${line.trim()}`,
+      `${'  '.repeat(depth)}• ${safeLine.trim()}`,
       contentWidth,
     );
   });
@@ -1501,7 +1523,7 @@ export function renderMermaidVisual(
   source: string,
   contentWidth: number,
 ): MermaidVisualResult {
-  const trimmed = source.trim();
+  const trimmed = sanitizeTerminalText(source).trim();
   const firstLine = trimmed.split(/\r?\n/).find((line) => line.trim()) ?? '';
   if (FLOW_START_RE.test(firstLine)) {
     return renderFlowchart(trimmed, contentWidth);

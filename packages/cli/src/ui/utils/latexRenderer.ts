@@ -55,6 +55,7 @@ const COMMAND_REPLACEMENT_REGEX = new RegExp(
     .join('|'),
   'g',
 );
+const MAX_RENDER_DEPTH = 10;
 
 const SUPERSCRIPT: Record<string, string> = {
   '0': '⁰',
@@ -192,16 +193,20 @@ function replaceBraceCommand(
   return output;
 }
 
-export function renderInlineLatex(input: string): string {
+export function renderInlineLatex(input: string, depth = 0): string {
   let output = input.trim();
+  if (depth > MAX_RENDER_DEPTH) {
+    return output;
+  }
 
   output = replaceBraceCommand(
     output,
     'frac',
     2,
     ([numerator, denominator]) =>
-      `${renderInlineLatex(numerator ?? '')}/${renderInlineLatex(
+      `${renderInlineLatex(numerator ?? '', depth + 1)}/${renderInlineLatex(
         denominator ?? '',
+        depth + 1,
       )}`,
   );
 
@@ -209,7 +214,7 @@ export function renderInlineLatex(input: string): string {
     output,
     'sqrt',
     1,
-    ([radicand]) => `√(${renderInlineLatex(radicand ?? '')})`,
+    ([radicand]) => `√(${renderInlineLatex(radicand ?? '', depth + 1)})`,
   );
 
   output = output.replace(

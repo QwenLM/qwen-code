@@ -46,4 +46,40 @@ flowchart TD
     expect(output).toContain('是');
     expect(output).toContain('否');
   });
+
+  it('strips terminal control sequences from rendered labels', () => {
+    const escape = String.fromCharCode(27);
+    const preview = renderMermaidVisual(
+      `
+flowchart TD
+  A[${escape}[2JStart] -->|${escape}[31mYes${escape}[0m| B[Done]
+`,
+      80,
+    );
+    const output = preview.lines.join('\n');
+
+    expect(output).toContain('Start');
+    expect(output).toContain('Yes');
+    expect(output).toContain('Done');
+    expect(output).not.toContain(escape);
+    expect(output).not.toContain('[2J');
+    expect(output).not.toContain('[31m');
+  });
+
+  it('strips terminal control sequences from source fallback', () => {
+    const escape = String.fromCharCode(27);
+    const preview = renderMermaidVisual(
+      `
+unknownDiagram
+  ${escape}[2Junsafe fallback
+`,
+      80,
+    );
+    const output = preview.lines.join('\n');
+
+    expect(preview.title).toBe('Mermaid source (unknownDiagram)');
+    expect(output).toContain('unsafe fallback');
+    expect(output).not.toContain(escape);
+    expect(output).not.toContain('[2J');
+  });
 });

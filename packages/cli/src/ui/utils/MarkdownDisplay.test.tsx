@@ -410,6 +410,24 @@ Another paragraph.
       expect(output).not.toContain('$\\alpha$');
     });
 
+    it('keeps pipes inside markdown table math spans in the same cell', () => {
+      const text = `
+| Expression | Meaning |
+|------------|---------|
+| $|x|$ | absolute value |
+| $P(A|B)$ | conditional probability |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+
+      expect(output).toContain('|x|');
+      expect(output).toContain('P(A|B)');
+      expect(output).toContain('absolute value');
+      expect(output).toContain('conditional probability');
+    });
+
     it('does not treat table dollar amounts as inline math', () => {
       const text = `
 | Item | Price |
