@@ -42,6 +42,11 @@ describe('randomHexString', () => {
     expect(randomHexString(16)).toHaveLength(16);
   });
 
+  it('handles odd lengths correctly', () => {
+    expect(randomHexString(15)).toHaveLength(15);
+    expect(randomHexString(7)).toHaveLength(7);
+  });
+
   it('returns only hex characters', () => {
     expect(randomHexString(32)).toMatch(/^[0-9a-f]+$/);
   });

@@ -5,12 +5,24 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SpanStatusCode } from '@opentelemetry/api';
+import { SpanStatusCode, TraceFlags } from '@opentelemetry/api';
 import {
   withSpan,
   startSpanWithContext,
   createSessionRootContext,
 } from './tracer.js';
+import { deriveTraceId } from './trace-id-utils.js';
+
+const mockState = vi.hoisted(() => ({
+  getSpanReturn: undefined as unknown,
+  lastParentCtx: undefined as unknown,
+  sessionContext: undefined as unknown,
+  activeContext: {} as unknown,
+}));
+
+vi.mock('./session-context.js', () => ({
+  getSessionContext: () => mockState.sessionContext,
+}));
 
 // Collect span operations for assertions
 interface SpanRecord {
@@ -56,16 +68,19 @@ vi.mock('@opentelemetry/api', async () => {
     startActiveSpan(
       name: string,
       options: { attributes?: Record<string, string | number | boolean> },
-      _ctx: unknown,
+      ctx: unknown,
       fn: (span: ReturnType<typeof createMockSpan>) => unknown,
     ) {
+      mockState.lastParentCtx = ctx;
       const span = createMockSpan(name, options.attributes ?? {});
       return fn(span);
     },
     startSpan(
       name: string,
       options: { attributes?: Record<string, string | number | boolean> },
+      ctx?: unknown,
     ) {
+      mockState.lastParentCtx = ctx;
       return createMockSpan(name, options.attributes ?? {});
     },
   };
@@ -76,12 +91,12 @@ vi.mock('@opentelemetry/api', async () => {
     TraceFlags: actual.TraceFlags,
     trace: {
       getTracer: () => mockTracer,
-      getSpan: () => undefined,
+      getSpan: () => mockState.getSpanReturn,
       setSpan: (_ctx: unknown, span: unknown) => span,
       wrapSpanContext: (ctx: unknown) => ctx,
     },
     context: {
-      active: () => ({}),
+      active: () => mockState.activeContext,
       with: (_ctx: unknown, fn: () => unknown) => fn(),
     },
   };
@@ -89,6 +104,10 @@ vi.mock('@opentelemetry/api', async () => {
 
 beforeEach(() => {
   spans.length = 0;
+  mockState.getSpanReturn = undefined;
+  mockState.lastParentCtx = undefined;
+  mockState.sessionContext = undefined;
+  mockState.activeContext = {};
 });
 
 describe('withSpan', () => {
@@ -192,18 +211,88 @@ describe('startSpanWithContext', () => {
 });
 
 describe('createSessionRootContext', () => {
-  it('returns a context object', () => {
-    const ctx = createSessionRootContext('session-123');
-    expect(ctx).toBeDefined();
+  it('derives a deterministic traceId from session ID', () => {
+    const ctx = createSessionRootContext('session-123') as unknown as {
+      traceId: string;
+      spanId: string;
+      traceFlags: number;
+      isRemote: boolean;
+    };
+    expect(ctx.traceId).toBe(deriveTraceId('session-123'));
   });
 
-  it('returns a valid context for repeated calls with the same session ID', () => {
-    // createSessionRootContext derives a deterministic traceId from the
-    // session ID but uses a random spanId, so each call produces a new
-    // context. We verify it doesn't throw and returns defined results.
-    const ctx1 = createSessionRootContext('session-abc');
-    const ctx2 = createSessionRootContext('session-abc');
-    expect(ctx1).toBeDefined();
-    expect(ctx2).toBeDefined();
+  it('uses TraceFlags.NONE to respect operator sampler config', () => {
+    const ctx = createSessionRootContext('session-123') as unknown as {
+      traceFlags: number;
+    };
+    expect(ctx.traceFlags).toBe(TraceFlags.NONE);
+  });
+
+  it('generates a valid 16-char hex spanId', () => {
+    const ctx = createSessionRootContext('session-123') as unknown as {
+      spanId: string;
+    };
+    expect(ctx.spanId).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('produces same traceId for same session ID', () => {
+    const ctx1 = createSessionRootContext('session-abc') as unknown as {
+      traceId: string;
+    };
+    const ctx2 = createSessionRootContext('session-abc') as unknown as {
+      traceId: string;
+    };
+    expect(ctx1.traceId).toBe(ctx2.traceId);
+  });
+
+  it('produces different traceId for different session IDs', () => {
+    const ctx1 = createSessionRootContext('session-abc') as unknown as {
+      traceId: string;
+    };
+    const ctx2 = createSessionRootContext('session-xyz') as unknown as {
+      traceId: string;
+    };
+    expect(ctx1.traceId).not.toBe(ctx2.traceId);
+  });
+});
+
+describe('parent context selection', () => {
+  it('uses session context as parent when no active span exists', async () => {
+    const sessionCtx = { _sentinel: 'session' };
+    mockState.getSpanReturn = undefined;
+    mockState.sessionContext = sessionCtx;
+
+    await withSpan('test.session-parent', {}, async () => {});
+
+    expect(mockState.lastParentCtx).toBe(sessionCtx);
+  });
+
+  it('prefers active span context over session context', async () => {
+    const sessionCtx = { _sentinel: 'session' };
+    mockState.getSpanReturn = { _sentinel: 'active-span' };
+    mockState.sessionContext = sessionCtx;
+
+    await withSpan('test.active-parent', {}, async () => {});
+
+    expect(mockState.lastParentCtx).toBe(mockState.activeContext);
+  });
+
+  it('falls back to active context when neither active span nor session context exists', async () => {
+    mockState.getSpanReturn = undefined;
+    mockState.sessionContext = undefined;
+
+    await withSpan('test.fallback', {}, async () => {});
+
+    expect(mockState.lastParentCtx).toBe(mockState.activeContext);
+  });
+
+  it('applies the same parent context logic for startSpanWithContext', () => {
+    const sessionCtx = { _sentinel: 'session' };
+    mockState.getSpanReturn = undefined;
+    mockState.sessionContext = sessionCtx;
+
+    startSpanWithContext('test.manual-session', {});
+
+    expect(mockState.lastParentCtx).toBe(sessionCtx);
   });
 });
