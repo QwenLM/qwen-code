@@ -1,0 +1,314 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, vi } from 'vitest';
+import {
+  DaemonClient,
+  DaemonHttpError,
+} from '../../src/daemon/DaemonClient.js';
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function sseResponse(frames: string): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(frames));
+      controller.close();
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+interface CapturedRequest {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: string | null;
+}
+
+function recordingFetch(
+  reply: (req: CapturedRequest) => Response | Promise<Response>,
+): { fetch: typeof globalThis.fetch; calls: CapturedRequest[] } {
+  const calls: CapturedRequest[] = [];
+  const fetchImpl = vi.fn(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const method = init?.method ?? 'GET';
+      const headers: Record<string, string> = {};
+      if (init?.headers) {
+        const h = new Headers(init.headers);
+        h.forEach((v, k) => (headers[k.toLowerCase()] = v));
+      }
+      const body = typeof init?.body === 'string' ? init.body : null;
+      const captured: CapturedRequest = { url, method, headers, body };
+      calls.push(captured);
+      return reply(captured);
+    },
+  ) as unknown as typeof globalThis.fetch;
+  return { fetch: fetchImpl, calls };
+}
+
+describe('DaemonClient', () => {
+  describe('health', () => {
+    it('GETs /health and returns the body', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { status: 'ok' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.health();
+      expect(res).toEqual({ status: 'ok' });
+      expect(calls[0]?.url).toBe('http://daemon/health');
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(503, { error: 'down' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.health()).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+  });
+
+  describe('capabilities', () => {
+    it('GETs /capabilities and returns the v1 envelope', async () => {
+      const envelope = {
+        v: 1 as const,
+        mode: 'http-bridge' as const,
+        features: ['health', 'capabilities'],
+        modelServices: [],
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const caps = await client.capabilities();
+      expect(caps).toEqual(envelope);
+    });
+  });
+
+  describe('bearer auth', () => {
+    it('attaches Authorization: Bearer when token is set', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { status: 'ok' }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+      await client.health();
+      expect(calls[0]?.headers['authorization']).toBe('Bearer secret');
+    });
+
+    it('omits Authorization when no token', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { status: 'ok' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.health();
+      expect(calls[0]?.headers['authorization']).toBeUndefined();
+    });
+  });
+
+  describe('createOrAttachSession', () => {
+    it('POSTs cwd in the body', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const session = await client.createOrAttachSession({
+        workspaceCwd: '/work/a',
+      });
+      expect(session.sessionId).toBe('s-1');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/session');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+    });
+
+    it('forwards modelServiceId when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.createOrAttachSession({
+        workspaceCwd: '/work/a',
+        modelServiceId: 'qwen-prod',
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        cwd: '/work/a',
+        modelServiceId: 'qwen-prod',
+      });
+    });
+
+    it('throws on 400', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: 'bad cwd' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.createOrAttachSession({ workspaceCwd: 'relative' }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+  });
+
+  describe('prompt', () => {
+    it('POSTs the prompt body and returns the agent response', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { stopReason: 'end_turn' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.prompt('s-1', {
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+      expect(res.stopReason).toBe('end_turn');
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/prompt');
+      expect(calls[0]?.method).toBe('POST');
+      const body = JSON.parse(calls[0]!.body!);
+      expect(body.prompt).toEqual([{ type: 'text', text: 'hi' }]);
+    });
+
+    it('url-encodes the sessionId', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { stopReason: 'end_turn' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.prompt('with/slash', {
+        prompt: [{ type: 'text', text: 'x' }],
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/with%2Fslash/prompt');
+    });
+  });
+
+  describe('cancel', () => {
+    it('POSTs /cancel and tolerates 204', async () => {
+      const { fetch, calls } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.cancel('s-1');
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/cancel');
+      expect(calls[0]?.method).toBe('POST');
+    });
+
+    it('throws on 404', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.cancel('s-1')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+  });
+
+  describe('respondToPermission', () => {
+    it('returns true on 200', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const accepted = await client.respondToPermission('req-1', {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+      expect(accepted).toBe(true);
+      expect(calls[0]?.url).toBe('http://daemon/permission/req-1');
+    });
+
+    it('returns false on 404 (lost the race)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', requestId: 'req-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const accepted = await client.respondToPermission('req-1', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(accepted).toBe(false);
+    });
+
+    it('throws on 400 (malformed outcome)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: 'bad outcome' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.respondToPermission('req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+  });
+
+  describe('subscribeEvents', () => {
+    it('GETs /events and yields parsed frames', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        sseResponse(
+          'id: 1\nevent: session_update\ndata: {"id":1,"v":1,"type":"session_update","data":"a"}\n\n' +
+            'id: 2\nevent: session_update\ndata: {"id":2,"v":1,"type":"session_update","data":"b"}\n\n',
+        ),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const events = [];
+      for await (const e of client.subscribeEvents('s-1')) events.push(e);
+      expect(events.map((e) => e.id)).toEqual([1, 2]);
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/events');
+      expect(calls[0]?.headers['accept']).toBe('text/event-stream');
+    });
+
+    it('forwards Last-Event-ID', async () => {
+      const { fetch, calls } = recordingFetch(() => sseResponse(''));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      // Drain immediately — empty stream.
+      for await (const _ of client.subscribeEvents('s-1', {
+        lastEventId: 42,
+      })) {
+        /* unreachable */
+      }
+      expect(calls[0]?.headers['last-event-id']).toBe('42');
+    });
+
+    it('throws DaemonHttpError when the daemon returns a non-2xx for events', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 'missing' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const iter = client.subscribeEvents('missing');
+      await expect(iter.next()).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
+  describe('baseUrl normalization', () => {
+    it('strips trailing slashes', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { status: 'ok' }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon/////',
+        fetch,
+      });
+      await client.health();
+      expect(calls[0]?.url).toBe('http://daemon/health');
+    });
+  });
+});

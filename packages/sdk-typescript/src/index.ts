@@ -3,6 +3,28 @@ export { AbortError, isAbortError } from './types/errors.js';
 export { Query } from './query/Query.js';
 export { SdkLogger } from './utils/logger.js';
 
+// Daemon HTTP client (talks to `qwen serve`; see GitHub issue #3803)
+export {
+  DaemonClient,
+  DaemonHttpError,
+  parseSseStream,
+  type CreateSessionRequest,
+  type DaemonCapabilities,
+  type DaemonClientOptions,
+  type DaemonEvent,
+  type DaemonMode,
+  type DaemonSession,
+  type PermissionOutcome,
+  type PermissionOutcomeCancelled,
+  type PermissionOutcomeSelected,
+  type PermissionResponse,
+  type PromptContentBlock,
+  type PromptRequest as DaemonPromptRequest,
+  type PromptResult,
+  type PromptTextContent,
+  type SubscribeOptions as DaemonSubscribeOptions,
+} from './daemon/index.js';
+
 // SDK MCP Server exports
 export { tool } from './mcp/tool.js';
 export { createSdkMcpServer } from './mcp/createSdkMcpServer.js';
