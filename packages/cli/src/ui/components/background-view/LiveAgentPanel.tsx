@@ -148,14 +148,20 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   const config = useContext(ConfigContext);
 
   // Wall-clock tick. Drives elapsed-time refresh, terminal-row eviction,
-  // AND the live registry re-pull below. The gate must consider both
-  // live agents AND terminal-but-still-visible agents (within the 8s
-  // visibility window) — `BackgroundTaskRegistry.getAll()` retains
-  // terminal entries indefinitely, so a naive `entries.some(isAgentEntry)`
-  // gate would keep ticking forever after the last entry's window
-  // closed, churning re-renders for nothing on screen.
+  // AND the live registry re-pull below. The gate must consider:
+  //   - `dialogOpen` — when the bg-tasks dialog is up, the panel
+  //     renders null (`if (dialogOpen) return null` below), so any
+  //     ticks the interval fires are wasted re-renders.
+  //   - live agents (running / paused) — always need elapsed updates.
+  //   - terminal agents still inside the 8s visibility window — need
+  //     ticks to drive their eviction.
+  // `BackgroundTaskRegistry.getAll()` retains terminal entries
+  // indefinitely, so a naive `entries.some(isAgentEntry)` gate would
+  // keep ticking forever after the last entry's window closed; the
+  // `dialogOpen` arm closes the corresponding gap on the dialog side.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (dialogOpen) return;
     const needsTick = (whenMs: number) =>
       entries.some((e) => {
         if (!isAgentEntry(e)) return false;
@@ -174,8 +180,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
       if (!needsTick(wallNow)) clearInterval(id);
     }, 1000);
     return () => clearInterval(id);
-     
-  }, [entries]);
+  }, [entries, dialogOpen]);
 
   // Re-pull each agent from the live registry on every tick so the row
   // shows the latest `recentActivities` — `useBackgroundTaskView`

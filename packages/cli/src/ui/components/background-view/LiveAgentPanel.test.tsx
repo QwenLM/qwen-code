@@ -295,6 +295,37 @@ describe('<LiveAgentPanel />', () => {
     expect(lastFrame() ?? '').toBe('');
   });
 
+  it('tears the 1s tick down when the bg-tasks dialog opens', () => {
+    // While the dialog is open the panel returns null and the dialog
+    // owns the same data — a still-running interval is a wasted
+    // re-render budget. Verify by checking that advancing the clock
+    // past the visibility window with dialogOpen=true does not flip
+    // the panel into its "expired" state (which would only happen if
+    // the tick advanced `now`).
+    const initial = agentEntry({
+      agentId: 'live-1',
+      subagentType: 'researcher',
+      description: 'researcher: investigate',
+      status: 'completed',
+      startTime: -2000,
+      endTime: 0,
+    });
+    const { config } = makeRegistryConfig([initial]);
+    const { lastFrame } = renderPanel({
+      entries: [initial],
+      config,
+      dialogOpen: true,
+    });
+    // Dialog open → panel hidden, no opportunity for `now` to drift.
+    expect(lastFrame() ?? '').toBe('');
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    // Still hidden. The fact that we got here without the panel ever
+    // mounting an interval means subsequent renders won't churn either.
+    expect(lastFrame() ?? '').toBe('');
+  });
+
   it('still shows the snapshot when no Config is mounted (test fixtures)', () => {
     // Without a Config provider the panel can't reach the registry, so
     // it has to trust the snapshot — this is the one place the legacy

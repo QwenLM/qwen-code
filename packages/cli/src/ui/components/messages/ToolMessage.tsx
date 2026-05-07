@@ -402,8 +402,13 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   config?: Config;
   forceShowResult?: boolean;
   /**
-   * Whether this subagent owns keyboard input for confirmations and
-   * Ctrl+E/Ctrl+F display shortcuts.
+   * Whether this subagent owns keyboard input for the inline approval
+   * surface — when true the focus-holder banner renders and the
+   * underlying ToolConfirmationMessage receives keystrokes; when false
+   * sibling subagents render a dim "Queued approval" marker instead.
+   * (The legacy Ctrl+E / Ctrl+F display shortcuts were retired with
+   * the inline AgentExecutionDisplay frame; LiveAgentPanel owns the
+   * live progress surface and BackgroundTasksDialog owns drill-down.)
    */
   isFocused?: boolean;
   /**
