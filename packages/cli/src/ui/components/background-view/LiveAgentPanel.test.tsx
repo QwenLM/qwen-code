@@ -156,6 +156,73 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('5s');
   });
 
+  it('renders elapsed + token count for completed agents with stats', () => {
+    // Locks in the cost-visibility win the panel is partly motivated
+    // by — completed entries should surface `▶ Ns · Nk tokens`. Using
+    // a completed entry (rather than running) so the assertion is
+    // stable against the running-tally heuristic.
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'done-1',
+          subagentType: 'researcher',
+          description: 'researcher: investigate',
+          status: 'completed',
+          startTime: -12_000,
+          endTime: 0,
+          stats: { totalTokens: 2400, toolUses: 5, durationMs: 12_000 },
+        }),
+      ],
+    });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('12s');
+    expect(frame).toContain('2.4k tokens');
+  });
+
+  it.each([
+    ['paused', '⏸'],
+    ['failed', '✖'],
+    ['cancelled', '✖'],
+  ] as const)('renders the %s status with the %s glyph', (status, glyph) => {
+    // Status routing is otherwise uncovered for paused / failed /
+    // cancelled — a future regression that flattened the switch
+    // would slip past the existing running / completed cases.
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: `${status}-1`,
+          subagentType: 'researcher',
+          description: 'researcher: status routing fixture',
+          status,
+          // paused entries don't carry an endTime; failed / cancelled do.
+          endTime: status === 'paused' ? undefined : 0,
+        }),
+      ],
+    });
+    expect(lastFrame() ?? '').toContain(glyph);
+  });
+
+  it('strips the subagentType: prefix from the description case-insensitively', () => {
+    // `descriptionWithoutPrefix` lowercases both sides — the existing
+    // tests only feed lowercase prefixes, so a future revert to
+    // strict `startsWith` would silently re-introduce
+    // `Researcher: Researcher: …` double-prefix on capitalised inputs.
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'cap-1',
+          subagentType: 'researcher',
+          description: 'Researcher: cap-mismatch description',
+        }),
+      ],
+    });
+    const frame = lastFrame() ?? '';
+    // The prefix MUST have been stripped — the descriptive tail
+    // should appear exactly once, with no leading "Researcher: ".
+    expect(frame).toContain('cap-mismatch description');
+    expect(frame).not.toContain('Researcher: cap-mismatch');
+  });
+
   it('does NOT surface a flavor marker on foreground agents', () => {
     // Foreground vs background distinction stays with BackgroundTasksDialog
     // (where cancel semantics differ); the panel reads as a glance roster
@@ -275,23 +342,53 @@ describe('<LiveAgentPanel />', () => {
     expect(lastFrame() ?? '').toBe('');
   });
 
-  it('drops snapshot rows the live registry no longer knows about', () => {
-    // Foreground subagents unregister silently after the status-change
-    // callback fires (`unregisterForeground` deletes from the registry
-    // without emitting another transition). The snapshot still lists the
-    // entry as `running`, so a naive `live ?? snap` fallback would leave
-    // a ghost row that never clears. The panel must trust the registry
-    // and drop the row when `registry.get()` returns undefined.
+  it('reconciles snapshots the live registry no longer knows about as just-finished', () => {
+    // `unregisterForeground` calls `emitStatusChange(entry)` BEFORE
+    // it deletes the entry, so a snapshot taken on that callback
+    // captures the agent as "still running" while the very next
+    // render's `registry.get()` returns undefined. Naively falling
+    // back to the snap leaves a ghost-running row that never clears;
+    // dropping the row outright makes the agent disappear instantly
+    // and the user loses the "what just finished?" beat. Synthesize
+    // a terminal version so the 8s visibility window gives feedback
+    // and then evicts the row cleanly.
     const ghost = agentEntry({
       agentId: 'ghost-1',
       subagentType: 'editor',
       description: 'editor: long-gone foreground task',
       status: 'running',
     });
-    // Stub registry knows nothing about ghost-1 (simulates the
-    // post-unregister state).
     const { config } = makeRegistryConfig([]);
     const { lastFrame } = renderPanel({ entries: [ghost], config });
+    // First frame: synthesized completion, row still on screen.
+    let frame = lastFrame() ?? '';
+    expect(frame).toContain('editor');
+    expect(frame).toContain('long-gone foreground task');
+    // The synthesis sets status='completed', so the running tally
+    // should be 0/1 and the bullet should switch to the success ✔.
+    expect(frame).toContain('(0/1)');
+    expect(frame).toContain('✔');
+    // After the visibility window the row evicts and the panel hides.
+    act(() => {
+      vi.advanceTimersByTime(9000);
+    });
+    frame = lastFrame() ?? '';
+    expect(frame).toBe('');
+  });
+
+  it('still drops rows where snapshot is already terminal AND registry is empty', () => {
+    // No useful state to keep showing — the snap is already terminal
+    // (so the user already saw the result) and the registry forgot
+    // about it (so we can't update activity / stats). Drop.
+    const stale = agentEntry({
+      agentId: 'stale-1',
+      subagentType: 'researcher',
+      description: 'researcher: stale terminal entry',
+      status: 'completed',
+      endTime: 0,
+    });
+    const { config } = makeRegistryConfig([]);
+    const { lastFrame } = renderPanel({ entries: [stale], config });
     expect(lastFrame() ?? '').toBe('');
   });
 

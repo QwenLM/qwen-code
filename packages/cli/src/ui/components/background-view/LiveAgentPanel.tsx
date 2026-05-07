@@ -27,8 +27,9 @@
  */
 
 import type React from 'react';
-import { useContext, useEffect, useMemo, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
+import { DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import { useBackgroundTaskViewState } from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
@@ -61,12 +62,13 @@ const DEFAULT_MAX_ROWS = 5;
 // because the panel is denser and we have the dialog as the long-term
 // review surface.
 const TERMINAL_VISIBLE_MS = 8000;
-// `general-purpose` is the default builtin subagent; printing the type
-// every row when it's the default just clutters the line — the
-// description carries all the meaningful identity. Specialized
-// subagents (named in `subagents/builtin-agents.ts` or user-authored)
-// still get their type rendered as a bold anchor.
-const DEFAULT_SUBAGENT_TYPE = 'general-purpose';
+// Re-export under a panel-local alias so the source of truth stays
+// in `subagents/builtin-agents.ts` (a backend rename of the default
+// type would otherwise silently re-introduce the redundant
+// `general-purpose:` prefix on every row). Specialized subagents
+// (other builtins or user-authored types) still get their type
+// rendered as a bold anchor.
+const DEFAULT_SUBAGENT_TYPE = CORE_DEFAULT_SUBAGENT_TYPE;
 
 type LivePanelEntry = AgentDialogEntry & {
   /** True when the row is past its terminal-visibility window. */
@@ -191,37 +193,84 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   // BackgroundTasksDialog's detail body, which re-reads the registry
   // on its own activity tick.
   //
-  // When `registry.get()` returns undefined the entry is gone (the
-  // canonical case is a foreground subagent that unregistered after
-  // its statusChange fired but before the next snapshot refresh —
-  // `unregisterForeground` deletes silently). Drop the row instead
-  // of falling back to `snap`: the snapshot still says `running`,
-  // and that ghost would never clear because the registry has no
-  // record left to flip it to terminal.
+  // Three reconciliation paths between the snapshot and the registry:
+  //   1. Both agree → use live (newest `recentActivities`).
+  //   2. Snap says still-live (running / paused) but registry forgot
+  //      → most commonly a foreground subagent that finished:
+  //      `unregisterForeground` fires `emitStatusChange(entry)` BEFORE
+  //      it deletes the entry, so the snapshot captures the old
+  //      "still running" state and the next render's `registry.get`
+  //      returns undefined. Synthesize a terminal version with
+  //      `endTime = now` so the 8s visibility window gives the user
+  //      a "the agent finished" beat instead of either a ghost-running
+  //      row that never clears OR an instant disappearance the moment
+  //      the tool returns.
+  //   3. Snap is already terminal but registry forgot → nothing useful
+  //      to keep showing; drop.
   //
   // When `config` itself is undefined (test fixtures that render
   // without ConfigContext) the panel degrades to snapshot-only —
-  // there's no live source of truth to drop against, so the
-  // snapshot is the best we have.
+  // there's no live source of truth to reconcile against.
   //
   // NOTE: this useMemo MUST come before the `if (dialogOpen) return null`
   // early-return below — React's rules of hooks require hook calls in
   // identical order each render, so a conditional early-return that
   // skips a subsequent hook is a violation.
+  // First-seen-missing timestamps for synthesized terminal entries.
+  // We need this to survive across useMemo recomputes — without it,
+  // each tick would re-synthesize the entry with a fresh `now` as
+  // `endTime`, the visibility-window check (`now - endTime > 8000`)
+  // would always evaluate to 0, and the row would never expire. The
+  // ref outlives both the snapshot and the tick state.
+  const missingSinceRef = useRef<Map<string, number>>(new Map());
+
   const liveAgentSnapshots: AgentDialogEntry[] = useMemo(() => {
     const snapshots = entries.filter(isAgentEntry);
     if (!config) return snapshots;
     const registry = config.getBackgroundTaskRegistry();
-    return snapshots
+    // `now` participates in the dependency array so the memo recomputes
+    // each tick and picks up `recentActivities` the registry mutated in
+    // place via appendActivity. Reading it here makes the dependency
+    // semantically honest — without this read a future "remove dead
+    // dep" cleanup would silently freeze the panel on the first
+    // tool-call after a snapshot refresh.
+    const reconcileAt = now;
+    const seenIds = new Set<string>();
+    const next = snapshots
       .map((snap) => {
+        seenIds.add(snap.agentId);
         const live = registry.get(snap.agentId);
-        return live ? ({ ...live, kind: 'agent' as const } as const) : null;
+        if (live) {
+          // Recovered (or never went missing) — drop any stale
+          // missing-since record so a future re-disappearance
+          // gets a fresh timestamp.
+          missingSinceRef.current.delete(snap.agentId);
+          return { ...live, kind: 'agent' as const };
+        }
+        if (snap.status === 'running' || snap.status === 'paused') {
+          // Pin the disappearance time on first observation so
+          // subsequent ticks don't keep resetting endTime to `now`.
+          let missingSince = missingSinceRef.current.get(snap.agentId);
+          if (missingSince === undefined) {
+            missingSince = reconcileAt;
+            missingSinceRef.current.set(snap.agentId, missingSince);
+          }
+          return {
+            ...snap,
+            status: 'completed' as const,
+            endTime: snap.endTime ?? missingSince,
+          };
+        }
+        return null;
       })
       .filter((e): e is AgentDialogEntry => e !== null);
-    // `now` is a deliberate dep so the memo recomputes each tick and
-    // captures the latest `recentActivities` mutated in place by the
-    // registry's appendActivity path.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // GC: drop missing-since records for agents that are no longer
+    // even in the snapshot (e.g. statusChange refreshed and the
+    // entry left useBackgroundTaskView's view entirely).
+    for (const id of missingSinceRef.current.keys()) {
+      if (!seenIds.has(id)) missingSinceRef.current.delete(id);
+    }
+    return next;
   }, [entries, config, now]);
 
   // Defense in depth: don't compete with the dialog. Under
