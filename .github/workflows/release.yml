@@ -367,7 +367,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
-            git commit -m "chore(release): ${RELEASE_TAG} [skip ci]"
+            git commit -m "chore(release): ${RELEASE_TAG}"
           fi
           if [[ "${IS_DRY_RUN}" == "false" ]]; then
             echo "Pushing release branch to remote..."
@@ -447,6 +447,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: |-
           set -euo pipefail
           # Keep [skip ci] on the squash commit that lands on main. The release

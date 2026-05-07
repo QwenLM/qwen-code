@@ -321,7 +321,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
-            git commit -m "chore(release): sdk-typescript ${RELEASE_TAG} [skip ci]"
+            git commit -m "chore(release): sdk-typescript ${RELEASE_TAG}"
           fi
           echo "Pushing release branch to remote..."
           git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
@@ -411,6 +411,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
+          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
           set -euo pipefail
           # Keep [skip ci] on the squash commit that lands on main. The release
