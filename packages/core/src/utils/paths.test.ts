@@ -25,6 +25,7 @@ import {
   isSubpath,
   shortenPath,
   tildeifyPath,
+  expandHomeDir,
   getProjectHash,
   _resetValidatePathCacheForTest,
 } from './paths.js';
@@ -909,5 +910,53 @@ describe('getProjectHash', () => {
     }
 
     platformSpy.mockRestore();
+  });
+});
+
+describe('expandHomeDir', () => {
+  const homeDir = os.homedir();
+
+  it('should return empty string for empty input', () => {
+    expect(expandHomeDir('')).toBe('');
+  });
+
+  it('should expand ~ to home directory', () => {
+    expect(expandHomeDir('~')).toBe(path.normalize(homeDir));
+  });
+
+  it('should expand ~/path to home directory path', () => {
+    expect(expandHomeDir('~/documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should not expand ~path (no slash)', () => {
+    expect(expandHomeDir('~documents')).toBe('~documents');
+  });
+
+  it('should expand %userprofile% (case-insensitive) to home directory', () => {
+    expect(expandHomeDir('%userprofile%')).toBe(path.normalize(homeDir));
+    expect(expandHomeDir('%USERPROFILE%')).toBe(path.normalize(homeDir));
+  });
+
+  it('should expand %userprofile%\\path to home directory path', () => {
+    // We use path.join to get the correct separator for the current platform
+    const result = expandHomeDir('%userprofile%/documents');
+    expect(result).toBe(path.join(homeDir, 'documents'));
+
+    if (process.platform === 'win32') {
+      const resultWin = expandHomeDir('%userprofile%\\documents');
+      expect(resultWin).toBe(path.join(homeDir, 'documents'));
+    }
+  });
+
+  it('should return regular absolute path unchanged (but normalized)', () => {
+    const absPath =
+      process.platform === 'win32' ? 'C:\\absolute\\path' : '/absolute/path';
+    expect(expandHomeDir(absPath)).toBe(path.normalize(absPath));
+  });
+
+  it('should return relative path unchanged (but normalized)', () => {
+    expect(expandHomeDir('relative/path')).toBe(
+      path.normalize('relative/path'),
+    );
   });
 });
