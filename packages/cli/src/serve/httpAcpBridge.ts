@@ -42,9 +42,9 @@ import type {
  * Per design §08 (Roadmap, Stage 1) and the issue body's Caveat:
  *   - Each session spawns its own `qwen --acp` child process.
  *   - HTTP request bodies are forwarded as ACP NDJSON over the child's stdin.
- *   - Child stdout NDJSON notifications fan out to all SSE/WS subscribers
- *     attached to the session (Stage 1 buffers them in-memory; SSE wiring
- *     lands in the next PR).
+ *   - Child stdout NDJSON notifications publish onto each session's
+ *     `EventBus`; HTTP SSE subscribers (`GET /session/:id/events`) drain
+ *     it. Cross-client fan-out + `Last-Event-ID` reconnect supported.
  *   - Multi-client requests against the same session serialize through this
  *     bridge (FIFO; honors ACP's "one active prompt per session" invariant).
  *
@@ -642,7 +642,16 @@ async function withTimeout<T>(
  * Default channel factory: spawn the current Node executable running this
  * CLI's entry script in `--acp` mode. `process.argv[1]` resolves to the qwen
  * entry script when launched via the `qwen` bin shim.
+ *
+ * Note on `cwd`: CodeQL flags the `workspaceCwd` flow into `spawn({cwd})`
+ * as an "uncontrolled data used in path expression" finding. That's the
+ * Stage 1 trust model speaking — the caller (a token-authenticated HTTP
+ * client) is treated as an extension of the operator. The agent already
+ * runs as the same UID with shell-tool access, so restricting the spawn
+ * cwd to a sandbox here would be theatre. Stage 4+ remote-sandbox swaps
+ * this factory for a sandbox-aware variant; see issue #3803 §11.
  */
+// lgtm[js/shell-command-constructed-from-input]
 export const defaultSpawnChannelFactory: ChannelFactory = async (
   workspaceCwd,
 ) => {

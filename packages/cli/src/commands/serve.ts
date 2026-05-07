@@ -13,8 +13,10 @@ interface ServeArgs {
   port: number;
   hostname: string;
   token?: string;
+  // Read from the kebab-case key only — the camelCase mirror that yargs
+  // synthesizes is convenient for handlers but type-confusing here. The
+  // handler reads `argv['http-bridge']` directly.
   'http-bridge': boolean;
-  httpBridge: boolean;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -48,7 +50,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Stage 2 native in-process mode is not yet implemented; this flag will become opt-in then.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
-    const mode: ServeMode = argv.httpBridge ? 'http-bridge' : 'native';
+    const mode: ServeMode = argv['http-bridge'] ? 'http-bridge' : 'native';
     if (mode === 'native') {
       writeStderrLine(
         'qwen serve: --no-http-bridge (native mode) is not yet implemented; ' +

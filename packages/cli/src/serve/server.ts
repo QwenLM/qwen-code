@@ -35,8 +35,16 @@ export interface ServeAppDeps {
  * resolves. Defaults to `opts.port` for callers (e.g. tests) that pin a port
  * up front.
  *
- * Stage 1 routes shipped: `/health`, `/capabilities`, `POST /session`.
- * Session prompt/cancel/events and permission voting follow in the next PRs.
+ * Stage 1 routes shipped (matches §04 of issue #3803):
+ *   - `GET  /health`
+ *   - `GET  /capabilities`
+ *   - `POST /session`
+ *   - `GET  /workspace/:id/sessions`
+ *   - `POST /session/:id/prompt`
+ *   - `POST /session/:id/cancel`
+ *   - `POST /session/:id/model`
+ *   - `GET  /session/:id/events` (SSE)
+ *   - `POST /permission/:requestId`
  */
 export function createServeApp(
   opts: ServeOptions,

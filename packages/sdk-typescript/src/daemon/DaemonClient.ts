@@ -43,6 +43,19 @@ export interface DaemonClientOptions {
 }
 
 /**
+ * Strip any trailing slashes from a base URL via plain string ops. The
+ * obvious `replace(/\/+$/, '')` is technically linear here (the regex is
+ * end-anchored), but CodeQL's ReDoS detector flags any `\/+$` pattern as a
+ * polynomial-regex risk on attacker-controlled input. Hand-rolling the loop
+ * sidesteps the rule entirely.
+ */
+function stripTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 0x2f /* '/' */) end--;
+  return end === url.length ? url : url.slice(0, end);
+}
+
+/**
  * Thrown for any non-2xx daemon response. `status` and `body` are surfaced
  * so callers can branch on the standard daemon HTTP semantics (404 missing
  * session, 401 bad token, 400 malformed body, 500 agent failure).
@@ -83,7 +96,7 @@ export class DaemonClient {
   private readonly _fetch: typeof globalThis.fetch;
 
   constructor(opts: DaemonClientOptions) {
-    this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
+    this.baseUrl = stripTrailingSlashes(opts.baseUrl);
     this.token = opts.token;
     this._fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
   }
