@@ -2002,6 +2002,87 @@ describe('OpenAIContentConverter', () => {
 
       expect(emitted).toEqual(['ha', 'ha']);
     });
+
+    it('should normalize cumulative streaming reasoning_content deltas to suffixes', () => {
+      const ctx = withStreamParser();
+      const chunks = [
+        'Let me think',
+        'Let me think about the request carefully.',
+        'Let me think about the request carefully.\nFirst, identify the table format.',
+      ];
+
+      const emitted = chunks.map((reasoning_content, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-cumulative-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        const part = chunk.candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      expect(emitted).toEqual([
+        { text: 'Let me think', thought: true },
+        { text: ' about the request carefully.', thought: true },
+        { text: '\nFirst, identify the table format.', thought: true },
+      ]);
+      expect(emitted.map((e) => e.text).join('')).toBe(
+        chunks[chunks.length - 1],
+      );
+    });
+
+    it('should exit cumulative mode when a chunk does not match prior accumulated text', () => {
+      const ctx = withStreamParser();
+      // Three chunks that establish cumulative mode, then one that breaks it.
+      const chunks = [
+        'Step one is to gather inputs.',
+        'Step one is to gather inputs.\nStep two is to validate them.',
+        'Brand new unrelated message.',
+      ];
+
+      const emitted = chunks.map((content, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-cumulative-exit-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      });
+
+      // Chunk 1: emits as-is (initial)
+      // Chunk 2: cumulative mode entered, emits suffix only
+      // Chunk 3: NOT a prefix-extension — cumulative mode must exit and the
+      //          new chunk must be appended verbatim (no silent loss)
+      expect(emitted[0]).toBe('Step one is to gather inputs.');
+      expect(emitted[1]).toBe('\nStep two is to validate them.');
+      expect(emitted[2]).toBe('Brand new unrelated message.');
+    });
   });
 
   describe('OpenAI -> Gemini tagged thinking content', () => {

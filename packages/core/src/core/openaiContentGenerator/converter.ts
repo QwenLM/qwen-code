@@ -88,6 +88,9 @@ function normalizeStreamingTextDelta(
       return '';
     }
 
+    debugLogger.debug(
+      'normalizeStreamingTextDelta: exiting cumulative mode (chunk does not match prior accumulated text)',
+    );
     state.cumulativeMode = false;
   }
 
@@ -98,6 +101,9 @@ function normalizeStreamingTextDelta(
     const suffix = rawDelta.slice(state.emittedText.length);
     state.emittedText = rawDelta;
     state.cumulativeMode = true;
+    debugLogger.debug(
+      `normalizeStreamingTextDelta: entered cumulative mode (prefix overlap, prev=${state.emittedText.length - suffix.length}b -> curr=${rawDelta.length}b)`,
+    );
     return suffix;
   }
 
@@ -106,6 +112,9 @@ function normalizeStreamingTextDelta(
     rawDelta.length >= CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
   ) {
     state.cumulativeMode = true;
+    debugLogger.debug(
+      `normalizeStreamingTextDelta: entered cumulative mode (exact repeat, ${rawDelta.length}b)`,
+    );
     return '';
   }
 
