@@ -321,7 +321,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
-            git commit -m "chore(release): sdk-typescript ${RELEASE_TAG}"
+            git commit -m "chore(release): sdk-typescript ${RELEASE_TAG} [skip ci]"
           fi
           echo "Pushing release branch to remote..."
           git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
@@ -399,7 +399,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
-              --title "chore(release): sdk-typescript ${RELEASE_TAG}" \
+              --title "chore(release): sdk-typescript ${RELEASE_TAG} [skip ci]" \
               --body "Automated release PR for sdk-typescript ${RELEASE_TAG}.")"
           fi
 

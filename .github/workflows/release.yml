@@ -367,7 +367,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
-            git commit -m "chore(release): ${RELEASE_TAG}"
+            git commit -m "chore(release): ${RELEASE_TAG} [skip ci]"
           fi
           if [[ "${IS_DRY_RUN}" == "false" ]]; then
             echo "Pushing release branch to remote..."
@@ -435,7 +435,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
-              --title "chore(release): ${RELEASE_TAG}" \
+              --title "chore(release): ${RELEASE_TAG} [skip ci]" \
               --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions on main.")"
           fi
 
