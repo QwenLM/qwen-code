@@ -44,11 +44,6 @@ interface QwenAuthOptions {
   key?: string;
 }
 
-interface CodingPlanSettings {
-  baseUrl?: string;
-  version?: string;
-}
-
 interface MergedSettingsWithCodingPlan {
   security?: {
     auth?: {
@@ -57,7 +52,6 @@ interface MergedSettingsWithCodingPlan {
       baseUrl?: string;
     };
   };
-  codingPlan?: CodingPlanSettings;
   model?: {
     name?: string;
   };
@@ -214,7 +208,7 @@ async function handleCodePlanAuth(
     selectedKey = key;
   } else {
     selectedBaseUrl = await promptForCodingPlanBaseUrl();
-    selectedKey = await promptForAuthKey(t('Enter your Coding Plan API key: '));
+    selectedKey = await promptForKey(t('Enter your Coding Plan API key: '));
   }
 
   writeStdoutLine(t('Processing Alibaba Cloud Coding Plan authentication...'));
@@ -475,159 +469,10 @@ export async function runInteractiveAuth() {
 }
 
 /**
- * Handles API Key authentication - shows sub-menu for Standard or Custom API key
+ * Handles API Key authentication - directs user to documentation
  */
 export async function handleApiKeyAuth() {
-  try {
-    const selector = new InteractiveSelector(
-      [
-        {
-          value: 'alibaba-standard' as const,
-          label: t('Alibaba Cloud ModelStudio Standard API Key'),
-          description: t('Quick setup for Model Studio (China/International)'),
-        },
-        {
-          value: 'custom' as const,
-          label: t('Custom API Key'),
-          description: t(
-            'For other OpenAI / Anthropic / Gemini-compatible providers',
-          ),
-        },
-      ],
-      t('Select API key type:'),
-    );
-
-    const choice = await selector.select();
-
-    if (choice === 'alibaba-standard') {
-      await handleAlibabaStandardApiKeyAuth();
-    } else if (choice === 'custom') {
-      handleCustomApiKeyAuth();
-    }
-  } catch (error) {
-    writeStderrLine(getErrorMessage(error));
-    process.exit(1);
-  }
-}
-
-/**
- * Handles Alibaba Cloud ModelStudio Standard API Key authentication
- */
-async function handleAlibabaStandardApiKeyAuth(): Promise<void> {
-  try {
-    const settings = loadSettings();
-    const config = await loadAuthConfig(settings);
-
-    // Step 1: Select region
-    const region = await promptForStandardRegion();
-
-    // Step 2: Enter API key
-    const apiKey = await promptForKey(t('Enter your API key: '));
-    const trimmedApiKey = apiKey.trim();
-    if (!trimmedApiKey) {
-      writeStderrLine(t('API key cannot be empty.'));
-      process.exit(1);
-    }
-
-    // Step 3: Enter model IDs
-    const modelIdsInput = await promptForModelIds();
-    const modelIds = modelIdsInput
-      .split(',')
-      .map((id) => id.trim())
-      .filter(
-        (id, index, array) => id.length > 0 && array.indexOf(id) === index,
-      );
-    if (modelIds.length === 0) {
-      writeStderrLine(t('Model IDs cannot be empty.'));
-      process.exit(1);
-    }
-
-    writeStdoutLine(
-      t('Processing Alibaba Cloud ModelStudio Standard API Key...'),
-    );
-
-    // Persist settings
-    const baseUrl = ALIBABA_STANDARD_API_KEY_ENDPOINTS[region];
-    const persistScope = getPersistScopeForModelSelection(settings);
-    const settingsFile = settings.forScope(persistScope);
-    backupSettingsFile(settingsFile.path);
-
-    // Store API key
-    settings.setValue(
-      persistScope,
-      `env.${DASHSCOPE_STANDARD_API_KEY_ENV_KEY}`,
-      trimmedApiKey,
-    );
-    process.env[DASHSCOPE_STANDARD_API_KEY_ENV_KEY] = trimmedApiKey;
-
-    // Build model configs
-    const newConfigs: ModelConfig[] = modelIds.map((modelId) => ({
-      id: modelId,
-      name: `[ModelStudio Standard] ${modelId}`,
-      baseUrl,
-      envKey: DASHSCOPE_STANDARD_API_KEY_ENV_KEY,
-    }));
-
-    // Get existing configs and filter out old Alibaba Standard entries
-    const existingConfigs =
-      (settings.merged.modelProviders as Record<string, ModelConfig[]>)?.[
-        AuthType.USE_OPENAI
-      ] || [];
-
-    const nonReplacedConfigs = existingConfigs.filter(
-      (existing) =>
-        // Filter out old Alibaba Standard entries
-        !(
-          existing.envKey === DASHSCOPE_STANDARD_API_KEY_ENV_KEY &&
-          typeof existing.baseUrl === 'string' &&
-          Object.values(ALIBABA_STANDARD_API_KEY_ENDPOINTS).includes(
-            existing.baseUrl,
-          )
-        ) &&
-        // Filter out Coding Plan entries (their key will be cleared)
-        !isCodingPlanConfig(existing.baseUrl, existing.envKey),
-    );
-
-    const updatedConfigs = [...newConfigs, ...nonReplacedConfigs];
-
-    // Persist model providers and auth settings
-    settings.setValue(
-      persistScope,
-      `modelProviders.${AuthType.USE_OPENAI}`,
-      updatedConfigs,
-    );
-    settings.setValue(
-      persistScope,
-      'security.auth.selectedType',
-      AuthType.USE_OPENAI,
-    );
-    settings.setValue(persistScope, 'model.name', modelIds[0]);
-
-    // Clear stale Coding Plan state to avoid incorrect status/update prompts
-    delete process.env[CODING_PLAN_ENV_KEY];
-    settings.setValue(persistScope, `env.${CODING_PLAN_ENV_KEY}`, '');
-    settings.setValue(persistScope, 'codingPlan.region', '');
-    settings.setValue(persistScope, 'codingPlan.version', '');
-
-    // Reload and refresh
-    const updatedModelProviders: Record<string, ModelConfig[]> = {
-      ...(settings.merged.modelProviders as Record<string, ModelConfig[]>),
-      [AuthType.USE_OPENAI]: updatedConfigs,
-    };
-    config.reloadModelProvidersConfig(updatedModelProviders);
-    await config.refreshAuth(AuthType.USE_OPENAI);
-
-    writeStdoutLine(
-      t(
-        'Successfully configured Alibaba Cloud ModelStudio Standard API Key with {{modelCount}} model(s).',
-        { modelCount: String(modelIds.length) },
-      ),
-    );
-    process.exit(0);
-  } catch (error) {
-    writeStderrLine(getErrorMessage(error));
-    process.exit(1);
-  }
+  handleCustomApiKeyAuth();
 }
 
 /**
@@ -640,52 +485,6 @@ function handleCustomApiKeyAuth(): void {
     ),
   );
   process.exit(0);
-}
-
-/**
- * Prompts the user to select a region for ModelStudio Standard API Key
- */
-async function promptForStandardRegion(): Promise<AlibabaStandardRegion> {
-  const selector = new InteractiveSelector(
-    [
-      {
-        value: 'cn-beijing' as AlibabaStandardRegion,
-        label: t('China (Beijing)'),
-        description: ALIBABA_STANDARD_API_KEY_ENDPOINTS['cn-beijing'],
-      },
-      {
-        value: 'sg-singapore' as AlibabaStandardRegion,
-        label: t('Singapore'),
-        description: ALIBABA_STANDARD_API_KEY_ENDPOINTS['sg-singapore'],
-      },
-      {
-        value: 'us-virginia' as AlibabaStandardRegion,
-        label: t('US (Virginia)'),
-        description: ALIBABA_STANDARD_API_KEY_ENDPOINTS['us-virginia'],
-      },
-      {
-        value: 'cn-hongkong' as AlibabaStandardRegion,
-        label: t('China (Hong Kong)'),
-        description: ALIBABA_STANDARD_API_KEY_ENDPOINTS['cn-hongkong'],
-      },
-    ],
-    t('Select region:'),
-  );
-
-  return await selector.select();
-}
-
-/**
- * Prompts the user to enter comma-separated model IDs
- */
-async function promptForModelIds(): Promise<string> {
-  const defaultModels = 'qwen3.5-plus,glm-5,kimi-k2.5';
-  return promptForInput(
-    t('Enter model IDs (comma-separated, default: {{default}}): ', {
-      default: defaultModels,
-    }),
-    { defaultValue: defaultModels },
-  );
 }
 
 /**
@@ -746,13 +545,6 @@ export async function showAuthStatus(): Promise<void> {
       const isActiveOpenRouter = activeConfig
         ? isOpenRouterConfig(activeConfig)
         : false;
-      const isActiveStandard =
-        activeConfig &&
-        activeConfig.envKey === DASHSCOPE_STANDARD_API_KEY_ENV_KEY &&
-        typeof activeConfig.baseUrl === 'string' &&
-        Object.values(ALIBABA_STANDARD_API_KEY_ENDPOINTS).includes(
-          activeConfig.baseUrl,
-        );
       const hasOpenRouterApiKey =
         !!process.env[OPENROUTER_ENV_KEY] ||
         !!mergedSettings.env?.[OPENROUTER_ENV_KEY];
@@ -842,36 +634,6 @@ export async function showAuthStatus(): Promise<void> {
             t('  Run `qwen auth` to re-configure authentication.\n'),
           );
         }
-      } else if (isActiveStandard) {
-        const hasStandardKey =
-          !!process.env[DASHSCOPE_STANDARD_API_KEY_ENV_KEY] ||
-          !!mergedSettings.env?.[DASHSCOPE_STANDARD_API_KEY_ENV_KEY];
-
-        if (hasStandardKey) {
-          writeStdoutLine(
-            t(
-              '✓ Authentication Method: Alibaba Cloud ModelStudio Standard API Key',
-            ),
-          );
-
-          if (modelName) {
-            writeStdoutLine(
-              t('  Current Model: {{model}}', { model: modelName }),
-            );
-          }
-
-          writeStdoutLine(t('  Status: API key configured\n'));
-        } else {
-          writeStdoutLine(
-            t(
-              '⚠️  Authentication Method: Alibaba Cloud ModelStudio Standard API Key (Incomplete)',
-            ),
-          );
-          writeStdoutLine(
-            t('  Issue: API key not found in environment or settings\n'),
-          );
-          writeStdoutLine(t('  Run `qwen auth api-key` to re-configure.\n'));
-        }
       } else if (activeConfig) {
         let hasApiKey: boolean;
         if (activeConfig.envKey) {
@@ -915,15 +677,10 @@ export async function showAuthStatus(): Promise<void> {
           writeStdoutLine(t('  Run `qwen auth` to re-configure.\n'));
         }
       } else {
-        const hasCodingPlanKey =
-          !!process.env[CODING_PLAN_ENV_KEY] ||
-          !!mergedSettings.env?.[CODING_PLAN_ENV_KEY];
         const hasGenericApiKey =
           !!process.env['OPENAI_API_KEY'] ||
           !!mergedSettings.env?.['OPENAI_API_KEY'] ||
           !!mergedSettings.security?.auth?.apiKey;
-        const hasCodingPlanMetadata =
-          !modelName && (!!codingPlanRegion || !!codingPlanVersion);
 
         if (hasGenericApiKey) {
           writeStdoutLine(
@@ -942,48 +699,6 @@ export async function showAuthStatus(): Promise<void> {
           }
 
           writeStdoutLine(t('  Status: API key configured\n'));
-        } else if (hasCodingPlanKey) {
-          writeStdoutLine(
-            t('✓ Authentication Method: Alibaba Cloud Coding Plan'),
-          );
-
-          if (codingPlanRegion) {
-            const regionDisplay =
-              codingPlanRegion === CodingPlanRegion.CHINA
-                ? t('中国 (China) - 阿里云百炼')
-                : t('Global - Alibaba Cloud');
-            writeStdoutLine(
-              t('  Region: {{region}}', { region: regionDisplay }),
-            );
-          }
-
-          if (modelName) {
-            writeStdoutLine(
-              t('  Current Model: {{model}}', { model: modelName }),
-            );
-          }
-
-          if (codingPlanVersion) {
-            writeStdoutLine(
-              t('  Config Version: {{version}}', {
-                version: codingPlanVersion.substring(0, 8) + '...',
-              }),
-            );
-          }
-
-          writeStdoutLine(t('  Status: API key configured\n'));
-        } else if (hasCodingPlanMetadata) {
-          writeStdoutLine(
-            t(
-              '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
-            ),
-          );
-          writeStdoutLine(
-            t('  Issue: API key not found in environment or settings\n'),
-          );
-          writeStdoutLine(
-            t('  Run `qwen auth coding-plan` to re-configure.\n'),
-          );
         } else {
           writeStdoutLine(
             t(

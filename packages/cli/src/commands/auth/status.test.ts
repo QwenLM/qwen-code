@@ -117,9 +117,11 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          baseUrl: CODING_PLAN_CHINA_BASE_URL,
-          version: 'abc123def456',
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_CHINA_BASE_URL,
+            version: 'abc123def456',
+          },
         },
         model: {
           name: 'qwen3.5-plus',
@@ -218,8 +220,10 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+          },
         },
         modelProviders: codingPlanProviders(CODING_PLAN_GLOBAL_BASE_URL),
       }),
@@ -245,8 +249,10 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          },
         },
         model: {
           name: 'qwen3.5-plus',
@@ -272,8 +278,10 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+          },
         },
         model: {
           name: 'qwen3-coder-plus',
@@ -299,8 +307,10 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          },
         },
         model: {
           name: 'qwen3.5-plus',
@@ -326,9 +336,11 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          baseUrl: CODING_PLAN_CHINA_BASE_URL,
-          version: 'abc123def456789',
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_CHINA_BASE_URL,
+            version: 'abc123def456789',
+          },
         },
         model: {
           name: 'qwen3.5-plus',
