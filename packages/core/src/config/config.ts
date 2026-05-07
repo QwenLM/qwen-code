@@ -1586,7 +1586,7 @@ export class Config {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean },
+    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
     this.notifyModelChangeListeners();

@@ -32,6 +32,7 @@ export {
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
   ModelRegistry,
+  modelRegistryKey,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,

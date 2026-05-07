@@ -18,6 +18,13 @@ import type {
   ProviderModelProvidersPatch,
 } from '../types.js';
 
+function isSameModelIdentity(
+  a: { id: string; baseUrl?: string },
+  b: { id: string; baseUrl?: string },
+): boolean {
+  return a.id === b.id && (a.baseUrl ?? '') === (b.baseUrl ?? '');
+}
+
 function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
@@ -33,7 +40,9 @@ function applyModelProvidersPatch(
       if (ownsModel) {
         return !ownsModel(model);
       }
-      return !patch.models.some((newModel) => newModel.id === model.id);
+      return !patch.models.some((newModel) =>
+        isSameModelIdentity(newModel, model),
+      );
     });
 
     updatedModels =

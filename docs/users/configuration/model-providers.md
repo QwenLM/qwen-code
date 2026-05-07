@@ -10,9 +10,9 @@ Use `modelProviders` to declare curated model lists per auth type that the `/mod
 >
 > Only the `/model` command exposes non-default auth types. Anthropic, Gemini, etc., must be defined via `modelProviders`. The `/auth` command lists Qwen OAuth, Alibaba Cloud Coding Plan, and API Key as the built-in authentication options.
 
-> [!warning]
+> [!note]
 >
-> **Duplicate model IDs within the same authType:** Defining multiple models with the same `id` under a single `authType` (e.g., two entries with `"id": "gpt-4o"` in `openai`) is currently not supported. If duplicates exist, **the first occurrence wins** and subsequent duplicates are skipped with a warning. Note that the `id` field is used both as the configuration identifier and as the actual model name sent to the API, so using unique IDs (e.g., `gpt-4o-creative`, `gpt-4o-balanced`) is not a viable workaround. This is a known limitation that we plan to address in a future release.
+> **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
 
 ## Configuration Examples by Auth Type
 
