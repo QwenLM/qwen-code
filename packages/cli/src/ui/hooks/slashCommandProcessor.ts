@@ -357,6 +357,23 @@ export const useSlashCommandProcessor = (
     };
   }, [config, reloadCommands]);
 
+  // SkillManager already rebuilds its own cache and notifies SkillTool
+  // (which re-runs `setTools()` so `<available_skills>` is fresh). The
+  // slash-command list is a separate consumer: SkillCommandLoader reads
+  // `listSkills()` once during CommandService.create(), so without this
+  // bridge a newly added SKILL.md never produces a `/<skill-name>` entry
+  // until restart. Bumping reloadTrigger re-runs the loader effect below
+  // and CommandService picks up the fresh skill list.
+  useEffect(() => {
+    const skillManager = config?.getSkillManager();
+    if (!skillManager) {
+      return;
+    }
+    return skillManager.addChangeListener(() => {
+      reloadCommands();
+    });
+  }, [config, reloadCommands]);
+
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
