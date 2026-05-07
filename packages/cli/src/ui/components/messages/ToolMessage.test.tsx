@@ -387,13 +387,16 @@ describe('<ToolMessage />', () => {
       expect(output).not.toContain('MockApprovalPrompt');
     });
 
-    it('live (`isPending`) terminal subagent → no scrollback summary (panel owns the row)', () => {
-      // While the parent turn is still in `pendingHistoryItems`,
-      // LiveAgentPanel below the composer renders the synthesized /
-      // terminal row — emitting the summary here too would duplicate
-      // it visually. The summary fires only when the tool message
-      // commits to <Static> (`isPending=false`), guaranteeing exactly
-      // one inline copy in the eventual scrollback record.
+    it('live (`isPending`) terminal subagent → renders summary inline (panel snapshot already dropped)', () => {
+      // After `unregisterForeground`'s post-delete emit (#3921 swap-
+      // order), the panel snapshot drops the foreground entry as soon
+      // as the subagent finishes — even while the parent turn is
+      // still in `pendingHistoryItems`. If the inline summary were
+      // also gated on `!isPending`, a foreground subagent that
+      // finishes mid-turn would simply disappear from screen until
+      // commit. Render the summary in BOTH live and committed phases;
+      // the live-phase filter in `ToolGroupMessage` already keeps
+      // running entries from reaching this renderer.
       const { lastFrame } = renderWithContext(
         <ToolMessage
           {...buildProps({
@@ -409,9 +412,8 @@ describe('<ToolMessage />', () => {
         StreamingState.Responding,
       );
       const output = lastFrame() ?? '';
-      // No inline summary — the panel renders this row instead.
-      expect(output).not.toContain('✔');
-      expect(output).not.toContain('Just finished mid-turn');
+      expect(output).toContain('✔');
+      expect(output).toContain('Just finished mid-turn');
     });
 
     it('failed subagent → renders summary with terminate reason', () => {

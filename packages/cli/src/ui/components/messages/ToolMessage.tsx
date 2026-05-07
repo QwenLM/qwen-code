@@ -256,24 +256,27 @@ const PlanResultRenderer: React.FC<{
  *
  * The verbose inline frame has been retired. Three surfaces remain:
  *
- * - **Live phase (running)**: nothing inline — `LiveAgentPanel` (the
- *   always-on bottom roster) and `BackgroundTasksDialog` (Down-arrow
- *   detail view) own progress reporting.
- * - **Approval prompt (focus-locked)**: full inline approval banner so
- *   the user can answer without context-switching into the dialog;
+ * - **Running**: nothing inline — `LiveAgentPanel` (the always-on
+ *   bottom roster) and `BackgroundTasksDialog` (Down-arrow detail
+ *   view) own progress reporting. `ToolGroupMessage` filters
+ *   running task entries out of the live phase entirely so the
+ *   group container doesn't even attempt to render this renderer.
+ * - **Approval prompt (focus-locked)**: full inline approval banner
+ *   so the user can answer without context-switching into the dialog;
  *   sibling subagents render a queued marker.
- * - **Committed phase (terminal — completed / failed / cancelled)**: a
- *   single-line scrollback summary so the conversation history retains
- *   a permanent record after the panel's 8s window expires and the
- *   dialog closes. Format: `<icon> <type>: <description> · N tools · Xs · Yk tokens`.
+ * - **Terminal (completed / failed / cancelled)**: a single-line
+ *   scrollback summary so the conversation history retains a
+ *   permanent record after the panel evicts. Fires regardless of
+ *   `isPending` — `unregisterForeground`'s post-delete emit drops
+ *   the panel snapshot row immediately, so the inline summary is
+ *   the only surface that bridges the moment a foreground subagent
+ *   finishes mid-parent-turn until the parent commits.
+ *   Format: `<icon> <type>: <description> · N tools · Xs · Yk tokens`.
  *
- * The committed-phase summary is gated on `!isPending` — without the
- * gate the summary would also paint into `pendingHistoryItems`
- * (the live area) the moment a subagent terminates, duplicating the
- * row LiveAgentPanel already renders synthesized below the composer.
- * `isPending=true` means we're still in the live area; `isPending=false`
- * means the item has committed to `<Static>` and the summary is the
- * one and only place the user can find this run after the panel evicts.
+ * `isPending` is no longer used as a render gate here; the live-phase
+ * filter in `ToolGroupMessage` handles the running case before this
+ * renderer is reached. The prop is kept on the signature for future
+ * needs and parity with sibling renderers.
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -282,16 +285,17 @@ const SubagentExecutionRenderer: React.FC<{
   config: Config;
   isFocused?: boolean;
   isPending?: boolean;
-}> = ({
-  data,
-  availableHeight,
-  childWidth,
-  config,
-  isFocused,
-  isPending = false,
-}) => {
+  // `isPending` stays on the prop signature for parity with sibling
+  // renderers and possible future gating, but isn't read here — the
+  // live-phase filter in `ToolGroupMessage` already keeps running
+  // entries from reaching this renderer (so the terminal-summary path
+  // is the only thing left to gate, and it should fire in both phases).
+}> = ({ data, availableHeight, childWidth, config, isFocused }) => {
   if (data.pendingConfirmation && isFocused) {
-    const agentLabel = data.subagentName || 'agent';
+    // `subagentName` is user-authored / model-chosen and may carry
+    // ANSI control sequences; escape before rendering into Ink Text
+    // (matches LiveAgentPanel + SubagentScrollbackSummary).
+    const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
     return (
       <Box flexDirection="column" paddingLeft={1}>
         <Box>
@@ -313,7 +317,10 @@ const SubagentExecutionRenderer: React.FC<{
     );
   }
   if (data.pendingConfirmation) {
-    const agentLabel = data.subagentName || 'agent';
+    // `subagentName` is user-authored / model-chosen and may carry
+    // ANSI control sequences; escape before rendering into Ink Text
+    // (matches LiveAgentPanel + SubagentScrollbackSummary).
+    const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
     return (
       <Box paddingLeft={1}>
         <Text color={theme.text.secondary} dimColor>
@@ -324,18 +331,18 @@ const SubagentExecutionRenderer: React.FC<{
     );
   }
   // Terminal phase: render a single-line scrollback summary so the
-  // conversation history keeps a permanent record after the panel's
-  // 8s visibility window expires (LiveAgentPanel evicts terminal rows;
-  // BackgroundTasksDialog only retains them while open). Skip
-  // `running` / `background` since the panel + dialog cover those.
-  // ALSO skip while `isPending` — the live area is already painted by
-  // the panel, so emitting the summary into `pendingHistoryItems` would
-  // duplicate the row visually until the parent turn commits.
+  // conversation history keeps a permanent record. Fires in BOTH
+  // live and committed phases — `unregisterForeground`'s post-delete
+  // emit drops the panel snapshot row immediately, so without an
+  // inline render here a foreground subagent that finishes
+  // mid-parent-turn would simply disappear from screen until commit.
+  // No duplication risk because the panel never re-resurrects a
+  // dropped foreground entry. Skip `running` / `background` since the
+  // panel + dialog cover those.
   if (
-    !isPending &&
-    (data.status === 'completed' ||
-      data.status === 'failed' ||
-      data.status === 'cancelled')
+    data.status === 'completed' ||
+    data.status === 'failed' ||
+    data.status === 'cancelled'
   ) {
     return <SubagentScrollbackSummary data={data} />;
   }

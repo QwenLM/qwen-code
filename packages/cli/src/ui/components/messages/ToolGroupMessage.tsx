@@ -44,13 +44,7 @@ function isRunningAgent(
 
 /**
  * Predicate: tool entry whose `resultDisplay` is an `AgentResultDisplay`
- * (i.e. a `task_execution` subagent invocation). Used by the group
- * body to:
- *   - hide such entries during the live phase (LiveAgentPanel owns
- *     the row, so leaving them inline duplicates the display)
- *   - force-expand a committed compact group containing one with a
- *     terminal status, so SubagentScrollbackSummary lands in the
- *     persistent record
+ * (i.e. a `task_execution` subagent invocation), regardless of status.
  */
 function isSubagentToolEntry(tool: IndividualToolCallDisplay): boolean {
   const rd = tool.resultDisplay;
@@ -59,6 +53,36 @@ function isSubagentToolEntry(tool: IndividualToolCallDisplay): boolean {
     rd !== null &&
     'type' in rd &&
     (rd as AgentResultDisplay).type === 'task_execution'
+  );
+}
+
+/**
+ * Predicate: subagent tool entry whose live UI is owned by
+ * `LiveAgentPanel`. Only running / paused / background entries
+ * should be hidden during the live phase — terminal entries (the
+ * subagent already finished while the parent turn is still
+ * running) are NOT panel-owned: the panel snapshot drops them on
+ * `unregisterForeground`'s post-delete emit, so the inline path
+ * needs to render `SubagentScrollbackSummary` immediately so the
+ * user keeps a record of the run instead of seeing nothing.
+ */
+function isPanelOwnedSubagentTool(tool: IndividualToolCallDisplay): boolean {
+  if (!isSubagentToolEntry(tool)) return false;
+  const status = (tool.resultDisplay as AgentResultDisplay).status;
+  return status === 'running' || status === 'paused' || status === 'background';
+}
+
+/**
+ * Predicate: tool entry whose subagent has reached a terminal state
+ * (`completed` / `failed` / `cancelled`). Used to force-expand the
+ * group + force the inner ToolMessage to render its result block in
+ * compact mode, so `SubagentScrollbackSummary` actually lands.
+ */
+function isTerminalSubagentTool(tool: IndividualToolCallDisplay): boolean {
+  if (!isSubagentToolEntry(tool)) return false;
+  const status = (tool.resultDisplay as AgentResultDisplay).status;
+  return (
+    status === 'completed' || status === 'failed' || status === 'cancelled'
   );
 }
 
@@ -207,17 +231,21 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     focusedSubagentCallId ?? runningSubagentCallId;
 
   // Decide whether the entire group is panel-owned during the live
-  // phase: a pure-task_execution batch with no pending approval has
-  // nothing inline left to render once the subagent rows themselves
-  // are filtered out (LiveAgentPanel handles them). Hide the whole
-  // group so the bordered container / compact summary line don't
-  // float above the panel as a duplicate.
+  // phase: a pure-running-subagent batch with no pending approval
+  // has nothing inline left to render once the subagent rows
+  // themselves are filtered out (LiveAgentPanel handles them).
+  // Hide the whole group so the bordered container / compact
+  // summary line don't float above the panel as a duplicate.
+  // Terminal subagents (completed / failed / cancelled) are NOT
+  // panel-owned — `unregisterForeground`'s post-delete emit drops
+  // them from the panel snapshot, so the inline path must render
+  // their `SubagentScrollbackSummary` instead.
   const allEntriesPanelOwned =
     isPending &&
     toolCalls.length > 0 &&
     toolCalls.every(
       (tool) =>
-        isSubagentToolEntry(tool) &&
+        isPanelOwnedSubagentTool(tool) &&
         !isAgentWithPendingConfirmation(tool.resultDisplay),
     );
   if (allEntriesPanelOwned) {
@@ -236,14 +264,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // because the panel below the composer is still showing the row.
   const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
   const hasCommittedTerminalSubagent =
-    !isPending &&
-    toolCalls.some(
-      (t) =>
-        isSubagentToolEntry(t) &&
-        ((t.resultDisplay as AgentResultDisplay).status === 'completed' ||
-          (t.resultDisplay as AgentResultDisplay).status === 'failed' ||
-          (t.resultDisplay as AgentResultDisplay).status === 'cancelled'),
-    );
+    !isPending && toolCalls.some(isTerminalSubagentTool);
   const showCompact =
     compactMode &&
     !hasConfirmingTool &&
@@ -366,17 +387,19 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
           );
         })()}
       {toolCalls.map((tool) => {
-        // Live phase: hide subagent (`task_execution`) tool entries
-        // unless the subagent is awaiting user approval. The inline
-        // banner / queued marker is the only way the user can answer
-        // the approval prompt without opening the dialog, so those
-        // entries always render. Other subagent entries are hidden
-        // because LiveAgentPanel below the composer paints them; the
-        // entry returns once the parent turn commits and carries the
-        // SubagentScrollbackSummary as the persistent audit trail.
+        // Live phase: hide ONLY panel-owned subagent entries (running /
+        // paused / background) so LiveAgentPanel below the composer
+        // is the single source of truth for in-flight subagents.
+        // Terminal subagents (completed / failed / cancelled) ARE
+        // rendered inline immediately so `SubagentScrollbackSummary`
+        // lands the moment the subagent finishes — `unregisterForeground`
+        // already dropped the panel row, leaving inline as the only
+        // place the user can see the run's outcome until commit.
+        // Pending-approval entries also pass through so the inline
+        // banner / queued marker can answer the prompt.
         if (
           isPending &&
-          isSubagentToolEntry(tool) &&
+          isPanelOwnedSubagentTool(tool) &&
           !isAgentWithPendingConfirmation(tool.resultDisplay)
         ) {
           return null;
@@ -415,7 +438,15 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   isUserInitiated ||
                   tool.status === ToolCallStatus.Confirming ||
                   tool.status === ToolCallStatus.Error ||
-                  isAgentWithPendingConfirmation(tool.resultDisplay)
+                  isAgentWithPendingConfirmation(tool.resultDisplay) ||
+                  // Terminal subagents need their result block to render
+                  // even in compact mode — that's where
+                  // `SubagentScrollbackSummary` lands. ToolMessage's
+                  // compact-mode gate
+                  // (`!compactMode || forceShowResult ? renderer : 'none'`)
+                  // would otherwise drop the result block, leaving the
+                  // committed audit trail empty for compact-mode users.
+                  isTerminalSubagentTool(tool)
                 }
                 isFocused={isSubagentFocused}
                 isPending={isPending}

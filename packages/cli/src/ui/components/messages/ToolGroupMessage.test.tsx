@@ -30,6 +30,7 @@ vi.mock('./ToolMessage.js', () => ({
     emphasis,
     resultDisplay,
     isFocused,
+    forceShowResult,
   }: {
     callId: string;
     name: string;
@@ -38,6 +39,7 @@ vi.mock('./ToolMessage.js', () => ({
     emphasis: string;
     resultDisplay?: unknown;
     isFocused?: boolean;
+    forceShowResult?: boolean;
   }) {
     // Use the same constants as the real component
     const statusSymbolMap: Record<ToolCallStatus, string> = {
@@ -54,9 +56,13 @@ vi.mock('./ToolMessage.js', () => ({
       typeof resultDisplay === 'object' &&
       (resultDisplay as { type?: string }).type === 'task_execution'
     ) {
+      // `forceShowResult` is the gate that lets `SubagentScrollbackSummary`
+      // render in compact mode — surfaced in the mock so tests can
+      // assert it was passed for terminal subagent tools.
       return (
         <Text>
-          MockSubagent[{callId}]: focused={String(isFocused)}
+          MockSubagent[{callId}]: focused={String(isFocused)} force=
+          {String(Boolean(forceShowResult))}
         </Text>
       );
     }
@@ -730,6 +736,27 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame() ?? '').toContain('MockSubagent[task-pending]');
     });
 
+    it('live phase (non-compact): TERMINAL subagent renders inline (panel snapshot already dropped)', () => {
+      // Post-#3921 swap-order, `unregisterForeground` removes the
+      // foreground entry from the panel snapshot the moment the
+      // subagent finishes. If the inline path also stayed hidden in
+      // the live phase, the user would see nothing for the run
+      // until the parent commits — `SubagentScrollbackSummary` has
+      // to bridge that gap. Live-phase hide applies only to
+      // running / paused / background entries.
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('completed')]}
+          isPending={true}
+        />,
+      );
+      // Terminal entry rendered → MockSubagent sentinel from the
+      // ToolMessage mock; if the entry were still hidden the frame
+      // would be empty.
+      expect(lastFrame() ?? '').toContain('MockSubagent[task-completed]');
+    });
+
     it('committed phase (non-compact): subagent tool entry comes back for the audit trail', () => {
       // Once the parent turn commits the panel evicts the row and
       // the inline entry returns so SubagentScrollbackSummary lands
@@ -742,6 +769,25 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       expect(lastFrame() ?? '').toContain('MockSubagent[task-completed]');
+    });
+
+    it('terminal subagent tool receives forceShowResult so the summary renders in compact mode', () => {
+      // Force-expanding the group is necessary but not sufficient —
+      // `ToolMessage`'s own compact-mode gate
+      // (`!compactMode || forceShowResult`) would otherwise drop the
+      // result block, so the inner SubagentScrollbackSummary never
+      // gets a chance to render. ToolGroupMessage must propagate
+      // `forceShowResult=true` for terminal subagent tools.
+      const { lastFrame } = renderCompact(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('completed')]}
+          isPending={false}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MockSubagent[task-completed]');
+      expect(frame).toContain('force=true');
     });
 
     it('compact mode: committed group with failed subagent forces expand', () => {

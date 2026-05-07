@@ -188,19 +188,25 @@ interface BackgroundTaskCancelOptions {
 }
 
 /**
- * Fires on entry status transitions — register, complete, fail, cancel,
- * unregister. Intentionally does NOT fire on `appendActivity` so
- * consumers that only care about the roster don't re-render on every
- * tool call a background agent makes.
+ * Fires on entry status transitions: `register`, `complete`, `fail`,
+ * `cancel`, `finalizeCancelled`, `finalizeCancellationIfPending`,
+ * `abandon`, `unregisterForeground`, and `reset`. Intentionally does
+ * NOT fire on `appendActivity` so consumers that only care about the
+ * roster don't re-render on every tool call a background agent makes.
  *
- * Ordering relative to the registry mutation:
- *   - register / complete / fail / cancel / finalize: emit AFTER the
- *     Map mutation but with the entry still present, so a callback
- *     that re-reads `registry.get(entry.agentId)` sees the entry.
- *   - unregisterForeground: deletes BEFORE emitting so snapshot-style
- *     consumers (those that re-pull `getAll()` from inside the
- *     callback) drop the row. The `entry` arg still carries the
- *     agent's last live state for log / display consumers.
+ * Ordering relative to the registry mutation falls into two camps:
+ *   - **Keeps the entry around** (`register` / `complete` / `fail` /
+ *     `cancel` / `finalizeCancelled` /
+ *     `finalizeCancellationIfPending` / `abandon`): emit while the
+ *     entry is still in the Map (the status field has been mutated
+ *     in place to its terminal value), so a callback that re-reads
+ *     `registry.get(entry.agentId)` sees the entry. Snapshot-style
+ *     consumers calling `getAll()` see the new status too.
+ *   - **Removes the entry** (`unregisterForeground`, `reset`):
+ *     deletes from the Map BEFORE emitting so snapshot-style
+ *     consumers drop the row. The `entry` arg carries the agent's
+ *     last live state for log / display consumers; `registry.get`
+ *     and `getAll` already reflect the deletion.
  */
 export type BackgroundStatusChangeCallback = (
   entry?: BackgroundTaskEntry,
