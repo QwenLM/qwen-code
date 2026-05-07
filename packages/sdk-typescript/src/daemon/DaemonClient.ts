@@ -255,6 +255,19 @@ export class DaemonClient {
     if (!res.ok) {
       throw await this.failOnError(res, 'GET /session/:id/events');
     }
+    // A 200 with the wrong content type usually means a misconfigured
+    // proxy or middleware swallowed our SSE response and replaced it
+    // with JSON/HTML. Without this check `parseSseStream` would
+    // silently produce zero frames — a confusing "no events" symptom
+    // that's easy to misdiagnose. Fail fast with the actual mime type.
+    const ct = res.headers.get('content-type') ?? '';
+    if (!ct.toLowerCase().includes('text/event-stream')) {
+      throw new DaemonHttpError(
+        res.status,
+        ct,
+        `GET /session/:id/events: expected content-type text/event-stream, got "${ct}"`,
+      );
+    }
     if (!res.body) {
       throw new Error('SSE response has no body');
     }

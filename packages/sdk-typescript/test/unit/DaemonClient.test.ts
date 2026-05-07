@@ -398,6 +398,24 @@ describe('DaemonClient', () => {
       const iter = client.subscribeEvents('s-1');
       await expect(iter.next()).rejects.toThrow(/SSE response has no body/);
     });
+
+    it('throws DaemonHttpError when content-type is not text/event-stream', async () => {
+      // E.g. a misconfigured proxy returns 200 + JSON instead of SSE.
+      // Without the content-type guard the parser would silently produce
+      // zero events.
+      const { fetch } = recordingFetch(
+        () =>
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const iter = client.subscribeEvents('s-1');
+      await expect(iter.next()).rejects.toMatchObject({
+        status: 200,
+      });
+    });
   });
 
   describe('URL encoding of session-scoped endpoints', () => {

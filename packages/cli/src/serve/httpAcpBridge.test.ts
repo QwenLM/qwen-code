@@ -113,6 +113,8 @@ interface ChannelHandle {
   channel: AcpChannel;
   agent: FakeAgent;
   killed: boolean;
+  /** Resolve `channel.exited` without going through `kill()`. */
+  crash: () => void;
 }
 
 /**
@@ -125,15 +127,22 @@ function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
   const ba = new TransformStream<Uint8Array, Uint8Array>();
   const clientStream = ndJsonStream(ab.writable, ba.readable);
   const agentStream = ndJsonStream(ba.writable, ab.readable);
+  let resolveExited: (() => void) | undefined;
+  const exited = new Promise<void>((res) => {
+    resolveExited = res;
+  });
   const handle: ChannelHandle = {
     channel: undefined as unknown as AcpChannel,
     agent: new FakeAgent(opts),
     killed: false,
+    /** Test hook: simulate an unexpected child crash. */
+    crash: () => resolveExited!(),
   };
   // Spin up the fake agent on the agent side.
   new AgentSideConnection(() => handle.agent, agentStream);
   handle.channel = {
     stream: clientStream,
+    exited,
     kill: async () => {
       handle.killed = true;
       try {
@@ -146,6 +155,7 @@ function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
       } catch {
         /* ignore */
       }
+      resolveExited!();
     },
   };
   return handle;
@@ -538,6 +548,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(handle);
         return {
           stream: clientStream,
+          exited: new Promise<void>(() => {}),
           kill: async () => {
             handle.killed = true;
           },
@@ -786,7 +797,11 @@ describe('createHttpAcpBridge', () => {
           },
         });
         new AgentSideConnection(() => augmented as Agent, agentStream);
-        return { stream: clientStream, kill: async () => {} };
+        return {
+          stream: clientStream,
+          exited: new Promise<void>(() => {}),
+          kill: async () => {},
+        };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
       return { bridge, setModelCalls };
@@ -874,6 +889,77 @@ describe('createHttpAcpBridge', () => {
       expect(next.done).toBe(true);
 
       await bridge.shutdown();
+    });
+  });
+
+  describe('channel exit cleanup (child-crash recovery)', () => {
+    it('removes the SessionEntry when the channel terminates unexpectedly', async () => {
+      const handles: ChannelHandle[] = [];
+      let n = 0;
+      const factory: ChannelFactory = async () => {
+        // Distinct sessionIdPrefix per spawn so the post-crash retry gets
+        // a different sessionId than the dead session — verifies the
+        // bridge spawned a NEW child rather than reusing.
+        const h = makeChannel({ sessionIdPrefix: `gen${n++}` });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      expect(bridge.sessionCount).toBe(1);
+
+      // Subscribe so we can observe the session_died event.
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Simulate a child crash (channel.exited resolves but we never called
+      // kill() — entry is still in byId/byWorkspace at the moment of crash).
+      handles[0]?.crash();
+
+      // Drain the bus — first frame is `session_died`.
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      expect(next.done).toBe(false);
+      expect(next.value?.type).toBe('session_died');
+
+      // After the crash handler runs, the entry should be gone.
+      // (await one microtask in case the handler is still resolving.)
+      await Promise.resolve();
+      expect(bridge.sessionCount).toBe(0);
+
+      // A subsequent spawnOrAttach for the same workspace must NOT reuse
+      // the dead session; it spawns fresh (attached: false) with a new id.
+      const fresh = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      expect(fresh.attached).toBe(false);
+      expect(fresh.sessionId).not.toBe(session.sessionId);
+      expect(handles).toHaveLength(2);
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('exit fired on planned shutdown does NOT trigger the unexpected-cleanup path', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+
+      // No subscribers; planned shutdown removes the entry first, THEN
+      // calls channel.kill() which resolves channel.exited. The cleanup
+      // .then() handler runs but sees byId.get(sessionId) === undefined
+      // (already removed), so it no-ops and doesn't double-publish.
+      await bridge.shutdown();
+
+      // Re-subscribing throws SessionNotFoundError (not a stale state).
+      expect(() => bridge.subscribeEvents(session.sessionId)).toThrow();
+      expect(bridge.sessionCount).toBe(0);
     });
   });
 
@@ -967,7 +1053,11 @@ describe('createHttpAcpBridge', () => {
           () => new FakeAgent(),
           agentStream,
         );
-        return { stream: clientStream, kill: async () => {} };
+        return {
+          stream: clientStream,
+          exited: new Promise<void>(() => {}),
+          kill: async () => {},
+        };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
@@ -1166,6 +1256,7 @@ describe('createHttpAcpBridge', () => {
         new AgentSideConnection(() => augmented as Agent, agentStream);
         return {
           stream: clientStream,
+          exited: new Promise<void>(() => {}),
           kill: async () => {},
         };
       };
@@ -1247,6 +1338,7 @@ describe('createHttpAcpBridge', () => {
         capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
         return {
           stream: clientStream,
+          exited: new Promise<void>(() => {}),
           kill: async () => {},
         };
       };

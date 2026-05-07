@@ -166,6 +166,14 @@ export interface AcpChannel {
   stream: Stream;
   /** Best-effort terminate; resolves when teardown is complete. */
   kill(): Promise<void>;
+  /**
+   * Resolves when the channel has terminated for any reason — planned
+   * (`kill()` called) OR unexpected (child process crashed, stream closed).
+   * The bridge subscribes to this so a SessionEntry whose underlying
+   * channel dies between requests is removed from `byWorkspace`/`byId`
+   * instead of lingering as a stuck session.
+   */
+  exited: Promise<void>;
 }
 
 export type ChannelFactory = (workspaceCwd: string) => Promise<AcpChannel>;
@@ -408,6 +416,33 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       };
       byWorkspace.set(workspaceKey, entry);
       byId.set(entry.sessionId, entry);
+
+      // Cleanup if the child terminates between requests. `channel.exited`
+      // resolves both for planned shutdown (we already removed the entry
+      // before calling kill, so the `byId.get(...) === entry` check is
+      // false and this is a no-op) AND for unplanned crashes (entry is
+      // still in the maps → cancel pending permissions, publish a
+      // `session_died` event so live SSE subscribers learn the session is
+      // gone, close the bus, drop from maps).
+      const liveEntry = entry;
+      void channel.exited.then(() => {
+        if (byId.get(liveEntry.sessionId) !== liveEntry) return;
+        cancelPendingForSession(liveEntry.sessionId);
+        try {
+          liveEntry.events.publish({
+            type: 'session_died',
+            data: {
+              sessionId: liveEntry.sessionId,
+              reason: 'channel_closed',
+            },
+          });
+        } catch {
+          /* bus already closed */
+        }
+        byWorkspace.delete(liveEntry.workspaceCwd);
+        byId.delete(liveEntry.sessionId);
+        liveEntry.events.close();
+      });
 
       // ACP `newSession` doesn't take a model id; honor the caller's
       // `modelServiceId` by issuing the unstable `setSessionModel` call
@@ -674,10 +709,32 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // Child stderr is `inherit`ed so it lands in the daemon's stderr; this
   // is interleaved across sessions and hard to debug. Stage 4+ remote
   // sandboxes will isolate.
+  //
+  // Note: spawning `process.execPath` only works when the entry script can
+  // be loaded by raw Node. In dev (e.g. `npm run dev` via `tsx`) the entry
+  // is a `.ts` file Node can't run; users should `npm run build` before
+  // `qwen serve` or set `process.execPath` to a tsx-aware shim. Stage 1
+  // accepts this — the daemon is meant for built deployments.
   const child = spawn(process.execPath, [cliEntry, '--acp'], {
     cwd: workspaceCwd,
     stdio: ['pipe', 'pipe', 'inherit'],
     env: process.env,
+  });
+
+  // Build the `exited` promise BEFORE checking stdin/stdout so the listener
+  // is in place before any error event can fire. We treat both `exit` and
+  // `error` as termination — without an `error` listener Node would treat
+  // an async spawn failure (ENOMEM, EACCES, …) as an unhandled error and
+  // crash the whole daemon.
+  const exited = new Promise<void>((resolve) => {
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      resolve();
+    };
+    child.once('exit', finish);
+    child.once('error', finish);
   });
 
   if (!child.stdin || !child.stdout) {
@@ -694,6 +751,7 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   return {
     stream,
     kill: () => killChild(child),
+    exited,
   };
 };
 

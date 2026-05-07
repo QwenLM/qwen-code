@@ -90,6 +90,11 @@ export class EventBus {
       ...input,
     };
     this.ring.push(event);
+    // Eviction-by-shift is O(n) once the ring is full. With ringSize=1000
+    // and per-publish work measured in hundreds of microseconds even on
+    // chatty sessions, this isn't a real hotspot today. A circular-buffer
+    // refactor would push it to O(1) but adds index bookkeeping; deferred
+    // until profiling actually flags it.
     if (this.ring.length > this.ringSize) this.ring.shift();
     for (const sub of this.subs) {
       if (sub.evicted) continue;

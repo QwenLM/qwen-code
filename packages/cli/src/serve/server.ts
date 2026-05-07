@@ -278,12 +278,23 @@ export function createServeApp(
 
     // Tell EventSource to retry after 3s on disconnect. Awaiting drain on
     // the very first write is overkill but cheap — `ok` is true the
-    // overwhelming majority of the time.
-    void writeWithBackpressure('retry: 3000\n\n');
+    // overwhelming majority of the time. Always swallow rejection: a
+    // socket that errors before the very first write would otherwise
+    // surface as an unhandled promise rejection (the `res.on('error')`
+    // hook below is what we actually rely on for cleanup).
+    void writeWithBackpressure('retry: 3000\n\n').catch(() => {});
 
     // Heartbeat keeps NAT/proxy connections alive and lets the server
     // notice a dead client through write-back-pressure. Comment frame is
     // ignored by EventSource.
+    //
+    // KNOWN GAP: this only catches dead connections via write
+    // back-pressure on heartbeat itself. A network partition without TCP
+    // RST can leave the connection looking alive (no FIN received) for
+    // however long Node's keepalive probes take to time out — usually
+    // ~2 hours by default, configurable via `server.keepAliveTimeout`.
+    // Stage 2 may add an explicit application-level idle timeout
+    // (last-byte-written tracking + per-connection deadline).
     const heartbeatTimer = setInterval(() => {
       if (!res.writableEnded) {
         // Heartbeat writes are best-effort; failure swallowed via the
@@ -347,7 +358,15 @@ function isValidOutcome(
   if (typeof raw !== 'object' || raw === null) return false;
   const obj = raw as Record<string, unknown>;
   if (obj['outcome'] === 'cancelled') return true;
-  return obj['outcome'] === 'selected' && typeof obj['optionId'] === 'string';
+  // `optionId` must be a non-empty string. An empty string is technically a
+  // string but isn't a meaningful selection — letting it through would
+  // forward malformed votes to the bridge and the agent would reject the
+  // unknown option opaquely.
+  return (
+    obj['outcome'] === 'selected' &&
+    typeof obj['optionId'] === 'string' &&
+    (obj['optionId'] as string).length > 0
+  );
 }
 
 function parseLastEventId(raw: unknown): number | undefined {

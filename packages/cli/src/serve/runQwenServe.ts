@@ -69,6 +69,7 @@ export async function runQwenServe(
       }
 
       let shuttingDown = false;
+      let closePromise: Promise<void> | undefined;
 
       // Forward declaration so handle.close can detach the listener after
       // drain completes. The handler is registered just before `resolve()`.
@@ -88,8 +89,14 @@ export async function runQwenServe(
         server,
         url,
         bridge,
-        close: () =>
-          new Promise<void>((res, rej) => {
+        close: () => {
+          // Idempotent: cache the in-flight (or settled) close promise so
+          // overlapping calls (e.g. test harness + signal handler firing
+          // simultaneously) all observe the same drain cycle. Without this
+          // each caller would arm its own force-close timer + invoke
+          // bridge.shutdown / server.close redundantly.
+          if (closePromise) return closePromise;
+          closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
             // NOTE: the SIGINT/SIGTERM handlers stay attached during the
             // drain. Their `if (shuttingDown) return` guard makes a second
@@ -138,7 +145,9 @@ export async function runQwenServe(
                   finish(err);
                 });
               });
-          }),
+          });
+          return closePromise;
+        },
       };
 
       process.on('SIGINT', onSignal);

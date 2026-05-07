@@ -61,10 +61,14 @@ export async function* parseSseStream(
       buf = consumed.tail;
     }
   } finally {
+    // `reader.cancel()` does both the release-lock work AND signals the
+    // upstream that we don't want any more data — closing the underlying
+    // HTTP body stream when the consumer breaks out early. Using only
+    // `releaseLock()` would orphan the connection until idle timeout.
     try {
-      reader.releaseLock();
+      await reader.cancel();
     } catch {
-      /* reader already detached */
+      /* already cancelled or detached */
     }
   }
 }
@@ -110,14 +114,22 @@ function splitFrames(raw: string): string[] {
 function parseFrame(raw: string): DaemonEvent | undefined {
   if (!raw) return undefined;
   if (raw.startsWith(':') || raw.startsWith('retry:')) return undefined;
-  let dataLine: string | undefined;
-  // Split on either CRLF or LF — same forgiving stance as frame boundaries.
+  // Per the EventSource spec, a frame may have multiple `data:` lines that
+  // accumulate into the final field value joined by `\n`. Whitespace after
+  // the colon is optional — `data: foo` and `data:foo` are both valid.
+  // Split on either CRLF or LF (same forgiving stance as frame boundaries).
+  const dataLines: string[] = [];
   for (const line of raw.split(/\r?\n/)) {
-    if (line.startsWith('data: ')) dataLine = line.slice(6);
+    if (!line.startsWith('data:')) continue;
+    const rest = line.slice(5);
+    // Strip ONE leading space if present (per spec); preserve subsequent
+    // whitespace verbatim.
+    dataLines.push(rest.startsWith(' ') ? rest.slice(1) : rest);
   }
-  if (!dataLine) return undefined;
+  if (dataLines.length === 0) return undefined;
+  const dataText = dataLines.join('\n');
   try {
-    return JSON.parse(dataLine) as DaemonEvent;
+    return JSON.parse(dataText) as DaemonEvent;
   } catch {
     return undefined;
   }

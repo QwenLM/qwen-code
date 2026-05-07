@@ -200,7 +200,7 @@ describe('EventBus', () => {
     expect(bus.subscriberCount).toBe(0);
   });
 
-  it('drops the oldest events from the ring beyond ringSize', () => {
+  it('drops the oldest events from the ring beyond ringSize', async () => {
     const bus = new EventBus(3);
     for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
     // Internal: only the last 3 should be replayable.
@@ -208,14 +208,15 @@ describe('EventBus', () => {
     const abort = new AbortController();
     const iter = bus.subscribe({ lastEventId: 0, signal: abort.signal });
 
-    void (async () => {
-      const out: BridgeEvent[] = [];
-      for await (const e of iter) {
-        out.push(e);
-        if (out.length === 3) break;
-      }
-      expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
-      abort.abort();
-    })();
+    // Must `await` the iteration: the prior `void (async () => …)()` form
+    // returned synchronously to vitest, so the assertion below could
+    // silently pass even if the ring eviction logic was broken.
+    const out: BridgeEvent[] = [];
+    for await (const e of iter) {
+      out.push(e);
+      if (out.length === 3) break;
+    }
+    expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
+    abort.abort();
   });
 });

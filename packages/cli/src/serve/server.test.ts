@@ -191,6 +191,39 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('CORS / browser origin denial', () => {
+    it('returns a deterministic 403 JSON when an Origin header is present', async () => {
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Origin', 'https://evil.example.com');
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Request denied by CORS policy' });
+    });
+
+    it('accepts requests with no Origin header (CLI/SDK clients)', async () => {
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+    });
+
+    it('also rejects POSTs with an Origin header', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Origin', 'https://evil.example.com')
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(403);
+      // Bridge must NOT have been touched.
+      expect(bridge.calls).toHaveLength(0);
+    });
+  });
+
   describe('POST /session', () => {
     it('400 when cwd is missing', async () => {
       const bridge = fakeBridge();
@@ -466,6 +499,20 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(bridge.permissionVotes).toHaveLength(0);
     });
+
+    it('400 when selected outcome has an empty-string optionId', async () => {
+      // An empty string passes `typeof === 'string'` but isn't a meaningful
+      // selection — would push a malformed vote to the agent which would
+      // reject with an opaque "unknown option" error.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'selected', optionId: '' } });
+      expect(res.status).toBe(400);
+      expect(bridge.permissionVotes).toHaveLength(0);
+    });
   });
 
   describe('POST /session/:id/cancel', () => {
@@ -606,6 +653,25 @@ describe('runQwenServe', () => {
       { bridge },
     );
     expect(bridge.shutdownCalls).toBe(0);
+    await handle.close();
+    handle = undefined;
+    expect(bridge.shutdownCalls).toBe(1);
+  });
+
+  it('handle.close() is idempotent — concurrent + repeat calls share one drain cycle', async () => {
+    const bridge = fakeBridge();
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    // Three overlapping callers — without the cached promise each would
+    // arm its own force-close timer and call bridge.shutdown again.
+    const a = handle.close();
+    const b = handle.close();
+    const c = handle.close();
+    await Promise.all([a, b, c]);
+    // Subsequent call after settle should also resolve immediately and
+    // not re-trigger shutdown.
     await handle.close();
     handle = undefined;
     expect(bridge.shutdownCalls).toBe(1);

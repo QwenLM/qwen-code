@@ -129,6 +129,54 @@ describe('parseSseStream', () => {
     expect(events.map((e) => e.id)).toEqual([1, 2]);
   });
 
+  it('accepts data: lines without a trailing space (per SSE spec)', async () => {
+    const stream = bodyFromString(
+      'id: 1\nevent: x\ndata:{"id":1,"v":1,"type":"x","data":"no-space"}\n\n',
+    );
+    const events = await collect(parseSseStream(stream));
+    expect(events).toHaveLength(1);
+    expect(events[0]?.data).toBe('no-space');
+  });
+
+  it('accumulates multiple data: lines per spec (joined by \\n)', async () => {
+    // Per SSE field parsing, a frame with two `data:` lines yields a value
+    // with a `\n` between them. JSON-encoded objects with embedded newlines
+    // round-trip fine when re-parsed.
+    const stream = bodyFromString(
+      'id: 1\nevent: x\ndata: {"id":1,"v":1,"type":"x",\ndata: "data":"split"}\n\n',
+    );
+    const events = await collect(parseSseStream(stream));
+    expect(events).toHaveLength(1);
+    expect(events[0]?.data).toBe('split');
+  });
+
+  it('cancels the underlying reader on early consumer break', async () => {
+    let cancelled = false;
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'id: 1\nevent: x\ndata: {"id":1,"v":1,"type":"x","data":1}\n\n',
+          ),
+        );
+        // Hold the stream open — we expect the consumer to cancel before
+        // we send another frame.
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    for await (const _e of parseSseStream(body)) {
+      // First event arrives; break out immediately.
+      break;
+    }
+    // The for-await break invokes the iterator's `return()`, which runs
+    // the parser's finally block and calls `reader.cancel()` — that
+    // propagates to the underlying ReadableStream's `cancel()`.
+    expect(cancelled).toBe(true);
+  });
+
   it('flushes the TextDecoder on stream close so the last UTF-8 char is preserved', async () => {
     // "中" is 3 bytes in UTF-8 (0xE4 0xB8 0xAD). Split the byte stream
     // mid-character to simulate a chunk boundary that lands inside the
