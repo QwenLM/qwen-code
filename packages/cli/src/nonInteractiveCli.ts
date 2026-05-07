@@ -313,11 +313,17 @@ export async function runNonInteractive(
             }
             // Surface a clear reason on stderr — otherwise the
             // failure looks like the teammate gave up for no reason.
-            process.stderr.write(
-              `[team] Auto-cancelling tool ${event.toolName} requested by ` +
-                `teammate "${event.teammateName}": current approval mode ` +
-                `(${mode}) cannot prompt in non-stream-json mode. ` +
-                `Use --yolo or stream-json to allow teammate tool calls.\n`,
+            const reason =
+              `Auto-cancelling tool ${event.toolName} requested by ` +
+              `teammate "${event.teammateName}": current approval mode ` +
+              `(${mode}) cannot prompt in non-stream-json mode. ` +
+              `Use --yolo or stream-json to allow teammate tool calls.`;
+            process.stderr.write(`[team] ${reason}\n`);
+            // Also surface to the leader's LLM, otherwise it just
+            // sees the teammate fail without any signal that an
+            // approval was needed and the host couldn't prompt.
+            pendingTeammateMessages.push(
+              `<team_notice>\n${reason}\n</team_notice>`,
             );
             void event.respond(ToolConfirmationOutcome.Cancel);
           };

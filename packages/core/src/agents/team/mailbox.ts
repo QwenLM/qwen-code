@@ -104,9 +104,23 @@ export async function readInbox(
 }
 
 /**
+ * How long a `read: true` message stays in the inbox before
+ * `writeMessage` compacts it out. Long enough that a
+ * polling-window's worth of recent context is preserved for
+ * debugging, short enough to keep the file bounded over a
+ * long-running team session.
+ */
+const READ_RETENTION_MS = 5 * 60 * 1000;
+
+/**
  * Write a message to an agent's inbox.
  * Creates the inbox file and parent directories if needed.
  * Uses file locking to prevent concurrent write corruption.
+ *
+ * Drops `read: true` entries older than `READ_RETENTION_MS` so
+ * the file stays bounded under long-running teams. Unread
+ * messages are never dropped — they're still owed to the
+ * recipient.
  */
 export async function writeMessage(
   teamName: string,
@@ -120,10 +134,16 @@ export async function writeMessage(
   const release = await lockfile.lock(inboxPath, LOCK_OPTIONS);
   try {
     const messages = await readInboxRaw(inboxPath);
-    messages.push(message);
+    const cutoff = Date.now() - READ_RETENTION_MS;
+    const compacted = messages.filter((m) => {
+      if (!m.read) return true;
+      const ts = Date.parse(m.timestamp);
+      return Number.isNaN(ts) || ts >= cutoff;
+    });
+    compacted.push(message);
     await fs.writeFile(
       inboxPath,
-      JSON.stringify(messages, null, 2) + '\n',
+      JSON.stringify(compacted, null, 2) + '\n',
       'utf-8',
     );
   } finally {

@@ -76,23 +76,29 @@ describe('leaderPermissionBridge', () => {
 describe('wrapConfirmWithBadge', () => {
   it('prefixes title with teammate name', () => {
     const original = makeDetails('Confirm Edit');
-    const wrapped = wrapConfirmWithBadge(original, 'alice', '#00ff00');
+    const wrapped = wrapConfirmWithBadge(
+      original,
+      'alice',
+      async () => {},
+      '#00ff00',
+    );
     expect(wrapped.title).toBe('[alice] Confirm Edit');
   });
 
-  it('preserves onConfirm behavior', async () => {
-    let called = false;
+  it('routes onConfirm through the supplied respond callback', async () => {
+    let respondedWith: ToolConfirmationOutcome | undefined;
     const original = {
       type: 'info' as const,
       title: 'Test',
       prompt: 'test',
-      onConfirm: async () => {
-        called = true;
-      },
-    } as ToolCallConfirmationDetails;
+    } as Omit<ToolCallConfirmationDetails, 'onConfirm'> & {
+      type: ToolCallConfirmationDetails['type'];
+    };
 
-    const wrapped = wrapConfirmWithBadge(original, 'bob');
+    const wrapped = wrapConfirmWithBadge(original, 'bob', async (outcome) => {
+      respondedWith = outcome;
+    });
     await wrapped.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-    expect(called).toBe(true);
+    expect(respondedWith).toBe(ToolConfirmationOutcome.ProceedOnce);
   });
 });

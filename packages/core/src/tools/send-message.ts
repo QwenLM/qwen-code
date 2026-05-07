@@ -220,6 +220,9 @@ export class SendMessageTool extends BaseDeclarativeTool<
           message: {
             type: 'string',
             description: 'Message text to send.',
+            // Cap message size so a teammate can't grow the
+            // recipient's inbox file unboundedly with a single send.
+            maxLength: 65536,
           },
           summary: {
             type: 'string',

@@ -50,7 +50,7 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
  * model-supplied IDs from escaping the tasks directory via
  * `../` segments or absolute paths.
  */
-function assertValidTaskId(taskId: string): void {
+export function assertValidTaskId(taskId: string): void {
   if (!/^[1-9]\d*$/.test(taskId)) {
     throw new Error(
       `Invalid task ID "${taskId}". Task IDs must be positive integers.`,
@@ -200,6 +200,24 @@ export async function updateTask(
     const raw = await fs.readFile(taskPath, 'utf-8');
     const task = JSON.parse(raw) as SwarmTask;
 
+    // Merge dependency edges first so the completion-unblock below
+    // sees the post-update `task.blocks`. Without this, a single
+    // call like
+    //   task_update({taskId:'1', status:'completed', addBlocks:['2']})
+    // would skip unblocking task 2 (still absent from `task.blocks`)
+    // and the reciprocal `addBlockedBy:['1']` from task-update.ts
+    // would leave task 2 blocked by an already-completed task.
+    if (updates.addBlocks?.length) {
+      const blockSet = new Set(task.blocks);
+      for (const id of updates.addBlocks) blockSet.add(id);
+      task.blocks = Array.from(blockSet);
+    }
+    if (updates.addBlockedBy?.length) {
+      const blockedBySet = new Set(task.blockedBy);
+      for (const id of updates.addBlockedBy) blockedBySet.add(id);
+      task.blockedBy = Array.from(blockedBySet);
+    }
+
     if (updates.status !== undefined) {
       task.status = updates.status;
 
@@ -251,16 +269,6 @@ export async function updateTask(
         task.metadata = undefined;
       }
     }
-    if (updates.addBlocks?.length) {
-      const blockSet = new Set(task.blocks);
-      for (const id of updates.addBlocks) blockSet.add(id);
-      task.blocks = Array.from(blockSet);
-    }
-    if (updates.addBlockedBy?.length) {
-      const blockedBySet = new Set(task.blockedBy);
-      for (const id of updates.addBlockedBy) blockedBySet.add(id);
-      task.blockedBy = Array.from(blockedBySet);
-    }
 
     await fs.writeFile(taskPath, JSON.stringify(task, null, 2) + '\n', 'utf-8');
 
@@ -273,12 +281,26 @@ export async function updateTask(
 
 /**
  * Delete a task file.
+ *
+ * Acquires the same per-task lock that `updateTask` uses so a
+ * concurrent read-modify-write cycle can't write back to a path
+ * we just unlinked (which would resurrect the task with stale
+ * data). Lock-acquisition failures with ENOENT are treated as
+ * already-deleted.
  */
 export async function deleteTask(
   teamName: string,
   taskId: string,
 ): Promise<boolean> {
   const taskPath = getTaskPath(teamName, taskId);
+
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await lockfile.lock(taskPath, LOCK_OPTIONS);
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') return false;
+    throw err;
+  }
   try {
     await fs.unlink(taskPath);
     notifyTasksUpdated(teamName);
@@ -286,6 +308,8 @@ export async function deleteTask(
   } catch (err) {
     if (isNodeError(err) && err.code === 'ENOENT') return false;
     throw err;
+  } finally {
+    await release();
   }
 }
 

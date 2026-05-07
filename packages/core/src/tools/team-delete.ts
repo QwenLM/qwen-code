@@ -13,7 +13,6 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { deleteTeamDirs } from '../agents/team/teamHelpers.js';
-import { clearPermissions } from '../agents/team/permissionSync.js';
 import { unregisterLeader } from '../agents/team/leaderPermissionBridge.js';
 import { isTeammate } from '../agents/team/identity.js';
 
@@ -63,10 +62,7 @@ class TeamDeleteInvocation extends BaseToolInvocation<
     // Clean up file system artifacts.
     // deleteTeamDirs removes both the team dir (containing inboxes)
     // and the tasks dir, so no separate clearAllInboxes/resetTaskList needed.
-    await Promise.allSettled([
-      deleteTeamDirs(teamName),
-      clearPermissions(teamName),
-    ]);
+    await deleteTeamDirs(teamName);
 
     this.config.setTeamManager(null);
     this.config.setTeamContext(null);

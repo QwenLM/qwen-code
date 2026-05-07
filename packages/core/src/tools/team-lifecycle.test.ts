@@ -90,6 +90,7 @@ function makeConfig(): Config {
     getArenaManager: () => null,
     getTeamManager: () => teamManager,
     getSubagentManager: () => null,
+    getAgentsSettings: () => ({}),
     setTeamManager: vi.fn((m: TeamManager | null) => {
       teamManager = m;
     }),

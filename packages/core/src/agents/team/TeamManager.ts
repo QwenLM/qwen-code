@@ -16,7 +16,13 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import type { Backend, AgentSpawnConfig } from '../backends/types.js';
+import * as fsPromises from 'node:fs/promises';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import type {
+  Backend,
+  AgentSpawnConfig,
+  TeamAgentHandle,
+} from '../backends/types.js';
 import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
 import { AgentEventType } from '../runtime/agent-events.js';
 import type {
@@ -31,7 +37,12 @@ import {
 } from './leaderPermissionBridge.js';
 import type { TeammateApprovalRequestEvent } from './team-events.js';
 import { TeamEventEmitter, TeamEventType } from './team-events.js';
-import type { TeamFile, TeamMember, TeammateIdentity } from './types.js';
+import type {
+  TeamFile,
+  TeamMember,
+  TeammateIdentity,
+  SwarmTask,
+} from './types.js';
 import { MAX_TEAMMATES, LEADER_NAME } from './types.js';
 import {
   formatAgentId,
@@ -45,6 +56,7 @@ import {
   sendStructuredMessage,
   writeMessage,
   readInbox,
+  getInboxPath,
 } from './mailbox.js';
 import {
   listTasks,
@@ -57,23 +69,13 @@ import { runWithTeammateIdentity } from './identity.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
 
+const debug = createDebugLogger('AGENTS_TEAM_MANAGER');
+
 // ─── Types ──────────────────────────────────────────────────
 
-/**
- * Minimal agent surface that TeamManager needs.
- * Both AgentInteractive and FakeAgent satisfy this.
- */
-export interface TeamAgentHandle {
-  getStatus(): AgentStatus;
-  getEventEmitter():
-    | {
-        on(event: string, listener: (...args: never[]) => void): void;
-        off(event: string, listener: (...args: never[]) => void): void;
-      }
-    | undefined;
-  enqueueMessage(msg: string): void;
-  abort(): void;
-}
+// `TeamAgentHandle` is re-exported below so existing callers that
+// imported it from this module keep compiling.
+export type { TeamAgentHandle };
 
 /** Configuration for spawning a teammate. */
 export interface TeammateSpawnConfig {
@@ -162,14 +164,19 @@ export class TeamManager {
   /** Optional subagent manager for loading specialized agent configs. */
   private readonly subagentManager: SubagentManager | null;
 
+  /** Maximum number of teammates this team will accept. */
+  private readonly maxTeammates: number;
+
   constructor(
     backend: Backend,
     teamFile: TeamFile,
     subagentManager?: SubagentManager | null,
+    options?: { maxTeammates?: number },
   ) {
     this.backend = backend;
     this.teamFile = teamFile;
     this.subagentManager = subagentManager ?? null;
+    this.maxTeammates = options?.maxTeammates ?? MAX_TEAMMATES;
 
     // Subscribe to task updates so we can auto-claim for
     // idle agents when new tasks appear.
@@ -187,9 +194,9 @@ export class TeamManager {
    * spawns via backend, and sets up the event bridge.
    */
   async spawnTeammate(config: TeammateSpawnConfig): Promise<void> {
-    if (this.teamFile.members.length >= MAX_TEAMMATES) {
+    if (this.teamFile.members.length >= this.maxTeammates) {
       throw new Error(
-        `Maximum number of teammates (${MAX_TEAMMATES}) reached.`,
+        `Maximum number of teammates (${this.maxTeammates}) reached.`,
       );
     }
 
@@ -230,12 +237,31 @@ export class TeamManager {
     this.lastActivityAt.set(agentId, Date.now());
     this.agentIdentities.set(agentId, identity);
 
+    let agentSpawned = false;
+    let eventBridgeAttached = false;
+
     const rollback = () => {
       const idx = this.teamFile.members.indexOf(member);
       if (idx !== -1) this.teamFile.members.splice(idx, 1);
       this.pendingMessages.delete(agentId);
       this.lastActivityAt.delete(agentId);
       this.agentIdentities.delete(agentId);
+      if (eventBridgeAttached) {
+        const cleanup = this.eventBridgeCleanups.get(agentId);
+        cleanup?.();
+        this.eventBridgeCleanups.delete(agentId);
+      }
+      if (agentSpawned) {
+        try {
+          this.backend.stopAgent(agentId);
+        } catch (stopErr) {
+          const errMsg =
+            stopErr instanceof Error ? stopErr.message : String(stopErr);
+          debug.warn(
+            `Failed to stop agent ${agentId} during rollback: ${errMsg}`,
+          );
+        }
+      }
     };
 
     try {
@@ -337,13 +363,20 @@ export class TeamManager {
       await runWithTeammateIdentity(identity, () =>
         this.backend.spawnAgent(spawnConfig),
       );
+      agentSpawned = true;
+
+      this.setupEventBridge(agentId, name);
+      eventBridgeAttached = true;
+
+      // Persist the team file last. If this fails (disk full,
+      // EACCES, ...), `rollback` tears down the just-spawned agent
+      // and event bridge so we don't leave a running teammate that
+      // no team file knows about.
+      await writeTeamFile(this.teamFile.name, this.teamFile);
     } catch (err) {
       rollback();
       throw err;
     }
-    this.setupEventBridge(agentId, name);
-
-    await writeTeamFile(this.teamFile.name, this.teamFile);
 
     this.teamEventEmitter.emit(TeamEventType.TEAMMATE_JOINED, {
       agentId,
@@ -577,6 +610,7 @@ export class TeamManager {
       return;
     }
     const newMessages = await this.withInboxLock(async () => {
+      const inboxPath = getInboxPath(this.teamFile.name, LEADER_NAME);
       try {
         const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
         if (inbox.length <= this.lastInboxOffset) {
@@ -585,8 +619,36 @@ export class TeamManager {
         const slice = inbox.slice(this.lastInboxOffset);
         this.lastInboxOffset = inbox.length;
         return slice;
-      } catch {
-        // Inbox may not exist yet.
+      } catch (err) {
+        // ENOENT is the legitimate "no inbox yet" case — the
+        // mailbox layer already strips it, but defend in depth.
+        if (
+          err &&
+          typeof err === 'object' &&
+          'code' in err &&
+          (err as { code?: string }).code === 'ENOENT'
+        ) {
+          return [];
+        }
+        // Anything else is a parse/I-O failure. Quarantine the
+        // file so the next write doesn't overwrite a corrupt-but-
+        // recoverable inbox, and reset our offset so a fresh inbox
+        // can replace it. Keep returning [] for this poll cycle.
+        const errMsg = err instanceof Error ? err.message : String(err);
+        debug.warn(
+          `Quarantining corrupt leader inbox at ${inboxPath}: ${errMsg}`,
+        );
+        try {
+          await fsPromises.rename(
+            inboxPath,
+            `${inboxPath}.corrupt-${Date.now()}`,
+          );
+        } catch (renameErr) {
+          const renameMsg =
+            renameErr instanceof Error ? renameErr.message : String(renameErr);
+          debug.warn(`Failed to quarantine ${inboxPath}: ${renameMsg}`);
+        }
+        this.lastInboxOffset = 0;
         return [];
       }
     });
@@ -882,17 +944,11 @@ export class TeamManager {
 
   /**
    * Get an agent object from the backend by agent ID.
-   * Works with both InProcessBackend and FakeBackend
-   * (both expose getAgent()).
+   * Returns undefined for backends that don't expose in-process
+   * agent handles (e.g. tmux/iTerm2).
    */
   getAgentFromBackend(agentId: string): TeamAgentHandle | undefined {
-    // InProcessBackend and FakeBackend both have getAgent()
-    // but it's not on the Backend interface. Access via the
-    // concrete type.
-    const backend = this.backend as {
-      getAgent?: (id: string) => TeamAgentHandle | undefined;
-    };
-    return backend.getAgent?.(agentId);
+    return this.backend.getAgent?.(agentId);
   }
 
   // ─── Cleanup ────────────────────────────────────────────
@@ -1003,8 +1059,9 @@ export class TeamManager {
     const onApproval = (event: AgentApprovalRequestEvent) => {
       const color = member?.color;
       const badged = wrapConfirmWithBadge(
-        event.confirmationDetails as import('../../tools/tools.js').ToolCallConfirmationDetails,
+        event.confirmationDetails,
         agentName,
+        event.respond,
         color,
       );
       const forwarded = forwardApproval(agentName, color, badged);
@@ -1052,7 +1109,11 @@ export class TeamManager {
     const payload: TeammateApprovalRequestEvent = {
       teammateName: agentName,
       toolName: event.name,
-      toolInput: (event.confirmationDetails as Record<string, unknown>) ?? {},
+      // Use the raw tool args, not `confirmationDetails`. The latter
+      // is the UI-rendering shape (e.g. `{type:'edit', fileName,
+      // fileDiff}`), which doesn't match what permission policies
+      // expect to see (e.g. `{file_path, content}`).
+      toolInput: event.args ?? {},
       respond: event.respond,
       timestamp: Date.now(),
     };
@@ -1128,22 +1189,29 @@ export class TeamManager {
 
   /**
    * Try to claim the next pending task for an agent.
+   *
+   * `pending` may be passed in by `scanIdleAgentsForTasks` to share
+   * a single `listTasks` call across all idle teammates; if omitted
+   * the task list is fetched directly.
    */
   private async tryAutoClaimTask(
     agentId: string,
     agentName: string,
+    pending?: SwarmTask[],
   ): Promise<void> {
     const agent = this.getAgentFromBackend(agentId);
     if (!agent) return;
     if (agent.getStatus() !== AgentStatus.IDLE) return;
 
-    const pending = await listTasks(this.teamFile.name, {
-      status: 'pending',
-    });
-    if (pending.length === 0) return;
+    const pendingTasks =
+      pending ??
+      (await listTasks(this.teamFile.name, {
+        status: 'pending',
+      }));
+    if (pendingTasks.length === 0) return;
 
     // Try to claim the first unblocked, unowned task.
-    for (const task of pending) {
+    for (const task of pendingTasks) {
       if (task.owner) continue;
       if (task.blockedBy.length > 0) continue;
 
@@ -1191,7 +1259,7 @@ export class TeamManager {
 
     await Promise.all(
       idleMembers.map((member) =>
-        this.tryAutoClaimTask(member.agentId, member.name),
+        this.tryAutoClaimTask(member.agentId, member.name, pending),
       ),
     );
   }

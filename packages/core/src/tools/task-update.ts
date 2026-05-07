@@ -14,9 +14,15 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import {
   getAgentName,
+  isTeammate,
   resolveActiveTeamName,
 } from '../agents/team/identity.js';
-import { updateTask, deleteTask } from '../agents/team/tasks.js';
+import {
+  updateTask,
+  deleteTask,
+  assertValidTaskId,
+  getTask,
+} from '../agents/team/tasks.js';
 
 export interface TaskUpdateParams {
   taskId: string;
@@ -66,6 +72,63 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     }
 
     const { taskId } = this.params;
+
+    // Validate every referenced ID up-front so an invalid id in
+    // addBlocks / addBlockedBy rejects the whole call before we
+    // mutate the primary task. Without this, a half-mirrored
+    // dependency graph would be persisted (the primary update
+    // succeeds, then the reciprocal updateTask throws on the bad
+    // id) — exactly what the comment below the reciprocal block
+    // says must not happen.
+    try {
+      assertValidTaskId(taskId);
+      for (const id of this.params.addBlocks ?? []) {
+        assertValidTaskId(id);
+      }
+      for (const id of this.params.addBlockedBy ?? []) {
+        assertValidTaskId(id);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
+    // Ownership guard for non-leader callers.
+    //
+    // Mutations to status / owner / subject / description / blocks
+    // are restricted: a teammate can only touch tasks it owns or
+    // tasks that are still unowned. The leader (and the current
+    // owner) keeps full authority — leader for override, owner for
+    // its own work. Open mutations like `metadata` are still allowed
+    // so any teammate can leave a note.
+    if (isTeammate()) {
+      const callerName = getAgentName();
+      const restrictsOwnership =
+        this.params.status !== undefined ||
+        this.params.owner !== undefined ||
+        this.params.subject !== undefined ||
+        this.params.description !== undefined ||
+        (this.params.addBlocks?.length ?? 0) > 0 ||
+        (this.params.addBlockedBy?.length ?? 0) > 0;
+      if (restrictsOwnership) {
+        const existing = await getTask(teamName, taskId);
+        if (existing?.owner && existing.owner !== callerName) {
+          const msg =
+            `Task #${taskId} is owned by "${existing.owner}". ` +
+            `Only the leader or the owner can change ` +
+            `status / owner / subject / description / blocks.`;
+          return {
+            llmContent: msg,
+            returnDisplay: msg,
+            error: { message: msg },
+          };
+        }
+      }
+    }
 
     // status: 'deleted' → delete the task file.
     if (this.params.status === 'deleted') {

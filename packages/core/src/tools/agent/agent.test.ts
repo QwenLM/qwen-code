@@ -120,6 +120,7 @@ describe('AgentTool', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getTeamManager: vi.fn().mockReturnValue(undefined),
+      isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),

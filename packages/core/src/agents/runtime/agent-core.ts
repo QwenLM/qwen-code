@@ -925,6 +925,7 @@ export class AgentCore {
                 waiting.request.name,
                 waiting.request.args,
               ),
+              args: waiting.request.args,
               confirmationDetails: rest,
               respond: async (
                 outcome: ToolConfirmationOutcome,

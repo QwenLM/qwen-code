@@ -91,7 +91,8 @@ export function unregisterLeader(): void {
  * leader's approval queue. Returns true if forwarded.
  *
  * If no leader is registered (bridge is null), returns false.
- * The caller should fall back to permissionSync (file-based).
+ * The caller should fall back to a host-side permission channel
+ * (e.g. emit a `TEAMMATE_APPROVAL_REQUEST` team event).
  */
 export function forwardApproval(
   teammateName: string,
@@ -110,17 +111,24 @@ export function forwardApproval(
 }
 
 /**
- * Create a wrapper around the original onConfirm callback
- * that adds teammate identity context. This allows the UI
- * to track which teammate's tool was approved/denied.
+ * Create a wrapper around a teammate-tool confirmation that adds
+ * the teammate's name as a UI badge. The wrapper's `onConfirm`
+ * delegates to the supplied `respond` callback (from the
+ * `AgentApprovalRequestEvent`) — using `original.onConfirm`
+ * directly would throw because the agent-event boundary strips
+ * that callback off.
  */
 export function wrapConfirmWithBadge(
-  original: ToolCallConfirmationDetails,
+  original: Omit<ToolCallConfirmationDetails, 'onConfirm'> & {
+    type: ToolCallConfirmationDetails['type'];
+  },
   teammateName: string,
+  respond: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>,
   _teammateColor?: string,
 ): ToolCallConfirmationDetails {
-  // Clone the details and inject badge metadata.
-  // The UI can read the extra properties for rendering.
   return {
     ...original,
     title: `[${teammateName}] ${original.title}`,
@@ -128,7 +136,7 @@ export function wrapConfirmWithBadge(
       outcome: ToolConfirmationOutcome,
       payload?: ToolConfirmationPayload,
     ) => {
-      await original.onConfirm(outcome, payload);
+      await respond(outcome, payload);
     },
   } as ToolCallConfirmationDetails;
 }

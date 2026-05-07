@@ -36,6 +36,7 @@ function makeConfig(overrides?: {
     getArenaManager: () => overrides?.arenaManager ?? null,
     getTeamManager: () => overrides?.teamManager ?? null,
     getSubagentManager: () => null,
+    getAgentsSettings: () => ({}),
     setTeamManager: vi.fn(),
     setTeamContext: vi.fn(),
   } as unknown as import('../config/config.js').Config;
