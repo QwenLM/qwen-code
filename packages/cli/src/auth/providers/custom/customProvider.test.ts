@@ -79,19 +79,8 @@ describe('customProvider', () => {
     ]);
   });
 
-  it('owns models by env key prefix', () => {
-    expect(
-      customProvider.ownsModel?.({
-        id: 'x',
-        envKey: `${CUSTOM_API_KEY_ENV_PREFIX}ABC123`,
-      }),
-    ).toBe(true);
-    expect(
-      customProvider.ownsModel?.({
-        id: 'x',
-        envKey: 'OPENAI_API_KEY',
-      }),
-    ).toBe(false);
+  it('does not define ownsModel (falls back to id-based filtering)', () => {
+    expect(customProvider.ownsModel).toBeUndefined();
   });
 
   it('shows protocol, baseUrl, models, and advancedConfig steps', () => {

@@ -17,6 +17,7 @@ export const CODING_PLAN_CHINA_BASE_URL =
 export const CODING_PLAN_GLOBAL_BASE_URL =
   'https://coding-intl.dashscope.aliyuncs.com/v1';
 
+// keep in sync with packages/vscode-ide-companion/src/services/subscriptionPlanDefinitions.ts ALIBABA_SUBSCRIPTION_MODELS
 const MODELSTUDIO_MODELS: ModelSpec[] = [
   {
     id: 'qwen3.5-plus',

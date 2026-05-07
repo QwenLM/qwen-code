@@ -116,7 +116,7 @@ function migrateProviderMetadata(settings: LoadedSettings): void {
 
   if (migrated) {
     // eslint-disable-next-line no-console
-    console.error(
+    console.log(
       '[info] Migrated provider metadata to providerMetadata namespace.',
     );
   }

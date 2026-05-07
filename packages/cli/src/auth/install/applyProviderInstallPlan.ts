@@ -6,7 +6,10 @@
 
 import type { ModelProvidersConfig } from '@qwen-code/qwen-code-core';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
-import { backupSettingsFile } from '../../utils/settingsUtils.js';
+import {
+  backupSettingsFile,
+  restoreSettingsFromBackup,
+} from '../../utils/settingsUtils.js';
 import type {
   ApplyProviderInstallPlanOptions,
   ApplyProviderInstallPlanResult,
@@ -135,6 +138,7 @@ export async function applyProviderInstallPlan(
       updatedModelProviders,
     };
   } catch (error) {
+    restoreSettingsFromBackup(settingsFile.path);
     for (const [key, prev] of previousEnvValues) {
       if (prev === undefined) {
         delete process.env[key];

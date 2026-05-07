@@ -643,4 +643,22 @@ export function backupSettingsFile(filePath: string): boolean {
   return false;
 }
 
+/**
+ * Restore a settings file from its `.orig` backup created by {@link backupSettingsFile}.
+ * @param filePath - Path to the settings file to restore
+ * @returns boolean indicating whether the restore succeeded
+ */
+export function restoreSettingsFromBackup(filePath: string): boolean {
+  try {
+    const backupPath = `${filePath}.orig`;
+    if (fs.existsSync(backupPath)) {
+      fs.copyFileSync(backupPath, filePath);
+      return true;
+    }
+  } catch (_e) {
+    // Ignore restore errors — caller should handle the failure
+  }
+  return false;
+}
+
 export const TEST_ONLY = { clearFlattenedSchema };

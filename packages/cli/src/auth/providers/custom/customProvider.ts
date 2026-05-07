@@ -41,8 +41,5 @@ export const customProvider: ProviderConfig = {
   models: undefined,
   modelNamePrefix: '',
   showAdvancedConfig: true,
-  ownsModel: (model) =>
-    typeof model.envKey === 'string' &&
-    model.envKey.startsWith(CUSTOM_API_KEY_ENV_PREFIX),
   uiGroup: 'custom',
 };

@@ -469,6 +469,12 @@ describe('useAuthCommand', () => {
           },
         },
         {
+          id: 'old-custom',
+          name: 'old-custom',
+          baseUrl: 'https://api.example.com/v1',
+          envKey,
+        },
+        {
           id: 'preserved-model',
           name: 'preserved-model',
           baseUrl: 'https://api.other.com/v1',

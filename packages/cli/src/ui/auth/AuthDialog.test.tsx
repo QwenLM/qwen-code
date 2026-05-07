@@ -851,7 +851,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Alibaba ModelStudio · Step 1/2 · Region',
+      'Alibaba ModelStudio · Step 1/3 · Region',
     );
     stdin.write('\u001b');
 
@@ -1165,10 +1165,16 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Alibaba ModelStudio · Step 1/1 · API Key',
+      'Alibaba ModelStudio · Step 1/2 · API Key',
     );
 
     await typeText(stdin, 'sk-token-plan');
+
+    await pressEnterAndWaitFor(
+      stdin,
+      lastFrame,
+      'Alibaba ModelStudio · Step 2/2 · Model IDs',
+    );
     stdin.write('\r');
     await vi.waitFor(() => {
       expect(handleProviderSubmit).toHaveBeenCalled();
@@ -1221,7 +1227,7 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
-      'Alibaba ModelStudio · Step 1/1 · API Key',
+      'Alibaba ModelStudio · Step 1/2 · API Key',
     );
     stdin.write('\u001b');
 

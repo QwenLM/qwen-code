@@ -12,6 +12,7 @@ import type { ProviderInstallPlan } from '../types.js';
 
 vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),
+  restoreSettingsFromBackup: vi.fn(),
 }));
 
 vi.mock('../../config/modelProvidersScope.js', () => ({

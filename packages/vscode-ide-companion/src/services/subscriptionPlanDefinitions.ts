@@ -84,6 +84,7 @@ export interface SubscriptionPlanConfig {
   usageDocumentationUrl?: string;
 }
 
+// keep in sync with packages/cli/src/auth/providers/alibaba/codingPlan.ts MODELSTUDIO_MODELS
 const ALIBABA_SUBSCRIPTION_MODELS = [
   { id: 'qwen3.5-plus', contextWindowSize: 1000000, enableThinking: true },
   {

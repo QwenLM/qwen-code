@@ -169,7 +169,7 @@ export function AuthDialog(): React.JSX.Element {
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
-  const [mainIndex, setMainIndex] = useState(0);
+  const [mainIndex, setMainIndex] = useState<number | null>(null);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
   const setupFlow = useProviderSetupFlow(handleProviderSubmit);
@@ -350,7 +350,7 @@ export function AuthDialog(): React.JSX.Element {
         <Box marginTop={1}>
           <DescriptiveRadioButtonSelect
             items={MAIN_ITEMS}
-            initialIndex={mainIndex || defaultMainIndex}
+            initialIndex={mainIndex != null ? mainIndex : defaultMainIndex}
             onSelect={handleMainSelect}
             onHighlight={(value) => {
               setMainIndex(

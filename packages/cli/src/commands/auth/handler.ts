@@ -469,7 +469,13 @@ export async function runInteractiveAuth() {
 }
 
 /**
- * Handles API Key authentication - directs user to documentation
+ * Handles API Key authentication - directs user to documentation.
+ *
+ * Intentionally simplified: the full interactive provider setup is now
+ * available through the `/auth` slash command in the UI. The CLI sub-command
+ * (`qwen auth api-key`) serves as a lightweight fallback that points users
+ * to the docs. A future improvement could wire this into the provider
+ * registry for a fully interactive CLI flow.
  */
 export async function handleApiKeyAuth() {
   handleCustomApiKeyAuth();
