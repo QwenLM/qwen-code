@@ -745,10 +745,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //      built right before promote) to the file as the initial
     //      content. The agent / `/tasks` / dialog can `Read` this file.
     //   3. Register a `BackgroundShellEntry` with the existing pid +
-    //      the same `promoteAbortController` we already wired into the
-    //      child's signal — `task_stop bg_xxx` and the Background tasks
-    //      dialog's `x` key both abort via `entry.abortController` and
-    //      will land on the running child.
+    //      a FRESH `AbortController` whose abort listener kills the
+    //      still-running child (mirroring `ShellExecutionService`'s
+    //      SIGTERM → 200ms → SIGKILL cascade) and sync-marks the
+    //      entry `cancelled`. `task_stop bg_xxx` and the dialog's
+    //      `x` key route through `entry.abortController.abort()` →
+    //      kill listener → child gets SIGTERM/SIGKILL. Reusing the
+    //      already-aborted `promoteAbortController` would have made
+    //      `task_stop` a no-op (Web `AbortController.abort()` is
+    //      idempotent on already-aborted controllers per spec) — see
+    //      `handlePromotedForeground` for the full rationale.
     //   4. Return a model-facing `ToolResult` with promote-flavored copy
     //      pointing the agent at `/tasks` / the Background tasks dialog
     //      / `task_stop` for follow-up.
@@ -1113,7 +1119,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     });
     const entry: BackgroundShellEntry = {
       shellId,
-      command: this.params.command,
+      // Use `commandToExecute` (post-co-author transform) so the registry
+      // shows what actually ran. `this.params.command` is the pre-transform
+      // form and would diverge for git-commit invocations that
+      // `addCoAuthorToGitCommit()` rewrote (#3894 review).
+      command: commandToExecute,
       cwd,
       pid: result.pid,
       status: 'running',
@@ -1127,10 +1137,30 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // re-plumbing.
     void abortController;
 
-    registry.register(entry);
+    // `registry.register` is internally safe today (Map.set + emit),
+    // but if a future implementation throws, the promoted child is
+    // already detached from the service and would become an orphan
+    // zombie with no kill path. Wrap defensively: best-effort kill the
+    // child and re-throw so the scheduler surfaces the failure instead
+    // of pretending promote succeeded.
+    try {
+      registry.register(entry);
+    } catch (e) {
+      debugLogger.warn(
+        `promote: registry.register threw for ${shellId} (pid=${result.pid}) — killing orphan child: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      try {
+        entryAc.abort();
+      } catch {
+        /* swallow — we're already in an error path */
+      }
+      throw e;
+    }
 
     const llmContent = [
-      `Foreground command "${this.params.command}" promoted to background as ${shellId}.`,
+      `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
       `Status: running. PID: ${result.pid ?? '(unknown)'}.`,
       `Output snapshot at promote time saved to: ${outputPath}`,
       `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`,
@@ -1140,13 +1170,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     debugLogger.debug(
       `promote: registered ${shellId} (pid=${result.pid}) — outputPath=${outputPath}`,
     );
-
-    // Reference `commandToExecute` to satisfy the unused-parameter
-    // checker without actually using it in the result — the param is
-    // kept on the method signature so a future PR-2.5 that compares
-    // the executed command against `params.command` (e.g. for PowerShell
-    // UTF-8 prefix detection) can read it without re-plumbing.
-    void commandToExecute;
 
     return {
       llmContent,

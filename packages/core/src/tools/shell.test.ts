@@ -1806,6 +1806,97 @@ describe('ShellTool', () => {
         expect(registry.register).toHaveBeenCalledTimes(1);
         expect(result.llmContent).toContain('promoted to background');
       });
+
+      it('entry.command holds the post-co-author-rewrite form (commandToExecute), not raw params.command', async () => {
+        // #3894 review: previously `entry.command` used
+        // `this.params.command`, which diverges from what actually ran
+        // for `git commit -m` invocations that
+        // `addCoAuthorToGitCommit()` rewrote into a multi-line form
+        // with `-m "Co-Authored-By: …"`. Pin: registered entry MUST
+        // mirror the post-rewrite command so /tasks shows what the OS
+        // actually executed.
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockReturnValue(undefined);
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const rawCommand = 'git commit -m "feat: ship promote"';
+        const invocation = shellTool.build({
+          command: rawCommand,
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 33333,
+        });
+        const result = await promise;
+
+        // The actual command passed to ShellExecutionService.execute is
+        // the post-rewrite form — capture it from the service mock.
+        const commandPassedToService = mockShellExecutionService.mock
+          .calls[0][0] as string;
+        expect(commandPassedToService).not.toBe(rawCommand); // sanity: rewrite happened
+        expect(commandPassedToService).toContain('Co-authored-by');
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(entry.command).toBe(commandPassedToService);
+        expect(entry.command).not.toBe(rawCommand);
+
+        // llmContent also references the post-rewrite form so the
+        // model sees consistent state.
+        expect(result.llmContent).toContain(commandPassedToService);
+      });
+
+      it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
+        // #3894 review: today `BackgroundShellRegistry.register` is
+        // internally safe (Map.set + emit) but if a future
+        // implementation throws, the promoted child is already
+        // detached from the service's listeners and would become an
+        // orphan zombie with no kill path. Pin: register-throw is
+        // re-raised AND the child gets SIGTERM (best-effort kill via
+        // the entry's abort listener).
+        vi.useFakeTimers();
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        try {
+          const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+          writeFileSyncSpy.mockReturnValue(undefined);
+          const registry = mockConfig.getBackgroundShellRegistry();
+          (registry.register as Mock).mockImplementation(() => {
+            throw new Error('boom: registry borked');
+          });
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 44444,
+          });
+
+          // Re-thrown to caller (scheduler will surface as tool error).
+          await expect(promise).rejects.toThrow('boom: registry borked');
+
+          // The catch path fired entryAc.abort() → cancelChild → SIGTERM.
+          await Promise.resolve();
+          expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGTERM');
+          // SIGKILL fires after the 200ms timer; advance + assert.
+          await vi.advanceTimersByTimeAsync(250);
+          expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGKILL');
+        } finally {
+          processKillSpy.mockRestore();
+          vi.useRealTimers();
+        }
+      });
     });
   });
 
