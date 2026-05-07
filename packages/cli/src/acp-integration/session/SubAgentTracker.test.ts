@@ -70,6 +70,7 @@ function createApprovalEvent(
     round: 1,
     timestamp: Date.now(),
     description: `Awaiting approval for ${overrides.name}`,
+    args: {},
     ...overrides,
   };
 }
