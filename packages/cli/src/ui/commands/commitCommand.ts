@@ -37,8 +37,8 @@ export const commitCommand: SlashCommand = {
       };
     }
 
-    // Escape double quotes in the message for the shell command.
-    const escapedMessage = trimmed.replace(/"/g, '\\"');
+    // Escape backslashes and double quotes to prevent shell injection.
+    const escapedMessage = trimmed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
     return {
       type: 'tool',

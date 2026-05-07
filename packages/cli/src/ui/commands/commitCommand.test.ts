@@ -76,6 +76,22 @@ describe('commitCommand', () => {
     });
   });
 
+  it('should escape backslashes in the commit message', async () => {
+    const result = await commitCommand.action!(
+      {} as never,
+      'fix: C:\\Users\\test',
+    );
+    expect(result).toEqual({
+      type: 'tool',
+      toolName: 'run_shell_command',
+      toolArgs: {
+        description: expect.stringContaining('Stage all changes'),
+        command: 'git add -A && git commit -m "fix: C:\\\\Users\\\\test"',
+        is_background: false,
+      },
+    });
+  });
+
   it('should trim whitespace from the message', async () => {
     const result = await commitCommand.action!(
       {} as never,
