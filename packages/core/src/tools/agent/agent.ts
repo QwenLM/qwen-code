@@ -30,6 +30,7 @@ import {
   AgentHeadless,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
+import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
 import type { Content, FunctionDeclaration } from '@google/genai';
 import {
   FORK_AGENT,
@@ -75,6 +76,51 @@ function persistBackgroundCancellation(
     lastUpdatedAt: new Date().toISOString(),
     lastError: undefined,
   });
+}
+
+function createLocalExternalInputQueue(): {
+  enqueue: (input: AgentExternalInput) => boolean;
+  drain: () => AgentExternalInput[];
+  wait: (signal: AbortSignal) => Promise<AgentExternalInput[]>;
+} {
+  const inputs: AgentExternalInput[] = [];
+  let wake: (() => void) | undefined;
+
+  const drain = () => inputs.splice(0);
+
+  return {
+    enqueue(input: AgentExternalInput): boolean {
+      inputs.push(input);
+      wake?.();
+      return true;
+    },
+    drain,
+    wait(signal: AbortSignal): Promise<AgentExternalInput[]> {
+      const immediate = drain();
+      if (immediate.length > 0 || signal.aborted) {
+        return Promise.resolve(immediate);
+      }
+
+      return new Promise<AgentExternalInput[]>((resolve) => {
+        const cleanup = () => {
+          if (wake === onWake) {
+            wake = undefined;
+          }
+          signal.removeEventListener('abort', onAbort);
+        };
+        const onWake = () => {
+          cleanup();
+          resolve(drain());
+        };
+        const onAbort = () => {
+          cleanup();
+          resolve([]);
+        };
+        wake = onWake;
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+    },
+  };
 }
 
 export interface AgentParams {
@@ -513,6 +559,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     if (updateOutput) {
       updateOutput(this.currentDisplay);
     }
+  }
+
+  private registerOwnedMonitorNotifications(
+    agentId: string,
+    enqueue: (input: AgentExternalInput) => boolean,
+  ): () => void {
+    const monitorRegistry = this.config.getMonitorRegistry();
+    monitorRegistry.setAgentNotificationCallback(
+      agentId,
+      (_displayText, modelText) =>
+        void enqueue({ kind: 'notification', text: modelText }),
+    );
+
+    return () => {
+      monitorRegistry.setAgentNotificationCallback(agentId, undefined);
+      monitorRegistry.cancelRunningForOwner(agentId, { notify: false });
+    };
   }
 
   /**
@@ -1288,10 +1351,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
         bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
 
-        // Wire external message drain so SendMessage can inject messages
-        // into this agent's reasoning loop between tool rounds.
+        const cleanupOwnedMonitorNotifications =
+          this.registerOwnedMonitorNotifications(hookOpts.agentId, (input) =>
+            registry.queueExternalInput(hookOpts.agentId, input),
+          );
+
+        // Wire external message drain so SendMessage and owned Monitor
+        // notifications can inject inputs between tool rounds.
         bgSubagent.setExternalMessageProvider(() =>
           registry.drainMessages(hookOpts.agentId),
+        );
+        bgSubagent.setExternalMessageWaiter?.((waitSignal) =>
+          registry.waitForMessages(hookOpts.agentId, waitSignal),
+        );
+        bgSubagent.setExternalMessageWaitPredicate?.(() =>
+          this.config.getMonitorRegistry().hasRunningForOwner(hookOpts.agentId),
         );
 
         const getCompletionStats = () => {
@@ -1392,6 +1466,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           } finally {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
             bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+            cleanupOwnedMonitorNotifications();
             cleanupJsonl?.();
             // Release the per-subagent ToolRegistry now that the
             // background agent has finished — see the matching call in
@@ -1431,6 +1506,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // need to see this subagent's id as their `parentAgentId`.
 
       if (isFork) {
+        const forkMonitorInputs = createLocalExternalInputQueue();
+        subagent.setExternalMessageProvider?.(() => forkMonitorInputs.drain());
+        subagent.setExternalMessageWaiter?.((waitSignal) =>
+          forkMonitorInputs.wait(waitSignal),
+        );
+        subagent.setExternalMessageWaitPredicate?.(() =>
+          this.config.getMonitorRegistry().hasRunningForOwner(hookOpts.agentId),
+        );
+        const cleanupOwnedMonitorNotifications =
+          this.registerOwnedMonitorNotifications(
+            hookOpts.agentId,
+            forkMonitorInputs.enqueue,
+          );
+
         // Background fork execution. Run under an AsyncLocalStorage frame so
         // nested `agent` tool calls by the fork's model can be detected.
         // Forks run async (return a placeholder); skip foreground registration.
@@ -1443,12 +1532,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const runFramedFork = () =>
           runWithAgentContext({ agentId: hookOpts.agentId }, async () => {
             try {
-              await this.runSubagentWithHooks(
-                subagent,
-                contextState,
-                hookOpts,
-              );
+              await this.runSubagentWithHooks(subagent, contextState, hookOpts);
             } finally {
+              cleanupOwnedMonitorNotifications();
               void agentConfig
                 .getToolRegistry()
                 .stop()
@@ -1497,6 +1583,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         prompt: this.params.prompt,
         toolUseId: this.callId,
       });
+
+      const cleanupOwnedMonitorNotifications =
+        this.registerOwnedMonitorNotifications(hookOpts.agentId, (input) =>
+          registry.queueExternalInput(hookOpts.agentId, input),
+        );
+      subagent.setExternalMessageProvider?.(() =>
+        registry.drainMessages(hookOpts.agentId),
+      );
+      subagent.setExternalMessageWaiter?.((waitSignal) =>
+        registry.waitForMessages(hookOpts.agentId, waitSignal),
+      );
+      subagent.setExternalMessageWaitPredicate?.(() =>
+        this.config.getMonitorRegistry().hasRunningForOwner(hookOpts.agentId),
+      );
 
       // Mirror the background path's progress wiring so the dialog detail
       // body has live tool-call activity AND a current `entry.stats`
@@ -1575,6 +1675,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
         signal?.removeEventListener('abort', onParentAbort);
+        cleanupOwnedMonitorNotifications();
         // Foreground entries leave the registry as soon as the tool-call
         // returns — the parent's tool-result is the durable record. Doing
         // this in finally guarantees we clean up on success, failure,

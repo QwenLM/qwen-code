@@ -48,6 +48,7 @@ import type {
   RunConfig,
   ToolConfig,
   AgentMessage,
+  AgentExternalInput,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
 import type {
@@ -115,11 +116,24 @@ export interface ReasoningLoopOptions {
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
   /**
-   * Optional callback to drain external messages between tool rounds.
-   * Called after processFunctionCalls completes. Returned strings are
-   * appended to the next model request as user-role content.
+   * Optional callback to drain external messages between model rounds.
+   * Returned inputs are appended to the next model request as user-role
+   * content.
    */
-  getExternalMessages?: () => string[];
+  getExternalMessages?: () => AgentExternalInput[];
+  /**
+   * Optional callback to wait for external messages while the agent is idle.
+   * The callback must resolve with any queued inputs or [] when the signal is
+   * aborted.
+   */
+  waitForExternalMessages?: (
+    signal: AbortSignal,
+  ) => Promise<AgentExternalInput[]>;
+  /**
+   * Optional predicate controlling whether a no-tool response should wait for
+   * future external inputs instead of finalizing immediately.
+   */
+  shouldWaitForExternalMessages?: () => boolean;
 }
 
 /**
@@ -625,58 +639,97 @@ export class AgentCore {
           wasOutputTruncated,
         );
 
-        const externalMsgs = options?.getExternalMessages?.() ?? [];
-        if (externalMsgs.length > 0) {
+        const externalInputs = this.drainExternalInputs(options);
+        if (externalInputs.length > 0) {
           // Append to the tool-response user message so external input rides
           // alongside the tool results the model is about to see.
           // processFunctionCalls always returns exactly one user-role entry.
           const last = currentMessages[currentMessages.length - 1];
-          last.parts!.push(
-            ...externalMsgs.map((text) => ({
-              text: `\n${EXTERNAL_MESSAGE_PREFIX} ${text}`,
-            })),
-          );
+          last.parts!.push(...this.externalInputsToParts(externalInputs, true));
           // Emit one event per injection so observers (e.g. the JSONL
           // transcript writer) can persist each external message as a
           // user-role record. The framing prefix is stripped — the prefix
           // is a model-facing detail, not part of the original message.
-          for (const text of externalMsgs) {
-            this.eventEmitter?.emit(AgentEventType.EXTERNAL_MESSAGE, {
-              subagentId: this.subagentId,
-              text,
-              timestamp: Date.now(),
-            });
-          }
+          this.emitExternalInputEvents(externalInputs);
         }
       } else {
-        // No tool calls — treat this as the model's final answer.
-        if (roundText && roundText.trim().length > 0) {
-          finalText = roundText.trim();
-          // Emit ROUND_END for the final round so all consumers see it.
-          // Previously this was skipped, requiring AgentInteractive to
-          // compensate with an explicit flushStreamBuffers() call.
+        const immediateExternalInputs = this.drainExternalInputs(options);
+        if (immediateExternalInputs.length > 0) {
+          currentMessages = this.externalInputsToContent(
+            immediateExternalInputs,
+          );
+          this.emitExternalInputEvents(immediateExternalInputs);
+        } else if (options?.shouldWaitForExternalMessages?.()) {
           this.eventEmitter?.emit(AgentEventType.ROUND_END, {
             subagentId: this.subagentId,
             round: turnCounter,
             promptId,
             timestamp: Date.now(),
           } as AgentRoundEvent);
-          // Clean up before breaking
           abortController.signal.removeEventListener('abort', onParentAbort);
-          // null terminateMode = normal text completion
-          break;
+
+          const waitResult = await this.waitForExternalInputs(
+            options,
+            abortController,
+            startTime,
+            turnCounter,
+          );
+          if (waitResult.terminateMode) {
+            finalText = roundText.trim();
+            terminateMode = waitResult.terminateMode;
+            break;
+          }
+          if (waitResult.inputs.length > 0) {
+            currentMessages = this.externalInputsToContent(waitResult.inputs);
+            this.emitExternalInputEvents(waitResult.inputs);
+            continue;
+          }
+
+          if (roundText && roundText.trim().length > 0) {
+            finalText = roundText.trim();
+            break;
+          }
+          currentMessages = [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: 'Please provide the final result now and stop calling tools.',
+                },
+              ],
+            },
+          ];
+          continue;
+        } else {
+          // No tool calls — treat this as the model's final answer.
+          if (roundText && roundText.trim().length > 0) {
+            finalText = roundText.trim();
+            // Emit ROUND_END for the final round so all consumers see it.
+            // Previously this was skipped, requiring AgentInteractive to
+            // compensate with an explicit flushStreamBuffers() call.
+            this.eventEmitter?.emit(AgentEventType.ROUND_END, {
+              subagentId: this.subagentId,
+              round: turnCounter,
+              promptId,
+              timestamp: Date.now(),
+            } as AgentRoundEvent);
+            // Clean up before breaking
+            abortController.signal.removeEventListener('abort', onParentAbort);
+            // null terminateMode = normal text completion
+            break;
+          }
+          // Otherwise, nudge the model to finalize a result.
+          currentMessages = [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: 'Please provide the final result now and stop calling tools.',
+                },
+              ],
+            },
+          ];
         }
-        // Otherwise, nudge the model to finalize a result.
-        currentMessages = [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: 'Please provide the final result now and stop calling tools.',
-              },
-            ],
-          },
-        ];
       }
 
       this.eventEmitter?.emit(AgentEventType.ROUND_END, {
@@ -695,6 +748,131 @@ export class AgentCore {
       terminateMode,
       turnsUsed: turnCounter,
     };
+  }
+
+  private drainExternalInputs(
+    options?: ReasoningLoopOptions,
+  ): AgentExternalInput[] {
+    return options?.getExternalMessages?.() ?? [];
+  }
+
+  private externalInputText(
+    input: AgentExternalInput,
+    leadingNewline: boolean,
+  ): string {
+    const text =
+      typeof input === 'string'
+        ? `${EXTERNAL_MESSAGE_PREFIX} ${input}`
+        : input.text;
+    return leadingNewline ? `\n${text}` : text;
+  }
+
+  private externalInputsToParts(
+    inputs: AgentExternalInput[],
+    leadingNewline: boolean,
+  ): Part[] {
+    return inputs.map((input) => ({
+      text: this.externalInputText(input, leadingNewline),
+    }));
+  }
+
+  private externalInputsToContent(inputs: AgentExternalInput[]): Content[] {
+    return [
+      {
+        role: 'user',
+        parts: this.externalInputsToParts(inputs, false),
+      },
+    ];
+  }
+
+  private emitExternalInputEvents(inputs: AgentExternalInput[]): void {
+    for (const input of inputs) {
+      this.eventEmitter?.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: this.subagentId,
+        text: typeof input === 'string' ? input : input.text,
+        timestamp: Date.now(),
+      });
+    }
+  }
+
+  private hasTurnBudgetForAnotherRound(
+    options: ReasoningLoopOptions | undefined,
+    turnCounter: number,
+  ): boolean {
+    return !options?.maxTurns || turnCounter < options.maxTurns;
+  }
+
+  private getRemainingTimeMs(
+    options: ReasoningLoopOptions | undefined,
+    startTime: number,
+  ): number | undefined {
+    if (!options?.maxTimeMinutes) return undefined;
+    return options.maxTimeMinutes * 60 * 1000 - (Date.now() - startTime);
+  }
+
+  private async waitForExternalInputs(
+    options: ReasoningLoopOptions,
+    abortController: AbortController,
+    startTime: number,
+    turnCounter: number,
+  ): Promise<{
+    inputs: AgentExternalInput[];
+    terminateMode?: AgentTerminateMode;
+  }> {
+    const immediate = this.drainExternalInputs(options);
+    if (immediate.length > 0) {
+      return { inputs: immediate };
+    }
+
+    if (!this.hasTurnBudgetForAnotherRound(options, turnCounter)) {
+      return { inputs: [], terminateMode: AgentTerminateMode.MAX_TURNS };
+    }
+
+    const remainingTimeMs = this.getRemainingTimeMs(options, startTime);
+    if (remainingTimeMs !== undefined && remainingTimeMs <= 0) {
+      return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
+    }
+
+    if (!options.waitForExternalMessages) {
+      return { inputs: [] };
+    }
+
+    const waitAbortController = new AbortController();
+    const onAbort = () => waitAbortController.abort();
+    abortController.signal.addEventListener('abort', onAbort, { once: true });
+    let timedOut = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    if (remainingTimeMs !== undefined) {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        waitAbortController.abort();
+      }, remainingTimeMs);
+      timeout.unref?.();
+    }
+
+    try {
+      const inputs = await options.waitForExternalMessages(
+        waitAbortController.signal,
+      );
+      if (abortController.signal.aborted) {
+        return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+      }
+      if (timedOut) {
+        return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
+      }
+      return { inputs };
+    } catch (error) {
+      if (abortController.signal.aborted) {
+        return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+      }
+      if (timedOut) {
+        return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
+      }
+      throw error;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      abortController.signal.removeEventListener('abort', onAbort);
+    }
   }
 
   // ─── Tool Execution ───────────────────────────────────────

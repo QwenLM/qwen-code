@@ -849,6 +849,52 @@ describe('BackgroundTaskRegistry', () => {
     });
   });
 
+  describe('waitForMessages', () => {
+    it('resolves with queued input when a running agent is notified', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      const waitPromise = registry.waitForMessages(
+        'test-1',
+        new AbortController().signal,
+      );
+
+      registry.queueExternalInput('test-1', {
+        kind: 'notification',
+        text: '<task-notification>event</task-notification>',
+      });
+
+      await expect(waitPromise).resolves.toEqual([
+        {
+          kind: 'notification',
+          text: '<task-notification>event</task-notification>',
+        },
+      ]);
+      expect(registry.drainMessages('test-1')).toEqual([]);
+    });
+
+    it('resolves empty when the wait signal is aborted', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      const waitAbort = new AbortController();
+      const waitPromise = registry.waitForMessages('test-1', waitAbort.signal);
+
+      waitAbort.abort();
+
+      await expect(waitPromise).resolves.toEqual([]);
+    });
+  });
+
   describe('session switch helpers', () => {
     it('reset clears tracked entries without touching persisted sidecars', () => {
       registry.register({

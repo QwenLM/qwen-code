@@ -69,11 +69,16 @@ describe('BackgroundAgentResumeService', () => {
       getAllToolNames: vi.fn().mockReturnValue([]),
       stop: vi.fn().mockResolvedValue(undefined),
     };
+    const monitorRegistry = {
+      setAgentNotificationCallback: vi.fn(),
+      cancelRunningForOwner: vi.fn(),
+    };
     const config = {
       storage: {
         getProjectDir: () => tempDir,
       },
       getBackgroundTaskRegistry: () => registry,
+      getMonitorRegistry: () => monitorRegistry,
       getSubagentManager: () => subagentManager,
       getHookSystem: () => hookSystem,
       getApprovalMode: () => 'default',
@@ -91,6 +96,7 @@ describe('BackgroundAgentResumeService', () => {
       service: new BackgroundAgentResumeService(config),
       subagentManager,
       hookSystem,
+      monitorRegistry,
     };
   }
 
@@ -673,6 +679,88 @@ describe('BackgroundAgentResumeService', () => {
       | undefined;
     expect(provider).toBeDefined();
     expect(provider?.()).toEqual(['second message']);
+  });
+
+  it('routes owned monitor notifications into a resumed agent queue', async () => {
+    const sessionId = 'session-monitor';
+    const agentId = 'agent-monitor';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume monitor owner',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume monitor owner' }] },
+      }) + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Resume monitor owner',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume monitor owner',
+      outputFile,
+      metaPath,
+    });
+
+    let releaseExecute: (() => void) | undefined;
+    const subagent = {
+      execute: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseExecute = resolve;
+          }),
+      ),
+      setExternalMessageProvider: vi.fn(),
+      setExternalMessageWaiter: vi.fn(),
+      setExternalMessageWaitPredicate: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+    const { service, subagentManager, monitorRegistry } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+
+    const resume = service.resumeBackgroundAgent(agentId, 'continue');
+    await vi.waitFor(() => {
+      expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+        agentId,
+        expect.any(Function),
+      );
+    });
+    const callback = monitorRegistry.setAgentNotificationCallback.mock
+      .calls[0][1] as (displayText: string, modelText: string) => void;
+
+    callback('Monitor "logs" event #1: ready', '<task-notification />');
+
+    expect(registry.get(agentId)?.pendingMessages).toContainEqual({
+      kind: 'notification',
+      text: '<task-notification />',
+    });
+    expect(subagent.setExternalMessageWaiter).toHaveBeenCalled();
+    expect(subagent.setExternalMessageWaitPredicate).toHaveBeenCalled();
+    releaseExecute?.();
+    await resume;
   });
 
   it('resumes fork agents from transcript bootstrap instead of current parent config', async () => {

@@ -662,6 +662,21 @@ export class BackgroundAgentResumeService {
       subagent.setExternalMessageProvider(() =>
         registry.drainMessages(meta.agentId),
       );
+      subagent.setExternalMessageWaiter?.((waitSignal) =>
+        registry.waitForMessages(meta.agentId, waitSignal),
+      );
+      const monitorRegistry = this.config.getMonitorRegistry();
+      subagent.setExternalMessageWaitPredicate?.(() =>
+        monitorRegistry.hasRunningForOwner(meta.agentId),
+      );
+      monitorRegistry.setAgentNotificationCallback(
+        meta.agentId,
+        (_displayText, modelText) =>
+          void registry.queueExternalInput(meta.agentId, {
+            kind: 'notification',
+            text: modelText,
+          }),
+      );
 
       const hookSystem = this.config.getHookSystem();
       const contextState = new ContextState();
@@ -770,6 +785,10 @@ export class BackgroundAgentResumeService {
         } finally {
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+          monitorRegistry.setAgentNotificationCallback(meta.agentId, undefined);
+          monitorRegistry.cancelRunningForOwner(meta.agentId, {
+            notify: false,
+          });
           cleanupJsonl?.();
           // Release the per-subagent ToolRegistry the resumed agent's
           // wrapper Config built in `createApprovalModeOverride` so any

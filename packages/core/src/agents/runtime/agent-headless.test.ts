@@ -736,6 +736,109 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
+      it('should wait for external notification after a no-tool response', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        let resolveWait:
+          | ((inputs: [{ kind: 'notification'; text: string }]) => void)
+          | undefined;
+        const waitForExternalMessages = vi.fn(
+          (_signal: AbortSignal) =>
+            new Promise<[{ kind: 'notification'; text: string }]>((resolve) => {
+              resolveWait = resolve;
+            }),
+        );
+        let shouldWait = true;
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => shouldWait);
+
+        const executePromise = scope.execute(new ContextState());
+        await vi.waitFor(() =>
+          expect(waitForExternalMessages).toHaveBeenCalled(),
+        );
+
+        shouldWait = false;
+        resolveWait?.([
+          {
+            kind: 'notification',
+            text: '<task-notification>event</task-notification>',
+          },
+        ]);
+
+        await executePromise;
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '<task-notification>event</task-notification>' },
+        ]);
+      });
+
+      it('should drain queued external notification before finalizing', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+        const pendingInputs: Array<{ kind: 'notification'; text: string }> = [
+          {
+            kind: 'notification',
+            text: '<task-notification>terminal</task-notification>',
+          },
+        ];
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => pendingInputs.splice(0));
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '<task-notification>terminal</task-notification>' },
+        ]);
+      });
+
+      it('should not idle-wait when max turns prevents another round', async () => {
+        const { config } = await createMockConfig();
+        const runConfig: RunConfig = { ...defaultRunConfig, max_turns: 1 };
+        const waitForExternalMessages = vi.fn(async () => []);
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          runConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => true);
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
+        expect(waitForExternalMessages).not.toHaveBeenCalled();
+      });
+
       it('should execute external tools and provide the response to the model', async () => {
         const listFilesToolDef: FunctionDeclaration = {
           name: 'list_files',
