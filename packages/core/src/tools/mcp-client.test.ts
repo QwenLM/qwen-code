@@ -15,11 +15,18 @@ import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
+  addMCPStatusChangeListener,
   createTransport,
+  getAllMCPServerStatuses,
+  getMCPServerStatus,
   hasNetworkTransport,
   isEnabled,
+  MCPServerStatus,
   McpClient,
   populateMcpServerCommand,
+  removeMCPServerStatus,
+  removeMCPStatusChangeListener,
+  updateMCPServerStatus,
 } from './mcp-client.js';
 import type { ToolRegistry } from './tool-registry.js';
 
@@ -498,6 +505,55 @@ describe('mcp-client', () => {
       expect(isEnabled(namelessFuncDecl, serverName, mcpServerConfig)).toBe(
         false,
       );
+    });
+  });
+
+  describe('removeMCPServerStatus', () => {
+    afterEach(() => {
+      // Clean up any state left in the module-level registry between tests.
+      for (const name of getAllMCPServerStatuses().keys()) {
+        removeMCPServerStatus(name);
+      }
+    });
+
+    it('removes the entry from the global status map', () => {
+      updateMCPServerStatus('srv-a', MCPServerStatus.DISCONNECTED);
+      expect(getAllMCPServerStatuses().has('srv-a')).toBe(true);
+
+      removeMCPServerStatus('srv-a');
+
+      expect(getAllMCPServerStatuses().has('srv-a')).toBe(false);
+      // getMCPServerStatus falls back to DISCONNECTED for unknown servers,
+      // but the snapshot map should no longer include the entry.
+      expect(getMCPServerStatus('srv-a')).toBe(MCPServerStatus.DISCONNECTED);
+    });
+
+    it('notifies listeners with undefined to signal removal', () => {
+      const events: Array<[string, MCPServerStatus | undefined]> = [];
+      const listener = (name: string, status: MCPServerStatus | undefined) => {
+        events.push([name, status]);
+      };
+      addMCPStatusChangeListener(listener);
+
+      updateMCPServerStatus('srv-b', MCPServerStatus.CONNECTED);
+      removeMCPServerStatus('srv-b');
+
+      removeMCPStatusChangeListener(listener);
+
+      expect(events).toEqual([
+        ['srv-b', MCPServerStatus.CONNECTED],
+        ['srv-b', undefined],
+      ]);
+    });
+
+    it('is a no-op (no listener fired) when the server is not tracked', () => {
+      const listener = vi.fn();
+      addMCPStatusChangeListener(listener);
+
+      removeMCPServerStatus('never-registered');
+
+      removeMCPStatusChangeListener(listener);
+      expect(listener).not.toHaveBeenCalled();
     });
   });
 

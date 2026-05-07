@@ -266,11 +266,14 @@ let mcpDiscoveryState: MCPDiscoveryState = MCPDiscoveryState.NOT_STARTED;
 export const mcpServerRequiresOAuth: Map<string, boolean> = new Map();
 
 /**
- * Event listeners for MCP server status changes
+ * Event listeners for MCP server status changes.
+ * `status` is `undefined` when the server has been removed from the registry
+ * (e.g. disabled via `/mcp`), so consumers can drop it from their snapshots
+ * rather than continue to count it as `DISCONNECTED`.
  */
 type StatusChangeListener = (
   serverName: string,
-  status: MCPServerStatus,
+  status: MCPServerStatus | undefined,
 ) => void;
 const statusChangeListeners: StatusChangeListener[] = [];
 
@@ -306,6 +309,21 @@ export function updateMCPServerStatus(
   // Notify all listeners
   for (const listener of statusChangeListeners) {
     listener(serverName, status);
+  }
+}
+
+/**
+ * Remove an MCP server from the status registry and notify listeners.
+ * Used when a server is disabled or removed from configuration so it no
+ * longer shows up in the Footer's MCP health pill as offline.
+ */
+export function removeMCPServerStatus(serverName: string): void {
+  if (!serverStatuses.has(serverName)) {
+    return;
+  }
+  serverStatuses.delete(serverName);
+  for (const listener of statusChangeListeners) {
+    listener(serverName, undefined);
   }
 }
 

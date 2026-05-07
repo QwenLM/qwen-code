@@ -18,6 +18,12 @@ import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
+import {
+  getAllMCPServerStatuses,
+  MCPServerStatus,
+  removeMCPServerStatus,
+  updateMCPServerStatus,
+} from './mcp-client.js';
 import { ToolErrorType } from './tool-error.js';
 
 vi.mock('node:fs');
@@ -528,6 +534,38 @@ describe('ToolRegistry', () => {
 
       // The good tool should still have been loaded despite the failure.
       expect(await toolRegistry.ensureTool('good-tool')).toBe(goodTool);
+    });
+  });
+
+  describe('disableMcpServer', () => {
+    afterEach(() => {
+      for (const name of getAllMCPServerStatuses().keys()) {
+        removeMCPServerStatus(name);
+      }
+    });
+
+    it('removes the server from the global status registry so the health pill stops counting it', async () => {
+      // Simulate an MCP server that connected and then dropped — the global
+      // registry would carry a DISCONNECTED entry for it.
+      updateMCPServerStatus('flaky-server', MCPServerStatus.DISCONNECTED);
+      expect(getAllMCPServerStatuses().has('flaky-server')).toBe(true);
+
+      const setExcludedSpy = vi
+        .spyOn(config, 'setExcludedMcpServers')
+        .mockImplementation(() => {});
+      vi.spyOn(config, 'getExcludedMcpServers').mockReturnValue([]);
+      // disableMcpServer delegates the actual transport teardown to the
+      // McpClientManager — stub it out so we can isolate the status-registry
+      // behavior.
+      vi.spyOn(
+        McpClientManager.prototype,
+        'disconnectServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.disableMcpServer('flaky-server');
+
+      expect(getAllMCPServerStatuses().has('flaky-server')).toBe(false);
+      expect(setExcludedSpy).toHaveBeenCalledWith(['flaky-server']);
     });
   });
 

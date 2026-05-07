@@ -16,6 +16,7 @@ import type { Config } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
+import { removeMCPServerStatus } from './mcp-client.js';
 import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
@@ -352,6 +353,11 @@ export class ToolRegistry {
 
     // Disconnect the MCP client
     await this.mcpClientManager.disconnectServer(serverName);
+
+    // Drop the server from the global status registry so the Footer's
+    // MCP health pill doesn't keep counting it as "offline" — disabling
+    // is intentional, not a connectivity failure.
+    removeMCPServerStatus(serverName);
 
     // Update config's exclusion list
     const currentExcluded = this.config.getExcludedMcpServers() || [];
