@@ -708,13 +708,19 @@ describe('ShellExecutionService', () => {
         },
       );
       expect(result.promoted).toBe(true);
-      // Snapshot the count after promote settled — pre-promote chain
-      // item ran AFTER abort set listenersDetached=true (chain items
-      // queue at handleOutput time but only execute when their .then
-      // microtask runs), so even pre-promote emits may have been
-      // suppressed. We don't assert on the exact pre count; we just
-      // capture it as a baseline for the post-promote assertion below.
+      // Snapshot the count after promote settled. Pre-promote chain
+      // item ran AFTER abort set `listenersDetached = true` (chain
+      // items queue at handleOutput time but only execute when their
+      // .then microtask runs, which is after the sync abort dispatch
+      // that set the flag), so the pre-promote emit was already
+      // suppressed by the guard. Asserting `0` here pins both halves
+      // of the contract — pre-promote AND post-promote bytes are both
+      // suppressed once `listenersDetached` is set. Without the guard,
+      // pre-promote's render path would emit a `'data'` event into
+      // `onOutputEventMock` and this would be `>= 1`, failing the
+      // assertion.
       const eventCountAfterSettle = onOutputEventMock.mock.calls.length;
+      expect(eventCountAfterSettle).toBe(0);
       // Suppress the post-promote-emit unhandled rejection (mock chain
       // items don't await; if production-side state has been torn
       // down, the inner promise might reject — fine for this test).
