@@ -487,6 +487,7 @@ describe('standalone release packaging', () => {
     const {
       HOSTED_INSTALLATION_ASSET_NAMES,
       HOSTED_INSTALLATION_ASSETS,
+      HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS,
       HOSTED_INSTALLER_REQUIRED_FRAGMENTS,
       assertHostedInstallationAssetChecksums,
       buildHostedInstallationAssets,
@@ -511,8 +512,29 @@ describe('standalone release packaging', () => {
       expect(HOSTED_INSTALLER_REQUIRED_FRAGMENTS).toEqual([
         '--version',
         'QWEN_INSTALL_VERSION',
-        'latest',
       ]);
+      // The default-version regex pins `latest` semantically rather than as a
+      // loose substring, so a stray `latest` in a comment cannot satisfy it.
+      expect(
+        HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS['install-qwen.sh'].test(
+          'VERSION="${QWEN_INSTALL_VERSION:-latest}"',
+        ),
+      ).toBe(true);
+      expect(
+        HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS['install-qwen.sh'].test(
+          '# defaults to latest',
+        ),
+      ).toBe(false);
+      expect(
+        HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS['install-qwen.bat'].test(
+          'set "VERSION=latest"',
+        ),
+      ).toBe(true);
+      expect(
+        HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS['install-qwen.bat'].test(
+          'rem defaults to latest',
+        ),
+      ).toBe(false);
       expect(readScript(installSh)).toBe(
         readScript('scripts/installation/install-qwen-with-source.sh'),
       );
@@ -561,6 +583,42 @@ describe('standalone release packaging', () => {
         buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
       ).rejects.toThrow(
         /install-qwen\.sh is missing hosted installer behavior: --version/,
+      );
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects hosted installer sources whose default version is not latest', async () => {
+    const { buildHostedInstallationAssets } = await import(
+      hostedInstallationScriptUrl
+    );
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-root-'));
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+    const sourceDir = path.join(tmpRoot, 'scripts', 'installation');
+
+    try {
+      mkdirSync(sourceDir, { recursive: true });
+      // Both fragments are present, but the default version was changed to
+      // something other than `latest`. The default-version pattern guard
+      // catches this, even though loose substring matching would not.
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-with-source.sh'),
+        '#!/usr/bin/env bash\n' +
+          '# Defaults to latest unless --version is passed.\n' +
+          'VERSION="${QWEN_INSTALL_VERSION:-stable}"\n' +
+          'case "$1" in --version) shift; VERSION="$1" ;; esac\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-with-source.bat'),
+        '@echo off\r\nset "VERSION=stable"\r\n',
+      );
+
+      await expect(
+        buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
+      ).rejects.toThrow(
+        /install-qwen\.sh default install version must be 'latest'/,
       );
     } finally {
       rmSync(tmpRoot, { recursive: true, force: true });
@@ -848,6 +906,11 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('installation/install-qwen.sh');
     expect(guide).toContain('installation/install-qwen.bat');
     expect(guide).toContain('release operators must sync these staged files');
+    // The hosted-endpoint status callout must keep flagging the transition
+    // window so users do not assume the documented --version flow works
+    // before the next OSS sync.
+    expect(guide).toContain('Hosted endpoint status');
+    expect(guide).toContain('legacy NVM-based installer');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
   });

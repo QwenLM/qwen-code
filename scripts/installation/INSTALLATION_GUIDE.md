@@ -43,6 +43,13 @@ specific standalone release. This keeps the public install command on a stable
 hosted entrypoint while still allowing version pinning, rather than using
 per-release installer URLs.
 
+> **Hosted endpoint status**: Until the hosted endpoint is re-synced after the
+> next release, the URL below still serves the legacy NVM-based installer,
+> which does not honor `--version` or `QWEN_INSTALL_VERSION` in the way
+> documented here. To get the standalone-archive-first behavior immediately,
+> run `install-qwen-with-source.sh` from a local checkout of this repository.
+> The `--version` examples below describe the post-sync behavior.
+
 Latest hosted entrypoints used today:
 
 ```bash

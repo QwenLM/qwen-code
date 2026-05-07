@@ -38,8 +38,15 @@ const HOSTED_INSTALLATION_ASSET_NAMES = HOSTED_INSTALLATION_ASSETS.map(
 const HOSTED_INSTALLER_REQUIRED_FRAGMENTS = [
   '--version',
   'QWEN_INSTALL_VERSION',
-  'latest',
 ];
+// Narrow regexes that pin the default-version assignment to `latest`.
+// Substring matching alone would let the word "latest" leak in via comments
+// or help text even when the actual default has been changed. The patterns
+// allow whitespace flexibility but require the literal default value.
+const HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS = {
+  'install-qwen.sh': /VERSION\s*=\s*"\$\{QWEN_INSTALL_VERSION:-latest\}"/,
+  'install-qwen.bat': /set\s+"VERSION=latest"/,
+};
 // SHA256SUMS is allowed in an existing output directory because every staging
 // run rewrites it from scratch after copying the hosted installer assets.
 const HOSTED_INSTALLATION_OUTPUT_NAMES = new Set([
@@ -133,6 +140,13 @@ function assertHostedInstallerSource(source, output) {
       `${output} is missing hosted installer behavior: ${missing.join(', ')}`,
     );
   }
+
+  const defaultPattern = HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS[output];
+  if (defaultPattern && !defaultPattern.test(contents)) {
+    fail(
+      `${output} default install version must be 'latest' for the hosted entrypoint`,
+    );
+  }
 }
 
 async function writeHostedSha256Sums(outDir) {
@@ -167,6 +181,7 @@ async function assertHostedInstallationAssetChecksums(outDir) {
 export {
   HOSTED_INSTALLATION_ASSETS,
   HOSTED_INSTALLATION_ASSET_NAMES,
+  HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS,
   HOSTED_INSTALLER_REQUIRED_FRAGMENTS,
   assertHostedInstallationAssetChecksums,
   buildHostedInstallationAssets,
