@@ -36,9 +36,13 @@ export interface ModelUpdateDiff {
 
 export type UpdateChoice = 'update' | 'later' | 'skip';
 
-export interface ProviderUpdateRequest {
+export interface ProviderUpdateEntry {
   providerLabel: string;
   diff: ModelUpdateDiff;
+}
+
+export interface ProviderUpdateRequest {
+  entries: ProviderUpdateEntry[];
   onConfirm: (choice: UpdateChoice) => void;
 }
 
@@ -161,10 +165,11 @@ function getInstalledOwnedModelIds(
   return allModels.filter(ownsFn).map((m) => m.id);
 }
 
-function findPendingUpdate(
+function findAllPendingUpdates(
   settings: LoadedSettings,
   currentModel: string,
-): PendingUpdate | undefined {
+): PendingUpdate[] {
+  const results: PendingUpdate[] = [];
   for (const provider of ALL_PROVIDERS) {
     const metadataKey = resolveMetadataKey(provider);
     if (!metadataKey) continue;
@@ -183,9 +188,9 @@ function findPendingUpdate(
     const newModelIds = provider.models!.map((s) => s.id);
     const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
 
-    return { provider, metadataKey, baseUrl, currentVersion, diff };
+    results.push({ provider, metadataKey, baseUrl, currentVersion, diff });
   }
-  return undefined;
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,27 +298,32 @@ export function useProviderUpdates(
     }
 
     const currentModel = config.getModel();
-    const pending = findPendingUpdate(settings, currentModel);
+    const pendingList = findAllPendingUpdates(settings, currentModel);
 
-    if (!pending) return;
+    if (pendingList.length === 0) return;
 
-    const { provider, metadataKey, baseUrl, currentVersion, diff } = pending;
-    const displayName = t(provider.label);
+    const entries: ProviderUpdateEntry[] = pendingList.map((p) => ({
+      providerLabel: t(p.provider.label),
+      diff: p.diff,
+    }));
 
     setUpdateRequest({
-      providerLabel: displayName,
-      diff,
+      entries,
       onConfirm: async (choice: UpdateChoice) => {
         setUpdateRequest(undefined);
         if (choice === 'update') {
-          await executeUpdate(provider, baseUrl);
+          for (const p of pendingList) {
+            await executeUpdate(p.provider, p.baseUrl);
+          }
         } else if (choice === 'skip') {
           const persistScope = getPersistScopeForModelSelection(settings);
-          settings.setValue(
-            persistScope,
-            `${PROVIDER_METADATA_NS}.${metadataKey}.ignoredVersion`,
-            currentVersion,
-          );
+          for (const p of pendingList) {
+            settings.setValue(
+              persistScope,
+              `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
+              p.currentVersion,
+            );
+          }
         }
       },
     });

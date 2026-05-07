@@ -138,8 +138,7 @@ export const DialogManager = ({
   if (uiState.providerUpdateRequest) {
     return (
       <ProviderUpdatePrompt
-        providerLabel={uiState.providerUpdateRequest.providerLabel}
-        diff={uiState.providerUpdateRequest.diff}
+        entries={uiState.providerUpdateRequest.entries}
         onConfirm={uiState.providerUpdateRequest.onConfirm}
       />
     );

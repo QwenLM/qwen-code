@@ -14,6 +14,10 @@ import {
   codingPlanProvider,
 } from '../../auth/providers/alibaba/codingPlan.js';
 import {
+  TOKEN_PLAN_BASE_URL,
+  tokenPlanProvider,
+} from '../../auth/providers/alibaba/tokenPlan.js';
+import {
   buildProviderTemplate,
   computeModelListVersion,
   PROVIDER_METADATA_NS,
@@ -29,7 +33,14 @@ const chinaTemplate = buildProviderTemplate(
 );
 const chinaVersion = computeModelListVersion(chinaTemplate);
 
+const tokenTemplate = buildProviderTemplate(
+  tokenPlanProvider,
+  TOKEN_PLAN_BASE_URL,
+);
+const tokenVersion = computeModelListVersion(tokenTemplate);
+
 const METADATA_KEY = 'coding-plan';
+const TOKEN_METADATA_KEY = 'token-plan';
 
 describe('useProviderUpdates', () => {
   const mockSettings = {
@@ -123,13 +134,10 @@ describe('useProviderUpdates', () => {
       expect(result.current.providerUpdateRequest).toBeDefined();
     });
 
-    expect(result.current.providerUpdateRequest?.providerLabel).toContain(
-      'Coding Plan',
-    );
-    expect(result.current.providerUpdateRequest?.diff).toBeDefined();
-    expect(
-      result.current.providerUpdateRequest?.diff.currentModelAffected,
-    ).toBe(false);
+    const entry = result.current.providerUpdateRequest?.entries[0];
+    expect(entry?.providerLabel).toContain('Coding Plan');
+    expect(entry?.diff).toBeDefined();
+    expect(entry?.diff.currentModelAffected).toBe(false);
   });
 
   it('reports currentModelAffected when model is removed', async () => {
@@ -164,12 +172,9 @@ describe('useProviderUpdates', () => {
       expect(result.current.providerUpdateRequest).toBeDefined();
     });
 
-    expect(
-      result.current.providerUpdateRequest?.diff.currentModelAffected,
-    ).toBe(true);
-    expect(result.current.providerUpdateRequest?.diff.removed).toContain(
-      'old-deprecated-model',
-    );
+    const entry = result.current.providerUpdateRequest?.entries[0];
+    expect(entry?.diff.currentModelAffected).toBe(true);
+    expect(entry?.diff.removed).toContain('old-deprecated-model');
   });
 
   it('executes update when user confirms with "update"', async () => {
@@ -389,6 +394,90 @@ describe('useProviderUpdates', () => {
     );
 
     expect(result.current.providerUpdateRequest).toBeUndefined();
+  });
+
+  it('batches multiple provider updates into a single prompt', async () => {
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    const entries = result.current.providerUpdateRequest!.entries;
+    expect(entries.length).toBe(2);
+
+    const labels = entries.map((e) => e.providerLabel);
+    expect(labels).toContain('Coding Plan');
+    expect(labels).toContain('Token Plan');
+  });
+
+  it('skip persists ignoredVersion for all providers in batch', async () => {
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('skip');
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    });
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.ignoredVersion`,
+      chinaVersion,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.ignoredVersion`,
+      tokenVersion,
+    );
   });
 
   it('shows prompt again when a newer version supersedes ignoredVersion', async () => {
