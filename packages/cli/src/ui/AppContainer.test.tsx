@@ -78,12 +78,6 @@ vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
-vi.mock('../remoteInput/RemoteInputContext.js', () => ({
-  useRemoteInput: vi.fn(),
-}));
-vi.mock('../dualOutput/DualOutputContext.js', () => ({
-  useDualOutput: vi.fn(),
-}));
 vi.mock('./contexts/AgentViewContext.js', () => ({
   useAgentViewState: vi.fn(() => ({
     activeView: 'main',
@@ -129,8 +123,6 @@ import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { measureElement } from 'ink';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
-import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
-import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 
 describe('AppContainer State Management', () => {
   let mockConfig: Config;
@@ -157,8 +149,7 @@ describe('AppContainer State Management', () => {
   const mockedUseTextBuffer = useTextBuffer as Mock;
   const mockedUseLogger = useLogger as Mock;
   const mockedUseLoadingIndicator = useLoadingIndicator as Mock;
-  const mockedUseRemoteInput = useRemoteInput as Mock;
-  const mockedUseDualOutput = useDualOutput as Mock;
+  const mockedUseTerminalSize = useTerminalSize as Mock;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -275,8 +266,7 @@ describe('AppContainer State Management', () => {
       elapsedTime: '0.0s',
       currentLoadingPhrase: '',
     });
-    mockedUseRemoteInput.mockReturnValue(null);
-    mockedUseDualOutput.mockReturnValue(null);
+    mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
 
     // Mock Config
     mockConfig = makeFakeConfig();
@@ -712,97 +702,6 @@ describe('AppContainer State Management', () => {
       // popQueueIntoInput convention used elsewhere in the input prompt).
       expect(mockSetText).toHaveBeenCalledWith(
         'queued follow-up\nin-progress draft',
-      );
-    });
-  });
-
-  describe('Remote Input & Dual Output Integration', () => {
-    it('wires remote input watcher to submitQuery and idle notifications', () => {
-      const mockSubmitQuery = vi.fn();
-      const remoteInput = {
-        setSubmitFn: vi.fn(),
-        notifyIdle: vi.fn(),
-      };
-
-      mockedUseGeminiStream.mockReturnValue({
-        streamingState: 'idle',
-        submitQuery: mockSubmitQuery,
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest: vi.fn(),
-        retryLastPrompt: vi.fn(),
-      });
-      mockedUseRemoteInput.mockReturnValue(remoteInput);
-
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-
-      expect(remoteInput.setSubmitFn).toHaveBeenCalledTimes(1);
-      expect(remoteInput.setSubmitFn).toHaveBeenCalledWith(
-        expect.any(Function),
-      );
-      expect(remoteInput.notifyIdle).toHaveBeenCalledTimes(1);
-    });
-
-    it('bridges pending tool confirmations to dual output and remote input', () => {
-      const onConfirm = vi.fn();
-      const remoteInput = {
-        setSubmitFn: vi.fn(),
-        notifyIdle: vi.fn(),
-        setConfirmationHandler: vi.fn(),
-      };
-      const dualOutput = {
-        isConnected: true,
-        emitPermissionRequest: vi.fn(),
-        emitControlResponse: vi.fn(),
-      };
-
-      mockedUseGeminiStream.mockReturnValue({
-        streamingState: 'waiting_for_confirmation',
-        submitQuery: vi.fn(),
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest: vi.fn(),
-        retryLastPrompt: vi.fn(),
-        pendingToolCalls: [
-          {
-            status: 'awaiting_approval',
-            request: {
-              callId: 'call-1',
-              name: 'shell',
-              args: { cmd: 'ls' },
-            },
-            confirmationDetails: { onConfirm },
-          },
-        ],
-      });
-      mockedUseRemoteInput.mockReturnValue(remoteInput);
-      mockedUseDualOutput.mockReturnValue(dualOutput);
-      mockedUseSessionStats.mockReturnValue({
-        stats: { sessionId: 'session-123' },
-        startNewSession: vi.fn(),
-      });
-
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-
-      expect(dualOutput.emitPermissionRequest).toHaveBeenCalledTimes(1);
-      expect(remoteInput.setConfirmationHandler).toHaveBeenCalledWith(
-        expect.any(Function),
       );
     });
   });
