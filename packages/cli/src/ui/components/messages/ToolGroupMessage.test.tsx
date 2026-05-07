@@ -656,6 +656,94 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame() ?? '').not.toContain('MockSubagent[task-completed]');
     });
 
+    it('live phase (non-compact): running subagent tool entry is hidden — panel owns the row', () => {
+      // Without this filter the user sees the same subagent twice —
+      // once as the parent tool group's `task` row, once as the
+      // `LiveAgentPanel` row beneath the composer. Hide the inline
+      // entry while `isPending=true` so the panel is the single
+      // source of truth for in-flight subagents.
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('running')]}
+          isPending={true}
+        />,
+      );
+      // Pure-subagent group with everything panel-owned → entire
+      // group is hidden so an empty bordered container doesn't
+      // float above the panel.
+      expect(lastFrame() ?? '').toBe('');
+    });
+
+    it('live phase (non-compact): mixed group still renders sibling tools', () => {
+      // Only the subagent entry is hidden in live phase — sibling
+      // tools (Read / Edit / Bash) keep rendering normally so the
+      // parent's tool stream stays continuous.
+      const sibling = createToolCall({
+        callId: 'read-1',
+        name: 'read_file',
+        description: 'read config.yaml',
+        status: ToolCallStatus.Success,
+      });
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('running'), sibling]}
+          isPending={true}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // Sibling shown.
+      expect(frame).toContain('read_file');
+      // Subagent hidden — panel owns the live row.
+      expect(frame).not.toContain('MockSubagent[task-running]');
+    });
+
+    it('live phase (non-compact): subagent with pending approval still renders', () => {
+      // The focus-routed approval banner / queued marker is the
+      // only inline surface that lets users answer the prompt
+      // without opening the dialog, so the entry must NOT be
+      // hidden when the subagent is awaiting confirmation.
+      const pending = createToolCall({
+        callId: 'task-pending',
+        name: 'task',
+        description: 'Delegate task to subagent',
+        status: ToolCallStatus.Executing,
+        resultDisplay: {
+          type: 'task_execution',
+          subagentName: 'researcher',
+          taskDescription: 'investigate the change',
+          taskPrompt: 'investigate',
+          status: 'running',
+          pendingConfirmation: { type: 'info', title: 't', prompt: 'p' },
+        } as AgentResultDisplay,
+      });
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[pending]}
+          isPending={true}
+        />,
+      );
+      // Subagent entry rendered (banner / marker fires inside
+      // ToolMessage); panel sits below as ambient progress.
+      expect(lastFrame() ?? '').toContain('MockSubagent[task-pending]');
+    });
+
+    it('committed phase (non-compact): subagent tool entry comes back for the audit trail', () => {
+      // Once the parent turn commits the panel evicts the row and
+      // the inline entry returns so SubagentScrollbackSummary lands
+      // inside the parent's tool group as a permanent record.
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('completed')]}
+          isPending={false}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('MockSubagent[task-completed]');
+    });
+
     it('compact mode: committed group with failed subagent forces expand', () => {
       // Same as the completed case — the scrollback summary needs to
       // land for failed / cancelled foreground subagents too so the
