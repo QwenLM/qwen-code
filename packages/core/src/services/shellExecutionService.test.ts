@@ -691,16 +691,12 @@ describe('ShellExecutionService', () => {
       // the time the result resolves, the abort handler has run its
       // drain (so all queued chain items have settled) and we can read
       // the final emit count.
-      const dataCallbackHolder: { current: (data: string) => void } = {
-        current: () => {},
-      };
       const { result } = await simulateExecution(
         'tail -f /tmp/never.log',
         (pty, ac) => {
           // Pre-promote data — fed via the live onData listener so it
           // reaches the foreground onOutputEvent normally.
-          dataCallbackHolder.current = pty.onData.mock.calls[0][0];
-          dataCallbackHolder.current('pre-promote-data\n');
+          pty.onData.mock.calls[0][0]('pre-promote-data\n');
           ac.abort({
             kind: 'background',
             shellId: 'bg_test123',
@@ -721,14 +717,14 @@ describe('ShellExecutionService', () => {
       // assertion.
       const eventCountAfterSettle = onOutputEventMock.mock.calls.length;
       expect(eventCountAfterSettle).toBe(0);
-      // Suppress the post-promote-emit unhandled rejection (mock chain
-      // items don't await; if production-side state has been torn
-      // down, the inner promise might reject — fine for this test).
       // Drive the data callback again after promote: production-side
-      // dataDisposable was disposed (mock stub does not actually detach
-      // the callback, but production's listenersDetached guard inside
-      // chain callbacks suppresses onOutputEvent emits regardless).
-      dataCallbackHolder.current('post-promote-data\n');
+      // dataDisposable was disposed, but the mock stub doesn't actually
+      // detach the callback (the disposable returned by `vi.fn()` is a
+      // no-op). Re-invoking via `mock.calls[0][0]` exercises the
+      // production-side `listenersDetached` guard inside the chain
+      // callback, which is the real backstop against post-promote
+      // bytes leaking to the foreground onOutputEvent.
+      mockPtyProcess.onData.mock.calls[0][0]('post-promote-data\n');
       // Wait one macrotask + a microtask flush to let any chain items
       // queued by the post-promote dataCallback fully settle.
       await new Promise((res) => setImmediate(res));
