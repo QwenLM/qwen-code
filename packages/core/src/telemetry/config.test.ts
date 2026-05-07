@@ -61,6 +61,7 @@ describe('telemetry/config helpers', () => {
         otlpEndpoint: 'http://localhost:4317',
         otlpProtocol: 'grpc' as const,
         logPrompts: false,
+        includeSensitiveSpanAttributes: true,
         outfile: 'settings.log',
         useCollector: false,
       };
@@ -80,6 +81,7 @@ describe('telemetry/config helpers', () => {
         otlpEndpoint: 'http://settings:4317',
         otlpProtocol: 'grpc' as const,
         logPrompts: false,
+        includeSensitiveSpanAttributes: false,
         outfile: 'settings.log',
         useCollector: false,
       };
@@ -89,6 +91,7 @@ describe('telemetry/config helpers', () => {
         QWEN_TELEMETRY_OTLP_ENDPOINT: 'http://env:4317',
         QWEN_TELEMETRY_OTLP_PROTOCOL: 'http',
         QWEN_TELEMETRY_LOG_PROMPTS: 'true',
+        QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: 'true',
         QWEN_TELEMETRY_OUTFILE: 'env.log',
         QWEN_TELEMETRY_USE_COLLECTOR: 'true',
       } as Record<string, string>;
@@ -111,6 +114,7 @@ describe('telemetry/config helpers', () => {
         otlpLogsEndpoint: undefined,
         otlpMetricsEndpoint: undefined,
         logPrompts: true,
+        includeSensitiveSpanAttributes: true,
         outfile: 'env.log',
         useCollector: true,
       });
@@ -129,9 +133,39 @@ describe('telemetry/config helpers', () => {
         otlpLogsEndpoint: undefined,
         otlpMetricsEndpoint: undefined,
         logPrompts: false,
+        includeSensitiveSpanAttributes: true,
         outfile: 'argv.log',
         useCollector: true, // from env as no argv option
       });
+    });
+
+    it('defaults includeSensitiveSpanAttributes to false', async () => {
+      const resolved = await resolveTelemetrySettings({});
+
+      expect(resolved.includeSensitiveSpanAttributes).toBe(false);
+    });
+
+    it('parses includeSensitiveSpanAttributes from settings and env', async () => {
+      const resolvedFromSettings = await resolveTelemetrySettings({
+        settings: { includeSensitiveSpanAttributes: true },
+      });
+      expect(resolvedFromSettings.includeSensitiveSpanAttributes).toBe(true);
+
+      const resolvedEnvTrue = await resolveTelemetrySettings({
+        env: {
+          QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: '1',
+        },
+        settings: { includeSensitiveSpanAttributes: false },
+      });
+      expect(resolvedEnvTrue.includeSensitiveSpanAttributes).toBe(true);
+
+      const resolvedEnvFalse = await resolveTelemetrySettings({
+        env: {
+          QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: 'false',
+        },
+        settings: { includeSensitiveSpanAttributes: true },
+      });
+      expect(resolvedEnvFalse.includeSensitiveSpanAttributes).toBe(false);
     });
 
     it('falls back to OTEL_EXPORTER_OTLP_ENDPOINT when GEMINI var is missing', async () => {

@@ -1084,6 +1084,32 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
     });
 
+    it('should return provided includeSensitiveSpanAttributes setting', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: { enabled: true, includeSensitiveSpanAttributes: true },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+    });
+
+    it('should default includeSensitiveSpanAttributes to false', () => {
+      const configWithTelemetry = new Config({
+        ...baseParams,
+        telemetry: { enabled: true },
+      });
+      expect(
+        configWithTelemetry.getTelemetryIncludeSensitiveSpanAttributes(),
+      ).toBe(false);
+
+      const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
+      delete paramsWithoutTelemetry.telemetry;
+      const configWithoutTelemetry = new Config(paramsWithoutTelemetry);
+      expect(
+        configWithoutTelemetry.getTelemetryIncludeSensitiveSpanAttributes(),
+      ).toBe(false);
+    });
+
     it('should return default telemetry target if telemetry object is not provided', () => {
       const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
       delete paramsWithoutTelemetry.telemetry;

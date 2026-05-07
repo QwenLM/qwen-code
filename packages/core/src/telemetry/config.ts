@@ -99,6 +99,13 @@ export async function resolveTelemetrySettings(options: {
     parseBooleanEnvFlag(env['QWEN_TELEMETRY_LOG_PROMPTS']) ??
     settings.logPrompts;
 
+  const includeSensitiveSpanAttributes =
+    parseBooleanEnvFlag(
+      env['QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES'],
+    ) ??
+    settings.includeSensitiveSpanAttributes ??
+    false;
+
   const outfile =
     argv.telemetryOutfile ?? env['QWEN_TELEMETRY_OUTFILE'] ?? settings.outfile;
 
@@ -132,6 +139,7 @@ export async function resolveTelemetrySettings(options: {
     otlpLogsEndpoint,
     otlpMetricsEndpoint,
     logPrompts,
+    includeSensitiveSpanAttributes,
     outfile,
     useCollector,
   };
