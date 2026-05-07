@@ -487,6 +487,7 @@ describe('standalone release packaging', () => {
     const {
       HOSTED_INSTALLATION_ASSET_NAMES,
       HOSTED_INSTALLATION_ASSETS,
+      HOSTED_INSTALLER_REQUIRED_FRAGMENTS,
       assertHostedInstallationAssetChecksums,
       buildHostedInstallationAssets,
     } = await import(hostedInstallationScriptUrl);
@@ -498,6 +499,7 @@ describe('standalone release packaging', () => {
       const installSh = path.join(tmpDir, 'install-qwen.sh');
       const installBat = path.join(tmpDir, 'install-qwen.bat');
       const checksums = readScript(path.join(tmpDir, 'SHA256SUMS'));
+      const checksumLines = checksums.trim().split('\n');
 
       expect(HOSTED_INSTALLATION_ASSET_NAMES).toEqual([
         'install-qwen.sh',
@@ -506,6 +508,11 @@ describe('standalone release packaging', () => {
       expect(HOSTED_INSTALLATION_ASSETS.map(({ output }) => output)).toEqual(
         HOSTED_INSTALLATION_ASSET_NAMES,
       );
+      expect(HOSTED_INSTALLER_REQUIRED_FRAGMENTS).toEqual([
+        '--version',
+        'QWEN_INSTALL_VERSION',
+        'latest',
+      ]);
       expect(readScript(installSh)).toBe(
         readScript('scripts/installation/install-qwen-with-source.sh'),
       );
@@ -513,6 +520,8 @@ describe('standalone release packaging', () => {
         readScript('scripts/installation/install-qwen-with-source.bat'),
       );
       expect(existsSync(path.join(tmpDir, 'install'))).toBe(false);
+      const checksumNames = checksumLines.map((line) => line.split('  ')[1]);
+      expect(checksumNames).toEqual([...checksumNames].sort());
       expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.sh$/m);
       expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.bat$/m);
       expect(checksums).not.toMatch(/ {2}install$/m);
@@ -525,6 +534,36 @@ describe('standalone release packaging', () => {
         assertHostedInstallationAssetChecksums(tmpDir),
       ).rejects.toThrow(/Checksum verification failed for install-qwen\.sh/);
     } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects hosted installer sources missing pinned install behavior', async () => {
+    const { buildHostedInstallationAssets } = await import(
+      hostedInstallationScriptUrl
+    );
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-root-'));
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+    const sourceDir = path.join(tmpRoot, 'scripts', 'installation');
+
+    try {
+      mkdirSync(sourceDir, { recursive: true });
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-with-source.sh'),
+        '#!/usr/bin/env bash\nVERSION="${QWEN_INSTALL_VERSION:-latest}"\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-with-source.bat'),
+        '@echo off\r\nset "VERSION=latest"\r\n',
+      );
+
+      await expect(
+        buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
+      ).rejects.toThrow(
+        /install-qwen\.sh is missing hosted installer behavior: --version/,
+      );
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
@@ -808,6 +847,7 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('package:hosted-installation');
     expect(guide).toContain('installation/install-qwen.sh');
     expect(guide).toContain('installation/install-qwen.bat');
+    expect(guide).toContain('release operators must sync these staged files');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
   });

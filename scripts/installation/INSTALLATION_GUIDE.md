@@ -70,11 +70,13 @@ Build them with:
 npm run package:hosted-installation -- --out-dir dist/installation
 ```
 
-The staged files should be uploaded byte-for-byte to the hosted installation
-path, for example `installation/install-qwen.sh` and
-`installation/install-qwen.bat`. The staging command also writes `SHA256SUMS`
-for upload verification. The hosted installers intentionally default to
-`latest`; use `--version` or `QWEN_INSTALL_VERSION` to pin a standalone release.
+The staged `install-qwen.sh` and `install-qwen.bat` files map to the fixed
+hosted URLs shown above. Upload their contents byte-for-byte to
+`installation/install-qwen.sh` and `installation/install-qwen.bat`; the staging
+command also writes `SHA256SUMS` for upload verification. The hosted installers
+intentionally default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to
+pin a standalone release. OSS/CDN upload automation is still a follow-up release
+operation; until then, release operators must sync these staged files manually.
 
 Archive layout:
 

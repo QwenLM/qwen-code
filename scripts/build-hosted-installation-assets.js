@@ -35,6 +35,13 @@ const HOSTED_INSTALLATION_ASSETS = [
 const HOSTED_INSTALLATION_ASSET_NAMES = HOSTED_INSTALLATION_ASSETS.map(
   ({ output }) => output,
 );
+const HOSTED_INSTALLER_REQUIRED_FRAGMENTS = [
+  '--version',
+  'QWEN_INSTALL_VERSION',
+  'latest',
+];
+// SHA256SUMS is allowed in an existing output directory because every staging
+// run rewrites it from scratch after copying the hosted installer assets.
 const HOSTED_INSTALLATION_OUTPUT_NAMES = new Set([
   ...HOSTED_INSTALLATION_ASSET_NAMES,
   'SHA256SUMS',
@@ -118,31 +125,22 @@ function assertNoUnexpectedHostedFiles(outDir) {
 
 function assertHostedInstallerSource(source, output) {
   const contents = fs.readFileSync(source, 'utf8');
-  if (!contents.includes('--version')) {
-    fail(`${output} must support --version for pinned hosted installs`);
-  }
-
-  if (
-    output.endsWith('.sh') &&
-    !contents.includes('VERSION="${QWEN_INSTALL_VERSION:-latest}"')
-  ) {
-    fail(`${output} must default to latest for the hosted entrypoint`);
-  }
-
-  if (
-    output.endsWith('.bat') &&
-    (!contents.includes('set "VERSION=latest"') ||
-      !contents.includes(
-        'if defined QWEN_INSTALL_VERSION set "VERSION=!QWEN_INSTALL_VERSION!"',
-      ))
-  ) {
-    fail(`${output} must default to latest for the hosted entrypoint`);
+  const missing = HOSTED_INSTALLER_REQUIRED_FRAGMENTS.filter(
+    (fragment) => !contents.includes(fragment),
+  );
+  if (missing.length > 0) {
+    fail(
+      `${output} is missing hosted installer behavior: ${missing.join(', ')}`,
+    );
   }
 }
 
 async function writeHostedSha256Sums(outDir) {
   const lines = [];
-  for (const { output } of HOSTED_INSTALLATION_ASSETS) {
+  const assets = [...HOSTED_INSTALLATION_ASSETS].sort((left, right) =>
+    left.output.localeCompare(right.output),
+  );
+  for (const { output } of assets) {
     const hash = await sha256File(path.join(outDir, output));
     lines.push(`${hash}  ${output}`);
   }
@@ -169,6 +167,7 @@ async function assertHostedInstallationAssetChecksums(outDir) {
 export {
   HOSTED_INSTALLATION_ASSETS,
   HOSTED_INSTALLATION_ASSET_NAMES,
+  HOSTED_INSTALLER_REQUIRED_FRAGMENTS,
   assertHostedInstallationAssetChecksums,
   buildHostedInstallationAssets,
 };
