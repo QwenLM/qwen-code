@@ -1837,6 +1837,45 @@ describe('ShellTool', () => {
         );
       });
 
+      // `cd $HOME && git commit` would land in whatever repo `$HOME`
+      // points to — typically NOT our cwd. With the default
+      // `shell-quote` parse, `$HOME` collapses to `''` and the
+      // `target.includes('$')` repo-shift check silently fails. The
+      // env-preserving parse keeps `$NAME` literal in tokens so this
+      // case is correctly flagged.
+      it.each([
+        ['$HOME', 'cd $HOME && git commit -m "elsewhere"'],
+        ['$REPO_ROOT', 'cd $REPO_ROOT && git commit -m "elsewhere"'],
+      ])(
+        'should NOT add co-author for cd %s && git commit (env-var target)',
+        async (_label, command) => {
+          const invocation = shellTool.build({
+            command,
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+          await promise;
+          expect(mockShellExecutionService).toHaveBeenCalledWith(
+            expect.not.stringContaining('Co-authored-by:'),
+            expect.any(String),
+            expect.any(Function),
+            expect.any(AbortSignal),
+            false,
+            {},
+          );
+        },
+      );
+
       // A cd that comes AFTER an in-cwd commit doesn't invalidate the
       // commit's attribution — the commit already landed in our repo.
       it('should add co-author when cd comes AFTER git commit', async () => {
@@ -1923,6 +1962,45 @@ describe('ShellTool', () => {
         const observed = mockShellExecutionService.mock.calls[0][0];
         expect(observed).toContain('Co-authored-by:');
       });
+
+      // `shell-quote` parses an unresolved env-var (`$HOME`, `$REPO`)
+      // or unknown command-substitution as the empty string, which is
+      // indistinguishable from a literal `-C ""`. Treating that as
+      // no-op would let `git -C $HOME commit` silently land our trailer
+      // on a commit that goes to a different repo. Conservative skip is
+      // safer than the rare `-C $PWD` miss.
+      it.each([
+        ['git -C $HOME commit', 'git -C $HOME commit -m "elsewhere"'],
+        ['git -C "" commit', 'git -C "" commit -m "literal empty"'],
+      ])(
+        'should NOT add co-author for %s (env-var/empty target)',
+        async (_label, command) => {
+          const invocation = shellTool.build({
+            command,
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+          await promise;
+          expect(mockShellExecutionService).toHaveBeenCalledWith(
+            expect.not.stringContaining('Co-authored-by:'),
+            expect.any(String),
+            expect.any(Function),
+            expect.any(AbortSignal),
+            false,
+            {},
+          );
+        },
+      );
 
       // git's global flags (`-c`, `--no-pager`, etc.) push the
       // subcommand past index 1; a fixed-position check at arg1 used

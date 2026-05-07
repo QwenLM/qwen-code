@@ -172,7 +172,21 @@ function pickOuterLastMatch<T extends RegExpMatchArray | null>(
 function tokeniseSegment(segment: string): string[] | null {
   let tokens: string[];
   try {
-    tokens = parse(segment).filter((t): t is string => typeof t === 'string');
+    // Pass an env getter that preserves `$NAME` references in tokens
+    // rather than collapsing them to `''` (shell-quote's default).
+    // Without this, `cd $HOME` parses as `['cd', '']` and the downstream
+    // `target.includes('$')` repo-shift detection silently fails: an
+    // env-var that points to another repo would get treated as a
+    // same-repo no-op and our Co-authored-by trailer would land on a
+    // commit in whatever repo `$HOME`/`$REPO_ROOT` resolves to at
+    // runtime. Same problem in `parseGitInvocation` for `git -C $HOME`.
+    // Single-quoted forms (`cd '$HOME'`) end up looking like a variable
+    // reference too, but in practice nobody creates a directory named
+    // literally `$HOME`, so over-flagging is the conservative-correct
+    // choice.
+    tokens = parse(segment, (key) => '$' + key).filter(
+      (t): t is string => typeof t === 'string',
+    );
   } catch (e) {
     debugLogger.warn(
       `tokeniseSegment: parse failed for "${segment.slice(0, 80)}": ${
@@ -351,15 +365,29 @@ const GIT_GLOBAL_FLAGS_TAKES_VALUE = new Set([
 // Flags whose presence shifts cwd interpretation.
 const GIT_GLOBAL_FLAGS_SHIFTS_CWD = new Set(['-C', '--git-dir', '--work-tree']);
 
-// `-C .` and `-C` to an empty string are no-op cwd shifts; treating
+// `-C .` (and `./`, attached `-C.`) are no-op cwd shifts; treating
 // them as cwd-changing would suppress attribution for `git -C . commit`
-// (a common alias for "explicit current dir"). Same for the absolute
-// path that resolves to cwd at runtime — but we only have the literal
-// argv at parse time, so the cheap textual comparison is what we can
-// reasonably check here.
+// (a common alias for "explicit current dir").
+//
+// Empty string is intentionally NOT treated as no-op even though
+// `-C "" commit` is technically a no-op — `shell-quote` returns ''
+// for any env-var or command-substitution that it cannot resolve at
+// parse time (e.g. `-C $HOME`, `-C $REPO_ROOT`, `-C $UNSET`), so
+// the literal-empty and the unknown-env-var cases are
+// indistinguishable from our static view. Treating them as no-op
+// would silently stamp our Co-authored-by trailer onto a commit
+// that lands in whatever repo `$HOME`/`$REPO_ROOT` resolves to at
+// runtime. Conservative skip is the safer call; the only missed
+// attribution is for `-C $PWD commit` (rare) and literal `-C ""
+// commit` (malformed and won't actually commit).
+//
+// Same conservatism applies to literal absolute paths that happen
+// to resolve to cwd at runtime — we only have the argv at parse
+// time, so the cheap textual comparison is what we can reasonably
+// check here.
 function isNoopCwdTarget(target: string): boolean {
   const t = target.trim();
-  return t === '' || t === '.' || t === './';
+  return t === '.' || t === './';
 }
 
 function parseGitInvocation(tokens: string[]): {
