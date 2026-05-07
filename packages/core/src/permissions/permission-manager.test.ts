@@ -40,6 +40,8 @@ describe('resolveToolName', () => {
     expect(resolveToolName('ReadFile')).toBe('read_file');
     expect(resolveToolName('ReadFileTool')).toBe('read_file');
     expect(resolveToolName('EditTool')).toBe('edit');
+    expect(resolveToolName('NotebookEdit')).toBe('notebook_edit');
+    expect(resolveToolName('NotebookEditTool')).toBe('notebook_edit');
     expect(resolveToolName('WriteFileTool')).toBe('write_file');
   });
 
@@ -77,6 +79,7 @@ describe('getSpecifierKind', () => {
   it('returns "path" for file read/edit tools', async () => {
     expect(getSpecifierKind('read_file')).toBe('path');
     expect(getSpecifierKind('edit')).toBe('path');
+    expect(getSpecifierKind('notebook_edit')).toBe('path');
     expect(getSpecifierKind('write_file')).toBe('path');
     expect(getSpecifierKind('grep_search')).toBe('path');
     expect(getSpecifierKind('glob')).toBe('path');
@@ -108,8 +111,9 @@ describe('toolMatchesRuleToolName', () => {
     expect(toolMatchesRuleToolName('read_file', 'list_directory')).toBe(true);
   });
 
-  it('"Edit" (edit) covers write_file', async () => {
+  it('"Edit" (edit) covers write_file and notebook_edit', async () => {
     expect(toolMatchesRuleToolName('edit', 'write_file')).toBe(true);
+    expect(toolMatchesRuleToolName('edit', 'notebook_edit')).toBe(true);
   });
 
   it('"Bash" (run_shell_command) covers monitor', async () => {
@@ -704,10 +708,11 @@ describe('matchesRule', () => {
   });
 
   // Meta-category matching: Edit
-  it('Edit rule matches edit and write_file', async () => {
+  it('Edit rule matches edit, write_file, and notebook_edit', async () => {
     const rule = parseRule('Edit');
     expect(matchesRule(rule, 'edit')).toBe(true);
     expect(matchesRule(rule, 'write_file')).toBe(true);
+    expect(matchesRule(rule, 'notebook_edit')).toBe(true);
     expect(matchesRule(rule, 'read_file')).toBe(false); // not an edit tool
   });
 
@@ -759,6 +764,31 @@ describe('matchesRule', () => {
         'write_file',
         undefined,
         '/project/docs/readme.md',
+        undefined,
+        pathCtx,
+      ),
+    ).toBe(false);
+  });
+
+  it('Edit path specifier matches notebook_edit too', async () => {
+    const rule = parseRule('Edit(/src/**/*.ipynb)');
+    const pathCtx = { projectRoot: '/project', cwd: '/project' };
+    expect(
+      matchesRule(
+        rule,
+        'notebook_edit',
+        undefined,
+        '/project/src/analysis.ipynb',
+        undefined,
+        pathCtx,
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'notebook_edit',
+        undefined,
+        '/project/docs/analysis.ipynb',
         undefined,
         pathCtx,
       ),
@@ -1502,6 +1532,12 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
     });
 
+    it('Edit deny rule disables notebook_edit', async () => {
+      pm = new PermissionManager(makeConfig({ permissionsDeny: ['Edit'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
+    });
+
     it('coreTools allowlist: listed tool is enabled', async () => {
       pm = new PermissionManager(
         makeConfig({ coreTools: ['read_file', 'Bash'] }),
@@ -1516,6 +1552,14 @@ describe('PermissionManager', () => {
       pm.initialize();
       expect(await pm.isToolEnabled('read_file')).toBe(true);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
+      expect(await pm.isToolEnabled('edit')).toBe(false);
+      expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
+    });
+
+    it('coreTools allowlist: NotebookEdit alias enables notebook_edit', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['NotebookEdit'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('notebook_edit')).toBe(true);
       expect(await pm.isToolEnabled('edit')).toBe(false);
     });
 
@@ -1757,6 +1801,7 @@ describe('getRuleDisplayName', () => {
   it('maps edit tools to "Edit" meta-category', async () => {
     expect(getRuleDisplayName('edit')).toBe('Edit');
     expect(getRuleDisplayName('write_file')).toBe('Edit');
+    expect(getRuleDisplayName('notebook_edit')).toBe('Edit');
   });
 
   it('maps shell to "Bash"', async () => {
@@ -1828,6 +1873,14 @@ describe('buildPermissionRules', () => {
       const rules = buildPermissionRules({
         toolName: 'write_file',
         filePath: '/tmp/output.txt',
+      });
+      expect(rules).toEqual(['Edit(//tmp/**)']);
+    });
+
+    it('generates Edit rule scoped to parent directory for notebook_edit', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'notebook_edit',
+        filePath: '/tmp/analysis.ipynb',
       });
       expect(rules).toEqual(['Edit(//tmp/**)']);
     });

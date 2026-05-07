@@ -93,9 +93,9 @@ export class FileReadCache {
   /**
    * Record a successful Read of `absPath`.
    *
-   *  - `full`      — the Read covered the entire file (no offset / limit
-   *    / pages). Only full Reads enable the `file_unchanged` fast-path
-   *    on subsequent reads.
+   *  - `full`      — the Read output covered the entire file (no offset /
+   *    limit / pages and no content-level truncation). Only full Reads
+   *    enable the `file_unchanged` fast-path on subsequent reads.
    *  - `cacheable` — the produced content is suitable for substitution
    *    with a `file_unchanged` placeholder. Set true for plain text,
    *    false for binary / image / audio / video / PDF / notebook.
@@ -158,22 +158,24 @@ export class FileReadCache {
    * see its own write as a "stale" external change.
    *
    * Read metadata is **always** refreshed alongside the write, not
-   * just for brand-new entries: the model authored the entire current
-   * content, so for prior-read enforcement purposes it has now "seen"
-   * all bytes — regardless of whether the prior recordRead happened
-   * to be partial (`lastReadWasFull=false`) or non-cacheable
-   * (`lastReadCacheable=false`). Without this, a sequence such as
-   * `ReadFile(limit=10)` → `WriteFile` (full content) → `Edit` would
-   * be rejected on the Edit because `lastReadWasFull=false` from the
-   * earlier partial read would persist through the write.
+   * just for brand-new entries: the model authored the current content
+   * produced by the mutating tool, so for prior-read enforcement purposes
+   * it has now "seen" the bytes that tool wrote. Plain text writers use
+   * the default `cacheable: true`; structured writers such as notebook cell
+   * editors can set `cacheable: false` so regular Edit / WriteFile still
+   * reject the file as a non-text payload.
    */
-  recordWrite(absPath: string, stats: Stats): FileReadEntry {
+  recordWrite(
+    absPath: string,
+    stats: Stats,
+    opts: { cacheable?: boolean } = {},
+  ): FileReadEntry {
     const entry = this.upsert(absPath, stats);
     const now = Date.now();
     entry.lastWriteAt = now;
     entry.lastReadAt = now;
     entry.lastReadWasFull = true;
-    entry.lastReadCacheable = true;
+    entry.lastReadCacheable = opts.cacheable ?? true;
     return entry;
   }
 

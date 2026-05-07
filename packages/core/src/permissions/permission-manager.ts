@@ -433,6 +433,7 @@ export class PermissionManager {
     'read_file',
     'write_file',
     'edit',
+    'notebook_edit',
     'glob',
     'grep_search',
     'run_shell_command',

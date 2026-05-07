@@ -89,6 +89,11 @@ export enum ToolErrorType {
   // separately.
   PRIOR_READ_VERIFICATION_FAILED = 'prior_read_verification_failed',
 
+  // Notebook-specific Errors
+  NOTEBOOK_EDIT_FAILURE = 'notebook_edit_failure',
+  NOTEBOOK_INVALID_JSON = 'notebook_invalid_json',
+  NOTEBOOK_CELL_NOT_FOUND = 'notebook_cell_not_found',
+
   // Glob-specific Errors
   GLOB_EXECUTION_ERROR = 'glob_execution_error',
 

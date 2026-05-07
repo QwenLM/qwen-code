@@ -156,10 +156,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const cacheEnabled = !this.config.getFileReadCacheDisabled();
     const useFastPath = cacheEnabled && !isAutoMem;
     const cache = this.config.getFileReadCache();
-    // A "full" Read consumes the whole file: no offset, no limit, no PDF
-    // page range. Only full Reads are eligible for the file_unchanged
-    // fast-path; range-scoped Reads always go through, since the model
-    // may legitimately ask for a different slice next time.
+    // A request-level "full" Read asks for the whole file: no offset,
+    // no limit, no PDF page range. The cache entry is only marked as
+    // full later if the produced content was not truncated.
     const isFullRead =
       this.params.offset === undefined &&
       this.params.limit === undefined &&
@@ -220,9 +219,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     //     / PDF / notebook — those need their structured payload), and
     //   - the read was not truncated. A truncated full Read means the
     //     model only saw the head of the file; returning a placeholder
-    //     on the next call would falsely imply "you've already seen
-    //     everything", so we force the next call back through the full
-    //     pipeline.
+    //     on the next call or allowing a mutating notebook edit would
+    //     falsely imply "you've already seen everything", so we record
+    //     the read as not full and force the next call back through the
+    //     full pipeline.
     //
     // The stat we record is the one taken inside `processSingleFileContent`
     // and surfaced via `result.stats`. The internal stat happens
@@ -246,13 +246,17 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         !result.isTruncated;
       const recordStats: Stats = result.stats ?? stats!;
       cache.recordRead(absPath, recordStats, {
-        full: isFullRead,
+        full: isFullRead && !result.isTruncated,
         cacheable,
       });
     }
 
     let llmContent: PartUnion;
-    if (result.isTruncated) {
+    if (
+      result.isTruncated &&
+      result.linesShown &&
+      result.originalLineCount !== undefined
+    ) {
       const [start, end] = result.linesShown!;
       const total = result.originalLineCount!;
       llmContent = `Showing lines ${start}-${end} of ${total} total lines.\n\n---\n\n${result.llmContent}`;

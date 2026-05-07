@@ -39,6 +39,7 @@ export const ToolNames = {
   TASK_STOP: 'task_stop',
   SEND_MESSAGE: 'send_message',
   MONITOR: 'monitor',
+  NOTEBOOK_EDIT: 'notebook_edit',
 } as const;
 
 /**
@@ -68,6 +69,7 @@ export const ToolDisplayNames = {
   TASK_STOP: 'TaskStop',
   SEND_MESSAGE: 'SendMessage',
   MONITOR: 'Monitor',
+  NOTEBOOK_EDIT: 'NotebookEdit',
 } as const;
 
 // Migration from old tool names to new tool names

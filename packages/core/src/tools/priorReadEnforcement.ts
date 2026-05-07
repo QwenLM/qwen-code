@@ -93,7 +93,7 @@ export interface CheckPriorReadOptions {
  *
  * Approval requires more than `cache.check === 'fresh'`: the recorded
  * read must also have been (a) stamped with `lastReadAt`,
- * (b) `lastReadWasFull` (no offset / limit / pages), and
+ * (b) `lastReadWasFull` (no offset / limit / pages / truncation), and
  * (c) `lastReadCacheable` (i.e. plain text, not binary / image /
  * audio / video / PDF / notebook). Otherwise the model has only seen
  * a slice or a structured proxy of the file, not the bytes a
