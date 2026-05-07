@@ -12,35 +12,40 @@ import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
+import { AgentTree } from '../subagents/index.js';
+import type { AgentTreeAgent } from '../subagents/index.js';
 import { theme } from '../../semantic-colors.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { useCompactMode } from '../../contexts/CompactModeContext.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
 
-function isAgentWithPendingConfirmation(
+function isAgentResult(
   rd: IndividualToolCallDisplay['resultDisplay'],
 ): rd is AgentResultDisplay {
   return (
     typeof rd === 'object' &&
     rd !== null &&
     'type' in rd &&
-    (rd as AgentResultDisplay).type === 'task_execution' &&
-    (rd as AgentResultDisplay).pendingConfirmation !== undefined
+    (rd as AgentResultDisplay).type === 'task_execution'
   );
+}
+
+function isAgentWithPendingConfirmation(
+  rd: IndividualToolCallDisplay['resultDisplay'],
+): rd is AgentResultDisplay {
+  return isAgentResult(rd) && rd.pendingConfirmation !== undefined;
 }
 
 function isRunningAgent(
   rd: IndividualToolCallDisplay['resultDisplay'],
 ): rd is AgentResultDisplay {
-  return (
-    typeof rd === 'object' &&
-    rd !== null &&
-    'type' in rd &&
-    (rd as AgentResultDisplay).type === 'task_execution' &&
-    (rd as AgentResultDisplay).status === 'running'
-  );
+  return isAgentResult(rd) && rd.status === 'running';
 }
+
+type AgentToolCall = IndividualToolCallDisplay & {
+  resultDisplay: AgentResultDisplay;
+};
 
 interface ToolGroupMessageProps {
   groupId: number;
@@ -286,68 +291,148 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
             </Box>
           );
         })()}
-      {toolCalls.map((tool) => {
-        const isConfirming = toolAwaitingApproval?.callId === tool.callId;
-        // A subagent's inline confirmation should only receive keyboard focus
-        // when (1) there is no direct tool-level confirmation active, and (2)
-        // this tool currently holds the subagent keyboard focus. Pending
-        // confirmations keep the existing first-come focus lock; otherwise the
-        // first running subagent owns Ctrl+E/Ctrl+F so the compact hint remains
-        // actionable without making parallel subagents toggle in lock-step.
-        const isSubagentFocused =
-          isFocused &&
-          !toolAwaitingApproval &&
-          keyboardFocusedSubagentCallId === tool.callId;
-        // Show the waiting indicator only when this subagent genuinely has a
-        // pending confirmation AND another subagent holds the focus lock.
-        const isWaitingForOtherApproval =
-          isAgentWithPendingConfirmation(tool.resultDisplay) &&
-          focusedSubagentCallId !== null &&
-          focusedSubagentCallId !== tool.callId;
-        return (
-          <Box key={tool.callId} flexDirection="column" minHeight={1}>
-            <Box flexDirection="row" alignItems="center">
-              <ToolMessage
-                {...tool}
-                availableTerminalHeight={availableTerminalHeightPerToolMessage}
-                contentWidth={innerWidth}
-                emphasis={
-                  isConfirming
-                    ? 'high'
-                    : toolAwaitingApproval
-                      ? 'low'
-                      : 'medium'
-                }
-                activeShellPtyId={activeShellPtyId}
-                embeddedShellFocused={embeddedShellFocused}
-                config={config}
-                forceShowResult={
-                  isUserInitiated ||
-                  tool.status === ToolCallStatus.Confirming ||
-                  tool.status === ToolCallStatus.Error ||
-                  isAgentWithPendingConfirmation(tool.resultDisplay)
-                }
-                isFocused={isSubagentFocused}
-                isPending={isPending}
-                isWaitingForOtherApproval={isWaitingForOtherApproval}
-              />
-            </Box>
-            {tool.status === ToolCallStatus.Confirming &&
-              isConfirming &&
-              tool.confirmationDetails && (
-                <ToolConfirmationMessage
-                  confirmationDetails={tool.confirmationDetails}
-                  config={config}
-                  isFocused={isFocused}
+      {renderRuns(
+        toolCalls,
+        isPending,
+        (tool) => {
+          const isConfirming = toolAwaitingApproval?.callId === tool.callId;
+          // A subagent's inline confirmation should only receive keyboard
+          // focus when (1) there is no direct tool-level confirmation
+          // active, and (2) this tool currently holds the subagent
+          // keyboard focus. Pending confirmations keep the existing
+          // first-come focus lock; otherwise the first running subagent
+          // owns Ctrl+E/Ctrl+F so the compact hint remains actionable
+          // without making parallel subagents toggle in lock-step.
+          const isSubagentFocused =
+            isFocused &&
+            !toolAwaitingApproval &&
+            keyboardFocusedSubagentCallId === tool.callId;
+          // Show the waiting indicator only when this subagent genuinely
+          // has a pending confirmation AND another subagent holds the
+          // focus lock.
+          const isWaitingForOtherApproval =
+            isAgentWithPendingConfirmation(tool.resultDisplay) &&
+            focusedSubagentCallId !== null &&
+            focusedSubagentCallId !== tool.callId;
+          return (
+            <Box key={tool.callId} flexDirection="column" minHeight={1}>
+              <Box flexDirection="row" alignItems="center">
+                <ToolMessage
+                  {...tool}
                   availableTerminalHeight={
                     availableTerminalHeightPerToolMessage
                   }
                   contentWidth={innerWidth}
+                  emphasis={
+                    isConfirming
+                      ? 'high'
+                      : toolAwaitingApproval
+                        ? 'low'
+                        : 'medium'
+                  }
+                  activeShellPtyId={activeShellPtyId}
+                  embeddedShellFocused={embeddedShellFocused}
+                  config={config}
+                  forceShowResult={
+                    isUserInitiated ||
+                    tool.status === ToolCallStatus.Confirming ||
+                    tool.status === ToolCallStatus.Error ||
+                    isAgentWithPendingConfirmation(tool.resultDisplay)
+                  }
+                  isFocused={isSubagentFocused}
+                  isPending={isPending}
+                  isWaitingForOtherApproval={isWaitingForOtherApproval}
                 />
-              )}
-          </Box>
-        );
-      })}
+              </Box>
+              {tool.status === ToolCallStatus.Confirming &&
+                isConfirming &&
+                tool.confirmationDetails && (
+                  <ToolConfirmationMessage
+                    confirmationDetails={tool.confirmationDetails}
+                    config={config}
+                    isFocused={isFocused}
+                    availableTerminalHeight={
+                      availableTerminalHeightPerToolMessage
+                    }
+                    contentWidth={innerWidth}
+                  />
+                )}
+            </Box>
+          );
+        },
+        (agentTools) => {
+          const treeAgents: AgentTreeAgent[] = agentTools.map((tool) => {
+            const hasPending =
+              tool.resultDisplay.pendingConfirmation !== undefined;
+            // Direct tool-level confirmations (`toolAwaitingApproval`)
+            // own the keyboard until resolved. While one is active, no
+            // subagent banner can claim focus — surface the agent's
+            // request as queued so the user knows it's still waiting.
+            const isQueued =
+              hasPending &&
+              (toolAwaitingApproval !== undefined ||
+                (focusedSubagentCallId !== null &&
+                  focusedSubagentCallId !== tool.callId));
+            const treeFocused =
+              isFocused &&
+              !toolAwaitingApproval &&
+              focusedSubagentCallId === tool.callId;
+            return {
+              callId: tool.callId,
+              data: tool.resultDisplay,
+              isFocused: treeFocused,
+              isWaitingForOtherApproval: isQueued,
+            };
+          });
+          return (
+            <AgentTree
+              key={`agent-tree-${agentTools[0].callId}`}
+              agents={treeAgents}
+              config={config}
+              childWidth={innerWidth}
+              availableHeight={availableTerminalHeightPerToolMessage}
+            />
+          );
+        },
+      )}
     </Box>
   );
 };
+
+/**
+ * Walk `toolCalls` and emit one node per render unit:
+ *   - During the live phase, contiguous runs of agent-typed calls
+ *     collapse into a single `<AgentTree>` node via `renderAgentRun`.
+ *   - All other calls (and every call once the group commits) render
+ *     individually via `renderSingle`.
+ *
+ * The contiguous-run rule means a non-agent call between two agent
+ * calls splits them into two trees, matching the design spec.
+ */
+function renderRuns(
+  toolCalls: readonly IndividualToolCallDisplay[],
+  isPending: boolean | undefined,
+  renderSingle: (tool: IndividualToolCallDisplay) => React.ReactNode,
+  renderAgentRun: (agentTools: readonly AgentToolCall[]) => React.ReactNode,
+): React.ReactNode[] {
+  if (!isPending) {
+    return toolCalls.map((tool) => renderSingle(tool));
+  }
+  const out: React.ReactNode[] = [];
+  let buffer: AgentToolCall[] = [];
+  const flush = () => {
+    if (buffer.length === 0) return;
+    out.push(renderAgentRun(buffer));
+    buffer = [];
+  };
+  for (const tool of toolCalls) {
+    if (isAgentResult(tool.resultDisplay)) {
+      buffer.push(tool as AgentToolCall);
+    } else {
+      flush();
+      out.push(renderSingle(tool));
+    }
+  }
+  flush();
+  return out;
+}

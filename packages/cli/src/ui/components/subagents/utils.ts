@@ -5,6 +5,7 @@
  */
 
 import { COLOR_OPTIONS, TOTAL_WIZARD_STEPS } from './constants.js';
+import { theme } from '../../semantic-colors.js';
 
 export const shouldShowColor = (color?: string): boolean =>
   color !== undefined && color !== 'auto';
@@ -13,6 +14,13 @@ export const getColorForDisplay = (colorName?: string): string | undefined =>
   !colorName || colorName === 'auto'
     ? undefined
     : COLOR_OPTIONS.find((color) => color.name === colorName)?.value;
+
+/**
+ * Resolve a subagent color to a renderable value, falling back to the
+ * theme accent for `auto`, missing, or unknown names.
+ */
+export const getAgentColor = (colorName?: string): string =>
+  getColorForDisplay(colorName) ?? theme.text.accent;
 
 /**
  * Sanitizes user input by removing dangerous characters and normalizing whitespace.

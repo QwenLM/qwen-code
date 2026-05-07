@@ -207,7 +207,8 @@ export class BackgroundTaskRegistry {
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
-  private activityChangeCallback?: BackgroundActivityChangeCallback;
+  private readonly activityChangeListeners =
+    new Set<BackgroundActivityChangeCallback>();
 
   register(entry: BackgroundTaskEntry): void {
     if (!entry.pendingMessages) entry.pendingMessages = [];
@@ -512,10 +513,23 @@ export class BackgroundTaskRegistry {
     this.statusChangeCallback = cb;
   }
 
-  setActivityChangeCallback(
-    cb: BackgroundActivityChangeCallback | undefined,
-  ): void {
-    this.activityChangeCallback = cb;
+  /**
+   * Subscribe to per-tool activity events. Returns an `unsubscribe`
+   * function so consumers can clean up from a `useEffect` return value.
+   *
+   * Multiple listeners are supported because the inline tree (live
+   * agent rows) and the detail dialog both want activity ticks while
+   * they're visible. Listeners are stored in insertion order; an
+   * individual listener that throws is logged and skipped without
+   * stopping the rest.
+   */
+  addActivityChangeListener(
+    listener: BackgroundActivityChangeCallback,
+  ): () => void {
+    this.activityChangeListeners.add(listener);
+    return () => {
+      this.activityChangeListeners.delete(listener);
+    };
   }
 
   abortAll(options: BackgroundTaskCancelOptions = {}): void {
@@ -626,11 +640,17 @@ export class BackgroundTaskRegistry {
   }
 
   private emitActivityChange(entry: BackgroundTaskEntry): void {
-    if (!this.activityChangeCallback) return;
-    try {
-      this.activityChangeCallback(entry);
-    } catch (error) {
-      debugLogger.error('Failed to emit background activity change:', error);
+    if (this.activityChangeListeners.size === 0) return;
+    // Snapshot before iterating so a listener that adds or removes
+    // another listener can't extend the loop or accidentally receive
+    // the in-progress event.
+    const snapshot = Array.from(this.activityChangeListeners);
+    for (const listener of snapshot) {
+      try {
+        listener(entry);
+      } catch (error) {
+        debugLogger.error('Failed to emit background activity change:', error);
+      }
     }
   }
 }

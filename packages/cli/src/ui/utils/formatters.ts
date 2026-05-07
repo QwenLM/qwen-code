@@ -4,6 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ToolDisplayNames, ToolNames } from '@qwen-code/qwen-code-core';
+
+const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
+  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
+    ToolNames[key],
+    ToolDisplayNames[key],
+  ]),
+);
+
+/**
+ * Render a tool invocation as a short label suitable for inline display
+ * (e.g. `Shell(list /home/user)`). Falls back to the bare display name
+ * when no description is available, and to the raw tool name when the
+ * tool has no entry in the display-name map.
+ */
+export function formatActivityLabel(
+  name: string,
+  description: string | undefined,
+): string {
+  const display = TOOL_DISPLAY_BY_NAME[name] ?? name;
+  const singleLineDesc = description
+    ? description.replace(/\s*\n\s*/g, ' ').trim()
+    : '';
+  return singleLineDesc ? `${display}(${singleLineDesc})` : display;
+}
+
 export const formatMemoryUsage = (bytes: number): string => {
   const gb = bytes / (1024 * 1024 * 1024);
   if (bytes < 1024 * 1024) {

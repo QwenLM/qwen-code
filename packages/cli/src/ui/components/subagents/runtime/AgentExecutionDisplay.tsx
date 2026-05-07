@@ -13,8 +13,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
-import { COLOR_OPTIONS } from '../constants.js';
-import { fmtDuration } from '../utils.js';
+import { fmtDuration, getAgentColor } from '../utils.js';
 import { ToolConfirmationMessage } from '../../messages/ToolConfirmationMessage.js';
 import {
   getCachedStringWidth,
@@ -185,12 +184,10 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
       ? Math.min(MAX_VERBOSE_TOOL_CALLS, toolBudget)
       : Math.min(MAX_TOOL_CALLS, toolBudget);
 
-  const agentColor = useMemo(() => {
-    const colorOption = COLOR_OPTIONS.find(
-      (option) => option.name === data.subagentColor,
-    );
-    return colorOption?.value || theme.text.accent;
-  }, [data.subagentColor]);
+  const agentColor = useMemo(
+    () => getAgentColor(data.subagentColor),
+    [data.subagentColor],
+  );
 
   // Slice the prompt once at the parent so the rendered TaskPromptSection
   // and the footer's "ctrl+f to show more" hint share the same source of

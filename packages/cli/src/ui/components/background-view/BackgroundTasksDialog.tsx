@@ -24,12 +24,14 @@ import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   buildBackgroundEntryLabel,
-  ToolDisplayNames,
-  ToolNames,
   type BackgroundTaskEntry,
   type MonitorEntry,
 } from '@qwen-code/qwen-code-core';
-import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
+import {
+  formatActivityLabel,
+  formatDuration,
+  formatTokenCount,
+} from '../../utils/formatters.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
@@ -40,22 +42,6 @@ import {
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
 type EntryStatus = DialogEntry['status'];
-
-// Tool-name → display-name lookup (`run_shell_command` → `Shell`).
-const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
-  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
-    ToolNames[key],
-    ToolDisplayNames[key],
-  ]),
-);
-
-function formatActivityLabel(name: string, description: string | undefined) {
-  const display = TOOL_DISPLAY_BY_NAME[name] ?? name;
-  const singleLineDesc = description
-    ? description.replace(/\s*\n\s*/g, ' ').trim()
-    : '';
-  return singleLineDesc ? `${display}(${singleLineDesc})` : display;
-}
 
 const STATUS_VERBS: Record<EntryStatus, string> = {
   running: 'Running',
@@ -901,8 +887,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       if (entry.agentId !== selectedAgentIdForActivity) return;
       setActivityTick((n) => n + 1);
     };
-    registry.setActivityChangeCallback(onActivity);
-    return () => registry.setActivityChangeCallback(undefined);
+    return registry.addActivityChangeListener(onActivity);
   }, [dialogOpen, dialogMode, config, selectedAgentIdForActivity]);
 
   // Wall-clock tick for the running agent's duration. Activity callbacks

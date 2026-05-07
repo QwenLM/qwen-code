@@ -138,7 +138,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
-      setActivityChangeCallback: vi.fn(),
+      addActivityChangeListener: vi.fn(() => () => {}),
       get: (id: string) => {
         const match = currentEntries.find(
           (e) => e.kind === 'agent' && e.agentId === id,

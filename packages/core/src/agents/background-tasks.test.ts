@@ -726,7 +726,7 @@ describe('BackgroundTaskRegistry', () => {
     const statusCb = vi.fn();
     const activityCb = vi.fn();
     registry.setStatusChangeCallback(statusCb);
-    registry.setActivityChangeCallback(activityCb);
+    registry.addActivityChangeListener(activityCb);
 
     registry.register({
       agentId: 'a',
@@ -743,6 +743,54 @@ describe('BackgroundTaskRegistry', () => {
     expect(statusCb).not.toHaveBeenCalled();
     expect(activityCb).toHaveBeenCalledOnce();
     expect(activityCb.mock.calls[0][0].agentId).toBe('a');
+  });
+
+  it('fans appendActivity out to every registered listener', () => {
+    const a = vi.fn();
+    const b = vi.fn();
+    const unsubA = registry.addActivityChangeListener(a);
+    registry.addActivityChangeListener(b);
+
+    registry.register({
+      agentId: 'x',
+      description: 'agent x',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.appendActivity('x', { name: 'T', description: 'd', at: 0 });
+    expect(a).toHaveBeenCalledOnce();
+    expect(b).toHaveBeenCalledOnce();
+
+    unsubA();
+    registry.appendActivity('x', { name: 'T', description: 'd2', at: 1 });
+    // a unsubscribed; only b should pick up the second event.
+    expect(a).toHaveBeenCalledOnce();
+    expect(b).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps emitting to remaining listeners when one throws', () => {
+    const bad = vi.fn(() => {
+      throw new Error('boom');
+    });
+    const good = vi.fn();
+    registry.addActivityChangeListener(bad);
+    registry.addActivityChangeListener(good);
+
+    registry.register({
+      agentId: 'y',
+      description: 'agent y',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    expect(() =>
+      registry.appendActivity('y', { name: 'T', description: 'd', at: 0 }),
+    ).not.toThrow();
+    expect(bad).toHaveBeenCalledOnce();
+    expect(good).toHaveBeenCalledOnce();
   });
 
   it('stores prompt verbatim on the entry', () => {

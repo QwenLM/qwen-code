@@ -82,6 +82,33 @@ vi.mock('./ToolConfirmationMessage.js', () => ({
   },
 }));
 
+vi.mock('../subagents/index.js', () => ({
+  AgentTree: function MockAgentTree({
+    agents,
+  }: {
+    agents: Array<{
+      callId: string;
+      data: { subagentName?: string };
+      isFocused?: boolean;
+    }>;
+  }) {
+    return (
+      <Text>
+        MockAgentTree[
+        {agents
+          .map(
+            (a) =>
+              `${a.callId}:${a.data.subagentName ?? '?'}:focused=${String(
+                Boolean(a.isFocused),
+              )}`,
+          )
+          .join('|')}
+        ]
+      </Text>
+    );
+  },
+}));
+
 describe('<ToolGroupMessage />', () => {
   const mockConfig: Config = {} as Config;
 
@@ -464,6 +491,191 @@ describe('<ToolGroupMessage />', () => {
       );
 
       expect(lastFrame()).toContain('MockSubagent[agent-done]: focused=false');
+    });
+  });
+
+  describe('Live agent grouping', () => {
+    const createRunningSubagentDisplay = (
+      name: string,
+    ): AgentResultDisplay => ({
+      type: 'task_execution',
+      subagentName: name,
+      taskDescription: `${name} task`,
+      taskPrompt: `Run ${name}`,
+      status: 'running',
+    });
+
+    it('routes contiguous live agents into a single AgentTree', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={true}
+          toolCalls={[
+            createToolCall({
+              callId: 'agent-1',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('reviewer'),
+            }),
+            createToolCall({
+              callId: 'agent-2',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('reviewer'),
+            }),
+          ]}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // Both agents collapse into one tree node.
+      expect(frame).toContain('MockAgentTree[agent-1:reviewer');
+      expect(frame).toContain('agent-2:reviewer');
+      // No per-tool MockSubagent rows for live agents.
+      expect(frame).not.toContain('MockSubagent[agent-1]');
+      expect(frame).not.toContain('MockSubagent[agent-2]');
+    });
+
+    it('splits the tree when a non-agent call sits between agent calls', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={true}
+          toolCalls={[
+            createToolCall({
+              callId: 'agent-1',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('reviewer'),
+            }),
+            createToolCall({
+              callId: 'shell-1',
+              name: 'run_shell_command',
+              status: ToolCallStatus.Executing,
+            }),
+            createToolCall({
+              callId: 'agent-2',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('reviewer'),
+            }),
+          ]}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // Two separate trees, one per contiguous run.
+      expect(frame).toContain('MockAgentTree[agent-1:reviewer');
+      expect(frame).toContain('MockAgentTree[agent-2:reviewer');
+      // Non-agent call still renders via the per-tool path.
+      expect(frame).toContain('MockTool[shell-1]');
+    });
+
+    it('passes focus only to the first pending-confirmation agent', () => {
+      const pendingDisplay: AgentResultDisplay = {
+        ...createRunningSubagentDisplay('reviewer'),
+        pendingConfirmation: {
+          type: 'info',
+          title: 'Approve?',
+          prompt: 'allow?',
+          onConfirm: vi.fn(),
+        },
+      };
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={true}
+          toolCalls={[
+            createToolCall({
+              callId: 'agent-running',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: createRunningSubagentDisplay('reviewer'),
+            }),
+            createToolCall({
+              callId: 'agent-pending',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: pendingDisplay,
+            }),
+          ]}
+        />,
+      );
+
+      // Frame may soft-wrap inside the group border; collapse before
+      // matching so the assertion isn't sensitive to terminal width.
+      const frame = (lastFrame() ?? '').replace(/[│\n]/g, '');
+      expect(frame).toContain('agent-pending:reviewer:focused=true');
+      expect(frame).toContain('agent-running:reviewer:focused=false');
+    });
+
+    it('queues the agent banner when a direct tool confirmation is active', () => {
+      const pendingDisplay: AgentResultDisplay = {
+        ...createRunningSubagentDisplay('reviewer'),
+        pendingConfirmation: {
+          type: 'info',
+          title: 'Approve agent action?',
+          prompt: 'allow agent action?',
+          onConfirm: vi.fn(),
+        },
+      };
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={true}
+          toolCalls={[
+            createToolCall({
+              callId: 'tool-confirm',
+              name: 'write_file',
+              status: ToolCallStatus.Confirming,
+              confirmationDetails: {
+                type: 'info',
+                title: 'Write file?',
+                prompt: 'allow write?',
+                onConfirm: vi.fn(),
+              },
+            }),
+            createToolCall({
+              callId: 'agent-pending',
+              name: 'agent',
+              status: ToolCallStatus.Executing,
+              resultDisplay: pendingDisplay,
+            }),
+          ]}
+        />,
+      );
+      // Direct tool's Confirming row keeps focus; agent banner does not
+      // light up its own focused branch even though the agent has a
+      // pending confirmation.
+      const frame = (lastFrame() ?? '').replace(/[│\n]/g, '');
+      expect(frame).toContain('agent-pending:reviewer:focused=false');
+    });
+
+    it('falls back to per-tool live rendering once the group commits', () => {
+      const completed: AgentResultDisplay = {
+        type: 'task_execution',
+        subagentName: 'reviewer',
+        taskDescription: 'reviewer task',
+        taskPrompt: 'review it',
+        status: 'completed',
+      };
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={false}
+          toolCalls={[
+            createToolCall({
+              callId: 'agent-1',
+              name: 'agent',
+              status: ToolCallStatus.Success,
+              resultDisplay: completed,
+            }),
+          ]}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).not.toContain('MockAgentTree');
+      expect(frame).toContain('MockSubagent[agent-1]');
     });
   });
 
