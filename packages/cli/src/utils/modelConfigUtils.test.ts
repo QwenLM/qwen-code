@@ -662,6 +662,44 @@ describe('modelConfigUtils', () => {
       expect(result.warnings).toEqual([]);
     });
 
+    it('should not warn for unknown top-level generationConfig fields', () => {
+      const argv = {};
+      const modelProvider: ProviderModelConfig = {
+        id: 'provider-model',
+        name: 'Provider Model',
+      };
+      const settings = makeMockSettings({
+        model: {
+          name: 'provider-model',
+          generationConfig: {
+            contextWindwSize: 128000,
+          } as Record<string, unknown>,
+        },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [modelProvider],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'provider-model',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+      });
+
+      expect(result.warnings).toEqual([]);
+    });
+
     it('should append ignored generationConfig warnings to resolver warnings', () => {
       const argv = {};
       const modelProvider: ProviderModelConfig = {

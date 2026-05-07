@@ -6,6 +6,7 @@
 
 import {
   AuthType,
+  MODEL_GENERATION_CONFIG_FIELDS,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
   resolveModelConfig,
@@ -35,8 +36,10 @@ function getIgnoredTopLevelGenerationConfigFields(
   }
 
   const providerGenerationConfig = modelProvider.generationConfig ?? {};
-  return Object.keys(settingsGenerationConfig).filter(
-    (field) => !Object.hasOwn(providerGenerationConfig, field),
+  return MODEL_GENERATION_CONFIG_FIELDS.filter(
+    (field) =>
+      Object.hasOwn(settingsGenerationConfig, field) &&
+      !Object.hasOwn(providerGenerationConfig, field),
   );
 }
 
