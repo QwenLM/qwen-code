@@ -262,35 +262,42 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
       ? ` · ${formatTokenCount(entry.stats.totalTokens)} tokens`
       : '';
 
-  // Two-column row: a flex-grow left column (status icon + type +
-  // description + activity) that absorbs truncation, and a flex-shrink:0
-  // right column (elapsed + tokens) that always renders in full. Without
-  // the split, a long activity label would push elapsed/tokens past the
-  // right edge and Ink's row-level `truncate-end` would silently eat the
-  // very fields the user needs to monitor a run. Two extra spaces after
-  // the status glyph give the bold anchor breathing room.
+  // Single-Text row, layout order:
+  //   icon · elapsed · tokens · [type ·] description · activity
+  //
+  // Time / cost go FIRST (right after the status icon) so they are
+  // never at risk of being truncated by a long description or
+  // activity label, and so the row reads as one tight left-to-right
+  // line. The prior two-column layout used `flex-grow:1` on the
+  // description column, which puffed it out to fill the row — leaving
+  // a visual gap between the description tail and the right-pinned
+  // elapsed when content was shorter than the terminal width.
+  // Description + activity become the truncatable tail; `truncate-end`
+  // cuts at the right edge when (and only when) the line overflows.
   return (
-    <Box flexDirection="row">
-      <Box flexGrow={1} flexShrink={1}>
-        <Text wrap="truncate-end">
-          <Text color={color}>{glyph} </Text>
-          {showType && (
-            <>
-              <Text bold>{entry.subagentType}</Text>
-              <Text color={theme.text.secondary}>{' · '}</Text>
-            </>
-          )}
-          <Text color={theme.text.secondary}>{`${flavorPrefix}${label}`}</Text>
-          {activity && (
-            <Text color={theme.text.secondary}>{` · ${activity}`}</Text>
-          )}
-        </Text>
-      </Box>
-      <Box flexShrink={0}>
+    <Box>
+      <Text wrap="truncate-end">
+        {/*
+          Use a template literal for the icon-plus-spaces span so the
+          two-space breathing room after the glyph survives a prettier
+          pass — prettier sometimes collapses literal whitespace inside
+          JSX text expressions.
+        */}
+        <Text color={color}>{`${glyph}  `}</Text>
         <Text
           color={theme.text.secondary}
-        >{` · ${elapsed}${tokenSuffix}`}</Text>
-      </Box>
+        >{`${elapsed}${tokenSuffix} · `}</Text>
+        {showType && (
+          <>
+            <Text bold>{entry.subagentType}</Text>
+            <Text color={theme.text.secondary}>{' · '}</Text>
+          </>
+        )}
+        <Text color={theme.text.secondary}>{`${flavorPrefix}${label}`}</Text>
+        {activity && (
+          <Text color={theme.text.secondary}>{` · ${activity}`}</Text>
+        )}
+      </Text>
     </Box>
   );
 };
