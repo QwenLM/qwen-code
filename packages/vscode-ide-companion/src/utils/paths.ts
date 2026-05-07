@@ -6,6 +6,8 @@
 
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
+import * as dotenv from 'dotenv';
 
 /**
  * Expands tilde and resolves relative paths to absolute.
@@ -33,12 +35,73 @@ function resolvePath(dir: string): string {
   return resolved;
 }
 
+let envBootstrapped = false;
+
+/**
+ * Pre-resolves QWEN_HOME / QWEN_RUNTIME_DIR from `<homedir>/.qwen/.env` and
+ * `<homedir>/.env` when missing from process env. Mirrors the CLI's
+ * preResolveHomeEnvOverrides so the companion's lock-file location agrees
+ * with the CLI's discovery path even when these vars are configured only
+ * via `.env` files.
+ *
+ * Idempotent — safe to call repeatedly. Module-private state (no flag reset
+ * needed for tests) and intentionally avoids any cross-package imports from
+ * core, matching the existing standalone-companion convention.
+ */
+function bootstrapHomeEnvOverrides(): void {
+  if (envBootstrapped) {
+    return;
+  }
+  envBootstrapped = true;
+
+  if (process.env['QWEN_HOME'] && process.env['QWEN_RUNTIME_DIR']) {
+    return;
+  }
+
+  const homeDir = os.homedir();
+  if (!homeDir) {
+    return;
+  }
+
+  const currentQwenDir = process.env['QWEN_HOME']
+    ? resolvePath(process.env['QWEN_HOME'])
+    : path.join(homeDir, '.qwen');
+
+  const candidates: string[] = [path.join(currentQwenDir, '.env')];
+  if (!process.env['QWEN_HOME']) {
+    candidates.push(path.join(homeDir, '.env'));
+  }
+
+  const KEYS = ['QWEN_HOME', 'QWEN_RUNTIME_DIR'] as const;
+  for (const candidate of candidates) {
+    try {
+      const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
+      for (const key of KEYS) {
+        if (parsed[key] && !Object.hasOwn(process.env, key)) {
+          process.env[key] = parsed[key];
+        }
+      }
+    } catch {
+      // Match the dotenv quiet-mode behavior used by the CLI.
+    }
+  }
+}
+
+/**
+ * Test-only: reset the bootstrap latch so suite-wide env mutations are
+ * picked up by subsequent path lookups.
+ */
+export function resetEnvBootstrapForTesting(): void {
+  envBootstrapped = false;
+}
+
 /**
  * Returns the global Qwen home directory (config, credentials, etc.).
  *
  * Priority: QWEN_HOME env var > ~/.qwen
  */
 export function getGlobalQwenDir(): string {
+  bootstrapHomeEnvOverrides();
   const envDir = process.env['QWEN_HOME'];
   if (envDir) {
     return resolvePath(envDir);
@@ -59,6 +122,7 @@ export function getGlobalQwenDir(): string {
  * without importing from core to avoid cross-package dependencies.
  */
 export function getRuntimeBaseDir(): string {
+  bootstrapHomeEnvOverrides();
   const runtimeDir = process.env['QWEN_RUNTIME_DIR'];
   if (runtimeDir) {
     return resolvePath(runtimeDir);

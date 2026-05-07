@@ -528,8 +528,14 @@ function getUserLevelEnvPaths(): Set<string> {
  *
  * Only home-scoped paths are consulted — project `.env` files are barred
  * from changing these vars by `PROJECT_ENV_HARDCODED_EXCLUSIONS`.
+ *
+ * Exported so `main()` can run it before `parseArguments()`: yargs subcommand
+ * handlers (e.g. `channel status`/`stop`) `process.exit` before
+ * `loadSettings()` has a chance to bootstrap, so without this they would read
+ * legacy `~/.qwen/...` paths even when the running service wrote under
+ * `<QWEN_HOME>/...`.
  */
-function preResolveHomeEnvOverrides(): void {
+export function preResolveHomeEnvOverrides(): void {
   // Both vars already set — nothing to bootstrap from .env.
   if (process.env['QWEN_HOME'] && process.env['QWEN_RUNTIME_DIR']) {
     return;

@@ -30,6 +30,7 @@ import {
   createMinimalSettings,
   getSettingsWarnings,
   loadSettings,
+  preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import {
   initializeApp,
@@ -360,6 +361,12 @@ export async function main() {
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
+
+  // Bootstrap QWEN_HOME / QWEN_RUNTIME_DIR from `~/.qwen/.env` and `~/.env`
+  // before yargs parses subcommands. Subcommand handlers (e.g. `channel
+  // status`/`stop`) call `process.exit` from inside parseArguments, so
+  // `loadSettings()` never gets a chance to run for them.
+  preResolveHomeEnvOverrides();
 
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
