@@ -1918,22 +1918,21 @@ describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
     expect(getShellAbortReasonKind(proxyReason)).toBe('cancel');
   });
 
-  it("returns 'cancel' when the `getOwnPropertyDescriptor` Proxy trap throws (regression for @tanzhenxin's PR-1 review note)", () => {
+  it("returns 'cancel' when the `getOwnPropertyDescriptor` Proxy trap throws", () => {
     // `Object.prototype.hasOwnProperty.call(reason, 'kind')` triggers
     // the `[[GetOwnProperty]]` Proxy trap. A Proxy whose
     // `getOwnPropertyDescriptor` handler throws (separate from the
     // `get` trap covered by the test above) used to propagate past
     // the helper because `hasOwnProperty.call` was outside the try.
     // Now the helper wraps both the descriptor probe and the property
-    // read, so this also falls back to 'cancel'.
+    // read, so this also falls back to 'cancel'. (No `get` handler on
+    // the proxy: `hasOwnProperty.call` throws before the helper ever
+    // tries to read `kind`.)
     const throwingDescriptorProxy = new Proxy(
       {},
       {
         getOwnPropertyDescriptor() {
           throw new Error('getOwnPropertyDescriptor blew up');
-        },
-        get() {
-          return undefined;
         },
       },
     );

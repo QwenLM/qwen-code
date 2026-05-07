@@ -64,13 +64,12 @@ export function getShellAbortReasonKind(
 ): ShellAbortReason['kind'] {
   if (reason !== null && typeof reason === 'object') {
     try {
-      // Both `hasOwnProperty.call` AND the `kind` read are inside the try:
-      // `hasOwnProperty.call` triggers the `[[GetOwnProperty]]` Proxy trap
-      // (`getOwnPropertyDescriptor` handler), so a Proxy whose
-      // `getOwnPropertyDescriptor` throws — separate from a throwing
-      // `get` trap — would otherwise propagate past the helper. (Caught
-      // by @tanzhenxin in the PR-1 review; my own audit only covered
-      // `get` trap throws.)
+      // Both `hasOwnProperty.call` AND the `kind` read are inside the
+      // try: `hasOwnProperty.call` triggers the `[[GetOwnProperty]]`
+      // Proxy trap (`getOwnPropertyDescriptor` handler), so a Proxy
+      // whose `getOwnPropertyDescriptor` throws — separate from a
+      // throwing `get` trap — would otherwise propagate past the
+      // helper.
       if (Object.prototype.hasOwnProperty.call(reason, 'kind')) {
         const kind = (reason as { kind?: unknown }).kind;
         // INVARIANT — three points must be kept in sync when extending
