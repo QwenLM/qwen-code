@@ -274,4 +274,42 @@ describe('<LiveAgentPanel />', () => {
     // nothing left to show the panel hides itself.
     expect(lastFrame() ?? '').toBe('');
   });
+
+  it('drops snapshot rows the live registry no longer knows about', () => {
+    // Foreground subagents unregister silently after the status-change
+    // callback fires (`unregisterForeground` deletes from the registry
+    // without emitting another transition). The snapshot still lists the
+    // entry as `running`, so a naive `live ?? snap` fallback would leave
+    // a ghost row that never clears. The panel must trust the registry
+    // and drop the row when `registry.get()` returns undefined.
+    const ghost = agentEntry({
+      agentId: 'ghost-1',
+      subagentType: 'editor',
+      description: 'editor: long-gone foreground task',
+      status: 'running',
+    });
+    // Stub registry knows nothing about ghost-1 (simulates the
+    // post-unregister state).
+    const { config } = makeRegistryConfig([]);
+    const { lastFrame } = renderPanel({ entries: [ghost], config });
+    expect(lastFrame() ?? '').toBe('');
+  });
+
+  it('still shows the snapshot when no Config is mounted (test fixtures)', () => {
+    // Without a Config provider the panel can't reach the registry, so
+    // it has to trust the snapshot — this is the one place the legacy
+    // "fall back to snap" behavior is correct (and the seven other
+    // tests in this file rely on it).
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'snap-only',
+          subagentType: 'researcher',
+          description: 'researcher: snapshot-only path',
+        }),
+      ],
+    });
+    expect(lastFrame() ?? '').toContain('researcher');
+    expect(lastFrame() ?? '').toContain('snapshot-only path');
+  });
 });

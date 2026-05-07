@@ -11,6 +11,5 @@ export { AgentCreationWizard } from './create/AgentCreationWizard.js';
 export { AgentsManagerDialog } from './manage/AgentsManagerDialog.js';
 
 // Execution Display: the verbose inline frame was retired. Live progress
-// is now rendered by `LiveAgentPanel` (always-on roster) and
-// `BackgroundTasksDialog` (Down-arrow detail view); see
-// docs/comparison/subagent-display-deep-dive.md for context.
+// is now rendered by `LiveAgentPanel` (always-on roster, beneath the
+// composer) and `BackgroundTasksDialog` (Down-arrow detail view).

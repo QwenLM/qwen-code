@@ -148,16 +148,34 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   const config = useContext(ConfigContext);
 
   // Wall-clock tick. Drives elapsed-time refresh, terminal-row eviction,
-  // AND the live registry re-pull below. Only runs while the panel
-  // actually has live work to display so we don't keep a useless
-  // interval alive in the steady state.
+  // AND the live registry re-pull below. The gate must consider both
+  // live agents AND terminal-but-still-visible agents (within the 8s
+  // visibility window) — `BackgroundTaskRegistry.getAll()` retains
+  // terminal entries indefinitely, so a naive `entries.some(isAgentEntry)`
+  // gate would keep ticking forever after the last entry's window
+  // closed, churning re-renders for nothing on screen.
   const [now, setNow] = useState(() => Date.now());
-  const hasAgents = entries.some(isAgentEntry);
   useEffect(() => {
-    if (!hasAgents) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const needsTick = (whenMs: number) =>
+      entries.some((e) => {
+        if (!isAgentEntry(e)) return false;
+        if (e.status === 'running' || e.status === 'paused') return true;
+        if (e.endTime === undefined) return false;
+        return whenMs - e.endTime <= TERMINAL_VISIBLE_MS;
+      });
+    if (!needsTick(Date.now())) return;
+    const id = setInterval(() => {
+      const wallNow = Date.now();
+      // Always advance `now` first so the final render reflects the
+      // latest expiry state; THEN check if there's still work to do
+      // and clear the interval if not. Without the up-front update
+      // the row that just expired would linger one extra second.
+      setNow(wallNow);
+      if (!needsTick(wallNow)) clearInterval(id);
+    }, 1000);
     return () => clearInterval(id);
-  }, [hasAgents]);
+     
+  }, [entries]);
 
   // Re-pull each agent from the live registry on every tick so the row
   // shows the latest `recentActivities` — `useBackgroundTaskView`
@@ -166,9 +184,20 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   // a glance roster MUST surface "what is this agent doing right now"
   // or it stops being a glance surface. Mirrors the pattern in
   // BackgroundTasksDialog's detail body, which re-reads the registry
-  // on its own activity tick. Falls back to the snapshot when Config
-  // isn't available (test fixtures) or the entry has unregistered
-  // between snapshots.
+  // on its own activity tick.
+  //
+  // When `registry.get()` returns undefined the entry is gone (the
+  // canonical case is a foreground subagent that unregistered after
+  // its statusChange fired but before the next snapshot refresh —
+  // `unregisterForeground` deletes silently). Drop the row instead
+  // of falling back to `snap`: the snapshot still says `running`,
+  // and that ghost would never clear because the registry has no
+  // record left to flip it to terminal.
+  //
+  // When `config` itself is undefined (test fixtures that render
+  // without ConfigContext) the panel degrades to snapshot-only —
+  // there's no live source of truth to drop against, so the
+  // snapshot is the best we have.
   //
   // NOTE: this useMemo MUST come before the `if (dialogOpen) return null`
   // early-return below — React's rules of hooks require hook calls in
@@ -178,10 +207,12 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
     const snapshots = entries.filter(isAgentEntry);
     if (!config) return snapshots;
     const registry = config.getBackgroundTaskRegistry();
-    return snapshots.map((snap) => {
-      const live = registry.get(snap.agentId);
-      return live ? { ...live, kind: 'agent' as const } : snap;
-    });
+    return snapshots
+      .map((snap) => {
+        const live = registry.get(snap.agentId);
+        return live ? ({ ...live, kind: 'agent' as const } as const) : null;
+      })
+      .filter((e): e is AgentDialogEntry => e !== null);
     // `now` is a deliberate dep so the memo recomputes each tick and
     // captures the latest `recentActivities` mutated in place by the
     // registry's appendActivity path.
