@@ -198,6 +198,11 @@ export interface Backend {
   /**
    * Wait for a specific agent to complete its current run loop.
    *
+   * Implementations may fall back to waiting for ALL agents when
+   * per-agent waiting isn't natively supported (e.g. tmux/iTerm2
+   * backends). Callers that need strict per-agent semantics should
+   * branch on backend type.
+   *
    * @returns true if the agent completed, false if not found or timeout.
    */
   waitForAgent(agentId: string, timeoutMs?: number): Promise<boolean>;

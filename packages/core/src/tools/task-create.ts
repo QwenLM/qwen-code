@@ -90,6 +90,7 @@ export class TaskCreateTool extends BaseDeclarativeTool<
           },
           activeForm: {
             type: 'string',
+            maxLength: 200,
             description:
               'Present tense label for UI ' + '(e.g., "Running tests").',
           },

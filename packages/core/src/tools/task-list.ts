@@ -92,8 +92,11 @@ class TaskListInvocation extends BaseToolInvocation<
         if (msgs.length > 0) {
           lines.push('');
           lines.push('--- Teammate messages ---');
-          for (const m of msgs) {
-            lines.push(`[${m.from}]: ${m.text}`);
+          // Run the same nonce envelope `pollLeaderInbox` uses so a
+          // teammate can't slip a forged `[leader]: ...` header into
+          // the leader's conversation through the `task_list` path.
+          for (const wrapped of manager.formatLeaderEnvelope(msgs)) {
+            lines.push(wrapped);
           }
         }
       } catch {

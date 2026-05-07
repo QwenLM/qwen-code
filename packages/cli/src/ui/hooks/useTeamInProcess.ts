@@ -56,10 +56,18 @@ export function useTeamInProcess(
 
     let detachTeamListeners: (() => void) | null = null;
     const retryTimeouts = new Set<ReturnType<typeof setTimeout>>();
+    // Track only the agent ids this hook has registered so
+    // detaching the team session doesn't wipe agents owned by
+    // other hooks (e.g. useArenaInProcess writes into the same
+    // AgentViewContext map).
+    const ownedAgentIds = new Set<string>();
 
     /** Remove agent tabs, cancel pending retries, and detach team events. */
     const detachSession = () => {
-      actionsRef.current.unregisterAll();
+      for (const id of ownedAgentIds) {
+        actionsRef.current.unregisterAgent(id);
+      }
+      ownedAgentIds.clear();
       for (const t of retryTimeouts) clearTimeout(t);
       retryTimeouts.clear();
       detachTeamListeners?.();
@@ -99,6 +107,7 @@ export function useTeamInProcess(
               member.model ?? 'teammate',
               member.color ?? nextColor(),
             );
+            ownedAgentIds.add(member.agentId);
           }
         }
       }
@@ -122,6 +131,7 @@ export function useTeamInProcess(
               event.color ?? nextColor(),
               event.name,
             );
+            ownedAgentIds.add(event.agentId);
             return;
           }
           if (retriesLeft > 0) {

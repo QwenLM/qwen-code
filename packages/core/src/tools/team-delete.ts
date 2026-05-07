@@ -62,6 +62,16 @@ class TeamDeleteInvocation extends BaseToolInvocation<
     // Clean up file system artifacts.
     // deleteTeamDirs removes both the team dir (containing inboxes)
     // and the tasks dir, so no separate clearAllInboxes/resetTaskList needed.
+    //
+    // Belt-and-suspenders: a teammate's tool call that didn't
+    // settle inside `manager.cleanup()`'s wait window can still
+    // call `writeMessage`, which `mkdir(recursive)`s the inboxes
+    // directory and recreates `~/.qwen/teams/{name}/...` *after*
+    // we delete it — leaving an orphan dir that wedges the team
+    // name on the next `team_create`. Sweep once more after a
+    // short delay to catch the race.
+    await deleteTeamDirs(teamName);
+    await new Promise((r) => setTimeout(r, 250));
     await deleteTeamDirs(teamName);
 
     this.config.setTeamManager(null);

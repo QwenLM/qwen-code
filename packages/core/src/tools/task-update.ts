@@ -257,14 +257,17 @@ export class TaskUpdateTool extends BaseDeclarativeTool<
           },
           subject: {
             type: 'string',
+            maxLength: 200,
             description: 'Updated task title.',
           },
           description: {
             type: 'string',
+            maxLength: 10000,
             description: 'Updated task description.',
           },
           activeForm: {
             type: 'string',
+            maxLength: 200,
             description: 'Present tense label for UI.',
           },
           metadata: {

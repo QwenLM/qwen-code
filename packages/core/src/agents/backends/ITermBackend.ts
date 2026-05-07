@@ -244,6 +244,9 @@ export class ITermBackend implements Backend {
   }
 
   async waitForAgent(_agentId: string, timeoutMs?: number): Promise<boolean> {
+    // ITermBackend does not support per-agent waiting; fall back
+    // to waitForAll which watches all sessions. Callers that need
+    // strict per-agent semantics should branch on backend type.
     return this.waitForAll(timeoutMs);
   }
 

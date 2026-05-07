@@ -27,6 +27,30 @@ import type { SwarmTask, SwarmTaskStatus } from './types.js';
 
 const debug = createDebugLogger('AGENTS_TEAM_TASKS');
 
+// ─── Size limits ────────────────────────────────────────────
+
+/**
+ * Server-side cap on `metadata` payload size, applied in
+ * `createTask` / `updateTask`. JSON Schema can't easily express a
+ * byte-size limit on arbitrary objects, and an unbounded metadata
+ * field is the easiest OOM vector left in the task model: every
+ * `listTasks` reads every task file in parallel.
+ */
+const MAX_METADATA_BYTES = 32_768;
+
+function assertMetadataWithinLimit(
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (!metadata) return;
+  const size = Buffer.byteLength(JSON.stringify(metadata), 'utf-8');
+  if (size > MAX_METADATA_BYTES) {
+    throw new Error(
+      `Task metadata is too large (${size} bytes; max ${MAX_METADATA_BYTES}). ` +
+        `Trim the payload or store the bulk content elsewhere.`,
+    );
+  }
+}
+
 // ─── Lock options ───────────────────────────────────────────
 
 const LOCK_OPTIONS: lockfile.LockOptions = {
@@ -103,6 +127,7 @@ export async function createTask(
     metadata?: Record<string, unknown>;
   },
 ): Promise<SwarmTask> {
+  assertMetadataWithinLimit(opts.metadata);
   const dir = getTasksDir(teamName);
   await fs.mkdir(dir, { recursive: true });
 
@@ -268,6 +293,9 @@ export async function updateTask(
       if (Object.keys(task.metadata).length === 0) {
         task.metadata = undefined;
       }
+      // Enforce after the merge so the cap reflects the persisted
+      // size, not just the incoming delta.
+      assertMetadataWithinLimit(task.metadata);
     }
 
     await fs.writeFile(taskPath, JSON.stringify(task, null, 2) + '\n', 'utf-8');
@@ -328,8 +356,16 @@ export async function listTasks(
   let entries: string[];
   try {
     entries = await fs.readdir(dir);
-  } catch {
-    return [];
+  } catch (err) {
+    // ENOENT is the legitimate "no tasks dir yet" case. Anything
+    // else (EACCES, EIO, ENOTDIR, ELOOP, ...) means the disk is
+    // unreadable — surface it instead of pretending the board is
+    // empty, otherwise the leader sees no tasks while in-flight
+    // work is invisible.
+    if (isNodeError(err) && err.code === 'ENOENT') return [];
+    const errMsg = err instanceof Error ? err.message : String(err);
+    debug.warn(`Failed to list tasks dir ${dir}: ${errMsg}`);
+    throw err instanceof Error ? err : new Error(errMsg);
   }
 
   const jsonEntries = entries.filter((e) => e.endsWith('.json'));

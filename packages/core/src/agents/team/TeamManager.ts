@@ -58,6 +58,7 @@ import {
   readInbox,
   getInboxPath,
 } from './mailbox.js';
+import type { MailboxMessage } from './mailbox.js';
 import {
   listTasks,
   claimTask,
@@ -447,9 +448,17 @@ export class TeamManager {
     const priority = this.getSenderPriority(from);
 
     const queue = this.pendingMessages.get(member.agentId);
-    if (queue) {
-      queue.push({ text: message, from: from ?? '', priority });
+    if (!queue) {
+      // Per-agent queue is removed on terminal status, so the
+      // teammate is gone (terminated/cancelled). Surface the
+      // failure rather than accepting a message that would be
+      // silently dropped.
+      throw new Error(
+        `Teammate "${toName}" is no longer active and cannot ` +
+          `receive messages.`,
+      );
     }
+    queue.push({ text: message, from: from ?? '', priority });
 
     this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
       from: from ?? 'unknown',
@@ -524,20 +533,55 @@ export class TeamManager {
     Array<{ from: string; text: string; timestamp: string }>
   > {
     return this.withInboxLock(async () => {
-      try {
-        const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
-        if (inbox.length <= this.lastInboxOffset) return [];
-        const newMessages = inbox.slice(this.lastInboxOffset);
-        this.lastInboxOffset = inbox.length;
-        return newMessages.map((m) => ({
-          from: m.from,
-          text: m.text,
-          timestamp: m.timestamp,
-        }));
-      } catch {
+      const inbox = await this.readLeaderInboxOrQuarantine();
+      if (inbox.length <= this.lastInboxOffset) return [];
+      const newMessages = inbox.slice(this.lastInboxOffset);
+      this.lastInboxOffset = inbox.length;
+      return newMessages.map((m) => ({
+        from: m.from,
+        text: m.text,
+        timestamp: m.timestamp,
+      }));
+    });
+  }
+
+  /**
+   * Read the leader inbox, distinguishing the legitimate "no inbox
+   * yet" case (ENOENT) from corruption. On parse / I-O failure the
+   * file is quarantined to `.corrupt-{ts}` and `lastInboxOffset` is
+   * reset so a fresh inbox can replace it; the caller still gets an
+   * empty array for this read.
+   */
+  private async readLeaderInboxOrQuarantine(): Promise<MailboxMessage[]> {
+    const inboxPath = getInboxPath(this.teamFile.name, LEADER_NAME);
+    try {
+      return await readInbox(this.teamFile.name, LEADER_NAME);
+    } catch (err) {
+      if (
+        err &&
+        typeof err === 'object' &&
+        'code' in err &&
+        (err as { code?: string }).code === 'ENOENT'
+      ) {
         return [];
       }
-    });
+      const errMsg = err instanceof Error ? err.message : String(err);
+      debug.warn(
+        `Quarantining corrupt leader inbox at ${inboxPath}: ${errMsg}`,
+      );
+      try {
+        await fsPromises.rename(
+          inboxPath,
+          `${inboxPath}.corrupt-${Date.now()}`,
+        );
+      } catch (renameErr) {
+        const renameMsg =
+          renameErr instanceof Error ? renameErr.message : String(renameErr);
+        debug.warn(`Failed to quarantine ${inboxPath}: ${renameMsg}`);
+      }
+      this.lastInboxOffset = 0;
+      return [];
+    }
   }
 
   /**
@@ -610,47 +654,13 @@ export class TeamManager {
       return;
     }
     const newMessages = await this.withInboxLock(async () => {
-      const inboxPath = getInboxPath(this.teamFile.name, LEADER_NAME);
-      try {
-        const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
-        if (inbox.length <= this.lastInboxOffset) {
-          return [];
-        }
-        const slice = inbox.slice(this.lastInboxOffset);
-        this.lastInboxOffset = inbox.length;
-        return slice;
-      } catch (err) {
-        // ENOENT is the legitimate "no inbox yet" case — the
-        // mailbox layer already strips it, but defend in depth.
-        if (
-          err &&
-          typeof err === 'object' &&
-          'code' in err &&
-          (err as { code?: string }).code === 'ENOENT'
-        ) {
-          return [];
-        }
-        // Anything else is a parse/I-O failure. Quarantine the
-        // file so the next write doesn't overwrite a corrupt-but-
-        // recoverable inbox, and reset our offset so a fresh inbox
-        // can replace it. Keep returning [] for this poll cycle.
-        const errMsg = err instanceof Error ? err.message : String(err);
-        debug.warn(
-          `Quarantining corrupt leader inbox at ${inboxPath}: ${errMsg}`,
-        );
-        try {
-          await fsPromises.rename(
-            inboxPath,
-            `${inboxPath}.corrupt-${Date.now()}`,
-          );
-        } catch (renameErr) {
-          const renameMsg =
-            renameErr instanceof Error ? renameErr.message : String(renameErr);
-          debug.warn(`Failed to quarantine ${inboxPath}: ${renameMsg}`);
-        }
-        this.lastInboxOffset = 0;
+      const inbox = await this.readLeaderInboxOrQuarantine();
+      if (inbox.length <= this.lastInboxOffset) {
         return [];
       }
+      const slice = inbox.slice(this.lastInboxOffset);
+      this.lastInboxOffset = inbox.length;
+      return slice;
     });
 
     if (newMessages.length === 0) {
@@ -665,18 +675,30 @@ export class TeamManager {
       return;
     }
 
-    // Wrap each teammate message in a per-session nonce-tagged
-    // envelope. The body is interpolated raw, but a teammate
-    // cannot spoof the closing tag without knowing `envelopeNonce`,
-    // so they cannot inject a forged envelope (e.g. one claiming
-    // `from="leader"`) into the leader's conversation.
+    this.leaderMessageCallback(
+      this.formatLeaderEnvelope(newMessages).join('\n\n'),
+    );
+  }
+
+  /**
+   * Wrap teammate-to-leader messages in a per-session nonce-tagged
+   * envelope. The body is interpolated raw, but a teammate cannot
+   * spoof the closing tag without knowing `envelopeNonce`, so they
+   * cannot inject a forged envelope (e.g. one claiming
+   * `from="leader"`) into the leader's conversation.
+   *
+   * Exposed so any path that surfaces teammate text to the leader
+   * (`pollLeaderInbox`, `task_list`, ...) shares the same anti-
+   * spoofing framing instead of each one re-implementing it.
+   */
+  formatLeaderEnvelope(
+    messages: ReadonlyArray<{ from: string; text: string }>,
+  ): string[] {
     const open = `<teammate_message_${this.envelopeNonce}`;
     const close = `</teammate_message_${this.envelopeNonce}>`;
-    const formatted = newMessages
-      .map((m) => `${open} from="${m.from}">\n${m.text}\n${close}`)
-      .join('\n\n');
-
-    this.leaderMessageCallback(formatted);
+    return messages.map(
+      (m) => `${open} from="${m.from}">\n${m.text}\n${close}`,
+    );
   }
 
   /**
@@ -1038,6 +1060,18 @@ export class TeamManager {
           cleanup();
           this.eventBridgeCleanups.delete(agentId);
         }
+
+        // Drop per-agent state for the terminated teammate so
+        // long-running sessions with spawn-fail / shutdown churn
+        // don't grow these maps monotonically. `pendingMessages`
+        // matters most: a terminated teammate can never reach
+        // IDLE again, so anything queued here would be silently
+        // lost — better to refuse the send (handled at sendMessage
+        // by the missing entry) than accept it and drop it.
+        this.pendingMessages.delete(agentId);
+        this.lastActivityAt.delete(agentId);
+        this.agentIdentities.delete(agentId);
+        this._shutdownPending.delete(agentName);
       }
     };
 

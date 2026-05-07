@@ -16,6 +16,8 @@ import {
   sanitizeName,
   formatAgentId,
   createTeamFile,
+  getTeamDir,
+  getTasksDir,
 } from '../agents/team/teamHelpers.js';
 import { resetTaskList } from '../agents/team/tasks.js';
 import { clearAllInboxes } from '../agents/team/mailbox.js';
@@ -98,11 +100,18 @@ class TeamCreateInvocation extends BaseToolInvocation<
       await createTeamFile(teamName, teamFile);
     } catch (err) {
       if (isNodeError(err) && err.code === 'EEXIST') {
+        // If a previous session crashed between team_create and a
+        // clean team_delete, the on-disk artifacts are stranded
+        // and `team_delete` from a fresh session can't help —
+        // it'd see no in-memory manager. Surface the on-disk
+        // paths so the user has an actionable recovery step.
         const msg =
           `Team "${teamName}" already exists (likely owned by ` +
-          `another qwen-code session). Choose a different name, ` +
-          `or run team_delete first if you're sure no other ` +
-          `session is using it.`;
+          `another qwen-code session, or stranded by a prior ` +
+          `crash). Pick a different name, or — if you're sure no ` +
+          `other session is using it — remove the on-disk ` +
+          `artifacts manually:\n` +
+          `  rm -rf "${getTeamDir(teamName)}" "${getTasksDir(teamName)}"`;
         return {
           llmContent: msg,
           returnDisplay: msg,
