@@ -2028,6 +2028,69 @@ describe('ShellTool', () => {
         },
       );
 
+      // Trailing shell comments must not confuse the `-m` rewrite:
+      // `git commit -m "real" # -m "fake"` would otherwise have
+      // `lastMatchOf` pick the comment's `-m "fake"` and splice the
+      // trailer into a `-m` flag bash discards, leaving the actual
+      // commit unattributed. The unquoted-`#` truncation in the
+      // segment slicing keeps the rewrite scoped to the live part.
+      it('should add co-author for git commit followed by # comment', async () => {
+        const command = 'git commit -m "real" # -m "fake"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0] as string;
+        // Trailer must land in the live `-m "real"` body, BEFORE the `#`.
+        expect(observed).toContain('Co-authored-by:');
+        const realIdx = observed.indexOf('-m "real');
+        const hashIdx = observed.indexOf(' # ');
+        const coAuthorIdx = observed.indexOf('Co-authored-by:');
+        expect(realIdx).toBeGreaterThanOrEqual(0);
+        expect(hashIdx).toBeGreaterThan(realIdx);
+        expect(coAuthorIdx).toBeGreaterThan(realIdx);
+        expect(coAuthorIdx).toBeLessThan(hashIdx);
+      });
+
+      // A `#` inside a quoted commit body is NOT a comment marker.
+      // `git commit -m "fix #123"` should still get the trailer
+      // appended inside the quoted body.
+      it('should add co-author for git commit -m with # inside body', async () => {
+        const command = 'git commit -m "fix #123 add feature"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+        const observed = mockShellExecutionService.mock.calls[0][0] as string;
+        expect(observed).toContain('Co-authored-by:');
+        // The `#123` MUST still be inside the body (not pushed out by
+        // the comment-truncation logic mistaking it for a comment).
+        expect(observed).toContain('#123');
+      });
+
       // git's global flags (`-c`, `--no-pager`, etc.) push the
       // subcommand past index 1; a fixed-position check at arg1 used
       // to silently skip these forms. Make sure we still inject the

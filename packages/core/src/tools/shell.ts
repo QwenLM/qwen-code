@@ -104,6 +104,47 @@ function lastMatchOf<T extends RegExpMatchArray>(
 }
 
 /**
+ * Return the position of the first unquoted `#` (start-of-comment) in
+ * `s`, or -1 if none. Bash treats `#` as a comment marker only when it
+ * begins a word — at start of input or preceded by whitespace — and
+ * not when it appears inside a single- or double-quoted region. This
+ * mirrors that semantics so the `-m` / `--body` rewriters can scope
+ * their regex to the pre-comment part of a segment and avoid splicing
+ * the trailer into a comment-out flag like
+ * `git commit -m "real" # -m "fake"`, where the actual commit gets
+ * "real" but `lastMatchOf` would otherwise pick the comment's `-m
+ * "fake"` and put the trailer there.
+ */
+function findUnquotedCommentStart(s: string): number {
+  let inSingle = false;
+  let inDouble = false;
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i]!;
+    if (c === '\\' && !inSingle && i + 1 < s.length) {
+      i += 2;
+      continue;
+    }
+    if (c === "'" && !inDouble) {
+      inSingle = !inSingle;
+      i++;
+      continue;
+    }
+    if (c === '"' && !inSingle) {
+      inDouble = !inDouble;
+      i++;
+      continue;
+    }
+    if (c === '#' && !inSingle && !inDouble) {
+      const prev = i === 0 ? '' : s[i - 1]!;
+      if (prev === '' || /\s/.test(prev)) return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/**
  * Helpers for the nested-match-rejection logic shared between
  * addCoAuthorToGitCommit and addAttributionToPR. Both functions pick
  * the LAST `-m` / `--body` occurrence across two quote styles, but
@@ -2826,7 +2867,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
       `(${FLAG_PREFIX})'((?:[^']|'\\\\'')*)'`,
       'g',
     );
-    const segment = command.slice(segmentRange.start, segmentRange.end);
+    // Trim a trailing shell comment from the segment so an inert
+    // `git commit -m "real" # -m "fake"` doesn't have `lastMatchOf`
+    // pick the comment's `-m "fake"` and splice the trailer into the
+    // comment (where bash discards it), leaving the actual commit
+    // unattributed.
+    const fullSegment = command.slice(segmentRange.start, segmentRange.end);
+    const commentStart = findUnquotedCommentStart(fullSegment);
+    const segment =
+      commentStart >= 0 ? fullSegment.slice(0, commentStart) : fullSegment;
     // Git concatenates multiple `-m` values with a blank line, so the
     // co-author trailer has to land in the *last* `-m` value to be
     // recognised by `git interpret-trailers`. matchAll → take the
@@ -2970,7 +3019,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
       `(${BODY_FLAG})'((?:[^']|'\\\\'')*)'`,
       'g',
     );
-    const segment = command.slice(ghSegment.start, ghSegment.end);
+    // Trim a trailing shell comment off the segment for the same
+    // reason as addCoAuthorToGitCommit — `gh pr create --body "real"
+    // # --body "fake"` would otherwise let `lastMatchOf` pick the
+    // comment's `--body "fake"` and inject attribution into a `--body`
+    // flag bash discards.
+    const fullSegment = command.slice(ghSegment.start, ghSegment.end);
+    const commentStart = findUnquotedCommentStart(fullSegment);
+    const segment =
+      commentStart >= 0 ? fullSegment.slice(0, commentStart) : fullSegment;
     // gh ignores all but the last `--body`/`-b` flag, so the trailer
     // has to land in the final occurrence to actually appear in the PR.
     // matchAll → take the last match for each quote style, then pick
