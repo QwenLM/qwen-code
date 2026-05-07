@@ -329,7 +329,12 @@ export class LoggingContentGenerator implements ContentGenerator {
       if (!isInternal) {
         const consolidatedResponse =
           this.consolidateGeminiResponsesForLogging(responses);
-        await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
+        // Logging must not turn a fully-yielded stream into a thrown error.
+        try {
+          await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
+        } catch {
+          // swallow logging-side error
+        }
       }
     } catch (error) {
       const durationMs = Date.now() - startTime;
@@ -341,7 +346,12 @@ export class LoggingContentGenerator implements ContentGenerator {
         userPromptId,
       );
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        // Logging must not replace the original stream/API error.
+        try {
+          await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        } catch {
+          // swallow logging-side error
+        }
       }
       throw error;
     }

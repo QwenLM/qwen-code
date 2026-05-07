@@ -675,6 +675,95 @@ describe('LoggingContentGenerator', () => {
     ).rejects.toThrow('api-boom');
   });
 
+  it('does not propagate logging-side throws on a successful stream', async () => {
+    const chunk1 = createResponse('resp-stream-safe-1', 'test-model', [
+      { text: 'hello' },
+    ]);
+    const chunk2 = createResponse('resp-stream-safe-2', 'test-model', [
+      { text: ' world' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield chunk1;
+          yield chunk2;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('log-fail-on-stream-success'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-safe-success',
+    );
+    const seen: GenerateContentResponse[] = [];
+    for await (const item of stream) {
+      seen.push(item);
+    }
+    // All chunks must reach the consumer; the logger throw must not surface.
+    expect(seen).toHaveLength(2);
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let logging-side throws replace the original stream error', async () => {
+    const chunk = createResponse('resp-stream-err', 'test-model', [
+      { text: 'partial' },
+    ]);
+    const apiError = new Error('stream-api-fail');
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield chunk;
+          throw apiError;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('log-fail-on-stream-error'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-safe-error',
+    );
+    await expect(async () => {
+      for await (const _item of stream) {
+        // drain
+      }
+    }).rejects.toThrow('stream-api-fail');
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+  });
+
   it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
     'skips logApiRequest and OpenAI logging for internal promptId %s (generateContent)',
     async (promptId) => {
