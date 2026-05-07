@@ -28,6 +28,8 @@ import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import { runWithAgentContext } from '../tools/agent/agent-context.js';
+import { createApprovalModeOverride } from '../tools/agent/agent.js';
+import type { ApprovalMode } from '../config/config.js';
 import {
   FORK_AGENT,
   FORK_SUBAGENT_TYPE,
@@ -137,16 +139,6 @@ function reconcileResumedApprovalMode(
     return parentMode;
   }
   return 'default';
-}
-
-function createApprovalModeOverride(
-  base: Config,
-  mode: ApprovalModeValue,
-): Config {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const override = Object.create(base) as any;
-  override.getApprovalMode = () => mode;
-  return override as Config;
 }
 
 function persistBackgroundCancellation(
@@ -527,10 +519,18 @@ export class BackgroundAgentResumeService {
         parentApprovalMode,
         this.config.isTrustedFolder(),
       );
-      const agentConfig =
-        resolvedApprovalMode !== this.config.getApprovalMode()
-          ? createApprovalModeOverride(this.config, resolvedApprovalMode)
-          : this.config;
+      // Always wrap, even when the resolved approval mode matches the
+      // parent's. The wrapper rebuilds the tool registry on the
+      // override Config so bound `EditTool` / `WriteFileTool` /
+      // `ReadFileTool` instances resolve `this.config` to the resumed
+      // agent and use the resumed agent's `FileReadCache`, instead of
+      // continuing to read the parent's. Reusing `this.config`
+      // directly here would short-circuit that isolation. See the
+      // matching wrapper in `agent.ts:createApprovalModeOverride`.
+      const agentConfig = await createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode as ApprovalMode,
+      );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bgConfig = Object.create(agentConfig) as any;
       bgConfig.getShouldAvoidPermissionPrompts = () => true;
@@ -771,6 +771,16 @@ export class BackgroundAgentResumeService {
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
           cleanupJsonl?.();
+          // Release the per-subagent ToolRegistry the resumed agent's
+          // wrapper Config built in `createApprovalModeOverride` so any
+          // AgentTool / SkillTool the model instantiated during this
+          // run disposes its change-listeners on shared
+          // SubagentManager / SkillManager. Without this, every resume
+          // accumulates listeners for the rest of the session.
+          void agentConfig
+            .getToolRegistry()
+            .stop()
+            .catch(() => {});
         }
       };
 

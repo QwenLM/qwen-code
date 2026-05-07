@@ -78,6 +78,19 @@ export interface SettingDefinition {
   options?: readonly SettingEnumOption[];
   /** Schema for array items when type is 'array' */
   items?: SettingItemDefinition;
+  /**
+   * Escape hatch for the JSON Schema generator: when set, this object is
+   * emitted verbatim under the setting's properties entry instead of the
+   * shape derived from `type`/`properties`/etc. The `description` is still
+   * carried forward from the SettingDefinition.
+   *
+   * Use sparingly — for most settings the generator's normal mapping is
+   * preferable so the source schema stays the single source of truth. The
+   * one valid case so far is settings whose accepted runtime shape is a
+   * union (e.g. string | { path } | { small, large }) that the
+   * SettingDefinition `type` field cannot express.
+   */
+  jsonSchemaOverride?: Record<string, unknown>;
 }
 
 /**
@@ -104,6 +117,20 @@ export interface SettingItemDefinition {
 export interface SettingsSchema {
   [key: string]: SettingDefinition;
 }
+
+/**
+ * Source for a single tier of custom ASCII art. Either an inline string
+ * or a reference to a file on disk that contains the art.
+ */
+export type AsciiArtSource = string | { path: string };
+
+/**
+ * Setting value for `ui.customAsciiArt`. Accepts a bare source (treated as
+ * both width tiers), or a width-aware `{small, large}` object.
+ */
+export type CustomAsciiArtSetting =
+  | AsciiArtSource
+  | { small?: AsciiArtSource; large?: AsciiArtSource };
 
 /**
  * Common items schema for hook definitions.
@@ -727,6 +754,97 @@ const SETTINGS_SCHEMA = {
         description:
           'Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.',
         showInDialog: true,
+      },
+      hideBanner: {
+        type: 'boolean',
+        label: 'Hide Banner',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description: 'Hide the startup ASCII banner and info panel.',
+        showInDialog: true,
+      },
+      customBannerTitle: {
+        type: 'string',
+        label: 'Custom Banner Title',
+        category: 'UI',
+        requiresRestart: false,
+        default: '' as string,
+        description:
+          'Replace the default ">_ Qwen Code" title shown in the banner info panel. The version suffix is always appended.',
+        showInDialog: false,
+      },
+      customBannerSubtitle: {
+        type: 'string',
+        label: 'Custom Banner Subtitle',
+        category: 'UI',
+        requiresRestart: false,
+        default: '' as string,
+        description:
+          'Optional subtitle line rendered between the banner title and the auth/model line. When unset, the info panel keeps its blank spacer row.',
+        showInDialog: false,
+      },
+      customAsciiArt: {
+        type: 'object',
+        label: 'Custom ASCII Art',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as CustomAsciiArtSetting | undefined,
+        description:
+          'Replace the default QWEN ASCII art. Accepts an inline string, {"path": "..."}, or {"small": ..., "large": ...} for width-aware selection.',
+        showInDialog: false,
+        // The runtime accepts three shapes (inline string, {path}, or
+        // {small,large} where each tier is itself string-or-{path}). The
+        // SettingDefinition `type: 'object'` keeps the in-app dialog out of
+        // the way (we don't want a multi-line ASCII editor in the TUI), but
+        // the JSON Schema needs a real union so VS Code stops flagging the
+        // documented bare-string form.
+        // The `oneOf` here uses three *mutually exclusive* branches rather
+        // than one permissive object branch, so VS Code rejects nonsense
+        // like `{ path, small, large }` (which the runtime would also
+        // reject — see `normalizeTiers` in `customBanner.ts`).
+        jsonSchemaOverride: {
+          oneOf: [
+            { type: 'string' },
+            // Bare `{path}` — no tier keys allowed.
+            {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+              required: ['path'],
+              additionalProperties: false,
+            },
+            // Width-aware `{small?, large?}` — `path` not allowed at this
+            // level; each tier is itself string-or-`{path}`.
+            {
+              type: 'object',
+              properties: {
+                small: {
+                  oneOf: [
+                    { type: 'string' },
+                    {
+                      type: 'object',
+                      properties: { path: { type: 'string' } },
+                      required: ['path'],
+                      additionalProperties: false,
+                    },
+                  ],
+                },
+                large: {
+                  oneOf: [
+                    { type: 'string' },
+                    {
+                      type: 'object',
+                      properties: { path: { type: 'string' } },
+                      required: ['path'],
+                      additionalProperties: false,
+                    },
+                  ],
+                },
+              },
+              additionalProperties: false,
+            },
+          ],
+        },
       },
     },
   },

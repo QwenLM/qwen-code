@@ -211,8 +211,14 @@ function setup(initial: readonly DialogEntry[]): Harness {
       act(() => handle.current!.setEntries(next));
     },
     pressKey(key) {
+      // Real `useKeypress` unbinds the previous callback on rerender, so
+      // only the most recently registered closure should run. Calling all
+      // accumulated handlers misses state updates that happened between
+      // renders (the older closures see stale state) — the symptom looks
+      // like a re-render race in production code that doesn't exist.
       act(() => {
-        for (const h of handlers) h(key);
+        const latest = handlers[handlers.length - 1];
+        if (latest) latest(key);
       });
     },
     call(fn) {
@@ -294,6 +300,114 @@ describe('BackgroundTasksDialog', () => {
     // the user from detail.
     h.setEntries([{ ...done }]);
     expect(h.probe.current!.state.dialogMode).toBe('detail');
+  });
+
+  it('foreground cancel requires two `x` presses to confirm (one-press is a no-op)', () => {
+    // Foreground entries block the parent's tool-call: cancelling one ends
+    // the current turn with a partial result for that subagent. The dialog
+    // gates the destructive action behind a confirm step so the user can't
+    // wipe out their turn with a stray keypress.
+    const fg = entry({
+      agentId: 'fg-1',
+      status: 'running',
+      flavor: 'foreground',
+    });
+    const h = setup([fg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.cancel).not.toHaveBeenCalled();
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.cancel).toHaveBeenCalledWith('fg-1');
+  });
+
+  it('background cancel still fires on the first `x` press (no confirm)', () => {
+    // Backwards compatibility: the existing background-only cancel UX
+    // stays one-shot. Adding a confirm there would regress every workflow
+    // that relies on quickly cancelling a long-running async agent.
+    const bg = entry({
+      agentId: 'bg-1',
+      status: 'running',
+      flavor: 'background',
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.cancel).toHaveBeenCalledWith('bg-1');
+  });
+
+  it('ignores `x` on a terminal foreground entry (no arm, no cancel call)', () => {
+    // A foreground entry briefly stays visible after settling but before
+    // the tool-call's finally path unregisters it. The dialog's hint
+    // footer drops "x stop" once status leaves 'running', but without
+    // gating handleCancelKey itself, the first `x` would still arm a
+    // confirm step on the (now-terminal) entry — surfacing a misleading
+    // "x again to confirm stop" line that does nothing.
+    const completed = entry({
+      agentId: 'fg-done',
+      status: 'completed',
+      flavor: 'foreground',
+    });
+    const h = setup([completed]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.lastFrame()).not.toContain('x again to confirm stop');
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.cancel).not.toHaveBeenCalled();
+  });
+
+  it('detail-mode left clears any armed foreground cancel before exiting', () => {
+    // Detail-mode `x` arms the foreground confirm step on the focused
+    // entry. If the user presses `left` to back out without confirming,
+    // the armed state must NOT carry into list mode — otherwise the
+    // hint bar still shows "x again to confirm stop" and the next `x`
+    // unintentionally cancels the run.
+    const fg = entry({
+      agentId: 'fg-1',
+      status: 'running',
+      flavor: 'foreground',
+    });
+    const h = setup([fg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    h.pressKey({ sequence: 'x' });
+    h.pressKey({ name: 'left' });
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+
+    // Back in list mode, the next `x` arms again rather than confirming
+    // a stale armed state inherited from detail mode.
+    h.pressKey({ sequence: 'x' });
+    expect(h.cancel).not.toHaveBeenCalled();
+  });
+
+  it('Esc backs out of an armed foreground cancel without closing the dialog', () => {
+    const fg = entry({
+      agentId: 'fg-1',
+      status: 'running',
+      flavor: 'foreground',
+    });
+    const h = setup([fg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+
+    h.pressKey({ sequence: 'x' });
+    h.pressKey({ name: 'escape' });
+    // Dialog still open — Esc on the armed cancel resets the confirm
+    // state instead of nuking the dialog.
+    expect(h.probe.current!.state.dialogOpen).toBe(true);
+
+    // After the Esc reset, the next `x` arms again rather than confirming.
+    h.pressKey({ sequence: 'x' });
+    expect(h.cancel).not.toHaveBeenCalled();
   });
 
   it('clamps selectedIndex when entries shrink', () => {

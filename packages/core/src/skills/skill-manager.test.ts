@@ -1428,9 +1428,7 @@ Symlink skill content`);
       vi.mocked(fs.realpath).mockImplementation((p) => {
         const s = String(p);
         if (s.endsWith('broken-symlink')) {
-          return Promise.reject(
-            new Error('ENOENT: no such file or directory'),
-          );
+          return Promise.reject(new Error('ENOENT: no such file or directory'));
         }
         return Promise.resolve(s);
       });

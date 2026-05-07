@@ -25,7 +25,10 @@ describe('validateSymlinkScope', () => {
       isDirectory: () => true,
     } as Awaited<ReturnType<typeof fs.stat>>);
 
-    const result = await validateSymlinkScope('/base/skills/link', '/base/skills');
+    const result = await validateSymlinkScope(
+      '/base/skills/link',
+      '/base/skills',
+    );
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.realPath).toBe('/base/skills/foo');
@@ -38,14 +41,20 @@ describe('validateSymlinkScope', () => {
       isDirectory: () => true,
     } as Awaited<ReturnType<typeof fs.stat>>);
 
-    const result = await validateSymlinkScope('/base/skills/link', '/base/skills');
+    const result = await validateSymlinkScope(
+      '/base/skills/link',
+      '/base/skills',
+    );
     expect(result.ok).toBe(true);
   });
 
   it('rejects when realpath fails (broken symlink)', async () => {
     vi.mocked(fs.realpath).mockRejectedValue(new Error('ENOENT'));
 
-    const result = await validateSymlinkScope('/base/skills/dangling', '/base/skills');
+    const result = await validateSymlinkScope(
+      '/base/skills/dangling',
+      '/base/skills',
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toBe('invalid');
@@ -127,7 +136,10 @@ describe('validateSymlinkScope', () => {
       isDirectory: () => false,
     } as Awaited<ReturnType<typeof fs.stat>>);
 
-    const result = await validateSymlinkScope('/base/skills/link', '/base/skills');
+    const result = await validateSymlinkScope(
+      '/base/skills/link',
+      '/base/skills',
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toBe('not-directory');
@@ -138,7 +150,10 @@ describe('validateSymlinkScope', () => {
     vi.mocked(fs.realpath).mockResolvedValue('/base/skills/foo');
     vi.mocked(fs.stat).mockRejectedValue(new Error('EACCES'));
 
-    const result = await validateSymlinkScope('/base/skills/link', '/base/skills');
+    const result = await validateSymlinkScope(
+      '/base/skills/link',
+      '/base/skills',
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toBe('invalid');
@@ -155,7 +170,10 @@ describe('validateSymlinkScope', () => {
       isDirectory: () => true,
     } as Awaited<ReturnType<typeof fs.stat>>);
 
-    const result = await validateSymlinkScope('/base/skills/self', '/base/skills');
+    const result = await validateSymlinkScope(
+      '/base/skills/self',
+      '/base/skills',
+    );
     expect(result.ok).toBe(true);
   });
 });

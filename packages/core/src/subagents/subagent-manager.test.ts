@@ -72,6 +72,11 @@ describe('SubagentManager', () => {
         { name: 'write_file', displayName: 'Write File' },
         { name: 'grep', displayName: 'Search Files' },
       ]),
+      // `maybeOverrideContentGenerator` now rebuilds the tool registry on
+      // its override and copies discovered tools from this parent
+      // registry. The real implementation iterates `source.tools.values()`,
+      // so the stub needs a `tools` Map to avoid a TypeError.
+      tools: new Map(),
     } as unknown as ToolRegistry;
 
     // Create mock Config object using test utility
