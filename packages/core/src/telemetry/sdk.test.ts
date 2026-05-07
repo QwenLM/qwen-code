@@ -241,7 +241,7 @@ describe('Telemetry SDK', () => {
     // Logs falls back to LogToSpanProcessor (bridges logs → spans)
     expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
     expect(LogToSpanProcessor).toHaveBeenCalledWith(expect.anything(), {
-      includeSensitiveAttributes: false,
+      includeSensitiveSpanAttributes: false,
     });
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
   });
@@ -260,7 +260,7 @@ describe('Telemetry SDK', () => {
     initializeTelemetry(mockConfig);
 
     expect(LogToSpanProcessor).toHaveBeenCalledWith(expect.anything(), {
-      includeSensitiveAttributes: true,
+      includeSensitiveSpanAttributes: true,
     });
   });
 

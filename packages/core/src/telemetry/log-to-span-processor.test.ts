@@ -158,8 +158,9 @@ describe('LogToSpanProcessor', () => {
   it('keeps sensitive attributes when explicitly enabled', async () => {
     await processor.shutdown();
     exportedSpans = [];
-    processor = new LogToSpanProcessor(mockExporter, 60000, {
-      includeSensitiveAttributes: true,
+    processor = new LogToSpanProcessor(mockExporter, {
+      flushIntervalMs: 60000,
+      includeSensitiveSpanAttributes: true,
     });
     const logRecord = {
       body: 'event',

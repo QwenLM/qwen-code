@@ -204,7 +204,7 @@ export function initializeTelemetry(config: Config): void {
         logToSpanProcessor = new LogToSpanProcessor(
           new OTLPTraceExporterHttp({ url: tracesUrl }),
           {
-            includeSensitiveAttributes:
+            includeSensitiveSpanAttributes:
               config.getTelemetryIncludeSensitiveSpanAttributes(),
           },
         );

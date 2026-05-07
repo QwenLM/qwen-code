@@ -28,7 +28,8 @@ const SENSITIVE_ATTRIBUTE_KEYS = new Set([
 ]);
 
 interface LogToSpanProcessorOptions {
-  includeSensitiveAttributes?: boolean;
+  flushIntervalMs?: number;
+  includeSensitiveSpanAttributes?: boolean;
 }
 
 /**
@@ -49,21 +50,22 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private flushTimer: ReturnType<typeof setInterval> | undefined;
   private inFlightExport: Promise<void> | undefined;
   private readonly flushIntervalMs: number;
-  private readonly includeSensitiveAttributes: boolean;
+  private readonly includeSensitiveSpanAttributes: boolean;
 
+  constructor(spanExporter: SpanExporter);
+  constructor(spanExporter: SpanExporter, flushIntervalMs: number);
+  constructor(spanExporter: SpanExporter, options: LogToSpanProcessorOptions);
   constructor(
     private readonly spanExporter: SpanExporter,
     flushIntervalMsOrOptions: number | LogToSpanProcessorOptions = 5000,
-    options: LogToSpanProcessorOptions = {},
   ) {
     if (typeof flushIntervalMsOrOptions === 'number') {
       this.flushIntervalMs = flushIntervalMsOrOptions;
-      this.includeSensitiveAttributes =
-        options.includeSensitiveAttributes ?? false;
+      this.includeSensitiveSpanAttributes = false;
     } else {
-      this.flushIntervalMs = 5000;
-      this.includeSensitiveAttributes =
-        flushIntervalMsOrOptions.includeSensitiveAttributes ?? false;
+      this.flushIntervalMs = flushIntervalMsOrOptions.flushIntervalMs ?? 5000;
+      this.includeSensitiveSpanAttributes =
+        flushIntervalMsOrOptions.includeSensitiveSpanAttributes ?? false;
     }
     this.flushTimer = setInterval(() => {
       void this.flush();
@@ -81,7 +83,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         if (
           value !== undefined &&
           value !== null &&
-          (this.includeSensitiveAttributes ||
+          (this.includeSensitiveSpanAttributes ||
             !SENSITIVE_ATTRIBUTE_KEYS.has(key))
         ) {
           attributes[key] =
