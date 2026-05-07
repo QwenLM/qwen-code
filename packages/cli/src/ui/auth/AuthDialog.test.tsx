@@ -124,6 +124,8 @@ const typeText = async (
 const escapeRegExp = (text: string) =>
   text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+const WAIT_FOR_TIMEOUT = 5000;
+
 const expectSelectedOption = (frame: string | undefined, label: string) => {
   expect(frame).toMatch(
     new RegExp(`›\\s*(?:\\d+\\.\\s*)?${escapeRegExp(label)}`),
@@ -134,9 +136,12 @@ const waitForSelectedOption = async (
   lastFrame: () => string | undefined,
   label: string,
 ) => {
-  await vi.waitFor(() => {
-    expectSelectedOption(lastFrame(), label);
-  });
+  await vi.waitFor(
+    () => {
+      expectSelectedOption(lastFrame(), label);
+    },
+    { timeout: WAIT_FOR_TIMEOUT },
+  );
 };
 
 const pressEnterAndWaitFor = async (
@@ -145,9 +150,12 @@ const pressEnterAndWaitFor = async (
   expectedText: string,
 ) => {
   stdin.write('\r');
-  await vi.waitFor(() => {
-    expect(lastFrame()).toContain(expectedText);
-  });
+  await vi.waitFor(
+    () => {
+      expect(lastFrame()).toContain(expectedText);
+    },
+    { timeout: WAIT_FOR_TIMEOUT },
+  );
 };
 
 const moveDownAndWaitForSelection = async (
@@ -166,9 +174,12 @@ const navigateToCustomProtocolSelect = async (
   await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Third-party Providers');
   await moveDownAndWaitForSelection(stdin, lastFrame, 'OAuth');
-  await vi.waitFor(() => {
-    expect(lastFrame()).toContain('Custom Provider');
-  });
+  await vi.waitFor(
+    () => {
+      expect(lastFrame()).toContain('Custom Provider');
+    },
+    { timeout: WAIT_FOR_TIMEOUT },
+  );
   stdin.write('\u001b[B');
   await waitForSelectedOption(lastFrame, 'Custom Provider');
   await pressEnterAndWaitFor(
@@ -602,18 +613,20 @@ describe('AuthDialog', () => {
       { handleAuthSelect },
       undefined, // config.getAuthType() returns undefined
     );
-    await wait();
+    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
 
     // Simulate pressing escape key
     stdin.write('\u001b'); // ESC key
-    await wait();
 
     // Should show error message instead of calling handleAuthSelect
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('You must select an auth method');
-      expect(frame).toContain('Press Ctrl+C again to exit');
-    });
+    await vi.waitFor(
+      () => {
+        const frame = lastFrame();
+        expect(frame).toContain('You must select an auth method');
+        expect(frame).toContain('Press Ctrl+C again to exit');
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
     expect(handleAuthSelect).not.toHaveBeenCalled();
     unmount();
   });
@@ -664,9 +677,12 @@ describe('AuthDialog', () => {
       { handleAuthSelect },
       undefined, // config.getAuthType() returns undefined
     );
-    await wait();
-
-    expect(lastFrame()).toContain('Initial error');
+    await vi.waitFor(
+      () => {
+        expect(lastFrame()).toContain('Initial error');
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     // Simulate pressing escape key
     stdin.write('\u001b'); // ESC key
@@ -712,13 +728,18 @@ describe('AuthDialog', () => {
       new Set(),
     );
 
-    const { stdin, unmount } = renderAuthDialog(
+    const { stdin, lastFrame, unmount } = renderAuthDialog(
       settings,
       {},
       { handleAuthSelect },
       AuthType.USE_OPENAI, // config.getAuthType() returns USE_OPENAI
     );
-    await wait();
+    await vi.waitFor(
+      () => {
+        expect(lastFrame()).toBeTruthy();
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     // Simulate pressing escape key
     stdin.write('\u001b'); // ESC key
@@ -785,7 +806,6 @@ describe('AuthDialog', () => {
 
     for (const testCase of cases) {
       const { stdin, lastFrame, unmount } = renderAuthDialog(createSettings());
-      await wait();
 
       await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
       while (
@@ -839,7 +859,6 @@ describe('AuthDialog', () => {
     );
 
     const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
-    await wait();
 
     await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
     await pressEnterAndWaitFor(
@@ -855,12 +874,15 @@ describe('AuthDialog', () => {
     );
     stdin.write('\u001b');
 
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('Alibaba ModelStudio');
-      expect(frame).toContain('Coding Plan');
-      expect(frame).toContain('Token Plan');
-    });
+    await vi.waitFor(
+      () => {
+        const frame = lastFrame();
+        expect(frame).toContain('Alibaba ModelStudio');
+        expect(frame).toContain('Coding Plan');
+        expect(frame).toContain('Token Plan');
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     unmount();
   });
@@ -900,8 +922,8 @@ describe('AuthDialog', () => {
     );
 
     const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
-    await wait();
 
+    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
     await moveDownAndWaitForSelection(
       stdin,
       lastFrame,
@@ -920,11 +942,14 @@ describe('AuthDialog', () => {
     );
     stdin.write('\u001b');
 
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('Third-party Providers · Provider');
-      expect(frame).toContain('DeepSeek API Key');
-    });
+    await vi.waitFor(
+      () => {
+        const frame = lastFrame();
+        expect(frame).toContain('Third-party Providers · Provider');
+        expect(frame).toContain('DeepSeek API Key');
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     unmount();
   });
@@ -964,8 +989,8 @@ describe('AuthDialog', () => {
     );
 
     const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
-    await wait();
 
+    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
     await moveDownAndWaitForSelection(
       stdin,
       lastFrame,
@@ -977,15 +1002,18 @@ describe('AuthDialog', () => {
       'Third-party Providers · Provider',
     );
 
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('DeepSeek API Key');
-      expect(frame).toContain('MiniMax API Key');
-      expect(frame).toContain('Z.AI API Key');
-      expect(frame).not.toContain('OpenAI API Key');
-      expect(frame).not.toContain('HuggingFace API Key');
-      expect(frame).not.toContain('Standard API Key');
-    });
+    await vi.waitFor(
+      () => {
+        const frame = lastFrame();
+        expect(frame).toContain('DeepSeek API Key');
+        expect(frame).toContain('MiniMax API Key');
+        expect(frame).toContain('Z.AI API Key');
+        expect(frame).not.toContain('OpenAI API Key');
+        expect(frame).not.toContain('HuggingFace API Key');
+        expect(frame).not.toContain('Standard API Key');
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     unmount();
   });
@@ -1025,8 +1053,8 @@ describe('AuthDialog', () => {
     );
 
     const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
-    await wait();
 
+    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
     await moveDownAndWaitForSelection(
       stdin,
       lastFrame,
@@ -1044,9 +1072,12 @@ describe('AuthDialog', () => {
       'DeepSeek API Key · Step 1/2 · API Key',
     );
     stdin.write('\u001b');
-    await vi.waitFor(() => {
-      expect(lastFrame()).toContain('Third-party Providers · Provider');
-    });
+    await vi.waitFor(
+      () => {
+        expect(lastFrame()).toContain('Third-party Providers · Provider');
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
     await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
     await pressEnterAndWaitFor(
       stdin,
@@ -1054,11 +1085,14 @@ describe('AuthDialog', () => {
       'MiniMax API Key · Step 1/3 · Endpoint',
     );
 
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('International');
-      expect(frame).toContain('China');
-    });
+    await vi.waitFor(
+      () => {
+        const frame = lastFrame();
+        expect(frame).toContain('International');
+        expect(frame).toContain('China');
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     unmount();
   });
@@ -1098,20 +1132,23 @@ describe('AuthDialog', () => {
     );
 
     const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
-    await wait();
 
+    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
     await pressEnterAndWaitFor(
       stdin,
       lastFrame,
       'Alibaba ModelStudio · Access Method',
     );
 
-    await vi.waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('Coding Plan');
-      expect(frame).toContain('Token Plan');
-      expect(frame).toContain('Usage-based billing with dedicated endpoint');
-    });
+    await vi.waitFor(
+      () => {
+        const frame = lastFrame();
+        expect(frame).toContain('Coding Plan');
+        expect(frame).toContain('Token Plan');
+        expect(frame).toContain('Usage-based billing with dedicated endpoint');
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     unmount();
   });
@@ -1156,7 +1193,6 @@ describe('AuthDialog', () => {
       {},
       { handleProviderSubmit },
     );
-    await wait();
 
     await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
     stdin.write('\r');
@@ -1176,9 +1212,12 @@ describe('AuthDialog', () => {
       'Alibaba ModelStudio · Step 2/2 · Model IDs',
     );
     stdin.write('\r');
-    await vi.waitFor(() => {
-      expect(handleProviderSubmit).toHaveBeenCalled();
-    });
+    await vi.waitFor(
+      () => {
+        expect(handleProviderSubmit).toHaveBeenCalled();
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     unmount();
   });
@@ -1218,7 +1257,6 @@ describe('AuthDialog', () => {
     );
 
     const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
-    await wait();
 
     await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
     stdin.write('\r');
@@ -1231,10 +1269,13 @@ describe('AuthDialog', () => {
     );
     stdin.write('\u001b');
 
-    await vi.waitFor(() => {
-      expect(lastFrame()).toContain('Alibaba ModelStudio');
-      expectSelectedOption(lastFrame(), 'Token Plan');
-    });
+    await vi.waitFor(
+      () => {
+        expect(lastFrame()).toContain('Alibaba ModelStudio');
+        expectSelectedOption(lastFrame(), 'Token Plan');
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     unmount();
   });
@@ -1279,8 +1320,8 @@ describe('AuthDialog', () => {
       {},
       { handleOpenRouterSubmit },
     );
-    await wait();
 
+    await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
     await moveDownAndWaitForSelection(
       stdin,
       lastFrame,
@@ -1290,11 +1331,13 @@ describe('AuthDialog', () => {
     await pressEnterAndWaitFor(stdin, lastFrame, 'Select OAuth Provider');
     await waitForSelectedOption(lastFrame, 'OpenRouter');
     stdin.write('\r');
-    await wait();
 
-    await vi.waitFor(() => {
-      expect(handleOpenRouterSubmit).toHaveBeenCalledTimes(1);
-    });
+    await vi.waitFor(
+      () => {
+        expect(handleOpenRouterSubmit).toHaveBeenCalledTimes(1);
+      },
+      { timeout: WAIT_FOR_TIMEOUT },
+    );
 
     unmount();
   });
@@ -1366,13 +1409,16 @@ describe('AuthDialog Custom API Key Wizard', () => {
 
       await navigateToCustomProtocolSelect(stdin, lastFrame);
 
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('Custom Provider · Step 1/6 · Protocol');
-        expect(frame).toContain('OpenAI-compatible');
-        expect(frame).toContain('Anthropic-compatible');
-        expect(frame).toContain('Gemini-compatible');
-      });
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame();
+          expect(frame).toContain('Custom Provider · Step 1/6 · Protocol');
+          expect(frame).toContain('OpenAI-compatible');
+          expect(frame).toContain('Anthropic-compatible');
+          expect(frame).toContain('Gemini-compatible');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
 
       unmount();
     },
@@ -1402,11 +1448,14 @@ describe('AuthDialog Custom API Key Wizard', () => {
 
       await navigateToCustomBaseUrlInput(stdin, lastFrame);
 
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('Custom Provider · Step 2/6 · Base URL');
-        expect(frame).toContain('Enter the API endpoint');
-      });
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame();
+          expect(frame).toContain('Custom Provider · Step 2/6 · Base URL');
+          expect(frame).toContain('Enter the API endpoint');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
 
       unmount();
     },
@@ -1446,15 +1495,18 @@ describe('AuthDialog Custom API Key Wizard', () => {
         'Custom Provider · Step 6/6 · Review',
       );
 
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('Custom Provider · Step 6/6 · Review');
-        expect(frame).toContain('The following JSON will be saved');
-        expect(frame).toContain('QWEN_CUSTOM_API_KEY_');
-        expect(frame).toContain('qwen/qwen3-coder');
-        expect(frame).toContain('gpt-4.1');
-        expect(frame).toContain('Enter to save');
-      });
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame();
+          expect(frame).toContain('Custom Provider · Step 6/6 · Review');
+          expect(frame).toContain('The following JSON will be saved');
+          expect(frame).toContain('QWEN_CUSTOM_API_KEY_');
+          expect(frame).toContain('qwen/qwen3-coder');
+          expect(frame).toContain('gpt-4.1');
+          expect(frame).toContain('Enter to save');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
 
       unmount();
     },
@@ -1495,24 +1547,29 @@ describe('AuthDialog Custom API Key Wizard', () => {
         'Custom Provider · Step 6/6 · Review',
       );
 
-      await vi.waitFor(() => {
-        const frame = lastFrame();
-        expect(frame).toContain('Enter to save');
-      });
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame();
+          expect(frame).toContain('Enter to save');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
 
       stdin.write('\r'); // Enter to save
-      await wait();
 
-      await vi.waitFor(() => {
-        expect(handleProviderSubmit).toHaveBeenCalledWith(
-          expect.objectContaining({ id: 'custom-openai-compatible' }),
-          expect.objectContaining({
-            protocol: AuthType.USE_OPENAI,
-            apiKey: 'sk-test',
-            modelIds: ['model-1', 'model-2'],
-          }),
-        );
-      });
+      await vi.waitFor(
+        () => {
+          expect(handleProviderSubmit).toHaveBeenCalledWith(
+            expect.objectContaining({ id: 'custom-openai-compatible' }),
+            expect.objectContaining({
+              protocol: AuthType.USE_OPENAI,
+              apiKey: 'sk-test',
+              modelIds: ['model-1', 'model-2'],
+            }),
+          );
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
 
       unmount();
     },
