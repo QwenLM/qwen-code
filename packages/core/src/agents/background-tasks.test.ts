@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { BackgroundTaskRegistry } from './background-tasks.js';
+import {
+  BackgroundTaskRegistry,
+  type BackgroundTaskEntry,
+} from './background-tasks.js';
+import * as transcript from './agent-transcript.js';
 
 describe('BackgroundTaskRegistry', () => {
   let registry: BackgroundTaskRegistry;
@@ -100,6 +104,34 @@ describe('BackgroundTaskRegistry', () => {
     expect(registry.get('test-1')!.status).toBe('cancelled');
     expect(abortController.signal.aborted).toBe(true);
     expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('persists explicit cancellations as cancelled sidecar state', () => {
+    const patchSpy = vi
+      .spyOn(transcript, 'patchAgentMeta')
+      .mockImplementation(() => undefined);
+    try {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        metaPath: '/tmp/test-1.meta.json',
+      });
+
+      registry.cancel('test-1');
+
+      expect(patchSpy).toHaveBeenCalledWith(
+        '/tmp/test-1.meta.json',
+        expect.objectContaining({
+          status: 'cancelled',
+          lastError: undefined,
+        }),
+      );
+    } finally {
+      patchSpy.mockRestore();
+    }
   });
 
   it('emits a fallback cancelled notification after the grace period when the natural handler never runs', () => {
@@ -228,6 +260,37 @@ describe('BackgroundTaskRegistry', () => {
     expect(abortController.signal.aborted).toBe(false);
   });
 
+  it('abandons a paused agent without emitting a notification', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'paused-1',
+      description: 'paused agent',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.abandon('paused-1');
+
+    expect(registry.get('paused-1')!.status).toBe('cancelled');
+    expect(registry.get('paused-1')!.notified).toBe(true);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('does not treat paused entries as unfinalized work', () => {
+    registry.register({
+      agentId: 'paused-1',
+      description: 'paused agent',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    expect(registry.hasUnfinalizedTasks()).toBe(false);
+  });
+
   it('lists running agents', () => {
     registry.register({
       agentId: 'a',
@@ -246,7 +309,7 @@ describe('BackgroundTaskRegistry', () => {
 
     registry.complete('a', 'done');
 
-    const running = registry.getRunning();
+    const running = registry.getAll().filter((e) => e.status === 'running');
     expect(running).toHaveLength(1);
     expect(running[0].agentId).toBe('b');
   });
@@ -283,6 +346,57 @@ describe('BackgroundTaskRegistry', () => {
     // finalizeCancellationIfPending emits one cancelled notification per
     // agent to keep the SDK contract intact.
     expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it('abortAll({ notify: false }) suppresses terminal notifications from old tasks', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.abortAll({ notify: false });
+
+    expect(registry.get('a')!.status).toBe('cancelled');
+    expect(registry.hasUnfinalizedTasks()).toBe(false);
+    expect(callback).not.toHaveBeenCalled();
+
+    registry.complete('a', 'late result');
+    registry.finalizeCancelled('a', 'late partial');
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(registry.get('a')!.status).toBe('cancelled');
+    expect(registry.get('a')!.result).toBeUndefined();
+  });
+
+  it('abortAll({ notify: false }) suppresses pending fallback notifications', () => {
+    vi.useFakeTimers();
+    try {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'a',
+        description: 'agent a',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.cancel('a');
+      registry.abortAll({ notify: false });
+      vi.runAllTimers();
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(registry.hasUnfinalizedTasks()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('hasUnfinalizedTasks reports cancelled-but-not-notified entries', () => {
@@ -457,6 +571,192 @@ describe('BackgroundTaskRegistry', () => {
     expect(meta.toolUseId).toBeUndefined();
   });
 
+  it('getAll returns every entry regardless of status', () => {
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.register({
+      agentId: 'b',
+      description: 'agent b',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.register({
+      agentId: 'c',
+      description: 'agent c',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.complete('a', 'done');
+    registry.fail('b', 'boom');
+
+    const all = registry.getAll();
+    expect(all).toHaveLength(3);
+    expect(all.map((e) => e.status).sort()).toEqual([
+      'completed',
+      'failed',
+      'running',
+    ]);
+    // Callers that need only running entries filter getAll() themselves.
+    expect(
+      registry
+        .getAll()
+        .filter((e) => e.status === 'running')
+        .map((e) => e.agentId),
+    ).toEqual(['c']);
+  });
+
+  it('statusChange callback fires on register and every state transition', () => {
+    const seen: Array<{ id: string; status: string }> = [];
+    registry.setStatusChangeCallback((entry) => {
+      if (entry) {
+        seen.push({ id: entry.agentId, status: entry.status });
+      }
+    });
+
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.register({
+      agentId: 'b',
+      description: 'agent b',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.complete('a', 'ok');
+    registry.fail('b', 'err');
+
+    expect(seen).toEqual([
+      { id: 'a', status: 'running' },
+      { id: 'b', status: 'running' },
+      { id: 'a', status: 'completed' },
+      { id: 'b', status: 'failed' },
+    ]);
+  });
+
+  it('statusChange callback errors do not break registry operations', () => {
+    registry.setStatusChangeCallback(() => {
+      throw new Error('listener broke');
+    });
+
+    // Should not throw even though the callback does.
+    expect(() =>
+      registry.register({
+        agentId: 'a',
+        description: 'agent a',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      }),
+    ).not.toThrow();
+    expect(registry.get('a')?.status).toBe('running');
+  });
+
+  it('statusChange callback can be cleared with undefined', () => {
+    const cb = vi.fn();
+    registry.setStatusChangeCallback(cb);
+    registry.setStatusChangeCallback(undefined);
+
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('appendActivity builds a rolling buffer capped at 5', () => {
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    for (let i = 0; i < 7; i++) {
+      registry.appendActivity('a', {
+        name: `Tool${i}`,
+        description: `call ${i}`,
+        at: i,
+      });
+    }
+
+    const activities = registry.get('a')!.recentActivities ?? [];
+    expect(activities.map((a) => a.name)).toEqual([
+      'Tool2',
+      'Tool3',
+      'Tool4',
+      'Tool5',
+      'Tool6',
+    ]);
+  });
+
+  it('appendActivity no-ops after the agent terminates', () => {
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.complete('a', 'done');
+    registry.appendActivity('a', { name: 'Late', description: 'x', at: 99 });
+
+    expect(registry.get('a')!.recentActivities ?? []).toHaveLength(0);
+  });
+
+  it('appendActivity fires activityChange, not statusChange', () => {
+    const statusCb = vi.fn();
+    const activityCb = vi.fn();
+    registry.setStatusChangeCallback(statusCb);
+    registry.setActivityChangeCallback(activityCb);
+
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    statusCb.mockClear();
+    activityCb.mockClear();
+
+    registry.appendActivity('a', { name: 'T', description: 'd', at: 0 });
+
+    expect(statusCb).not.toHaveBeenCalled();
+    expect(activityCb).toHaveBeenCalledOnce();
+    expect(activityCb.mock.calls[0][0].agentId).toBe('a');
+  });
+
+  it('stores prompt verbatim on the entry', () => {
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Run sleep 30 and report done.',
+    });
+    expect(registry.get('a')!.prompt).toBe('Run sleep 30 and report done.');
+  });
+
   it('escapes XML metacharacters in interpolated fields', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);
@@ -549,6 +849,29 @@ describe('BackgroundTaskRegistry', () => {
     });
   });
 
+  describe('session switch helpers', () => {
+    it('reset clears tracked entries without touching persisted sidecars', () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      registry.register({
+        agentId: 'test-2',
+        description: 'paused agent',
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.reset();
+
+      expect(registry.getAll()).toEqual([]);
+    });
+  });
+
   describe('notification XML', () => {
     it('includes output-file tag when outputFile is set', () => {
       const callback = vi.fn();
@@ -587,6 +910,218 @@ describe('BackgroundTaskRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).not.toContain('<output-file>');
+    });
+  });
+
+  describe('foreground flavor', () => {
+    it('does not emit a task-notification on complete', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'fg-1',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.complete('fg-1', 'result text');
+
+      // Foreground entries deliver their result through the parent's normal
+      // tool-result channel; emitting the XML envelope on top would feed
+      // the parent model the same payload twice.
+      expect(callback).not.toHaveBeenCalled();
+      // The status mutation still happens — internal invariants intact.
+      expect(registry.get('fg-1')!.status).toBe('completed');
+      expect(registry.get('fg-1')!.notified).toBe(true);
+    });
+
+    it('does not emit a task-notification on fail', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'fg-2',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.fail('fg-2', 'oops');
+
+      expect(callback).not.toHaveBeenCalled();
+    });
+
+    it('is excluded from hasUnfinalizedTasks()', () => {
+      registry.register({
+        agentId: 'fg-3',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      // A still-running foreground entry must NOT keep the headless
+      // event loop alive — the parent's tool-call await already does that.
+      expect(registry.hasUnfinalizedTasks()).toBe(false);
+    });
+
+    it('cancel does not schedule the grace timer', () => {
+      // The grace-timer fallback only matters for background entries that
+      // might not see their natural completion handler fire. Foreground
+      // entries unregister themselves in agent.ts's finally path.
+      vi.useFakeTimers();
+      try {
+        const callback = vi.fn();
+        registry.setNotificationCallback(callback);
+
+        registry.register({
+          agentId: 'fg-4',
+          description: 'sync agent',
+          flavor: 'foreground',
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+        });
+
+        registry.cancel('fg-4');
+
+        // Advance well past the 5s grace window — no notification should fire.
+        vi.advanceTimersByTime(60_000);
+        expect(callback).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('unregisterForeground removes the entry and emits a status change', () => {
+      const onStatusChange = vi.fn();
+      registry.setStatusChangeCallback(onStatusChange);
+
+      registry.register({
+        agentId: 'fg-5',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      onStatusChange.mockClear();
+
+      registry.unregisterForeground('fg-5');
+
+      expect(registry.get('fg-5')).toBeUndefined();
+      expect(onStatusChange).toHaveBeenCalledTimes(1);
+    });
+
+    it('unregisterForeground throws if asked to remove a background entry', () => {
+      // Background entries must terminate via complete/fail/finalizeCancelled
+      // so the task-notification + headless holdback invariants stay intact.
+      // A silent no-op would mask caller bugs, so this throws.
+      registry.register({
+        agentId: 'bg-1',
+        description: 'async agent',
+        flavor: 'background',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      expect(() => registry.unregisterForeground('bg-1')).toThrow(
+        /non-foreground entry bg-1/,
+      );
+      expect(registry.get('bg-1')).toBeDefined();
+    });
+
+    it('unregisterForeground is a no-op for unknown agent ids', () => {
+      // Idempotent for already-unregistered/never-registered ids — the
+      // foreground finally path runs unconditionally and shouldn't throw
+      // if a parallel cancel already cleared the entry.
+      expect(() => registry.unregisterForeground('missing')).not.toThrow();
+    });
+
+    it('does not invoke the register callback for foreground entries', () => {
+      // Non-interactive bridges setRegisterCallback to a `task_started`
+      // SDK event. Foreground entries never produce a paired terminal
+      // task-notification (see emitNotification's flavor gate), so letting
+      // them fire `task_started` would leak orphaned in-flight tasks to
+      // SDK consumers.
+      const onRegister = vi.fn();
+      registry.setRegisterCallback(onRegister);
+
+      registry.register({
+        agentId: 'fg-no-register-cb',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      expect(onRegister).not.toHaveBeenCalled();
+
+      // Background entries still fire it.
+      registry.register({
+        agentId: 'bg-fires-register-cb',
+        description: 'async agent',
+        flavor: 'background',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      expect(onRegister).toHaveBeenCalledTimes(1);
+      expect(onRegister.mock.calls[0]![0].agentId).toBe('bg-fires-register-cb');
+    });
+
+    it('unregisterForeground emits status change before removing the entry', () => {
+      // Mirrors the ordering used by complete/fail/cancel/finalize so a
+      // statusChange callback that re-reads `registry.get(agentId)` from
+      // inside the callback sees the entry across every terminal path.
+      registry.register({
+        agentId: 'fg-unregister-order',
+        description: 'sync agent',
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      let observedFromCallback: BackgroundTaskEntry | undefined;
+      registry.setStatusChangeCallback((entry) => {
+        if (entry?.agentId === 'fg-unregister-order') {
+          observedFromCallback = registry.get(entry.agentId);
+        }
+      });
+
+      registry.unregisterForeground('fg-unregister-order');
+
+      expect(observedFromCallback).toBeDefined();
+      expect(observedFromCallback!.agentId).toBe('fg-unregister-order');
+      expect(registry.get('fg-unregister-order')).toBeUndefined();
+    });
+
+    it('default flavor (absent) behaves as background for emitNotification', () => {
+      // Older callers omit the flavor field. Backwards compatibility:
+      // missing flavor is treated as background everywhere.
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'legacy-1',
+        description: 'legacy agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.complete('legacy-1', 'done');
+
+      expect(callback).toHaveBeenCalledOnce();
     });
   });
 });

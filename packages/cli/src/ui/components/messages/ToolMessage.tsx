@@ -22,8 +22,10 @@ import type {
   AnsiOutputDisplay,
   Config,
   McpToolProgressData,
+  FileDiff,
 } from '@qwen-code/qwen-code-core';
 import { AgentExecutionDisplay } from '../subagents/index.js';
+import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
@@ -48,6 +50,14 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
 export type TextEmphasis = 'high' | 'medium' | 'low';
+type DiffResultDisplay = Pick<
+  FileDiff,
+  | 'fileDiff'
+  | 'fileName'
+  | 'truncatedForSession'
+  | 'fileDiffLength'
+  | 'fileDiffTruncated'
+>;
 
 function sliceTextForMaxHeight(
   text: string,
@@ -174,7 +184,7 @@ const useResultDisplayRenderer = (
     ) {
       return {
         type: 'diff',
-        data: resultDisplay as { fileDiff: string; fileName: string },
+        data: resultDisplay as DiffResultDisplay,
       };
     }
 
@@ -238,7 +248,19 @@ const PlanResultRenderer: React.FC<{
 );
 
 /**
- * Component to render subagent execution results
+ * Component to render subagent execution results.
+ *
+ * Live (`isPending===true`): the inline frame is suppressed — running
+ * subagents are surfaced through the footer pill + dialog instead, which
+ * removes the live-area flicker that occurred when the frame's tool-call
+ * list grew past the terminal height. The one exception is an active
+ * approval prompt that holds the focus lock: that renders as a small
+ * banner with an agent-name label, since hiding it would block the run
+ * silently.
+ *
+ * Committed (`isPending===false`): renders the full `AgentExecutionDisplay`
+ * exactly as before. Ink's `<Static>` is append-only, so committed frames
+ * never flicker even when verbose.
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -246,6 +268,7 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth: number;
   config: Config;
   isFocused?: boolean;
+  isPending?: boolean;
   isWaitingForOtherApproval?: boolean;
 }> = ({
   data,
@@ -253,17 +276,62 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth,
   config,
   isFocused,
+  isPending,
   isWaitingForOtherApproval,
-}) => (
-  <AgentExecutionDisplay
-    data={data}
-    availableHeight={availableHeight}
-    childWidth={childWidth}
-    config={config}
-    isFocused={isFocused}
-    isWaitingForOtherApproval={isWaitingForOtherApproval}
-  />
-);
+}) => {
+  if (isPending) {
+    if (data.pendingConfirmation && isFocused) {
+      // Active approval prompt for the focus-holding subagent — render
+      // inline so the user can act on it without opening the dialog.
+      const agentLabel = data.subagentName || 'agent';
+      return (
+        <Box flexDirection="column" paddingLeft={1}>
+          <Box>
+            <Text color={theme.text.secondary}>Approval requested by </Text>
+            <Text bold color={theme.text.accent}>
+              {agentLabel}
+            </Text>
+            <Text color={theme.text.secondary}>:</Text>
+          </Box>
+          <ToolConfirmationMessage
+            confirmationDetails={data.pendingConfirmation}
+            isFocused={isFocused}
+            availableTerminalHeight={availableHeight}
+            contentWidth={childWidth - 2}
+            compactMode={true}
+            config={config}
+          />
+        </Box>
+      );
+    }
+    if (data.pendingConfirmation) {
+      // Queued approval — another subagent currently holds the focus lock.
+      // A one-line marker keeps the user aware that something is waiting
+      // without opening the dialog; the full prompt renders on the
+      // focus-holder above and inside `BackgroundTasksDialog`.
+      const agentLabel = data.subagentName || 'agent';
+      return (
+        <Box paddingLeft={1}>
+          <Text color={theme.text.secondary} dimColor>
+            ⏳ Queued approval:{' '}
+          </Text>
+          <Text dimColor>{agentLabel}</Text>
+        </Box>
+      );
+    }
+    return null;
+  }
+  return (
+    <AgentExecutionDisplay
+      data={data}
+      availableHeight={availableHeight}
+      childWidth={childWidth}
+      config={config}
+      isFocused={isFocused}
+      isWaitingForOtherApproval={isWaitingForOtherApproval}
+    />
+  );
+};
 
 /**
  * Component to render string results (markdown or plain text)
@@ -319,19 +387,38 @@ const StringResultRenderer: React.FC<{
  * Component to render diff results
  */
 const DiffResultRenderer: React.FC<{
-  data: { fileDiff: string; fileName: string };
+  data: DiffResultDisplay;
   availableHeight?: number;
   childWidth: number;
   settings?: LoadedSettings;
-}> = ({ data, availableHeight, childWidth, settings }) => (
-  <DiffRenderer
-    diffContent={data.fileDiff}
-    filename={data.fileName}
-    availableTerminalHeight={availableHeight}
-    contentWidth={childWidth}
-    settings={settings}
-  />
-);
+}> = ({ data, availableHeight, childWidth, settings }) => {
+  const diffHeight =
+    data.truncatedForSession && availableHeight !== undefined
+      ? Math.max(1, availableHeight - 1)
+      : availableHeight;
+
+  return (
+    <Box flexDirection="column">
+      {data.truncatedForSession && (
+        <Text color={theme.status.warning} wrap="wrap">
+          {data.fileDiffTruncated
+            ? 'Saved session preview only; full diff omitted from JSONL'
+            : 'Saved session preview only; full file contents truncated in JSONL'}
+          {data.fileDiffTruncated && typeof data.fileDiffLength === 'number'
+            ? ` (${data.fileDiffLength} chars).`
+            : '.'}
+        </Text>
+      )}
+      <DiffRenderer
+        diffContent={data.fileDiff}
+        filename={data.fileName}
+        availableTerminalHeight={diffHeight}
+        contentWidth={childWidth}
+        settings={settings}
+      />
+    </Box>
+  );
+};
 
 export interface ToolMessageProps extends IndividualToolCallDisplay {
   availableTerminalHeight?: number;
@@ -342,8 +429,18 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   embeddedShellFocused?: boolean;
   config?: Config;
   forceShowResult?: boolean;
-  /** Whether this tool's subagent confirmation prompt should respond to keyboard input. */
+  /**
+   * Whether this subagent owns keyboard input for confirmations and
+   * Ctrl+E/Ctrl+F display shortcuts.
+   */
   isFocused?: boolean;
+  /**
+   * True when rendering inside `pendingHistoryItems` (live area), false once
+   * committed to `<Static>`. Foreground subagents suppress their inline
+   * frame in the live phase — the pill+dialog handle drill-down — but
+   * always render in scrollback.
+   */
+  isPending?: boolean;
   /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
   isWaitingForOtherApproval?: boolean;
 }
@@ -363,6 +460,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   isFocused,
+  isPending,
   isWaitingForOtherApproval,
   executionStartTime,
 }) => {
@@ -518,6 +616,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={innerWidth}
                 config={config}
                 isFocused={isFocused}
+                isPending={isPending}
                 isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             )}

@@ -5,18 +5,29 @@
  */
 
 /**
- * @fileoverview BackgroundTaskRegistry — tracks background (async) sub-agents.
+ * @fileoverview BackgroundTaskRegistry — tracks background (async) sub-agents
+ * and, with `flavor: 'foreground'`, the currently-running synchronous
+ * sub-agents whose UI is routed through the same pill+dialog while the
+ * parent turn waits on them. The two flavors share the registry (and the
+ * dialog wiring) but differ in lifecycle:
  *
- * When the Agent tool is called with `run_in_background: true`, the sub-agent
- * runs asynchronously. This registry tracks the lifecycle of each background
- * agent so the parent can be notified on completion.
+ * - `background` entries persist across turns, emit a `<task-notification>`
+ *   on terminal status (the parent's only return channel), and contribute to
+ *   `hasUnfinalizedTasks()` so headless callers keep their loop alive.
+ * - `foreground` entries live for the duration of the parent's tool-call,
+ *   are unregistered as soon as `execute()` returns, deliver their result
+ *   through the normal tool-result channel (no XML envelope), and don't
+ *   participate in the headless holdback.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
+import { patchAgentMeta } from './agent-transcript.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
 const MAX_DESCRIPTION_LENGTH = 40;
+const MAX_RECENT_ACTIVITIES = 5;
 
 // Grace period after cancel() before emitting a fallback cancelled
 // notification. The natural handler (bgBody) almost always settles and
@@ -27,21 +38,45 @@ const MAX_DESCRIPTION_LENGTH = 40;
 // doesn't feel hung.
 const CANCEL_GRACE_MS = 5000;
 
-// Escape text so it is safe to interpolate into an XML element body.
+/**
+ * Single source of truth for the human-facing label of a background
+ * entry. Shared by the notification payload (model-facing) and the TUI
+ * dialog (user-facing) so the two surfaces never drift.
+ *
+ * When `includePrefix` is true (default), returns `subagentType: desc`;
+ * when false, returns the bare truncated description — used where the
+ * subagent type is already rendered separately (e.g. the dialog header).
+ */
+export function buildBackgroundEntryLabel(
+  entry: { description: string; subagentType?: string },
+  options: { includePrefix?: boolean } = {},
+): string {
+  const { includePrefix = true } = options;
+  let raw = entry.description;
+  if (
+    entry.subagentType &&
+    raw.toLowerCase().startsWith(entry.subagentType.toLowerCase() + ':')
+  ) {
+    raw = raw.slice(entry.subagentType.length + 1).trimStart();
+  }
+  const truncated =
+    raw.length > MAX_DESCRIPTION_LENGTH
+      ? raw.slice(0, MAX_DESCRIPTION_LENGTH - 1) + '\u2026'
+      : raw;
+  return includePrefix && entry.subagentType
+    ? `${entry.subagentType}: ${truncated}`
+    : truncated;
+}
+
 // Subagent-produced strings (description, result, error) can contain `<`,
 // `>`, or literal `</task-notification>` — without escaping, a subagent
 // summarizing HTML or another agent's notification could close the
 // envelope early and forge sibling tags (e.g. a faked <status>) that the
-// parent model would treat as trusted metadata.
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
+// parent model would treat as trusted metadata. Use the shared helper.
 
-export type BackgroundAgentStatus =
+export type BackgroundTaskStatus =
   | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -52,20 +87,66 @@ export interface AgentCompletionStats {
   durationMs: number;
 }
 
-export interface BackgroundAgentEntry {
+/**
+ * A compact record of a recent tool invocation — drives the Progress
+ * section of the detail dialog. The Agent tool maintains a rolling
+ * buffer of these on each background entry by subscribing to the
+ * subagent's event emitter.
+ */
+export interface BackgroundActivity {
+  /** Tool name (e.g. `Bash`, `Read`). */
+  name: string;
+  /** Short one-line description — the tool's own render-friendly summary. */
+  description: string;
+  /** Emission timestamp (ms). */
+  at: number;
+}
+
+export type BackgroundTaskFlavor = 'foreground' | 'background';
+
+export interface BackgroundTaskEntry {
   agentId: string;
   description: string;
   subagentType?: string;
-  status: BackgroundAgentStatus;
+  /**
+   * `'background'` — async, persists across turns, emits XML notification.
+   * `'foreground'` — synchronous, unregistered when the tool-call returns,
+   * delivers results via the normal tool-result channel.
+   * Defaults to `'background'` when absent (older callers).
+   */
+  flavor?: BackgroundTaskFlavor;
+  status: BackgroundTaskStatus;
   startTime: number;
   endTime?: number;
   result?: string;
   error?: string;
+  /**
+   * Present only when the task is intentionally kept paused but cannot be
+   * safely resumed under the current conditions.
+   */
+  resumeBlockedReason?: string;
   abortController: AbortController;
   stats?: AgentCompletionStats;
   toolUseId?: string;
-  /** Absolute path to the agent's plain-text transcript file. */
+  /**
+   * The original user-supplied prompt for the background task. Surfaced
+   * verbatim in the detail dialog's Prompt section. Optional because
+   * resume-restored entries may not have it.
+   */
+  prompt?: string;
+  /**
+   * Rolling buffer (newest last, capped at MAX_RECENT_ACTIVITIES) of
+   * recent tool invocations by this agent. Feeds the detail dialog's
+   * Progress section. Replaced as a new array each time an activity is
+   * appended so reference-based change detection works. Optional:
+   * callers may register without providing it, and `appendActivity`
+   * initializes the array lazily.
+   */
+  recentActivities?: readonly BackgroundActivity[];
+  /** Absolute path to the agent's on-disk JSONL transcript file. */
   outputFile?: string;
+  /** Absolute path to the agent's sidecar metadata file. */
+  metaPath?: string;
   /** Messages queued by SendMessage, drained between tool rounds. */
   pendingMessages?: string[];
   /**
@@ -75,11 +156,20 @@ export interface BackgroundAgentEntry {
    * fires the notification with the real partial/final result).
    */
   notified?: boolean;
+  /**
+   * Persisted sidecar status to write when the current cancellation settles.
+   * Explicit user cancellation uses `cancelled`; shutdown interruption keeps
+   * `running` so `/resume` can recover the work later.
+   */
+  persistedCancellationStatus?: Extract<
+    BackgroundTaskStatus,
+    'running' | 'cancelled'
+  >;
 }
 
 export interface NotificationMeta {
   agentId: string;
-  status: BackgroundAgentStatus;
+  status: BackgroundTaskStatus;
   stats?: AgentCompletionStats;
   toolUseId?: string;
 }
@@ -90,25 +180,53 @@ export type BackgroundNotificationCallback = (
   meta: NotificationMeta,
 ) => void;
 
-export type BackgroundRegisterCallback = (entry: BackgroundAgentEntry) => void;
+export type BackgroundRegisterCallback = (entry: BackgroundTaskEntry) => void;
+
+interface BackgroundTaskCancelOptions {
+  notify?: boolean;
+  persistedStatus?: Extract<BackgroundTaskStatus, 'running' | 'cancelled'>;
+}
+
+/**
+ * Fires on entry status transitions — register, complete, fail, cancel.
+ * Intentionally does NOT fire on `appendActivity` so consumers that only
+ * care about the pill / roster (Footer, AppContainer) don't re-render
+ * on every tool call a background agent makes.
+ */
+export type BackgroundStatusChangeCallback = (
+  entry?: BackgroundTaskEntry,
+) => void;
+
+/** Fires on `appendActivity` — scoped to detail-view consumers. */
+export type BackgroundActivityChangeCallback = (
+  entry: BackgroundTaskEntry,
+) => void;
 
 export class BackgroundTaskRegistry {
-  private readonly agents = new Map<string, BackgroundAgentEntry>();
+  private readonly agents = new Map<string, BackgroundTaskEntry>();
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
+  private statusChangeCallback?: BackgroundStatusChangeCallback;
+  private activityChangeCallback?: BackgroundActivityChangeCallback;
 
-  register(entry: BackgroundAgentEntry): void {
+  register(entry: BackgroundTaskEntry): void {
     if (!entry.pendingMessages) entry.pendingMessages = [];
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
 
-    if (this.registerCallback) {
+    // Foreground entries are paired with a synchronous tool-call result on
+    // the parent's response and never emit a terminal `task_notification`
+    // (see emitNotification's flavor gate). Letting them fire the register
+    // callback would emit a `task_started` SDK event without a matching
+    // completion event, breaking the lifecycle contract for SDK consumers.
+    if (entry.flavor !== 'foreground' && this.registerCallback) {
       try {
         this.registerCallback(entry);
       } catch (error) {
         debugLogger.error('Failed to emit register callback:', error);
       }
     }
+    this.emitStatusChange(entry);
   }
 
   // Transition a still-running entry to 'completed' and emit the terminal
@@ -136,6 +254,33 @@ export class BackgroundTaskRegistry {
     debugLogger.info(`Background agent completed: ${agentId}`);
 
     this.emitNotification(entry);
+    this.emitStatusChange(entry);
+  }
+
+  /**
+   * Remove a foreground entry from the registry without emitting any
+   * terminal notification. Called by the foreground tool-call's `finally`
+   * path, which has already delivered the result through the tool-result
+   * channel — the registry entry has served its UI-surfacing purpose.
+   * Background entries must go through complete/fail/finalizeCancelled
+   * instead, so this throws if asked to remove one.
+   */
+  unregisterForeground(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry) return;
+    if (entry.flavor !== 'foreground') {
+      throw new Error(
+        `unregisterForeground called on non-foreground entry ${agentId} ` +
+          `(flavor=${entry.flavor ?? 'undefined'}). ` +
+          `Background entries must terminate via complete/fail/finalizeCancelled.`,
+      );
+    }
+    // Emit before delete so any future BackgroundStatusChangeCallback that
+    // re-reads `registry.get(agentId)` from inside the callback sees the
+    // entry, matching the ordering used by complete/fail/cancel/finalize.
+    this.emitStatusChange(entry);
+    this.agents.delete(agentId);
+    debugLogger.info(`Unregistered foreground agent: ${agentId}`);
   }
 
   // See complete() for the cancelled → terminal path rationale.
@@ -152,6 +297,7 @@ export class BackgroundTaskRegistry {
     debugLogger.info(`Background agent failed: ${agentId}`);
 
     this.emitNotification(entry);
+    this.emitStatusChange(entry);
   }
 
   // Cancellation aborts the signal and marks the entry as cancelled, but
@@ -162,19 +308,57 @@ export class BackgroundTaskRegistry {
   // case where a tool ignores AbortSignal and bgBody never settles — the
   // timeout lands on finalizeCancellationIfPending(), which is a no-op
   // once the natural handler has already emitted.
-  cancel(agentId: string): void {
+  cancel(agentId: string, options: BackgroundTaskCancelOptions = {}): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;
+    const persistedStatus = options.persistedStatus ?? 'cancelled';
 
     entry.abortController.abort();
     entry.status = 'cancelled';
     entry.endTime = Date.now();
+    entry.persistedCancellationStatus = persistedStatus;
+    if (entry.metaPath) {
+      patchAgentMeta(entry.metaPath, {
+        status: persistedStatus,
+        lastUpdatedAt: new Date().toISOString(),
+        lastError: undefined,
+      });
+    }
     debugLogger.info(`Background agent cancelled: ${agentId}`);
+    this.emitStatusChange(entry);
+
+    // Foreground entries don't emit XML notifications and unregister
+    // themselves in the tool-call's finally path, so the grace timer
+    // would only ever no-op for them.
+    if (entry.flavor === 'foreground') return;
+
+    if (options.notify === false) {
+      // Session reset paths intentionally suppress the old task's terminal
+      // notification so it cannot leak into a new conversation.
+      entry.notified = true;
+      return;
+    }
 
     const timer = setTimeout(() => {
       this.finalizeCancellationIfPending(agentId);
     }, CANCEL_GRACE_MS);
     timer.unref?.();
+  }
+
+  /**
+   * Marks a paused interrupted task as intentionally discarded/cancelled
+   * without emitting a task-notification. Used when the user explicitly
+   * abandons a recovered task instead of resuming it.
+   */
+  abandon(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'paused') return;
+
+    entry.status = 'cancelled';
+    entry.endTime = Date.now();
+    entry.notified = true;
+    debugLogger.info(`Abandoned paused background agent: ${agentId}`);
+    this.emitStatusChange(entry);
   }
 
   // Emit the terminal cancelled notification once the agent's natural
@@ -197,6 +381,7 @@ export class BackgroundTaskRegistry {
     if (partialResult) entry.result = partialResult;
     entry.stats = stats;
     this.emitNotification(entry);
+    this.emitStatusChange(entry);
   }
 
   // Emit the terminal cancelled notification for entries that were cancelled
@@ -208,16 +393,40 @@ export class BackgroundTaskRegistry {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'cancelled' || entry.notified) return;
     this.emitNotification(entry);
+    this.emitStatusChange(entry);
   }
 
-  get(agentId: string): BackgroundAgentEntry | undefined {
+  /**
+   * Append a recent tool activity to a running entry's rolling buffer.
+   * No-op if the entry is not running — late events after a cancellation
+   * shouldn't leak into the Progress section.
+   */
+  appendActivity(agentId: string, activity: BackgroundActivity): void {
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'running') return;
+
+    const prior = entry.recentActivities ?? [];
+    const next = [...prior, activity];
+    if (next.length > MAX_RECENT_ACTIVITIES) {
+      next.splice(0, next.length - MAX_RECENT_ACTIVITIES);
+    }
+    entry.recentActivities = next;
+    this.emitActivityChange(entry);
+  }
+
+  get(agentId: string): BackgroundTaskEntry | undefined {
     return this.agents.get(agentId);
   }
 
-  getRunning(): BackgroundAgentEntry[] {
-    return Array.from(this.agents.values()).filter(
-      (e) => e.status === 'running',
-    );
+  /**
+   * Snapshot of every entry regardless of status. Used by the TUI
+   * footer/dialog to render rows for still-running AND terminal-state
+   * tasks; the headless holdback loop keys off `hasUnfinalizedTasks`
+   * instead, so callers that only need the running slice can filter
+   * this snapshot at the call site.
+   */
+  getAll(): BackgroundTaskEntry[] {
+    return Array.from(this.agents.values());
   }
 
   /**
@@ -230,9 +439,32 @@ export class BackgroundTaskRegistry {
    */
   hasUnfinalizedTasks(): boolean {
     for (const entry of this.agents.values()) {
-      if (!entry.notified) return true;
+      // Foreground entries block the parent tool-call synchronously, so the
+      // headless event loop is already pinned by the `await` on the caller's
+      // promise — counting them here would be redundant and would also keep
+      // the loop alive for entries that don't even emit a notification.
+      if (entry.flavor === 'foreground') continue;
+      if (entry.status === 'running') return true;
+      if (entry.status === 'cancelled' && !entry.notified) return true;
     }
     return false;
+  }
+
+  /**
+   * Drops every in-memory entry without touching sidecar state.
+   *
+   * Used only when switching to a different session after the caller has
+   * already established that no live work from the current session is still
+   * running. Paused/interrupted entries remain recoverable from disk because
+   * their sidecars keep the persisted status.
+   */
+  reset(): void {
+    const firstEntry = this.agents.values().next().value as
+      | BackgroundTaskEntry
+      | undefined;
+    if (!firstEntry) return;
+    this.agents.clear();
+    this.emitStatusChange(firstEntry);
   }
 
   /**
@@ -274,9 +506,33 @@ export class BackgroundTaskRegistry {
     this.registerCallback = cb;
   }
 
-  abortAll(): void {
+  setStatusChangeCallback(
+    cb: BackgroundStatusChangeCallback | undefined,
+  ): void {
+    this.statusChangeCallback = cb;
+  }
+
+  setActivityChangeCallback(
+    cb: BackgroundActivityChangeCallback | undefined,
+  ): void {
+    this.activityChangeCallback = cb;
+  }
+
+  abortAll(options: BackgroundTaskCancelOptions = {}): void {
+    const cancelOptions: BackgroundTaskCancelOptions = {
+      persistedStatus: 'running',
+      ...options,
+    };
     for (const entry of Array.from(this.agents.values())) {
-      this.cancel(entry.agentId);
+      if (entry.status === 'running') {
+        this.cancel(entry.agentId, cancelOptions);
+      }
+
+      if (cancelOptions.notify === false) {
+        entry.notified = true;
+        continue;
+      }
+
       // Shutdown path: no natural handler will run, so emit the cancelled
       // notification here to honour the one-notification-per-agent contract.
       this.finalizeCancellationIfPending(entry.agentId);
@@ -284,29 +540,22 @@ export class BackgroundTaskRegistry {
     debugLogger.info('Aborted all background agents');
   }
 
-  private buildDisplayLabel(entry: BackgroundAgentEntry): string {
-    // Strip the subagent type prefix if the description already starts with it
-    // to avoid duplication like "Explore: Explore: list ts files".
-    let rawDesc = entry.description;
-    if (
-      entry.subagentType &&
-      rawDesc.toLowerCase().startsWith(entry.subagentType.toLowerCase() + ':')
-    ) {
-      rawDesc = rawDesc.slice(entry.subagentType.length + 1).trimStart();
-    }
-    const desc =
-      rawDesc.length > MAX_DESCRIPTION_LENGTH
-        ? rawDesc.slice(0, MAX_DESCRIPTION_LENGTH) + '...'
-        : rawDesc;
-    return entry.subagentType ? `${entry.subagentType}: ${desc}` : desc;
+  private buildDisplayLabel(entry: BackgroundTaskEntry): string {
+    return buildBackgroundEntryLabel(entry);
   }
 
-  private emitNotification(entry: BackgroundAgentEntry): void {
+  private emitNotification(entry: BackgroundTaskEntry): void {
     // Mark notified *before* invoking the callback so that a re-entrant
     // terminal call inside the callback chain (cancel → complete race)
     // sees the flag and short-circuits, rather than firing twice.
     if (entry.notified) return;
     entry.notified = true;
+
+    // Foreground entries return their result through the parent's normal
+    // tool-result channel (the `returnDisplay` field on the synchronous
+    // tool-call). Emitting the XML envelope on top would feed the parent
+    // model the same payload twice.
+    if (entry.flavor === 'foreground') return;
 
     if (!this.notificationCallback) return;
 
@@ -364,6 +613,24 @@ export class BackgroundTaskRegistry {
       this.notificationCallback(displayLine, xmlParts.join('\n'), meta);
     } catch (error) {
       debugLogger.error('Failed to emit background notification:', error);
+    }
+  }
+
+  private emitStatusChange(entry?: BackgroundTaskEntry): void {
+    if (!this.statusChangeCallback) return;
+    try {
+      this.statusChangeCallback(entry);
+    } catch (error) {
+      debugLogger.error('Failed to emit background status change:', error);
+    }
+  }
+
+  private emitActivityChange(entry: BackgroundTaskEntry): void {
+    if (!this.activityChangeCallback) return;
+    try {
+      this.activityChangeCallback(entry);
+    } catch (error) {
+      debugLogger.error('Failed to emit background activity change:', error);
     }
   }
 }

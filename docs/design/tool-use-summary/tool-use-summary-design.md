@@ -118,7 +118,7 @@ At T0+1s, we cannot retroactively add the label to the already-committed tool_gr
 
 This PR takes option 2 in full mode. The `tool_use_summary` entry is a real history item, rendered as a single dim `● <label>` line by `HistoryItemDisplay`. No `refreshStatic` needed.
 
-Compact mode is different because of `mergeCompactToolGroups`. When consecutive tool_groups merge, `MainContent` already calls `refreshStatic()` — that's an existing codepath, and it re-renders the merged group with the label looked up from history. So compact mode _does_ get the label as a header replacement. To avoid rendering the same label twice (once as the compact header, once as a trailing `● <label>` line), `HistoryItemDisplay` hides the standalone line when `compactMode` is true.
+Compact mode is different because of `mergeCompactToolGroups`. When consecutive tool*groups merge, `MainContent` already calls `refreshStatic()` — that's an existing codepath, and it re-renders the merged group with the label looked up from history. So compact mode \_does* get the label as a header replacement. To avoid rendering the same label twice (once as the compact header, once as a trailing `● <label>` line), `HistoryItemDisplay` hides the standalone line when `compactMode` is true.
 
 ```
 Full mode              Compact mode (with merge)

@@ -58,7 +58,13 @@ import {
   type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
-import { getStickyTodos } from './utils/todoSnapshot.js';
+import {
+  getStickyTodos,
+  getStickyTodoMaxVisibleItems,
+  getStickyTodosLayoutKey,
+  getStickyTodosRenderKey,
+} from './utils/todoSnapshot.js';
+import type { TodoItem } from './components/TodoDisplay.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import process from 'node:process';
 import { useHistory } from './hooks/useHistoryManager.js';
@@ -126,6 +132,10 @@ import {
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
+import {
+  useBackgroundTaskViewState,
+  useBackgroundTaskViewActions,
+} from './contexts/BackgroundTaskViewContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -159,6 +169,20 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+function useStableStickyTodos(todos: TodoItem[] | null): TodoItem[] | null {
+  const renderKey = getStickyTodosRenderKey(todos);
+  const stableTodosRef = useRef<{
+    renderKey: string;
+    todos: TodoItem[] | null;
+  } | null>(null);
+
+  if (stableTodosRef.current?.renderKey !== renderKey) {
+    stableTodosRef.current = { renderKey, todos };
+  }
+
+  return stableTodosRef.current.todos;
 }
 
 // Exported for tests. Given a newest-first list of messages, return a list
@@ -356,6 +380,21 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        const recovered = await config.loadPausedBackgroundAgents(
+          config.getSessionId(),
+        );
+        if (recovered.length > 0) {
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: config
+                .getBackgroundAgentResumeService()
+                .buildRecoveredBackgroundAgentsNotice(recovered.length),
+            },
+            Date.now(),
+          );
+        }
 
         // Restore session name tag from custom title
         const title = config
@@ -879,6 +918,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
 
   const agentViewState = useAgentViewState();
+  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
+  const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
@@ -1235,10 +1276,11 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
-  const stickyTodos = useMemo(
+  const rawStickyTodos = useMemo(
     () => getStickyTodos(historyManager.history, pendingHistoryItems),
     [historyManager.history, pendingHistoryItems],
   );
+  const stickyTodos = useStableStickyTodos(rawStickyTodos);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
@@ -1572,31 +1614,47 @@ export const AppContainer = (props: AppContainerProps) => {
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
     isExtensionsManagerDialogOpen ||
-    isRewindSelectorOpen;
+    isRewindSelectorOpen ||
+    bgTasksDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
   const shouldShowStickyTodos =
     stickyTodos !== null &&
     !dialogsVisible &&
     !isFeedbackDialogOpen &&
     streamingState !== StreamingState.WaitingForConfirmation;
+  const stickyTodoWidth = Math.min(mainAreaWidth, 64);
+  const stickyTodoMaxVisibleItems =
+    getStickyTodoMaxVisibleItems(terminalHeight);
+  const stickyTodosLayoutKey = shouldShowStickyTodos
+    ? getStickyTodosLayoutKey(
+        stickyTodos,
+        stickyTodoWidth,
+        stickyTodoMaxVisibleItems,
+      )
+    : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
   useLayoutEffect(() => {
     if (!mainControlsRef.current) {
-      setControlsHeight(0);
+      setControlsHeight((previousHeight) =>
+        previousHeight === 0 ? previousHeight : 0,
+      );
       return;
     }
 
     const fullFooterMeasurement = measureElement(mainControlsRef.current);
-    setControlsHeight(fullFooterMeasurement.height);
+    setControlsHeight((previousHeight) =>
+      previousHeight === fullFooterMeasurement.height
+        ? previousHeight
+        : fullFooterMeasurement.height,
+    );
   }, [
     buffer,
     terminalWidth,
     terminalHeight,
     btwItem,
     dialogsVisible,
-    shouldShowStickyTodos,
-    stickyTodos,
+    stickyTodosLayoutKey,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -1616,8 +1674,6 @@ export const AppContainer = (props: AppContainerProps) => {
     pager: settings.merged.tools?.shell?.pager,
     showColor: settings.merged.tools?.shell?.showColor,
   });
-  const isInitialMount = useRef(true);
-
   useEffect(() => {
     if (activePtyId) {
       ShellExecutionService.resizePty(
@@ -1634,21 +1690,6 @@ export const AppContainer = (props: AppContainerProps) => {
       setShowIdeRestartPrompt(true);
     }
   }, [ideNeedsRestart]);
-
-  useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-
-    const handler = setTimeout(() => {
-      refreshStatic();
-    }, 300);
-
-    return () => {
-      clearTimeout(handler);
-    };
-  }, [terminalWidth, refreshStatic]);
 
   useEffect(() => {
     const unsubscribe = ideContextStore.subscribe(setIdeContextState);
@@ -1711,9 +1752,10 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      // 3. Truncate API history and strip stale thinking blocks
+      // 3. Truncate API history to the target point.
+      // Do NOT strip thought parts — reasoning models (e.g. DeepSeek) require
+      // reasoning_content continuity across all turns in the conversation.
       geminiClient.truncateHistory(apiTruncateIndex);
-      geminiClient.stripThoughtsFromHistory();
 
       // 4. Truncate UI history (keep everything before the target item)
       const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
@@ -1897,6 +1939,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
+    isBackgroundTasksDialogOpen: bgTasksDialogOpen,
+    closeBackgroundTasksDialog: closeBgTasksDialog,
   });
 
   const handleExit = useCallback(

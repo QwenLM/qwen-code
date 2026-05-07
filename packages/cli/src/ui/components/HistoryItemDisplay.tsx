@@ -210,6 +210,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           availableTerminalHeight={availableTerminalHeight}
           contentWidth={contentWidth}
           isFocused={isFocused}
+          isPending={isPending}
           activeShellPtyId={activeShellPtyId}
           embeddedShellFocused={embeddedShellFocused}
           memoryWriteCount={itemForDisplay.memoryWriteCount}

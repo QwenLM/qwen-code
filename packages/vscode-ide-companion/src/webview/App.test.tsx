@@ -34,6 +34,20 @@ const secondarySkillItem: CompletionItem = {
   value: 'skills code-review',
 };
 
+const commitCommandItem: CompletionItem = {
+  id: 'commit',
+  label: '/commit',
+  type: 'command',
+  value: 'commit',
+};
+
+const clearCommandItem: CompletionItem = {
+  id: 'clear',
+  label: '/clear',
+  type: 'command',
+  value: 'clear',
+};
+
 vi.mock('./hooks/useVSCode.js', () => ({
   useVSCode: () => ({
     postMessage: mockPostMessage,
@@ -101,7 +115,11 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
     }: {
       setIsAuthenticated: (value: boolean) => void;
       setAvailableCommands: (
-        value: Array<{ name: string; description?: string }>,
+        value: Array<{
+          name: string;
+          description: string;
+          input?: { hint: string } | null;
+        }>,
       ) => void;
       setAvailableSkills: (value: string[]) => void;
     }) => {
@@ -114,7 +132,21 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
         initializedRef.current = true;
         setIsAuthenticated(true);
         setAvailableCommands([
-          { name: 'skills', description: 'List available skills' },
+          {
+            name: 'skills',
+            description: 'List available skills',
+            input: null,
+          },
+          {
+            name: 'commit',
+            description: 'Commit current changes',
+            input: { hint: '' },
+          },
+          {
+            name: 'clear',
+            description: 'Clear the chat',
+            input: null,
+          },
         ]);
         setAvailableSkills(['code-review']);
       }, [setAvailableCommands, setAvailableSkills, setIsAuthenticated]);
@@ -143,7 +175,12 @@ vi.mock('./hooks/useCompletionTrigger.js', () => ({
     isOpen: true,
     triggerChar: '/',
     query: 'skills ',
-    items: [slashSkillsItem, secondarySkillItem],
+    items: [
+      slashSkillsItem,
+      secondarySkillItem,
+      commitCommandItem,
+      clearCommandItem,
+    ],
     closeCompletion: mockCloseCompletion,
     openCompletion: mockOpenCompletion,
     refreshCompletion: vi.fn(),
@@ -184,6 +221,7 @@ vi.mock('@qwen-code/webui', () => ({
   EmptyState: () => null,
   ChatHeader: () => null,
   SessionSelector: () => null,
+  stripZeroWidthSpaces: (text: string) => text.replace(/\u200B/g, ''),
 }));
 
 vi.mock('./components/layout/InputForm.js', () => ({
@@ -216,6 +254,15 @@ vi.mock('./components/layout/InputForm.js', () => ({
       </button>
       <button onClick={() => onCompletionFill?.(secondarySkillItem)}>
         select-skill-tab
+      </button>
+      <button onClick={() => onCompletionSelect(commitCommandItem)}>
+        select-commit-enter
+      </button>
+      <button onClick={() => onCompletionSelect(clearCommandItem)}>
+        select-clear-enter
+      </button>
+      <button onClick={() => onCompletionFill?.(clearCommandItem)}>
+        select-clear-tab
       </button>
     </div>
   ),
@@ -409,5 +456,51 @@ describe('App /skills secondary picker', () => {
     expect(getRenderedInputText(rendered.container)).toBe(
       '/skills code-review ',
     );
+  });
+
+  it('fills slash commands that declare input when pressing Enter', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, '/');
+
+    clickButton(rendered.container, 'select-commit-enter');
+
+    expect(mockPostMessage).not.toHaveBeenCalled();
+    expect(getRenderedInputText(rendered.container)).toBe('/commit ');
+    expect(mockCloseCompletion).toHaveBeenCalled();
+  });
+
+  it('auto-submits slash commands without input when pressing Enter', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, '/');
+
+    clickButton(rendered.container, 'select-clear-enter');
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'sendMessage',
+      data: { text: '/clear' },
+    });
+    expect(mockCloseCompletion).toHaveBeenCalled();
+  });
+
+  it('fills slash commands without input when pressing Tab', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, '/');
+
+    clickButton(rendered.container, 'select-clear-tab');
+
+    expect(mockPostMessage).not.toHaveBeenCalled();
+    expect(getRenderedInputText(rendered.container)).toBe('/clear ');
   });
 });

@@ -460,14 +460,22 @@ describe('toolHookTriggers', () => {
       ]);
     });
 
-    it('should handle non-array PartListUnion content', () => {
-      const originalContent = { text: 'original' };
+    it('wraps single non-array PartListUnion content so the addition still lands', () => {
+      // Regression: `ReadFile` returns `{ inlineData: {...} }` for images
+      // and PDFs (a single Part, not an array). The previous "return
+      // content unchanged" silently dropped any hook-injected reminder
+      // — including the path-conditional skill activation `<system-reminder>`
+      // and the ConditionalRulesRegistry rule injection. Wrap into an array
+      // so the additional context lands.
+      const originalContent = {
+        inlineData: { data: 'base64', mimeType: 'image/png' },
+      };
       const result = appendAdditionalContext(
         originalContent,
         'additional context',
       );
 
-      expect(result).toEqual({ text: 'original' });
+      expect(result).toEqual([originalContent, { text: 'additional context' }]);
     });
 
     it('should return original array content when no additional context is provided', () => {
