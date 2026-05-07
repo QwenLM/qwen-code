@@ -31,9 +31,6 @@ const standaloneReleaseScriptUrl = pathToFileURL(
 const standalonePackageScriptUrl = pathToFileURL(
   path.resolve('scripts/create-standalone-package.js'),
 ).href;
-const installationAssetsScriptUrl = pathToFileURL(
-  path.resolve('scripts/build-installation-assets.js'),
-).href;
 const releaseAssetConfigUrl = pathToFileURL(
   path.resolve('scripts/release-asset-config.js'),
 ).href;
@@ -236,12 +233,13 @@ describe('standalone release packaging', () => {
     expect(packageJson.scripts['package:standalone:release']).toBe(
       'node scripts/build-standalone-release.js',
     );
-    expect(packageJson.scripts['package:installation-assets']).toBe(
-      'node scripts/build-installation-assets.js',
-    );
+    // Per-release installer publishing was removed in favor of a stable hosted
+    // entrypoint with --version pinning, so no package:installation-assets
+    // script should exist.
+    expect(packageJson.scripts['package:installation-assets']).toBeUndefined();
     expect(existsSync('scripts/create-standalone-package.js')).toBe(true);
     expect(existsSync('scripts/build-standalone-release.js')).toBe(true);
-    expect(existsSync('scripts/build-installation-assets.js')).toBe(true);
+    expect(existsSync('scripts/build-installation-assets.js')).toBe(false);
     expect(existsSync('scripts/release-asset-config.js')).toBe(true);
     expect(existsSync('scripts/release-script-utils.js')).toBe(true);
 
@@ -263,7 +261,7 @@ describe('standalone release packaging', () => {
     expect(packageScript).toContain('Rebuild SHA256SUMS from scratch');
     expect(packageScript).toContain('Promise.all(');
     expect(packageScript).toContain(
-      "import { isReleaseChecksumAsset } from './release-asset-config.js';",
+      "import { isStandaloneArchiveName } from './release-asset-config.js';",
     );
     expect(packageScript).toContain(
       "import {\n  fail,\n  isMainModule,\n  parseCliArgs,\n  sha256File,\n} from './release-script-utils.js';",
@@ -297,31 +295,14 @@ describe('standalone release packaging', () => {
     );
     expect(releaseScript).not.toContain('function parseArgs');
 
-    const installationAssetsScript = readScript(
-      'scripts/build-installation-assets.js',
-    );
-    expect(installationAssetsScript).toContain('Copyright 2025 Qwen Team');
-    expect(installationAssetsScript).toContain('writeSha256Sums(outDir)');
-    expect(installationAssetsScript).toContain(
-      'assertInstallationAssetChecksums(outDir, assets)',
-    );
-    expect(installationAssetsScript).toContain(
-      "from './release-script-utils.js'",
-    );
-    expect(installationAssetsScript).toContain(
-      'parseCliArgs(process.argv.slice(2), CLI_OPTIONS',
-    );
-    expect(installationAssetsScript).not.toContain('function parseArgs');
-
     const releaseAssetConfig = readScript('scripts/release-asset-config.js');
     expect(releaseAssetConfig).toContain('Copyright 2025 Qwen Team');
-    expect(releaseAssetConfig).toContain('INSTALLATION_ASSETS');
-    expect(releaseAssetConfig).toContain('install-qwen-with-source.sh');
-    expect(releaseAssetConfig).toContain('install-qwen.sh');
-    expect(releaseAssetConfig).toContain('install-qwen-with-source.bat');
-    expect(releaseAssetConfig).toContain('install-qwen.bat');
     expect(releaseAssetConfig).toContain('isStandaloneArchiveName');
-    expect(releaseAssetConfig).toContain('isReleaseChecksumAsset');
+    // Per-release installer publishing was removed; the config no longer
+    // exports installer-asset helpers.
+    expect(releaseAssetConfig).not.toContain('INSTALLATION_ASSETS');
+    expect(releaseAssetConfig).not.toContain('isInstallationAssetName');
+    expect(releaseAssetConfig).not.toContain('isReleaseChecksumAsset');
 
     const releaseScriptUtils = readScript('scripts/release-script-utils.js');
     expect(releaseScriptUtils).toContain('Copyright 2025 Qwen Team');
@@ -391,54 +372,18 @@ describe('standalone release packaging', () => {
     expect(output).toContain('--node-version VERSION');
   });
 
-  it('loads the installation asset packaging helper', () => {
-    const output = execFileSync(
-      process.execPath,
-      ['scripts/build-installation-assets.js', '--help'],
-      { encoding: 'utf8' },
-    );
+  it('exposes only standalone archive classification', async () => {
+    const config = await import(releaseAssetConfigUrl);
 
-    expect(output).toContain('package:installation-assets');
-    expect(output).toContain('--out-dir PATH');
-    expect(output).toContain('--version VERSION');
-  });
-
-  it('rejects invalid installation asset CLI arguments', () => {
-    expectCommandFailure(
-      ['scripts/build-installation-assets.js', '--unknown'],
-      /Unknown option: --unknown/,
+    expect(config.isStandaloneArchiveName('qwen-code-linux-x64.tar.gz')).toBe(
+      true,
     );
-    expectCommandFailure(
-      ['scripts/build-installation-assets.js', '--out-dir'],
-      /--out-dir requires a value/,
-    );
-    expectCommandFailure(
-      ['scripts/build-installation-assets.js', '--version'],
-      /--version requires a value/,
-    );
-    expectCommandFailure(
-      ['scripts/build-installation-assets.js', '--version', 'beta'],
-      /--version must be a semver string/,
-    );
-  });
-
-  it('shares release asset classification helpers', async () => {
-    const {
-      INSTALLATION_ASSET_NAMES,
-      isInstallationAssetName,
-      isReleaseChecksumAsset,
-      isStandaloneArchiveName,
-    } = await import(releaseAssetConfigUrl);
-
-    expect(INSTALLATION_ASSET_NAMES).toEqual([
-      'install-qwen.sh',
-      'install-qwen.bat',
-    ]);
-    expect(isStandaloneArchiveName('qwen-code-linux-x64.tar.gz')).toBe(true);
-    expect(isStandaloneArchiveName('qwen-code-win-x64.zip')).toBe(true);
-    expect(isStandaloneArchiveName('install-qwen.sh')).toBe(false);
-    expect(isInstallationAssetName('install-qwen.sh')).toBe(true);
-    expect(isReleaseChecksumAsset('install-qwen.bat')).toBe(true);
+    expect(config.isStandaloneArchiveName('qwen-code-win-x64.zip')).toBe(true);
+    expect(config.isStandaloneArchiveName('install-qwen.sh')).toBe(false);
+    // Per-release installer publishing helpers must no longer be exported.
+    expect(config.INSTALLATION_ASSET_NAMES).toBeUndefined();
+    expect(config.isInstallationAssetName).toBeUndefined();
+    expect(config.isReleaseChecksumAsset).toBeUndefined();
   });
 
   it('parses Node.js SHASUMS entries', async () => {
@@ -470,14 +415,7 @@ describe('standalone release packaging', () => {
         const extension = TARGETS.get(qwenTarget).outputExtension;
         return `${'a'.repeat(64)}  qwen-code-${qwenTarget}.${extension}`;
       });
-      writeFileSync(
-        path.join(tmpDir, 'SHA256SUMS'),
-        `${[
-          ...lines,
-          `${'c'.repeat(64)}  install-qwen.sh`,
-          `${'d'.repeat(64)}  install-qwen.bat`,
-        ].join('\n')}\n`,
-      );
+      writeFileSync(path.join(tmpDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
 
       expect(() => assertStandaloneOutput(tmpDir)).not.toThrow();
 
@@ -491,100 +429,30 @@ describe('standalone release packaging', () => {
     }
   });
 
-  it('builds release installation assets with checksums', async () => {
-    const { assertInstallationAssetChecksums, buildInstallationAssets } =
-      await import(installationAssetsScriptUrl);
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-assets-'));
-
-    try {
-      writeFileSync(path.join(tmpDir, 'qwen-code-linux-x64.tar.gz'), 'fake');
-
-      await buildInstallationAssets(tmpDir);
-
-      const installSh = path.join(tmpDir, 'install-qwen.sh');
-      const installBat = path.join(tmpDir, 'install-qwen.bat');
-      const checksums = readScript(path.join(tmpDir, 'SHA256SUMS'));
-
-      expect(readScript(installSh)).toBe(
-        readScript('scripts/installation/install-qwen-with-source.sh'),
-      );
-      expect(readScript(installBat)).toBe(
-        readScript('scripts/installation/install-qwen-with-source.bat'),
-      );
-      expect(checksums).toContain('qwen-code-linux-x64.tar.gz');
-      expect(checksums).toContain('install-qwen.sh');
-      expect(checksums).toContain('install-qwen.bat');
-      if (process.platform !== 'win32') {
-        expect(lstatSync(installSh).mode & 0o111).not.toBe(0);
-      }
-
-      writeFileSync(installSh, 'tampered');
-      await expect(assertInstallationAssetChecksums(tmpDir)).rejects.toThrow(
-        /Checksum verification failed for install-qwen\.sh/,
-      );
-
-      writeFileSync(
-        installSh,
-        readScript('scripts/installation/install-qwen-with-source.sh'),
-      );
-      writeFileSync(
-        path.join(tmpDir, 'qwen-code-linux-x64.tar.gz'),
-        'tampered',
-      );
-      await expect(assertInstallationAssetChecksums(tmpDir)).rejects.toThrow(
-        /Checksum verification failed for qwen-code-linux-x64\.tar\.gz/,
-      );
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  it('stamps release versions into copied installation assets', async () => {
-    const { assertInstallationAssetChecksums, buildInstallationAssets } =
-      await import(installationAssetsScriptUrl);
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-assets-'));
-
-    try {
-      await buildInstallationAssets(tmpDir, { version: '0.16.0' });
-
-      const installSh = readScript(path.join(tmpDir, 'install-qwen.sh'));
-      const installBat = readScript(path.join(tmpDir, 'install-qwen.bat'));
-
-      expect(installSh).toContain('VERSION="${QWEN_INSTALL_VERSION:-0.16.0}"');
-      expect(installSh).toContain(
-        'Standalone release version. Defaults to 0.16.0.',
-      );
-      expect(installSh).toContain('--version)');
-      expect(installBat).toContain('set "VERSION=0.16.0"');
-      expect(installBat).toContain(
-        'Standalone release version. Defaults to 0.16.0.',
-      );
-      expect(installBat).toContain(
-        'if defined QWEN_INSTALL_VERSION set "VERSION=!QWEN_INSTALL_VERSION!"',
-      );
-      await expect(
-        assertInstallationAssetChecksums(tmpDir),
-      ).resolves.not.toThrow();
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  it('rejects missing installation asset sources', async () => {
-    const { buildInstallationAssets } = await import(
-      installationAssetsScriptUrl
+  it('installer scripts honor --version for hosted entrypoints', () => {
+    // The hosted entrypoint flow relies on the installer scripts accepting a
+    // --version flag (and QWEN_INSTALL_VERSION env var) so that
+    //   curl URL | bash -s -- --version vX.Y.Z
+    // and the equivalent Windows incantation can pin a specific standalone
+    // release without per-release installer assets.
+    const installShellSource = readScript(
+      'scripts/installation/install-qwen-with-source.sh',
     );
-    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-install-root-'));
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-assets-'));
+    expect(installShellSource).toContain(
+      'VERSION="${QWEN_INSTALL_VERSION:-latest}"',
+    );
+    expect(installShellSource).toContain('--version)');
+    expect(installShellSource).toContain('--version requires a value');
 
-    try {
-      await expect(
-        buildInstallationAssets(tmpDir, { root: tmpRoot }),
-      ).rejects.toThrow(/Installation source asset not found/);
-    } finally {
-      rmSync(tmpRoot, { recursive: true, force: true });
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
+    const installBatchSource = readScript(
+      'scripts/installation/install-qwen-with-source.bat',
+    );
+    expect(installBatchSource).toContain('set "VERSION=latest"');
+    expect(installBatchSource).toContain(
+      'if defined QWEN_INSTALL_VERSION set "VERSION=!QWEN_INSTALL_VERSION!"',
+    );
+    expect(installBatchSource).toContain('"%~1"=="--version"');
+    expect(installBatchSource).toContain('--version requires a value');
   });
 
   it('rejects a runtime archive without a Node executable', () => {
@@ -823,14 +691,15 @@ describe('standalone release packaging', () => {
     const workflow = readScript('.github/workflows/release.yml');
 
     expect(workflow).toContain('npm run package:standalone:release --');
-    expect(workflow).toContain(
-      'npm run package:installation-assets -- --out-dir dist/standalone --version "${RELEASE_VERSION}"',
-    );
+    // Per-release installer publishing was removed in favor of a stable hosted
+    // entrypoint, so the release workflow no longer builds or uploads installer
+    // scripts as release assets.
+    expect(workflow).not.toContain('package:installation-assets');
+    expect(workflow).not.toContain('install-qwen.sh');
+    expect(workflow).not.toContain('install-qwen.bat');
     expect(workflow).not.toContain('verify_node_checksum()');
     expect(workflow).not.toContain('download_node()');
     expect(workflow).toContain('dist/standalone/qwen-code-*');
-    expect(workflow).toContain('dist/standalone/install-qwen.sh');
-    expect(workflow).toContain('dist/standalone/install-qwen.bat');
     expect(workflow).toContain('dist/standalone/SHA256SUMS');
   });
 
@@ -1680,27 +1549,6 @@ function runWindowsCommand(command, env = {}) {
     // cmd.exe parses the command string itself; preserve quoted paths.
     windowsVerbatimArguments: true,
   });
-}
-
-function expectCommandFailure(args, expectedOutput) {
-  let caughtError;
-  try {
-    execFileSync(process.execPath, args, {
-      encoding: 'utf8',
-      stdio: 'pipe',
-    });
-  } catch (error) {
-    caughtError = error;
-  }
-
-  expect(caughtError).toBeTruthy();
-  expect(
-    [
-      caughtError?.message,
-      caughtError?.stdout?.toString(),
-      caughtError?.stderr?.toString(),
-    ].join('\n'),
-  ).toMatch(expectedOutput);
 }
 
 function createSymlinkStandaloneArchive(tmpDir) {

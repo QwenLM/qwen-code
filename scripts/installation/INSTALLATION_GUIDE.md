@@ -34,26 +34,30 @@ GitHub releases publish these standalone archives:
 - `qwen-code-linux-arm64.tar.gz`
 - `qwen-code-linux-x64.tar.gz`
 - `qwen-code-win-x64.zip`
-- `install-qwen.sh`
-- `install-qwen.bat`
 - `SHA256SUMS`
 
-The installer scripts are published as release assets so version-specific
-install entrypoints can be distributed alongside the standalone archives after
-that release is created:
+The installer scripts (`install-qwen-with-source.sh`,
+`install-qwen-with-source.bat`) are not republished per release. They are
+served from a hosted installation endpoint and accept `--version` to pin a
+specific standalone release. This keeps the public install command on a stable
+hosted entrypoint while still allowing version pinning, rather than using
+per-release installer URLs.
+
+Latest hosted entrypoints used today:
 
 ```bash
-curl -fsSL https://github.com/QwenLM/qwen-code/releases/download/vX.Y.Z/install-qwen.sh | bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash -s -- --version vX.Y.Z
 ```
 
-```bat
-powershell -Command "Invoke-WebRequest 'https://github.com/QwenLM/qwen-code/releases/download/vX.Y.Z/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+```powershell
+$installer = Join-Path $env:TEMP 'install-qwen.bat'
+Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile $installer
+& $installer --version vX.Y.Z
 ```
 
-Public quick-install docs should switch to release asset URLs only after at
-least one published release includes `install-qwen.sh` and `install-qwen.bat`.
-Until then, keep public quick-install examples on the hosted installation URLs
-used in the README and user docs.
+`QWEN_INSTALL_VERSION` is the equivalent environment variable when arguments
+cannot be passed through.
 
 Archive layout:
 
@@ -185,7 +189,7 @@ Use `--base-url` for private mirrors. The URL must contain
 base URLs must use `https://`.
 
 For Aliyun OSS/CDN, release publishing must upload byte-identical artifacts to
-both the versioned directory, for example `v0.16.0/`, and the `latest/`
+both the versioned directory, for example `vX.Y.Z/`, and the `latest/`
 directory used by the default installer path.
 
 ## Supported Source Values

@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isReleaseChecksumAsset } from './release-asset-config.js';
+import { isStandaloneArchiveName } from './release-asset-config.js';
 import {
   fail,
   isMainModule,
@@ -523,12 +523,12 @@ function createZipArchive(outputPath, cwd) {
 }
 
 /**
- * Rebuild SHA256SUMS from scratch by scanning outDir for all release checksum
- * assets. This overwrites any existing SHA256SUMS, so callers must ensure all
- * desired release assets are present in outDir before calling.
+ * Rebuild SHA256SUMS from scratch by scanning outDir for standalone release
+ * archives. This overwrites any existing SHA256SUMS, so callers must ensure
+ * all desired archives are present in outDir before calling.
  */
 async function writeSha256Sums(outDir) {
-  const entries = fs.readdirSync(outDir).filter(isReleaseChecksumAsset).sort();
+  const entries = fs.readdirSync(outDir).filter(isStandaloneArchiveName).sort();
 
   if (entries.length === 0) {
     fail(
