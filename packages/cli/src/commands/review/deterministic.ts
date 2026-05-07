@@ -35,10 +35,7 @@
 // review output verbatim — they skip Step 5 verification.
 
 import type { CommandModule } from 'yargs';
-import {
-  execFileSync,
-  type ExecFileSyncOptionsWithStringEncoding,
-} from 'node:child_process';
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -282,11 +279,7 @@ const eslintTool: ToolDef = {
       ],
       TIMEOUT_LINTER_MS,
     );
-    const findings = parseEslintJson(
-      ex.stdout,
-      ctx.worktree,
-      ctx.changedFilesSet,
-    );
+    const findings = parseEslintJson(ex.stdout, ctx.worktree, ctx.changedFilesSet);
     return { exitCode: ex.exitCode, findings, timedOut: ex.timedOut };
   },
 };
@@ -358,8 +351,7 @@ const ruffTool: ToolDef = {
     if (!hasConfig) {
       return {
         ok: false,
-        reason:
-          'no ruff config (ruff.toml / .ruff.toml / pyproject [tool.ruff])',
+        reason: 'no ruff config (ruff.toml / .ruff.toml / pyproject [tool.ruff])',
       };
     }
     if (!which('ruff')) return { ok: false, reason: 'ruff not in PATH' };
@@ -376,11 +368,7 @@ const ruffTool: ToolDef = {
       ['check', '--output-format=json', ...targets],
       TIMEOUT_LINTER_MS,
     );
-    const findings = parseRuffJson(
-      ex.stdout,
-      ctx.worktree,
-      ctx.changedFilesSet,
-    );
+    const findings = parseRuffJson(ex.stdout, ctx.worktree, ctx.changedFilesSet);
     return { exitCode: ex.exitCode, findings, timedOut: ex.timedOut };
   },
 };
@@ -707,7 +695,10 @@ async function runDeterministic(args: DeterministicArgs): Promise<void> {
   writeFileSync(args.out, JSON.stringify(result, null, 2) + '\n', 'utf8');
 
   const summary = toolsRun
-    .map((r) => `${r.tool}=${r.findingsCount}${r.timedOut ? ' (timeout)' : ''}`)
+    .map(
+      (r) =>
+        `${r.tool}=${r.findingsCount}${r.timedOut ? ' (timeout)' : ''}`,
+    )
     .join(', ');
   writeStdoutLine(
     `Wrote deterministic report to ${args.out}: ${findings.length} findings (${summary || 'no tools applicable'}; skipped ${toolsSkipped.length})`,

@@ -26,7 +26,11 @@ import { dirname } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh } from './lib/gh.js';
 import { git, refExists } from './lib/git.js';
-import { REVIEW_TMP_DIR, reviewBranch, worktreePath } from './lib/paths.js';
+import {
+  REVIEW_TMP_DIR,
+  reviewBranch,
+  worktreePath,
+} from './lib/paths.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -84,7 +88,12 @@ function cleanStale(prNumber: string): void {
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
-  const { pr_number: prNumber, owner_repo: ownerRepo, remote, out } = args;
+  const {
+    pr_number: prNumber,
+    owner_repo: ownerRepo,
+    remote,
+    out,
+  } = args;
 
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
