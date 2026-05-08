@@ -28,6 +28,7 @@ import { GeminiClient } from '../core/client.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const rootDir = path.resolve(os.tmpdir(), 'qwen-code-test-root');
 
@@ -823,6 +824,79 @@ describe('WriteFileTool', () => {
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
+    });
+  });
+
+  // Same as edit.test's wiring guard: the WriteFileTool feeds the
+  // commit-attribution singleton on success. The recordEdit call
+  // distinguishes a true file creation (`null` old content) from
+  // overwriting an existing empty file (`''` old content); these
+  // tests pin both shapes so the distinction can't drift silently.
+  describe('commit-attribution wiring', () => {
+    const abortSignal = new AbortController().signal;
+
+    beforeEach(() => {
+      CommitAttributionService.resetInstance();
+    });
+
+    it('records AI-originated writes in the attribution service', async () => {
+      const filePath = path.join(rootDir, 'attr_write.txt');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'fresh content',
+      });
+      await invocation.execute(abortSignal);
+
+      const attribution =
+        CommitAttributionService.getInstance().getFileAttribution(filePath);
+      expect(attribution).toBeDefined();
+      expect(attribution!.aiContribution).toBeGreaterThan(0);
+      // A truly new file should be flagged so deletions later in the
+      // session can be reconciled.
+      expect(attribution!.aiCreated).toBe(true);
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('skips attribution when modified_by_user', async () => {
+      const filePath = path.join(rootDir, 'attr_skip.txt');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'human-edited',
+        modified_by_user: true,
+      });
+      await invocation.execute(abortSignal);
+
+      expect(
+        CommitAttributionService.getInstance().getFileAttribution(filePath),
+      ).toBeUndefined();
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('marks aiCreated=false when overwriting an existing empty file', async () => {
+      const filePath = path.join(rootDir, 'attr_existing_empty.txt');
+      // Create an empty file first — the distinction we're guarding
+      // is that overwriting an empty existing file should NOT be
+      // counted as a creation, even though both old contents are
+      // length-0.
+      fs.writeFileSync(filePath, '', 'utf8');
+      // Prior-read enforcement (origin/main #3774) requires the file
+      // to have been Read before WriteFile can overwrite it.
+      seedPriorRead(filePath);
+
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'overwrite content',
+      });
+      await invocation.execute(abortSignal);
+
+      const attribution =
+        CommitAttributionService.getInstance().getFileAttribution(filePath);
+      expect(attribution).toBeDefined();
+      expect(attribution!.aiCreated).toBe(false);
+
+      fs.unlinkSync(filePath);
     });
   });
 

@@ -435,7 +435,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
-              --title "chore(release): ${RELEASE_TAG}" \
+              --title "chore(release): ${RELEASE_TAG} [skip ci]" \
               --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions on main.")"
           fi
 
@@ -447,9 +447,18 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: |-
           set -euo pipefail
-          gh pr merge "${PR_URL}" --squash --auto --delete-branch
+          # Keep [skip ci] on the squash commit that lands on main. The release
+          # PR title also includes it for visibility, but --subject makes the
+          # post-merge CI-skip behavior explicit instead of depending on gh's
+          # default squash subject.
+          gh pr merge "${PR_URL}" \
+            --squash \
+            --auto \
+            --delete-branch \
+            --subject "chore(release): ${RELEASE_TAG} [skip ci]"
 
   notify_failure:
     name: 'Notify Release Failure'

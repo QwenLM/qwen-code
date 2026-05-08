@@ -10,16 +10,20 @@ import { stripVTControlCharacters } from 'node:util';
 import stringWidth from 'string-width';
 
 /**
- * Calculates the maximum width of a multi-line ASCII art string.
+ * Calculates the maximum *visual* width (terminal cells) of a multi-line
+ * ASCII art string. Uses `string-width` semantics via `getCachedStringWidth`
+ * so CJK fullwidth characters count as 2 cells and emoji are sized
+ * correctly — `.length` would undercount these and let oversized art slip
+ * past the width budget that `pickAsciiArtTier` applies.
  * @param asciiArt The ASCII art string.
- * @returns The length of the longest line in the ASCII art.
+ * @returns The widest line's terminal-cell width.
  */
 export const getAsciiArtWidth = (asciiArt: string): number => {
   if (!asciiArt) {
     return 0;
   }
   const lines = asciiArt.split('\n');
-  return Math.max(...lines.map((line) => line.length));
+  return Math.max(...lines.map((line) => getCachedStringWidth(line)));
 };
 
 /*

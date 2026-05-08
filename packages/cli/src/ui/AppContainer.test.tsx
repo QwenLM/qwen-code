@@ -14,7 +14,12 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
-import { AppContainer, dedupeNewestFirst } from './AppContainer.js';
+import {
+  AppContainer,
+  dedupeNewestFirst,
+  getNextRenderMode,
+  isRenderModeToggleKey,
+} from './AppContainer.js';
 import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
@@ -29,6 +34,10 @@ import {
   UIActionsContext,
   type UIActions,
 } from './contexts/UIActionsContext.js';
+import {
+  useRenderMode,
+  type RenderMode,
+} from './contexts/RenderModeContext.js';
 import { type HistoryItem, ToolCallStatus } from './types.js';
 import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
@@ -48,9 +57,11 @@ vi.mock('ink', async (importOriginal) => {
 // so we can assert against them in our tests.
 let capturedUIState: UIState;
 let capturedUIActions: UIActions;
+let capturedRenderMode: RenderMode;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
+  capturedRenderMode = useRenderMode().renderMode;
   return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
@@ -124,6 +135,7 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
+import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 
 describe('AppContainer State Management', () => {
@@ -152,6 +164,7 @@ describe('AppContainer State Management', () => {
   const mockedUseLogger = useLogger as Mock;
   const mockedUseLoadingIndicator = useLoadingIndicator as Mock;
   const mockedUseTerminalSize = useTerminalSize as Mock;
+  const mockedUseKeypress = useKeypress as Mock;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -170,6 +183,7 @@ describe('AppContainer State Management', () => {
 
     capturedUIState = null!;
     capturedUIActions = null!;
+    capturedRenderMode = 'render';
 
     // **Provide a default return value for EVERY mocked hook.**
     mockedUseHistory.mockReturnValue({
@@ -953,6 +967,103 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('initializes Markdown render mode from ui.renderMode', () => {
+      const rawSettings = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            renderMode: 'raw',
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={rawSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedRenderMode).toBe('raw');
+    });
+
+    it('falls back to rendered Markdown mode for missing or invalid ui.renderMode', () => {
+      const invalidSettings = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            renderMode: 'unsupported',
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={invalidSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedRenderMode).toBe('render');
+    });
+
+    it('computes render mode toggles from the global render shortcut', () => {
+      const optionMKey: Key = {
+        name: 'm',
+        ctrl: false,
+        meta: true,
+        shift: false,
+        paste: false,
+        sequence: '\u001bm',
+      };
+
+      expect(isRenderModeToggleKey(optionMKey)).toBe(true);
+      expect(getNextRenderMode('render')).toBe('raw');
+      expect(getNextRenderMode(getNextRenderMode('render'))).toBe('render');
+    });
+
+    it('handles global render mode shortcut through the captured keypress handler', async () => {
+      const optionMKey: Key = {
+        name: 'm',
+        ctrl: false,
+        meta: true,
+        shift: false,
+        paste: false,
+        sequence: '\u001bm',
+      };
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedRenderMode).toBe('render');
+      await Promise.resolve();
+      await Promise.resolve();
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('handleRenderModeToggleKey'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+      expect(() => handleKeypress!(optionMKey)).not.toThrow();
     });
   });
 
