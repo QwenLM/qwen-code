@@ -68,6 +68,12 @@ type MiniCollector = {
   outputTokens?: number;
 };
 
+type ExtractedUsage = {
+  inputTokens: number;
+  contextTokens: number;
+  outputTokens?: number;
+};
+
 type HistoryCollector = {
   updates: JsonRecord[];
 };
@@ -2368,7 +2374,7 @@ export class QwenAgent extends BaseAgent {
     this.eventQueue.enqueue({
       type: 'usage_update',
       usage: {
-        inputTokens: usage.inputTokens,
+        inputTokens: usage.contextTokens,
         ...(contextWindow ? { contextWindow } : {}),
       },
     });
@@ -2381,7 +2387,7 @@ export class QwenAgent extends BaseAgent {
     collector.outputTokens = usage.outputTokens;
   }
 
-  private extractUsage(update: JsonRecord): { inputTokens: number; outputTokens?: number } | null {
+  private extractUsage(update: JsonRecord): ExtractedUsage | null {
     const meta = toRecord(update._meta);
     const usage = toRecord(meta.usage);
     if (Object.keys(usage).length === 0) return null;
@@ -2391,17 +2397,19 @@ export class QwenAgent extends BaseAgent {
       ?? asNumber(usage.promptTokens)
       ?? asNumber(usage.promptTokenCount)
       ?? 0;
-    const cachedTokens =
-      asNumber(usage.cachedReadTokens)
-      ?? asNumber(usage.cachedTokens)
-      ?? asNumber(usage.cachedContentTokenCount)
-      ?? 0;
     const outputTokens =
       asNumber(usage.outputTokens)
       ?? asNumber(usage.completionTokens)
       ?? asNumber(usage.candidatesTokenCount);
+    const totalTokens =
+      asNumber(usage.totalTokens)
+      ?? asNumber(usage.totalTokenCount);
+    const contextTokens =
+      totalTokens !== undefined && totalTokens > 0
+        ? totalTokens
+        : inputTokens;
 
-    return { inputTokens: inputTokens + cachedTokens, outputTokens };
+    return { inputTokens, contextTokens, outputTokens };
   }
 
   // ============================================================
