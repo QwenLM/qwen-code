@@ -115,6 +115,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     streamingResponseLengthRef: { current: 0 },
     isReceivingContent: false,
     pendingGeminiHistoryItems: [],
+    terminalWidth: 80,
     ...overrides,
   }) as UIState;
 
@@ -216,6 +217,83 @@ describe('Composer', () => {
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
       expect(output).not.toContain('Should not show during confirmation');
+    });
+
+    it('keeps loading visible before first content in ultra-narrow panes', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 34,
+        currentLoadingPhrase: 'Working',
+        isReceivingContent: false,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame() ?? '';
+      expect(output).toContain('LoadingIndicator');
+      expect(output).toContain('InputPrompt');
+    });
+
+    it('suppresses the bottom loading indicator in very narrow responding panes', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 25,
+        currentLoadingPhrase: 'Working',
+        isReceivingContent: false,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame() ?? '';
+      expect(output).not.toContain('LoadingIndicator');
+      expect(output).toContain('InputPrompt');
+      expect(output).toContain('Footer');
+    });
+
+    it('keeps controls visible while receiving content in ultra-narrow panes', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 34,
+        currentLoadingPhrase: 'Working',
+        isReceivingContent: true,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame() ?? '';
+      expect(output).toContain('LoadingIndicator');
+      expect(output).toContain('InputPrompt');
+      expect(output).toContain('Footer');
+    });
+
+    it('keeps controls visible during ultra-narrow content stalls', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 34,
+        currentLoadingPhrase: 'Working',
+        isReceivingContent: false,
+        pendingHistoryItems: [{ type: 'gemini', text: 'partial response' }],
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame() ?? '';
+      expect(output).toContain('LoadingIndicator');
+      expect(output).toContain('InputPrompt');
+      expect(output).toContain('Footer');
+    });
+
+    it('keeps confirmation controls visible in ultra-narrow panes', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.WaitingForConfirmation,
+        terminalWidth: 34,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame() ?? '';
+      expect(output).toContain('LoadingIndicator');
+      expect(output).toContain('InputPrompt');
     });
   });
 

@@ -47,7 +47,7 @@ describe('markdownUtilities', () => {
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
-    it('should split after a closed fenced code block before pending tail text', () => {
+    it('should split after a closed fenced code block once the trailing prose is still streaming', () => {
       const content =
         'Intro\n```ts\nconst value = 1;\n```\nTail text without paragraph break';
       expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('Tail'));
@@ -58,10 +58,36 @@ describe('markdownUtilities', () => {
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
-    it('should split after a complete markdown table before pending tail text', () => {
+    it('should split after a completed table run once trailing prose is still streaming', () => {
       const content =
         '| Name | Value |\n| --- | --- |\n| Alpha | 1 |\nTail text without paragraph break';
       expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('Tail'));
+    });
+
+    it('should not split a table header and separator while data rows are still streaming', () => {
+      const content = '| Syntax | Description | Example |\n| --- | --- |';
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
+    it('should not split an unterminated table run at streaming EOF', () => {
+      const content = [
+        '| Syntax | Description | Example |',
+        '| --- | --- |',
+        '| `sequenceDiagram` | Direction:',
+      ].join('\n');
+
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
+    it('should keep a table pending when the next row is only partially streamed', () => {
+      const content = [
+        '| Syntax | Description | Example |',
+        '| --- | --- |',
+        '| `flowchart TD` | Direction | `flowchart TD` |',
+        '| `sequenceDiagram`',
+      ].join('\n');
+
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
     it('should not treat pipe text without a separator row as a table boundary', () => {
@@ -76,9 +102,46 @@ describe('markdownUtilities', () => {
       expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('Tail'));
     });
 
-    it('should not split list-like lines inside an open code block', () => {
+    it('should return 0 for an open code block that starts at the beginning', () => {
       const content = '```md\n- first item\n- second item\nTail text';
       expect(findLastSafeSplitPoint(content)).toBe(0);
+    });
+
+    it('should split before an unfinished fenced block when prose already stabilized', () => {
+      const content = 'Intro paragraph.\n\n```mermaid\nflowchart TD\nA-->B';
+      expect(findLastSafeSplitPoint(content)).toBe(
+        content.indexOf('```mermaid'),
+      );
+    });
+
+    it('should split before an unfinished table when prose already stabilized', () => {
+      const content = [
+        'Intro paragraph.',
+        '',
+        '| Syntax | Description |',
+        '| --- | --- |',
+        '| `flowchart TD` | Direction',
+      ].join('\n');
+
+      expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('| Syntax'));
+    });
+
+    it('should not split a leading blank prefix into Static', () => {
+      const content = '\n\nUseful text that is still streaming';
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
+    it('should keep consecutive repeated structural rows out of Static while streaming', () => {
+      const content = [
+        '### 语法参考',
+        '### 语法参考',
+        '',
+        '| 语法 | 说明 |',
+        '| 语法 | 说明 |',
+        'Tail text still streaming',
+      ].join('\n');
+
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
   });
 });

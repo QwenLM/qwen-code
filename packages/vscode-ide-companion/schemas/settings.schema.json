@@ -180,6 +180,14 @@
           "type": "boolean",
           "default": false
         },
+        "inlineThinkingMode": {
+          "description": "Display model thinking inline: off or full. Options: off, full",
+          "enum": [
+            "off",
+            "full"
+          ],
+          "default": "off"
+        },
         "hideTips": {
           "description": "Hide helpful tips in the UI",
           "type": "boolean",

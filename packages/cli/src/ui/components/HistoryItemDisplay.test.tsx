@@ -16,6 +16,7 @@ import type {
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { LoadedSettings } from '../../config/settings.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -33,6 +34,15 @@ describe('<HistoryItemDisplay />', () => {
     terminalWidth: 80,
     config: mockConfig,
   };
+  const createSettings = (settings: Record<string, unknown>) =>
+    new LoadedSettings(
+      { path: '', settings, originalSettings: settings },
+      { path: '', settings: {}, originalSettings: {} },
+      { path: '', settings: {}, originalSettings: {} },
+      { path: '', settings: {}, originalSettings: {} },
+      true,
+      new Set(),
+    );
 
   it('renders UserMessage for "user" type', () => {
     const item: HistoryItem = {
@@ -135,10 +145,81 @@ describe('<HistoryItemDisplay />', () => {
     );
     const output = lastFrame()!;
 
-    expect(output).toContain('streaming lines hidden');
+    expect(output).not.toContain('streaming lines hidden');
     expect(output).not.toContain('token-000');
     expect(output).toContain('token-119');
-    expect(output.split('\n').length).toBeLessThanOrEqual(7);
+    expect(output.split('\n').length).toBeLessThanOrEqual(6);
+  });
+
+  it('hides thinking items by default to avoid streaming scrollback repeats', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'gemini_thought',
+      text: 'thinking out loud',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+
+    expect(lastFrame()).not.toContain('thinking out loud');
+  });
+
+  it('renders thinking items when inlineThinkingMode is full', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'gemini_thought',
+      text: 'thinking out loud',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+      { settings: createSettings({ ui: { inlineThinkingMode: 'full' } }) },
+    );
+
+    expect(lastFrame()).toContain('thinking out loud');
+  });
+
+  it('keeps pending assistant output in placeholder mode for fence-only tokens', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'gemini',
+      text: '```mermaid',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay
+        item={item}
+        isPending={true}
+        terminalWidth={40}
+        availableTerminalHeight={10}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Generating response...');
+    expect(output).not.toContain('```mermaid');
+  });
+
+  it('renders pending assistant output once visible text arrives after leading blank lines', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'gemini',
+      text: '\n\nVisible assistant output',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay
+        item={item}
+        isPending={true}
+        terminalWidth={40}
+        availableTerminalHeight={10}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).not.toContain('Generating response...');
+    expect(output).toContain('Visible assistant output');
   });
 
   it('renders ToolStatsDisplay for "tool_stats" type', () => {

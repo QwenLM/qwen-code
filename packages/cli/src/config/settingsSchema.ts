@@ -572,6 +572,19 @@ const SETTINGS_SCHEMA = {
           'Show Qwen Code status and thoughts in the terminal window title',
         showInDialog: false,
       },
+      inlineThinkingMode: {
+        type: 'enum',
+        label: 'Inline Thinking',
+        category: 'UI',
+        requiresRestart: false,
+        default: 'off',
+        description: 'Display model thinking inline: off or full.',
+        showInDialog: true,
+        options: [
+          { value: 'off', label: 'Off' },
+          { value: 'full', label: 'Full' },
+        ],
+      },
       hideTips: {
         type: 'boolean',
         label: 'Hide Tips',

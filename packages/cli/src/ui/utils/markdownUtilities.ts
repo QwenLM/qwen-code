@@ -53,6 +53,8 @@ interface OpenFence extends FenceMarker {
 const fenceLineRegex = /^ {0,3}(`{3,}|~{3,})/;
 const listItemRegex = /^ {0,3}(?:[-+*]\s+\S|\d{1,9}[.)]\s+\S)/;
 const indentedContinuationRegex = /^[ \t]{2,}\S/;
+const repeatedStructuralLineRegex =
+  /^(?:#{1,6}\s+\S|\|.*\||(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie|mindmap|timeline)\b)/;
 
 const getMarkdownLines = (content: string): MarkdownLine[] => {
   const lines: MarkdownLine[] = [];
@@ -131,6 +133,26 @@ const isListLine = (line: string, isInListRun: boolean): boolean =>
   listItemRegex.test(line) ||
   (isInListRun && indentedContinuationRegex.test(line));
 
+const hasConsecutiveRepeatedStructuralLines = (content: string): boolean => {
+  let previousStructuralLine: string | null = null;
+
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!repeatedStructuralLineRegex.test(trimmed)) {
+      previousStructuralLine = null;
+      continue;
+    }
+
+    if (trimmed === previousStructuralLine) {
+      return true;
+    }
+
+    previousStructuralLine = trimmed;
+  }
+
+  return false;
+};
+
 const chooseLastSafePoint = (
   content: string,
   safeSplitPoints: number[],
@@ -141,8 +163,17 @@ const chooseLastSafePoint = (
 
   for (let i = sortedSafeSplitPoints.length - 1; i >= 0; i--) {
     const point = sortedSafeSplitPoints[i];
+    const prefix = content.slice(0, point);
     if (point >= content.length) {
       return content.length;
+    }
+
+    if (prefix.trim().length === 0) {
+      continue;
+    }
+
+    if (hasConsecutiveRepeatedStructuralLines(prefix)) {
+      continue;
     }
 
     if (content.slice(point).trim().length > 0) {
@@ -159,14 +190,20 @@ export const findLastSafeSplitPoint = (content: string) => {
   let openFence: OpenFence | undefined;
   let tableRunEnd: number | undefined;
   let tableRunHasSeparator = false;
+  let tableRunDataRows = 0;
   let listRunEnd: number | undefined;
 
   const closeTableRun = () => {
-    if (tableRunEnd !== undefined && tableRunHasSeparator) {
+    if (
+      tableRunEnd !== undefined &&
+      tableRunHasSeparator &&
+      tableRunDataRows > 0
+    ) {
       safeSplitPoints.push(tableRunEnd);
     }
     tableRunEnd = undefined;
     tableRunHasSeparator = false;
+    tableRunDataRows = 0;
   };
 
   const closeListRun = () => {
@@ -177,6 +214,7 @@ export const findLastSafeSplitPoint = (content: string) => {
   };
 
   for (const line of lines) {
+    const isLastLine = line.endWithNewline >= content.length;
     const fenceMarker = getFenceMarker(line.text);
 
     if (openFence) {
@@ -205,9 +243,22 @@ export const findLastSafeSplitPoint = (content: string) => {
     }
 
     if (isTableRow(line.text)) {
+      const isSeparator = isTableSeparatorRow(line.text);
+      if (tableRunHasSeparator && !isSeparator) {
+        tableRunDataRows += 1;
+      }
       tableRunEnd = line.endWithNewline;
-      tableRunHasSeparator =
-        tableRunHasSeparator || isTableSeparatorRow(line.text);
+      tableRunHasSeparator = tableRunHasSeparator || isSeparator;
+    } else if (
+      tableRunEnd !== undefined &&
+      isLastLine &&
+      !content.endsWith('\n') &&
+      line.text.trimStart().startsWith('|')
+    ) {
+      // A streaming chunk can end in the middle of the next table row, for
+      // example `| \`sequenceDiagram`. Do not close the active table on that
+      // partial line, or the already-complete rows before it will be committed
+      // to Static without the rest of the table.
     } else {
       closeTableRun();
     }
@@ -224,7 +275,11 @@ export const findLastSafeSplitPoint = (content: string) => {
     return openFence.start;
   }
 
-  closeTableRun();
+  // Do not close an in-progress table at streaming EOF. Models often emit a
+  // table header/separator first and data rows in later chunks; splitting the
+  // header into Static makes the following rows lose table context and render as
+  // raw pipe text on narrow terminals. A table is safe to split only after a
+  // following blank/non-table line has closed the run.
   closeListRun();
 
   return chooseLastSafePoint(content, safeSplitPoints);

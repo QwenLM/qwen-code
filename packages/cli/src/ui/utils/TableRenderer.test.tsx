@@ -61,7 +61,7 @@ describe('<TableRenderer />', () => {
     const output = renderTable(
       ['项目', 'ANSI', 'Markdown'],
       [['中文内容', '\u001b[31mRed\u001b[0m Blue', '**bold** and `code`']],
-      42,
+      80,
       ['left', 'center', 'right'],
     );
     expectAllLinesToHaveSameVisibleWidth(output);

@@ -77,8 +77,97 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
+import {
+  getTextRepeatDiagnostics,
+  isTuiStreamDebugEnabled,
+  logTuiStreamMetric,
+  normalizeOverlappingStreamDelta,
+  normalizeSuffixOverlappingStreamDelta,
+} from '../utils/tuiStreamDiagnostics.js';
+import { getInlineThinkingMode } from '../utils/inlineThinkingMode.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+const MIN_PENDING_TAIL_CHARS_AFTER_CONTINUATION_SPLIT = 80;
+const NARROW_TERMINAL_SPLIT_DEFER_MAX_COLS = 25;
+
+function normalizeStreamingDisplayBuffer(text: string): {
+  text: string;
+  collapsedBlankLines: number;
+  strippedLeadingBlankLines: number;
+} {
+  if (!text.includes('\n')) {
+    return {
+      text,
+      collapsedBlankLines: 0,
+      strippedLeadingBlankLines: 0,
+    };
+  }
+
+  const sourceLines = text.split('\n');
+  let strippedLeadingBlankLines = 0;
+  while (
+    strippedLeadingBlankLines < sourceLines.length &&
+    sourceLines[strippedLeadingBlankLines].trim().length === 0
+  ) {
+    strippedLeadingBlankLines += 1;
+  }
+
+  const normalizedLines: string[] = [];
+  let collapsedBlankLines = 0;
+  let previousWasBlank = false;
+
+  for (const line of sourceLines.slice(strippedLeadingBlankLines)) {
+    const isBlank = line.trim().length === 0;
+    if (isBlank) {
+      if (previousWasBlank) {
+        collapsedBlankLines += 1;
+        continue;
+      }
+      normalizedLines.push('');
+      previousWasBlank = true;
+      continue;
+    }
+
+    previousWasBlank = false;
+    normalizedLines.push(line);
+  }
+
+  return {
+    text: normalizedLines.join('\n'),
+    collapsedBlankLines,
+    strippedLeadingBlankLines,
+  };
+}
+
+function getTextFromHistoryItem(
+  item: HistoryItemWithoutId | HistoryItem | null | undefined,
+): string | undefined {
+  return item && 'text' in item && typeof item.text === 'string'
+    ? item.text
+    : undefined;
+}
+
+function logHistoryCommitMetrics(
+  reason: string,
+  item: HistoryItemWithoutId | HistoryItem,
+  timestamp: number,
+): void {
+  if (!isTuiStreamDebugEnabled()) {
+    return;
+  }
+
+  const text = getTextFromHistoryItem(item);
+  if (text === undefined) {
+    return;
+  }
+
+  logTuiStreamMetric('GEMINI_STREAM', 'history_commit_metrics', {
+    reason,
+    itemType: item.type,
+    timestamp,
+    ...getTextRepeatDiagnostics(text),
+  });
+}
 
 /**
  * Classify API error to StopFailureErrorType
@@ -223,6 +312,7 @@ export const useGeminiStream = (
   const abortControllerRef = useRef<AbortController | null>(null);
   const flushBufferedStreamEventsRef = useRef<Set<() => void>>(new Set());
   const turnCancelledRef = useRef(false);
+  const continuationRecoveryActiveRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
   const lastPromptRef = useRef<PartListUnion | null>(null);
   const lastPromptErroredRef = useRef(false);
@@ -245,6 +335,17 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    logTuiStreamMetric('GEMINI_STREAM', 'hook_mounted', {
+      terminalWidth,
+      terminalHeight,
+      pid: process.pid,
+      cwd: process.cwd(),
+      sourceUrl: import.meta.url,
+      fixVersion: 'streaming-display-v4',
+    });
+  }, [terminalHeight, terminalWidth]);
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
   // --- Real-time token display ---
@@ -680,25 +781,77 @@ export const useGeminiStream = (
     (
       eventValue: ContentEvent['value'],
       currentGeminiMessageBuffer: string,
+      currentFullGeminiMessageBuffer: string,
       userMessageTimestamp: number,
-    ): string => {
+    ): {
+      pendingBuffer: string;
+      fullBuffer: string;
+    } => {
       if (turnCancelledRef.current) {
         // Prevents additional output after a user initiated cancel.
-        return '';
+        return {
+          pendingBuffer: '',
+          fullBuffer: currentFullGeminiMessageBuffer,
+        };
       }
       // Track output chars for real-time token estimation & mark as receiving.
       streamingResponseLengthRef.current += eventValue.length;
       setIsReceivingContent(true);
-      let newGeminiMessageBuffer = currentGeminiMessageBuffer + eventValue;
+      const pendingBeforeType = pendingHistoryItemRef.current?.type ?? null;
+      const bufferBeforeText = currentGeminiMessageBuffer;
+      const fullBufferBeforeText = currentFullGeminiMessageBuffer;
+      const continuationNormalization = continuationRecoveryActiveRef.current
+        ? normalizeOverlappingStreamDelta(fullBufferBeforeText, eventValue)
+        : normalizeSuffixOverlappingStreamDelta(
+            fullBufferBeforeText,
+            eventValue,
+          );
+      const normalizedEventValue = continuationNormalization.text;
+
+      if (continuationRecoveryActiveRef.current) {
+        logTuiStreamMetric('GEMINI_STREAM', 'continuation_delta_metrics', {
+          normalization: continuationNormalization,
+          rawEvent: getTextRepeatDiagnostics(eventValue),
+          emittedEvent: getTextRepeatDiagnostics(normalizedEventValue),
+          bufferBefore: getTextRepeatDiagnostics(bufferBeforeText),
+          fullBufferBefore: getTextRepeatDiagnostics(fullBufferBeforeText),
+        });
+        if (
+          normalizedEventValue.length > 0 ||
+          continuationNormalization.action === 'unchanged'
+        ) {
+          continuationRecoveryActiveRef.current = false;
+        }
+      }
+
+      if (normalizedEventValue.length === 0) {
+        return {
+          pendingBuffer: currentGeminiMessageBuffer,
+          fullBuffer: currentFullGeminiMessageBuffer,
+        };
+      }
+
+      const newFullGeminiMessageBuffer =
+        currentFullGeminiMessageBuffer + normalizedEventValue;
+      const rawPendingBuffer =
+        currentGeminiMessageBuffer + normalizedEventValue;
+      const pendingDisplayNormalization =
+        normalizeStreamingDisplayBuffer(rawPendingBuffer);
+      let newGeminiMessageBuffer = pendingDisplayNormalization.text;
       if (
         pendingHistoryItemRef.current?.type !== 'gemini' &&
         pendingHistoryItemRef.current?.type !== 'gemini_content'
       ) {
         if (pendingHistoryItemRef.current) {
+          logHistoryCommitMetrics(
+            'content-switch',
+            pendingHistoryItemRef.current,
+            userMessageTimestamp,
+          );
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
         setPendingHistoryItem({ type: 'gemini', text: '' });
-        newGeminiMessageBuffer = eventValue;
+        newGeminiMessageBuffer = pendingDisplayNormalization.text;
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.
@@ -709,6 +862,27 @@ export const useGeminiStream = (
           type: item?.type as 'gemini' | 'gemini_content',
           text: newGeminiMessageBuffer,
         }));
+        if (isTuiStreamDebugEnabled()) {
+          logTuiStreamMetric('GEMINI_STREAM', 'content_buffer_metrics', {
+            eventChars: normalizedEventValue.length,
+            rawEventChars: eventValue.length,
+            streamDeltaNormalization: continuationNormalization,
+            pendingDisplayNormalization,
+            pendingBeforeType,
+            pendingAfterType: pendingHistoryItemRef.current?.type ?? null,
+            splitKind: 'none',
+            splitPoint,
+            event: getTextRepeatDiagnostics(normalizedEventValue),
+            rawEvent: getTextRepeatDiagnostics(eventValue),
+            bufferBefore: getTextRepeatDiagnostics(bufferBeforeText),
+            fullBufferBefore: getTextRepeatDiagnostics(fullBufferBeforeText),
+            rawPendingAfter: getTextRepeatDiagnostics(rawPendingBuffer),
+            bufferAfter: getTextRepeatDiagnostics(newGeminiMessageBuffer),
+            fullBufferAfter: getTextRepeatDiagnostics(
+              newFullGeminiMessageBuffer,
+            ),
+          });
+        }
       } else {
         // This indicates that we need to split up this Gemini Message.
         // Splitting a message is primarily a performance consideration. There is a
@@ -720,21 +894,146 @@ export const useGeminiStream = (
         // broken up so that there are more "statically" rendered.
         const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
         const afterText = newGeminiMessageBuffer.substring(splitPoint);
-        addItem(
-          {
-            type: pendingHistoryItemRef.current?.type as
-              | 'gemini'
-              | 'gemini_content',
-            text: beforeText,
-          },
-          userMessageTimestamp,
-        );
+        const shouldDeferNarrowWidthSplit =
+          terminalWidth <= NARROW_TERMINAL_SPLIT_DEFER_MAX_COLS;
+        const shouldDeferTinyTailSplit =
+          beforeText.length > 0 &&
+          afterText.length > 0 &&
+          afterText.length < MIN_PENDING_TAIL_CHARS_AFTER_CONTINUATION_SPLIT;
+
+        if (shouldDeferNarrowWidthSplit || shouldDeferTinyTailSplit) {
+          setPendingHistoryItem((item) => ({
+            type: item?.type as 'gemini' | 'gemini_content',
+            text: newGeminiMessageBuffer,
+          }));
+          if (isTuiStreamDebugEnabled()) {
+            logTuiStreamMetric('GEMINI_STREAM', 'content_buffer_metrics', {
+              eventChars: normalizedEventValue.length,
+              rawEventChars: eventValue.length,
+              streamDeltaNormalization: continuationNormalization,
+              pendingDisplayNormalization,
+              pendingBeforeType,
+              pendingAfterType: pendingHistoryItemRef.current?.type ?? null,
+              splitKind: 'deferred-safe-split',
+              splitPoint,
+              deferredReason: shouldDeferNarrowWidthSplit
+                ? 'narrow-terminal-live-tail'
+                : 'tiny-pending-tail',
+              terminalWidth,
+              narrowTerminalSplitDeferMaxCols:
+                NARROW_TERMINAL_SPLIT_DEFER_MAX_COLS,
+              deferredMinPendingTailChars:
+                MIN_PENDING_TAIL_CHARS_AFTER_CONTINUATION_SPLIT,
+              deferredPendingTailChars: afterText.length,
+              event: getTextRepeatDiagnostics(normalizedEventValue),
+              rawEvent: getTextRepeatDiagnostics(eventValue),
+              bufferBefore: getTextRepeatDiagnostics(bufferBeforeText),
+              fullBufferBefore: getTextRepeatDiagnostics(fullBufferBeforeText),
+              rawPendingAfter: getTextRepeatDiagnostics(rawPendingBuffer),
+              bufferAfter: getTextRepeatDiagnostics(newGeminiMessageBuffer),
+              fullBufferAfter: getTextRepeatDiagnostics(
+                newFullGeminiMessageBuffer,
+              ),
+              committedBefore: getTextRepeatDiagnostics(beforeText),
+              remainingAfter: getTextRepeatDiagnostics(afterText),
+            });
+          }
+          return {
+            pendingBuffer: newGeminiMessageBuffer,
+            fullBuffer: newFullGeminiMessageBuffer,
+          };
+        }
+
+        if (beforeText.length === 0) {
+          setPendingHistoryItem((item) => ({
+            type: item?.type === 'gemini_content' ? 'gemini_content' : 'gemini',
+            text: afterText,
+          }));
+          newGeminiMessageBuffer = afterText;
+          if (isTuiStreamDebugEnabled()) {
+            logTuiStreamMetric('GEMINI_STREAM', 'content_buffer_metrics', {
+              eventChars: normalizedEventValue.length,
+              rawEventChars: eventValue.length,
+              streamDeltaNormalization: continuationNormalization,
+              pendingDisplayNormalization,
+              pendingBeforeType,
+              pendingAfterType:
+                pendingHistoryItemRef.current?.type === 'gemini_content'
+                  ? 'gemini_content'
+                  : 'gemini',
+              splitKind: 'zero-prefix-live-tail',
+              splitPoint,
+              committedToStatic: false,
+              suppressedEmptyStaticCommit: true,
+              event: getTextRepeatDiagnostics(normalizedEventValue),
+              rawEvent: getTextRepeatDiagnostics(eventValue),
+              bufferBefore: getTextRepeatDiagnostics(bufferBeforeText),
+              fullBufferBefore: getTextRepeatDiagnostics(fullBufferBeforeText),
+              rawPendingAfter: getTextRepeatDiagnostics(rawPendingBuffer),
+              bufferAfterAppend: getTextRepeatDiagnostics(
+                newGeminiMessageBuffer,
+              ),
+              fullBufferAfter: getTextRepeatDiagnostics(
+                newFullGeminiMessageBuffer,
+              ),
+              committedBefore: getTextRepeatDiagnostics(beforeText),
+              remainingAfter: getTextRepeatDiagnostics(afterText),
+            });
+          }
+          return {
+            pendingBuffer: newGeminiMessageBuffer,
+            fullBuffer: newFullGeminiMessageBuffer,
+          };
+        }
+
+        const committedItem: HistoryItemWithoutId = {
+          type: pendingHistoryItemRef.current?.type as
+            | 'gemini'
+            | 'gemini_content',
+          text: beforeText,
+        };
+        if (isTuiStreamDebugEnabled()) {
+          logTuiStreamMetric('GEMINI_STREAM', 'content_buffer_metrics', {
+            eventChars: normalizedEventValue.length,
+            rawEventChars: eventValue.length,
+            streamDeltaNormalization: continuationNormalization,
+            pendingDisplayNormalization,
+            pendingBeforeType,
+            pendingAfterType: 'gemini_content',
+            splitKind: 'safe-split',
+            splitPoint,
+            committedToStatic: beforeText.length > 0,
+            suppressedEmptyStaticCommit: beforeText.length === 0,
+            event: getTextRepeatDiagnostics(normalizedEventValue),
+            rawEvent: getTextRepeatDiagnostics(eventValue),
+            bufferBefore: getTextRepeatDiagnostics(bufferBeforeText),
+            fullBufferBefore: getTextRepeatDiagnostics(fullBufferBeforeText),
+            rawPendingAfter: getTextRepeatDiagnostics(rawPendingBuffer),
+            bufferAfterAppend: getTextRepeatDiagnostics(newGeminiMessageBuffer),
+            fullBufferAfter: getTextRepeatDiagnostics(
+              newFullGeminiMessageBuffer,
+            ),
+            committedBefore: getTextRepeatDiagnostics(beforeText),
+            remainingAfter: getTextRepeatDiagnostics(afterText),
+          });
+        }
+        if (beforeText.length > 0) {
+          logHistoryCommitMetrics(
+            'content-safe-split',
+            committedItem,
+            userMessageTimestamp,
+          );
+          addItem(committedItem, userMessageTimestamp);
+        }
         setPendingHistoryItem({ type: 'gemini_content', text: afterText });
         newGeminiMessageBuffer = afterText;
       }
-      return newGeminiMessageBuffer;
+      return {
+        pendingBuffer: newGeminiMessageBuffer,
+        fullBuffer: newFullGeminiMessageBuffer,
+      };
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem, terminalWidth],
   );
 
   const mergeThought = useCallback(
@@ -765,6 +1064,21 @@ export const useGeminiStream = (
       const thoughtText = eventValue.description ?? '';
       if (!thoughtText) {
         return currentThoughtBuffer;
+      }
+
+      const inlineThinkingMode = getInlineThinkingMode(settings);
+      if (inlineThinkingMode !== 'full') {
+        if (isTuiStreamDebugEnabled()) {
+          logTuiStreamMetric('GEMINI_STREAM', 'thought_stream_metrics', {
+            inlineThinkingMode,
+            action: 'state-only',
+            event: getTextRepeatDiagnostics(thoughtText),
+            bufferBefore: getTextRepeatDiagnostics(currentThoughtBuffer),
+            pendingBeforeType: pendingHistoryItemRef.current?.type ?? null,
+          });
+        }
+        mergeThought(eventValue);
+        return '';
       }
 
       let newThoughtBuffer = currentThoughtBuffer + thoughtText;
@@ -798,16 +1112,44 @@ export const useGeminiStream = (
           type: nextPendingType,
           text: newThoughtBuffer,
         });
+        if (isTuiStreamDebugEnabled()) {
+          logTuiStreamMetric('GEMINI_STREAM', 'thought_stream_metrics', {
+            inlineThinkingMode: 'full',
+            action: 'pending-update',
+            splitPoint,
+            event: getTextRepeatDiagnostics(thoughtText),
+            bufferBefore: getTextRepeatDiagnostics(currentThoughtBuffer),
+            bufferAfter: getTextRepeatDiagnostics(newThoughtBuffer),
+            pendingBeforeType: pendingType ?? null,
+          });
+        }
       } else {
         const beforeText = newThoughtBuffer.substring(0, splitPoint);
         const afterText = newThoughtBuffer.substring(splitPoint);
-        addItem(
-          {
-            type: nextPendingType,
-            text: beforeText,
-          },
-          userMessageTimestamp,
-        );
+        if (isTuiStreamDebugEnabled()) {
+          logTuiStreamMetric('GEMINI_STREAM', 'thought_stream_metrics', {
+            inlineThinkingMode: 'full',
+            action: 'safe-split',
+            splitPoint,
+            committedToStatic: beforeText.length > 0,
+            suppressedEmptyStaticCommit: beforeText.length === 0,
+            event: getTextRepeatDiagnostics(thoughtText),
+            bufferBefore: getTextRepeatDiagnostics(currentThoughtBuffer),
+            bufferAfterAppend: getTextRepeatDiagnostics(newThoughtBuffer),
+            committedBefore: getTextRepeatDiagnostics(beforeText),
+            remainingAfter: getTextRepeatDiagnostics(afterText),
+            pendingBeforeType: pendingType ?? null,
+          });
+        }
+        if (beforeText.length > 0) {
+          addItem(
+            {
+              type: nextPendingType,
+              text: beforeText,
+            },
+            userMessageTimestamp,
+          );
+        }
         setPendingHistoryItem({
           type: 'gemini_thought_content',
           text: afterText,
@@ -820,7 +1162,13 @@ export const useGeminiStream = (
 
       return newThoughtBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, mergeThought],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      mergeThought,
+      settings,
+    ],
   );
 
   const handleUserCancelledEvent = useCallback(
@@ -1128,6 +1476,7 @@ export const useGeminiStream = (
       signal: AbortSignal,
     ): Promise<StreamProcessingStatus> => {
       let geminiMessageBuffer = '';
+      let fullGeminiMessageBuffer = '';
       let thoughtBuffer = '';
       const toolCallRequests: ToolCallRequestInfo[] = [];
       const bufferedEvents: BufferedStreamEvent[] = [];
@@ -1165,11 +1514,14 @@ export const useGeminiStream = (
               mergedContent += queuedContent.value;
             }
 
-            geminiMessageBuffer = handleContentEvent(
+            const contentBuffers = handleContentEvent(
               mergedContent,
               geminiMessageBuffer,
+              fullGeminiMessageBuffer,
               userMessageTimestamp,
             );
+            geminiMessageBuffer = contentBuffers.pendingBuffer;
+            fullGeminiMessageBuffer = contentBuffers.fullBuffer;
             continue;
           }
 
@@ -1289,15 +1641,28 @@ export const useGeminiStream = (
               // create a fresh one, and reset the buffer to just the new chunk,
               // losing the partial text we meant to preserve.
               if (!event.isContinuation) {
+                continuationRecoveryActiveRef.current = false;
                 discardBufferedStreamEvents();
                 if (pendingHistoryItemRef.current) {
                   setPendingHistoryItem(null);
                 }
                 geminiMessageBuffer = '';
+                fullGeminiMessageBuffer = '';
                 thoughtBuffer = '';
               } else {
                 flushBufferedStreamEvents();
+                continuationRecoveryActiveRef.current = true;
               }
+              logTuiStreamMetric('GEMINI_STREAM', 'stream_retry_metrics', {
+                isContinuation: event.isContinuation === true,
+                hasRetryInfo: event.retryInfo !== undefined,
+                geminiBuffer: getTextRepeatDiagnostics(geminiMessageBuffer),
+                fullGeminiBuffer: getTextRepeatDiagnostics(
+                  fullGeminiMessageBuffer,
+                ),
+                thoughtBuffer: getTextRepeatDiagnostics(thoughtBuffer),
+                pendingType: pendingHistoryItemRef.current?.type ?? null,
+              });
               // Always discard tool call requests from the truncated/failed
               // attempt to prevent duplicate execution after escalation or
               // recovery. The recovery path now skips turns that already
@@ -1421,6 +1786,7 @@ export const useGeminiStream = (
         submitType !== SendMessageType.ToolResult &&
         !allowConcurrentBtwDuringResponse
       ) {
+        continuationRecoveryActiveRef.current = false;
         setModelSwitchedFromQuotaError(false);
         // Clear model override for new user turns, but preserve it on retry
         // so the same skill-selected model is used again.
@@ -1569,6 +1935,11 @@ export const useGeminiStream = (
           }
 
           if (pendingHistoryItemRef.current) {
+            logHistoryCommitMetrics(
+              'stream-finished',
+              pendingHistoryItemRef.current,
+              userMessageTimestamp,
+            );
             addItem(pendingHistoryItemRef.current, userMessageTimestamp);
             setPendingHistoryItem(null);
           }

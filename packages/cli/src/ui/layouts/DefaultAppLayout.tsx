@@ -62,7 +62,9 @@ export const DefaultAppLayout: React.FC = () => {
       ) : (
         <>
           {/* Main view: conversation history + main composer / dialogs */}
-          <MainContent />
+          <Box flexDirection="column" flexGrow={1}>
+            <MainContent />
+          </Box>
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
             {uiState.dialogsVisible ? (
               <Box

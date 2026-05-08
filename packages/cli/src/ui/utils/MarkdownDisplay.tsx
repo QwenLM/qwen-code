@@ -134,7 +134,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             .filter((c) => c.length > 0).length
         : 0;
 
-      if (sepMatch && sepColCount === potentialHeaders.length) {
+      if (
+        sepMatch &&
+        sepColCount > 0 &&
+        sepColCount <= potentialHeaders.length
+      ) {
         inTable = true;
         tableHeaders = potentialHeaders;
         tableRows = [];

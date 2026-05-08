@@ -2355,6 +2355,109 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('should coalesce overlapping recovery continuation text', async () => {
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk([{ text: 'Alpha shared recovery suffix' }], 'MAX_TOKENS'),
+        ]),
+        makeStream([
+          makeChunk(
+            [{ text: 'shared recovery suffix and continuation' }],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery-overlap',
+      );
+
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+
+      expect(lastEntry.role).toBe('model');
+      expect(text).toBe('Alpha shared recovery suffix and continuation');
+    });
+
+    it('should coalesce recovery text that replays a previous tail anchor', async () => {
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                text: [
+                  'Intro',
+                  '### 常用语法速查',
+                  '| 语法 | 说明 |',
+                  'tail that was truncated',
+                ].join('\n'),
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                text: [
+                  '### 常用语法速查',
+                  '| 语法 | 说明 |',
+                  'new suffix',
+                ].join('\n'),
+              },
+            ],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long mermaid answer' },
+        'prompt-recovery-contained-replay',
+      );
+
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+
+      expect(text).toBe(
+        [
+          'Intro',
+          '### 常用语法速查',
+          '| 语法 | 说明 |',
+          'tail that was truncated',
+          'new suffix',
+        ].join('\n'),
+      );
+    });
+
     it('should skip recovery when truncated turn has a functionCall', async () => {
       // Initial stream returns a functionCall + MAX_TOKENS. Escalated stream
       // returns the same (functionCall + MAX_TOKENS). Recovery must NOT run

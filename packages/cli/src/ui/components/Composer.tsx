@@ -38,6 +38,10 @@ export const Composer = () => {
   const isStreaming =
     uiState.streamingState === StreamingState.Responding ||
     uiState.streamingState === StreamingState.WaitingForConfirmation;
+  const suppressBottomLoadingIndicator =
+    isStreaming &&
+    uiState.streamingState === StreamingState.Responding &&
+    uiState.terminalWidth <= 30;
 
   // Aggregate agent tool tokens from executing tool calls. Only changes when
   // a subagent reports progress, so it doesn't drive the animation loop.
@@ -80,7 +84,7 @@ export const Composer = () => {
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      {!uiState.embeddedShellFocused && (
+      {!uiState.embeddedShellFocused && !suppressBottomLoadingIndicator && (
         <LoadingIndicator
           // Hide loading phrases when enableLoadingPhrases is explicitly false.
           // Using === false ensures phrases show by default when undefined.

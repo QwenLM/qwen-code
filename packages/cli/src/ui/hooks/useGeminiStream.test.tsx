@@ -37,6 +37,7 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 
 // --- MOCKS ---
 const mockSendMessageStream = vi
@@ -235,6 +236,9 @@ describe('useGeminiStream', () => {
     mockSendMessageStream
       .mockClear()
       .mockReturnValue((async function* () {})());
+    vi.mocked(findLastSafeSplitPoint).mockImplementation(
+      (content: string) => content.length,
+    );
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
   });
 
@@ -254,6 +258,10 @@ describe('useGeminiStream', () => {
   const renderTestHook = (
     initialToolCalls: TrackedToolCall[] = [],
     geminiClient?: any,
+    options?: {
+      terminalWidth?: number;
+      terminalHeight?: number;
+    },
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -304,8 +312,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
-          80,
-          24,
+          options?.terminalWidth ?? 80,
+          options?.terminalHeight ?? 24,
         );
       },
       {
@@ -883,7 +891,7 @@ describe('useGeminiStream', () => {
       });
     });
 
-    it('buffers streamed thoughts until the throttle interval elapses', async () => {
+    it('buffers streamed thoughts without rendering them inline by default', async () => {
       vi.useFakeTimers();
 
       let releaseStream!: () => void;
@@ -922,13 +930,89 @@ describe('useGeminiStream', () => {
         vi.advanceTimersByTime(60);
       });
 
+      expect(result.current.pendingHistoryItems).toEqual([]);
+      expect(result.current.thought).toEqual({ description: 'Thinking' });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('renders streamed thoughts inline when inlineThinkingMode is full', async () => {
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      const mockStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Thought,
+          value: { description: 'Think' },
+        };
+        yield {
+          type: ServerGeminiEventType.Thought,
+          value: { description: 'ing' },
+        };
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const inlineThinkingSettings = {
+        ...mockLoadedSettings,
+        merged: {
+          ...mockLoadedSettings.merged,
+          ui: { inlineThinkingMode: 'full' },
+        },
+      } as unknown as LoadedSettings;
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          inlineThinkingSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
       expect(result.current.pendingHistoryItems).toEqual([
         expect.objectContaining({
           type: 'gemini_thought',
           text: 'Thinking',
         }),
       ]);
-      expect(result.current.thought).toEqual({ description: 'Thinking' });
 
       act(() => {
         result.current.cancelOngoingRequest();
@@ -980,6 +1064,396 @@ describe('useGeminiStream', () => {
         },
         expect.any(Number),
       );
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('does not commit empty static items when no safe split point exists', async () => {
+      vi.useFakeTimers();
+      vi.mocked(findLastSafeSplitPoint).mockReturnValue(0);
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '```mermaid\nflowchart TD',
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini',
+          text: '',
+        }),
+        expect.any(Number),
+      );
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini',
+          text: '```mermaid\nflowchart TD',
+        }),
+      ]);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('defers safe splits on very narrow terminals to avoid live/static overlap', async () => {
+      vi.useFakeTimers();
+      vi.mocked(findLastSafeSplitPoint).mockImplementation((content: string) =>
+        content.startsWith('Intro\n') ? 'Intro\n'.length : content.length,
+      );
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Intro\n```mermaid\nflowchart TD',
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook([], undefined, {
+        terminalWidth: 25,
+        terminalHeight: 31,
+      });
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: 'Intro\n',
+        }),
+        expect.any(Number),
+      );
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini',
+          text: 'Intro\n```mermaid\nflowchart TD',
+        }),
+      ]);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('collapses repeated blank lines in the pending display buffer', async () => {
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'flowchart TD\n\n\nA[Start]',
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook([], undefined, {
+        terminalWidth: 25,
+        terminalHeight: 31,
+      });
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toHaveLength(1);
+      expect(result.current.pendingHistoryItems[0]).toEqual(
+        expect.objectContaining({
+          type: 'gemini',
+        }),
+      );
+      expect(result.current.pendingHistoryItems[0]?.text).toContain(
+        'flowchart TD',
+      );
+      expect(result.current.pendingHistoryItems[0]?.text).toContain('A[Start]');
+      expect(result.current.pendingHistoryItems[0]?.text).not.toMatch(
+        /\n\s*\n\s*\n/,
+      );
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('deduplicates overlapping content after a continuation retry', async () => {
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Alpha shared recovery suffix',
+          };
+          yield {
+            type: ServerGeminiEventType.Retry,
+            isContinuation: true,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'shared recovery suffix and continuation',
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini',
+          text: 'Alpha shared recovery suffix and continuation',
+        }),
+      ]);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('deduplicates continuation content replayed from the previous tail', async () => {
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: [
+              'Intro',
+              '### 常用语法速查',
+              '| 语法 | 说明 |',
+              'tail that was truncated',
+            ].join('\n'),
+          };
+          yield {
+            type: ServerGeminiEventType.Retry,
+            isContinuation: true,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: ['### 常用语法速查', '| 语法 | 说明 |', 'new suffix'].join(
+              '\n',
+            ),
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini',
+          text: [
+            'Intro',
+            '### 常用语法速查',
+            '| 语法 | 说明 |',
+            'tail that was truncated',
+            'new suffix',
+          ].join('\n'),
+        }),
+      ]);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('deduplicates cumulative content across a static split boundary', async () => {
+      vi.useFakeTimers();
+      const sharedTail = 'shared recovery suffix '.repeat(4).trimEnd();
+      const firstChunk = `Alpha ${sharedTail}`;
+      const secondChunk = `${firstChunk} and continuation`;
+      vi.mocked(findLastSafeSplitPoint).mockImplementation((content: string) =>
+        content === firstChunk ? 'Alpha '.length : content.length,
+      );
+
+      let releaseSecondChunk!: () => void;
+      const waitForSecondChunk = new Promise<void>((resolve) => {
+        releaseSecondChunk = resolve;
+      });
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: firstChunk,
+          };
+          await waitForSecondChunk;
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: secondChunk,
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: 'gemini',
+          text: 'Alpha ',
+        },
+        expect.any(Number),
+      );
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_content',
+          text: sharedTail,
+        }),
+      ]);
+
+      await act(async () => {
+        releaseSecondChunk();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_content',
+          text: `${sharedTail} and continuation`,
+        }),
+      ]);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
 
       await act(async () => {
         releaseStream();

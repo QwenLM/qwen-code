@@ -22,6 +22,8 @@ export interface StreamingTextDeltaState {
   suppressedBytes: number;
   cumulativeDeltaCount: number;
   exactRepeatCount: number;
+  overlapDeltaCount: number;
+  overlapRepeatCount: number;
   maxPrefixOverlapBytes: number;
 }
 

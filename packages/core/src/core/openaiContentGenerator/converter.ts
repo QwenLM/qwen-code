@@ -19,6 +19,9 @@ import type {
 } from '@google/genai';
 import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import path from 'node:path';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { RequestContext, StreamingTextDeltaState } from './types.js';
@@ -59,6 +62,12 @@ export interface ExtendedCompletionChunkDelta
 }
 
 const CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH = 20;
+const OVERLAPPING_DELTA_MIN_OVERLAP_BYTES = 12;
+const OVERLAPPING_DELTA_STRUCTURAL_MIN_OVERLAP_BYTES = 6;
+const OVERLAPPING_DELTA_MAX_SCAN_CHARS = 4000;
+const STREAM_TEXT_FINGERPRINT_TAIL_CHARS = 2000;
+
+let directStreamDebugLogPath: string | null = null;
 
 function isStreamDebugEnabled(): boolean {
   const value = process.env['QWEN_STREAM_DEBUG'];
@@ -67,6 +76,121 @@ function isStreamDebugEnabled(): boolean {
   }
 
   return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
+}
+
+function getDirectStreamDebugLogPath(): string {
+  if (!directStreamDebugLogPath) {
+    const runtimeDir = process.env['QWEN_RUNTIME_DIR'];
+    const baseDir = runtimeDir
+      ? path.resolve(runtimeDir.replace(/^~(?=$|[/\\])/, homedir()))
+      : path.join(homedir() || tmpdir(), '.qwen');
+    const debugDir = path.join(baseDir, 'debug');
+    mkdirSync(debugDir, { recursive: true });
+    directStreamDebugLogPath = path.join(
+      debugDir,
+      `tui-stream-${process.pid}.jsonl`,
+    );
+  }
+
+  return directStreamDebugLogPath;
+}
+
+function writeDirectStreamDebugMetric(
+  scope: string,
+  metric: string,
+  payload: Record<string, unknown>,
+): void {
+  if (!isStreamDebugEnabled()) {
+    return;
+  }
+
+  try {
+    appendFileSync(
+      getDirectStreamDebugLogPath(),
+      `${JSON.stringify({
+        time: new Date().toISOString(),
+        pid: process.pid,
+        scope,
+        metric,
+        payload,
+      })}\n`,
+      'utf8',
+    );
+  } catch {
+    // Diagnostics must never affect provider conversion.
+  }
+}
+
+function fingerprintText(text: string): string {
+  let hash = 2166136261;
+  for (const char of text) {
+    hash ^= char.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return `${text.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function getTextRepeatDiagnostics(text: string): Record<string, unknown> {
+  const counts = new Map<string, number>();
+  let maxLine = '';
+  let maxLineRepeatCount = 0;
+  let previousLine: string | null = null;
+  let currentConsecutiveLine = '';
+  let currentConsecutiveCount = 0;
+  let maxConsecutiveLine = '';
+  let maxConsecutiveLineRepeatCount = 0;
+
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trimEnd();
+    if (line.length === 0) {
+      previousLine = null;
+      currentConsecutiveLine = '';
+      currentConsecutiveCount = 0;
+      continue;
+    }
+
+    const count = (counts.get(line) ?? 0) + 1;
+    counts.set(line, count);
+    if (count > maxLineRepeatCount) {
+      maxLine = line;
+      maxLineRepeatCount = count;
+    }
+
+    if (line === previousLine) {
+      currentConsecutiveCount += 1;
+    } else {
+      currentConsecutiveLine = line;
+      currentConsecutiveCount = 1;
+    }
+    previousLine = line;
+
+    if (currentConsecutiveCount > maxConsecutiveLineRepeatCount) {
+      maxConsecutiveLine = currentConsecutiveLine;
+      maxConsecutiveLineRepeatCount = currentConsecutiveCount;
+    }
+  }
+
+  const tail =
+    text.length > STREAM_TEXT_FINGERPRINT_TAIL_CHARS
+      ? text.slice(-STREAM_TEXT_FINGERPRINT_TAIL_CHARS)
+      : text;
+
+  return {
+    fingerprint: fingerprintText(text),
+    tailFingerprint: fingerprintText(tail),
+    chars: text.length,
+    bytes: byteLength(text),
+    lines: text.length === 0 ? 0 : text.split('\n').length,
+    maxLineRepeatCount,
+    maxLineRepeatFingerprint:
+      maxLineRepeatCount > 1 ? fingerprintText(maxLine) : null,
+    maxConsecutiveLineRepeatCount,
+    maxConsecutiveLineRepeatFingerprint:
+      maxConsecutiveLineRepeatCount > 1
+        ? fingerprintText(maxConsecutiveLine)
+        : null,
+  };
 }
 
 function createStreamingTextDeltaState(): StreamingTextDeltaState {
@@ -79,6 +203,8 @@ function createStreamingTextDeltaState(): StreamingTextDeltaState {
     suppressedBytes: 0,
     cumulativeDeltaCount: 0,
     exactRepeatCount: 0,
+    overlapDeltaCount: 0,
+    overlapRepeatCount: 0,
     maxPrefixOverlapBytes: 0,
   };
 }
@@ -93,7 +219,13 @@ function logStreamingTextDeltaMetrics(
   emittedDelta: string,
   state: StreamingTextDeltaState,
   prefixOverlapBytes: number,
-  event: 'incremental' | 'cumulative-suffix' | 'cumulative-repeat' | 'stale',
+  event:
+    | 'incremental'
+    | 'cumulative-suffix'
+    | 'cumulative-repeat'
+    | 'overlap-suffix'
+    | 'overlap-repeat'
+    | 'stale',
 ): void {
   state.chunkIndex += 1;
 
@@ -114,13 +246,14 @@ function logStreamingTextDeltaMetrics(
   } else if (event === 'cumulative-repeat') {
     state.cumulativeDeltaCount += 1;
     state.exactRepeatCount += 1;
+  } else if (event === 'overlap-suffix') {
+    state.overlapDeltaCount += 1;
+  } else if (event === 'overlap-repeat') {
+    state.overlapDeltaCount += 1;
+    state.overlapRepeatCount += 1;
   }
 
-  if (!isStreamDebugEnabled()) {
-    return;
-  }
-
-  debugLogger.debug('stream_delta_metrics', {
+  const payload = {
     streamPart,
     event,
     chunkIndex: state.chunkIndex,
@@ -135,9 +268,46 @@ function logStreamingTextDeltaMetrics(
       suppressedBytes: state.suppressedBytes,
       cumulativeDeltaCount: state.cumulativeDeltaCount,
       exactRepeatCount: state.exactRepeatCount,
+      overlapDeltaCount: state.overlapDeltaCount,
+      overlapRepeatCount: state.overlapRepeatCount,
       maxPrefixOverlapBytes: state.maxPrefixOverlapBytes,
     },
-  });
+    rawDelta: getTextRepeatDiagnostics(rawDelta),
+    emittedDelta: getTextRepeatDiagnostics(emittedDelta),
+    emittedText: getTextRepeatDiagnostics(state.emittedText),
+  };
+
+  writeDirectStreamDebugMetric('CONVERTER', 'stream_delta_metrics', payload);
+
+  if (!isStreamDebugEnabled()) {
+    return;
+  }
+
+  debugLogger.debug('stream_delta_metrics', payload);
+}
+
+function findSuffixPrefixOverlap(previous: string, next: string): number {
+  const maxOverlap = Math.min(
+    previous.length,
+    next.length,
+    OVERLAPPING_DELTA_MAX_SCAN_CHARS,
+  );
+
+  for (let length = maxOverlap; length > 0; length -= 1) {
+    const prefix = next.slice(0, length);
+    const prefixBytes = byteLength(prefix);
+    const hasMarkdownStructure = /[#|`\n]/.test(prefix);
+    const isSignificantOverlap =
+      prefixBytes >= OVERLAPPING_DELTA_MIN_OVERLAP_BYTES ||
+      (hasMarkdownStructure &&
+        prefixBytes >= OVERLAPPING_DELTA_STRUCTURAL_MIN_OVERLAP_BYTES);
+
+    if (isSignificantOverlap && previous.endsWith(prefix)) {
+      return length;
+    }
+  }
+
+  return 0;
 }
 
 // Some OpenAI-compatible providers send accumulated content in each
@@ -230,6 +400,35 @@ function normalizeStreamingTextDelta(
       'cumulative-repeat',
     );
     return '';
+  }
+
+  const overlapLength = findSuffixPrefixOverlap(state.emittedText, rawDelta);
+  if (overlapLength > 0) {
+    const overlap = rawDelta.slice(0, overlapLength);
+    const suffix = rawDelta.slice(overlapLength);
+    const prefixOverlapBytes = byteLength(overlap);
+    if (suffix.length === 0) {
+      logStreamingTextDeltaMetrics(
+        streamPart,
+        rawDelta,
+        '',
+        state,
+        prefixOverlapBytes,
+        'overlap-repeat',
+      );
+      return '';
+    }
+
+    state.emittedText += suffix;
+    logStreamingTextDeltaMetrics(
+      streamPart,
+      rawDelta,
+      suffix,
+      state,
+      prefixOverlapBytes,
+      'overlap-suffix',
+    );
+    return suffix;
   }
 
   state.emittedText += rawDelta;

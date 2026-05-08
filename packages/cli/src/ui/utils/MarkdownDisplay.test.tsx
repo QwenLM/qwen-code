@@ -228,7 +228,7 @@ next line
       expect(output).not.toContain('┌');
     });
 
-    it('does not treat separator with mismatched column count as a table', () => {
+    it('tolerates a short separator row in LLM-generated tables', () => {
       const text = `
 | A | B |
 |---|
@@ -238,8 +238,29 @@ next line
         <MarkdownDisplay {...baseProps} text={text} />,
       );
       const output = lastFrame();
-      expect(output).toContain('| A | B |');
-      expect(output).not.toContain('┌');
+      expect(output).toContain('A');
+      expect(output).toContain('B');
+      expect(output).toContain('1');
+      expect(output).toContain('2');
+      expect(output).toContain('┌');
+    });
+
+    it('tolerates a three-column header with a two-column separator on narrow terminals', () => {
+      const text = `
+| 语法 | 说明 | 示例 |
+|------|------|
+| \`sequenceDiagram\` | 声明时序图 | \`sequenceDiagram\` |
+| \`A->>B: 消息\` | 同步消息（实线箭头） | \`UI->>API: POST /login\` |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} contentWidth={38} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+
+      expect(output).toContain('语法');
+      expect(output).toContain('sequenceDiagram');
+      expect(output).not.toContain('| `sequenceDiagram` |');
+      expect(output).not.toContain('|------|------|');
     });
 
     it('does not treat a horizontal rule after a pipe line as a table separator', () => {

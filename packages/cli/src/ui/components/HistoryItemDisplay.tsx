@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
@@ -16,8 +16,10 @@ import {
   UserShellMessage,
   AssistantMessage,
   AssistantMessageContent,
+  PendingAssistantPlaceholder,
   ThinkMessage,
   ThinkMessageContent,
+  hasRenderablePendingAssistantSignal,
 } from './messages/ConversationMessages.js';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { CompressionMessage } from './messages/CompressionMessage.js';
@@ -52,6 +54,16 @@ import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
+import { getInlineThinkingMode } from '../utils/inlineThinkingMode.js';
+import {
+  createTuiStreamDebugLogger,
+  getTextRepeatDiagnostics,
+  isTuiStreamDebugEnabled,
+  logTuiStreamMetric,
+} from '../utils/tuiStreamDiagnostics.js';
+
+const historyDebugLogger = createTuiStreamDebugLogger('HISTORY_ITEM');
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -64,6 +76,7 @@ interface HistoryItemDisplayProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   availableTerminalHeightGemini?: number;
+  previousAssistantText?: string;
 }
 
 const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
@@ -77,16 +90,112 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   activeShellPtyId,
   embeddedShellFocused,
   availableTerminalHeightGemini,
+  previousAssistantText,
 }) => {
   const marginTop =
     item.type === 'gemini_content' || item.type === 'gemini_thought_content'
       ? 0
       : 1;
 
+  const settings = useSettings();
   const { compactMode } = useCompactMode();
+  const inlineThinkingMode = getInlineThinkingMode(settings);
+  const isThoughtItem =
+    item.type === 'gemini_thought' || item.type === 'gemini_thought_content';
+  const shouldRenderThought =
+    isThoughtItem && !compactMode && inlineThinkingMode === 'full';
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
+  const textForDiagnostics =
+    'text' in itemForDisplay && typeof itemForDisplay.text === 'string'
+      ? itemForDisplay.text
+      : undefined;
+
+  useEffect(() => {
+    if (!isTuiStreamDebugEnabled() || textForDiagnostics === undefined) {
+      return;
+    }
+
+    historyDebugLogger.debug('history_item_text_metrics', {
+      itemId: itemForDisplay.id,
+      itemType: itemForDisplay.type,
+      isPending,
+      availableTerminalHeight,
+      availableTerminalHeightGemini,
+      terminalWidth,
+      mainAreaWidth,
+      contentWidth,
+      ...getTextRepeatDiagnostics(textForDiagnostics),
+    });
+    logTuiStreamMetric('HISTORY_ITEM', 'history_item_text_metrics', {
+      itemId: itemForDisplay.id,
+      itemType: itemForDisplay.type,
+      isPending,
+      hasPreviousAssistantText: previousAssistantText !== undefined,
+      previousAssistantText:
+        previousAssistantText === undefined
+          ? undefined
+          : getTextRepeatDiagnostics(previousAssistantText),
+      availableTerminalHeight,
+      availableTerminalHeightGemini,
+      terminalWidth,
+      mainAreaWidth,
+      contentWidth,
+      ...getTextRepeatDiagnostics(textForDiagnostics),
+    });
+  }, [
+    availableTerminalHeight,
+    availableTerminalHeightGemini,
+    contentWidth,
+    isPending,
+    itemForDisplay.id,
+    itemForDisplay.type,
+    mainAreaWidth,
+    previousAssistantText,
+    terminalWidth,
+    textForDiagnostics,
+  ]);
+
+  if (isThoughtItem && !shouldRenderThought) {
+    return null;
+  }
+
+  if (
+    isPending &&
+    textForDiagnostics !== undefined &&
+    (itemForDisplay.type === 'gemini' ||
+      itemForDisplay.type === 'gemini_content' ||
+      itemForDisplay.type === 'gemini_thought' ||
+      itemForDisplay.type === 'gemini_thought_content') &&
+    !hasRenderablePendingAssistantSignal(textForDiagnostics)
+  ) {
+    if (isTuiStreamDebugEnabled()) {
+      logTuiStreamMetric('HISTORY_ITEM', 'pending_placeholder_fallback', {
+        itemId: itemForDisplay.id,
+        itemType: itemForDisplay.type,
+        isPending,
+        availableTerminalHeight,
+        availableTerminalHeightGemini,
+        terminalWidth,
+        mainAreaWidth,
+        contentWidth,
+        hasPreviousAssistantText: previousAssistantText !== undefined,
+        text: getTextRepeatDiagnostics(textForDiagnostics),
+      });
+    }
+    return (
+      <Box
+        flexDirection="column"
+        key={itemForDisplay.id}
+        marginTop={marginTop}
+        marginLeft={2}
+        marginRight={2}
+      >
+        <PendingAssistantPlaceholder />
+      </Box>
+    );
+  }
 
   return (
     <Box
@@ -124,9 +233,10 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
+          previousAssistantText={previousAssistantText}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought' && (
+      {shouldRenderThought && itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
           text={itemForDisplay.text}
           isPending={isPending}
@@ -136,16 +246,18 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
-        <ThinkMessageContent
-          text={itemForDisplay.text}
-          isPending={isPending}
-          availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
-          }
-          contentWidth={contentWidth}
-        />
-      )}
+      {shouldRenderThought &&
+        itemForDisplay.type === 'gemini_thought_content' && (
+          <ThinkMessageContent
+            text={itemForDisplay.text}
+            isPending={isPending}
+            availableTerminalHeight={
+              availableTerminalHeightGemini ?? availableTerminalHeight
+            }
+            contentWidth={contentWidth}
+            previousAssistantText={previousAssistantText}
+          />
+        )}
       {itemForDisplay.type === 'info' && (
         <InfoMessage
           text={itemForDisplay.text}

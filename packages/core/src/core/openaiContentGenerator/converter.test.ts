@@ -1527,6 +1527,59 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('should normalize rolling-overlap streaming content deltas to suffixes', () => {
+      const ctx = withStreamParser();
+      const chunks = [
+        '### 常用语法速',
+        '### 常用语法速查\n\n| 语法',
+        '| 语法 | 说明 |',
+        '| 说明 | 示例 |\n| `flowchart TD` | 方向',
+        '| `flowchart TD` | 方向：TD、LR |',
+      ];
+
+      const emitted = chunks.map((content, index) => {
+        const chunk = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-overlap-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        );
+
+        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      });
+
+      expect(emitted).toEqual([
+        '### 常用语法速',
+        '查\n\n| 语法',
+        ' | 说明 |',
+        ' 示例 |\n| `flowchart TD` | 方向',
+        '：TD、LR |',
+      ]);
+      expect(emitted.join('')).toBe(
+        '### 常用语法速查\n\n| 语法 | 说明 | 示例 |\n| `flowchart TD` | 方向：TD、LR |',
+      );
+      expect(ctx.textDeltaState).toEqual(
+        expect.objectContaining({
+          chunkIndex: 5,
+          cumulativeDeltaCount: 1,
+          overlapDeltaCount: 3,
+          overlapRepeatCount: 0,
+        }),
+      );
+      expect(ctx.textDeltaState?.suppressedBytes).toBeGreaterThan(0);
+    });
+
     it('should ignore repeated cumulative chunks with no new suffix', () => {
       const ctx = withStreamParser();
       const content = 'The following section starts with enough text.';

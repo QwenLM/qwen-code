@@ -116,22 +116,22 @@ Qwen Code uses a **component-level rendering flag** that each UI component reads
 
 ### 3.2 Key Source Files
 
-| Component       | File                                  | Key Logic                                       |
-| --------------- | ------------------------------------- | ----------------------------------------------- |
-| Toggle handler  | `AppContainer.tsx:1684-1690`          | Toggles `compactMode`, persists to settings     |
-| Context         | `CompactModeContext.tsx`              | `compactMode`, `setCompactMode`                 |
-| Tool group      | `ToolGroupMessage.tsx:105-110`        | `showCompact` with 4 force-expand conditions    |
-| Tool message    | `ToolMessage.tsx:346-350`             | Hides `displayRenderer` in compact mode         |
-| Compact display | `CompactToolGroupDisplay.tsx:49-108`  | Single-line summary with status + hint          |
-| Confirmation    | `ToolConfirmationMessage.tsx:113-147` | Simplified 3-option compact approval            |
-| Tips            | `Tips.tsx:14-29`                      | Startup tip rotation includes compact mode hint |
-| Settings sync   | `SettingsDialog.tsx:189-193`          | Syncs with CompactModeContext + refreshStatic   |
-| MainContent     | `MainContent.tsx:60-76`               | Renders live pendingHistoryItems                |
-| Thinking        | `HistoryItemDisplay.tsx:123-133`      | Hides `gemini_thought` in compact mode          |
+| Component       | File                                  | Key Logic                                                                                               |
+| --------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Toggle handler  | `AppContainer.tsx:1684-1690`          | Toggles `compactMode`, persists to settings                                                             |
+| Context         | `CompactModeContext.tsx`              | `compactMode`, `setCompactMode`                                                                         |
+| Tool group      | `ToolGroupMessage.tsx:105-110`        | `showCompact` with 4 force-expand conditions                                                            |
+| Tool message    | `ToolMessage.tsx:346-350`             | Hides `displayRenderer` in compact mode                                                                 |
+| Compact display | `CompactToolGroupDisplay.tsx:49-108`  | Single-line summary with status + hint                                                                  |
+| Confirmation    | `ToolConfirmationMessage.tsx:113-147` | Simplified 3-option compact approval                                                                    |
+| Tips            | `Tips.tsx:14-29`                      | Startup tip rotation includes compact mode hint                                                         |
+| Settings sync   | `SettingsDialog.tsx:189-193`          | Syncs with CompactModeContext + refreshStatic                                                           |
+| MainContent     | `MainContent.tsx:60-76`               | Renders live pendingHistoryItems                                                                        |
+| Thinking        | `HistoryItemDisplay.tsx`              | Hides `gemini_thought` by default unless `ui.inlineThinkingMode` is `full`; compact mode still hides it |
 
 ### 3.3 Design Decisions
 
-1. **Verbose is the default.** Users see all tool output and thinking by default.
+1. **Tool output remains verbose by default.** Streamed thinking is status-only by default to avoid narrow-terminal scrollback repeats; users can restore inline thinking with `ui.inlineThinkingMode: "full"`.
 2. **Persistent preference.** `compactMode` is saved to `settings.json` and survives across sessions.
 3. **Component-level rendering.** Each component reads `compactMode` from context and adjusts its own rendering.
 4. **Force-expand protection.** Four conditions override compact mode to ensure critical UI elements are always visible (confirmations, errors, shell, user-initiated).
@@ -144,7 +144,7 @@ Qwen Code uses a **component-level rendering flag** that each UI component reads
 ```
 Session start → verbose mode (default)
      │
-     ├─ All tool outputs, thinking, details visible
+     ├─ All tool outputs and details visible; thinking stays in live status
      │
      ├─ User presses Ctrl+O (or toggles in Settings)
      │     └─→ compactMode = true, persisted
@@ -154,7 +154,7 @@ Session start → verbose mode (default)
      │
      ├─ User presses Ctrl+O again
      │     └─→ compactMode = false, persisted
-     │         └─ All details visible again
+     │         └─ All details visible again; inline thinking follows ui.inlineThinkingMode
      │
      └─ Next session → same mode as last session
 ```
