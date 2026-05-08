@@ -158,15 +158,28 @@ class ToolSearchInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Candidates for keyword search: only deferred tools. Already-loaded (core)
-   * tools are already in the model's tool-declaration list, so surfacing them
-   * here would be noise. `select:<name>` mode is unrestricted — the model may
-   * legitimately want to inspect the schema of an already-loaded tool — and
-   * handles its own lookup via {@link loadAndReturnSchemas}.
+   * Candidates for keyword search: only deferred tools that have NOT yet
+   * been revealed this session. Already-loaded (core) tools are in the
+   * model's tool-declaration list already, so surfacing them here would
+   * be noise. Already-revealed deferred tools were loaded via a prior
+   * `select:` or keyword search and ARE in the declaration list too —
+   * re-surfacing them in subsequent searches wastes tokens and risks
+   * the model retrying a tool it already has.
+   *
+   * `select:<name>` mode is unrestricted — the model may legitimately
+   * want to re-inspect the schema of a loaded tool — and handles its
+   * own lookup via {@link loadAndReturnSchemas}.
    */
   private collectCandidates(): AnyDeclarativeTool[] {
     const registry = this.config.getToolRegistry();
-    return registry.getAllTools().filter((t) => t.shouldDefer && !t.alwaysLoad);
+    return registry
+      .getAllTools()
+      .filter(
+        (t) =>
+          t.shouldDefer &&
+          !t.alwaysLoad &&
+          !registry.isDeferredToolRevealed(t.name),
+      );
   }
 
   private async loadAndReturnSchemas(names: string[]): Promise<ToolResult> {
@@ -207,19 +220,34 @@ class ToolSearchInvocation extends BaseToolInvocation<
 
     // Re-sync the active chat's tool list so the revealed tools appear in the
     // next API request. Safe to call even if the client hasn't initialised.
+    let setToolsError: string | undefined;
     if (loaded.length > 0) {
       try {
         await this.config.getGeminiClient()?.setTools();
       } catch (err) {
-        // Non-fatal for this call — the schemas still appear in llmContent
-        // below so the model can read them. But the chat's declaration list
-        // didn't update, so follow-up calls to the revealed tools may fail
-        // at the API layer. Log for diagnostics.
+        // Capture the failure: the schemas appear in llmContent so the
+        // model SEES the tools, but the chat's declaration list didn't
+        // update — calling them next turn would surface as `unknown
+        // tool` from the API. Surface as a tool error so the agent
+        // knows the loaded tools aren't actually available, instead
+        // of silently swallowing into debugLogger.warn (which is off
+        // in production).
+        setToolsError = err instanceof Error ? err.message : String(err);
         debugLogger.warn(
-          'setTools() failed while revealing deferred tools; chat tool list may be stale until next session:',
+          'setTools() failed while revealing deferred tools:',
           err,
         );
       }
+    }
+
+    if (setToolsError) {
+      return {
+        llmContent: `Error: tools were located but could not be exposed to the API (setTools failed: ${setToolsError}). Retry the search next turn or call ToolSearch again with select:Name1,Name2 — re-running tool registration usually clears transient init races.`,
+        returnDisplay: `setTools failed: ${setToolsError}`,
+        error: {
+          message: `setTools failed while revealing deferred tools: ${setToolsError}`,
+        },
+      };
     }
 
     const schemaBlocks = loaded.map(

@@ -53,6 +53,7 @@ import {
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
+import { writeStderrLine } from './utils/stdioHelpers.js';
 
 // Human-readable labels for the detectors that can fire mid-stream.
 // Surfaced to stderr in TEXT mode so a headless run that halts on a loop
@@ -850,16 +851,22 @@ export async function runNonInteractive(
           // Setting exitCode + returning (rather than throwing) avoids the
           // outer catch re-emitting the result a second time.
           if (config.getJsonSchema()) {
+            const errorMessage =
+              'Model produced plain text instead of calling the structured_output tool as required by --json-schema.';
             adapter.emitResult({
               isError: true,
               durationMs: Date.now() - startTime,
               apiDurationMs: totalApiDurationMs,
               numTurns: turnCount,
-              errorMessage:
-                'Model produced plain text instead of calling the structured_output tool as required by --json-schema.',
+              errorMessage,
               usage,
               stats,
             });
+            // Text-format users only see the exit code (1) without
+            // visible context — `emitResult` is a no-op in TEXT mode for
+            // the isError-true path. Echo to stderr so the failure mode
+            // is discoverable without scraping `--output-format json`.
+            writeStderrLine(`qwen --json-schema: ${errorMessage}`);
             process.exitCode = 1;
             return;
           }

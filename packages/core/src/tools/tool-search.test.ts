@@ -358,6 +358,68 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('"name":"slack_send"');
     expect(content).not.toContain('"name":"email_send"');
   });
+
+  it('keyword search excludes already-revealed deferred tools', async () => {
+    // Pin: once a deferred tool is revealed via a prior `select:` lookup,
+    // it should no longer appear in subsequent keyword searches — it's
+    // already in the model's declaration list, re-surfacing wastes
+    // tokens and risks the model thinking it needs to load it again.
+    registry.registerTool(
+      new MockTool({
+        name: 'slack_send_message',
+        description: 'send a slack message',
+        searchHint: 'slack send',
+        shouldDefer: true,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+
+    // First: keyword search reveals the tool.
+    const first = await tool
+      .build({ query: 'slack' })
+      .execute(new AbortController().signal);
+    expect(String(first.llmContent)).toContain('"name":"slack_send_message"');
+    // First search uses keyword path (which calls loadAndReturnSchemas →
+    // revealDeferredTool); confirm registry agrees.
+    expect(registry.isDeferredToolRevealed('slack_send_message')).toBe(true);
+
+    // Second: same keyword search now finds nothing (tool excluded).
+    const second = await tool
+      .build({ query: 'slack' })
+      .execute(new AbortController().signal);
+    expect(String(second.llmContent)).toContain('No tools found matching');
+  });
+
+  it('returns an error result when setTools() throws — model must NOT see schemas as ready', async () => {
+    // Pin: setTools() sync-failure during reveal is surfaced as a tool
+    // error so the agent can choose to retry / abandon, instead of being
+    // told "tools loaded" while the API actually has no declarations
+    // (which would surface as "unknown tool" on the next call).
+    registry.registerTool(
+      new MockTool({
+        name: 'cron_create',
+        shouldDefer: true,
+      }),
+    );
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: vi.fn().mockRejectedValue(new Error('chat not initialised')),
+    } as never);
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:cron_create' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.error?.message).toContain('setTools failed');
+    expect(result.error?.message).toContain('chat not initialised');
+    // Critical: the schema MUST NOT be in llmContent — otherwise the
+    // model thinks the tool is callable and the next turn surfaces
+    // an "unknown tool" API error.
+    expect(String(result.llmContent)).not.toContain('"name":"cron_create"');
+    expect(String(result.llmContent)).toContain('setTools failed');
+  });
 });
 
 describe('ToolRegistry.clearRevealedDeferredTools', () => {
