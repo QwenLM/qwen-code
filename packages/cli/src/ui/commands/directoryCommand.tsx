@@ -403,14 +403,17 @@ export const directoryCommand: SlashCommand = {
         }
 
         try {
-          // Find the scope that actually contains this directory entry so
-          // we update the correct persisted setting.  The merged workspace
+          // Find the scope(s) that contain this directory entry so we
+          // update the correct persisted setting.  The merged workspace
           // context is built from all scopes via MergeStrategy.CONCAT, so a
           // directory added at user scope would reappear on restart if we
           // only clear the workspace-scoped list.
+          //
+          // Persisted entries may use ~, $HOME, or symlink spellings, so
+          // we resolve each raw entry via expandHomeDir + realpath before
+          // comparing against the canonical directory.
           const targetDir = canonicalDirectory;
-          let targetScope: SettingScope | null = null;
-          let existingDirs: string[] = [];
+          let found = false;
 
           for (const scope of [
             SettingScope.Workspace,
@@ -419,21 +422,36 @@ export const directoryCommand: SlashCommand = {
             const scopeDirs =
               settings.forScope(scope).originalSettings.context
                 ?.includeDirectories ?? [];
-            if (scopeDirs.includes(targetDir)) {
-              targetScope = scope;
-              existingDirs = scopeDirs;
-              break;
+            const matchingIndex = scopeDirs.findIndex((d: string) => {
+              try {
+                const resolved = fs.realpathSync(expandHomeDir(d));
+                return resolved === targetDir;
+              } catch {
+                return d === targetDir;
+              }
+            });
+            if (matchingIndex !== -1) {
+              found = true;
+              const includeDirectories = scopeDirs.filter(
+                (_: string, i: number) => i !== matchingIndex,
+              );
+              settings.setValue(
+                scope,
+                'context.includeDirectories',
+                includeDirectories,
+              );
             }
           }
 
-          if (targetScope !== null) {
-            const includeDirectories = existingDirs.filter(
-              (d: string) => d !== targetDir,
-            );
-            settings.setValue(
-              targetScope,
-              'context.includeDirectories',
-              includeDirectories,
+          if (!found) {
+            addItem(
+              {
+                type: MessageType.WARNING,
+                text: t(
+                  'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.',
+                ),
+              },
+              Date.now(),
             );
           }
         } catch (error) {

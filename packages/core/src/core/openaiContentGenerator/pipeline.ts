@@ -16,6 +16,10 @@ import { isDeepSeekHostname } from './provider/deepseek.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
+// eslint-disable-next-line import/no-internal-modules
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('PIPELINE');
 
 /**
  * The OpenAI SDK adds an abort listener for every `chat.completions.create`
@@ -510,6 +514,23 @@ export class ContentGenerationPipeline {
       );
 
       const result = await executor(openaiRequest, context);
+      // For streaming, errors can occur during iteration (not just during
+      // stream creation). Wrap the generator to catch model-unloaded errors
+      // that surface while consuming the stream.
+      if (
+        isStreaming &&
+        result &&
+        typeof result === 'object' &&
+        Symbol.asyncIterator in (result as object)
+      ) {
+        return this.wrapStreamWithRetry(
+          result as unknown as AsyncGenerator<GenerateContentResponse>,
+          request,
+          userPromptId,
+          context,
+          openaiRequest,
+        ) as unknown as T;
+      }
       return result;
     } catch (error) {
       // Retry once for model-unloaded errors.
@@ -519,6 +540,12 @@ export class ContentGenerationPipeline {
       // server returns an error (e.g. "Model is unloaded") instead of loading
       // it. A single retry gives the server a second chance to load the model.
       if (this.isModelUnloadedError(error)) {
+        debugLogger.warn(
+          'Retrying request after model-unloaded error:',
+          error instanceof Error ? error.message : String(error),
+        );
+        // Give the model server a moment to complete JIT loading.
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         try {
           const openaiRequest = await this.buildRequest(
             request,
@@ -526,13 +553,74 @@ export class ContentGenerationPipeline {
             context,
             isStreaming,
           );
-          return await executor(openaiRequest, context);
+          const result = await executor(openaiRequest, context);
+          debugLogger.info('Retry succeeded after model-unloaded error');
+          return result;
         } catch (retryError) {
+          debugLogger.warn(
+            'Retry failed after model-unloaded error:',
+            retryError instanceof Error ? retryError.message : String(retryError),
+          );
           return await this.handleError(retryError, context, request);
         }
       }
       // Use shared error handling logic
       return await this.handleError(error, context, request);
+    }
+  }
+
+  /**
+   * Wrap a streaming async generator so that model-unloaded errors raised
+   * during iteration (e.g. an error_finish SSE chunk) trigger a single
+   * retry, matching the behaviour of the non-streaming path.
+   */
+  private async *wrapStreamWithRetry(
+    generator: AsyncGenerator<GenerateContentResponse>,
+    request: GenerateContentParameters,
+    userPromptId: string,
+    context: RequestContext,
+    openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
+  ): AsyncGenerator<GenerateContentResponse> {
+    const iterator = generator[Symbol.asyncIterator]();
+    while (true) {
+      try {
+        const { value, done } = await iterator.next();
+        if (done) return;
+        yield value;
+      } catch (error) {
+        if (this.isModelUnloadedError(error)) {
+          debugLogger.warn(
+            'Stream encountered model-unloaded error, retrying:',
+            error instanceof Error ? error.message : String(error),
+          );
+          // Give the model server a moment to complete JIT loading.
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          try {
+            const retryResult = await this.client.chat.completions.create(
+              openaiRequest,
+              { signal: request.config?.abortSignal },
+            ) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+            const retryGenerator = this.processStreamWithLogging(
+              retryResult,
+              context,
+              request,
+            );
+            for await (const chunk of retryGenerator) {
+              yield chunk;
+            }
+            debugLogger.info('Stream retry succeeded after model-unloaded error');
+            return;
+          } catch (retryError) {
+            debugLogger.warn(
+              'Stream retry failed after model-unloaded error:',
+              retryError instanceof Error ? retryError.message : String(retryError),
+            );
+            await this.handleError(retryError, context, request);
+            return;
+          }
+        }
+        throw error;
+      }
     }
   }
 
@@ -551,12 +639,14 @@ export class ContentGenerationPipeline {
         ? error.message.toLowerCase()
         : String(error).toLowerCase();
 
+    // Only match known JIT-loading error patterns from local model servers
+    // (LM Studio, llama.cpp). Avoid matching permanent errors like
+    // "model not found" which indicate misconfiguration, not a transient
+    // unloaded state.
     return (
       errorMessage.includes('model is unloaded') ||
       errorMessage.includes('model not loaded') ||
-      errorMessage.includes('model unloaded') ||
-      errorMessage.includes('is not loaded') ||
-      errorMessage.includes('model not found')
+      errorMessage.includes('model unloaded')
     );
   }
 
