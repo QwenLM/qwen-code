@@ -259,7 +259,7 @@ function getRecentScore(
   }
 
   const ageMs = Math.max(0, now - recent.usedAt);
-  return recent.count * 10 + Math.max(0, 10 - ageMs / RECENT_DECAY_MS);
+  return recent.count * 10 + 10 * Math.max(0, 1 - ageMs / RECENT_DECAY_MS);
 }
 
 function getMatchedAlias(

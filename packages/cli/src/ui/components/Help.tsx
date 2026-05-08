@@ -41,10 +41,10 @@ type CommandGroup = {
 const DEFAULT_WIDTH = 100;
 const KEY_COL_WIDTH = 20;
 const COMMAND_LIST_VISIBLE_LINES = 18;
-const TAB_LABELS: Array<{ tab: HelpTab; label: string }> = [
-  { tab: 'general', label: 'general' },
-  { tab: 'commands', label: 'commands' },
-  { tab: 'custom-commands', label: 'custom-commands' },
+const TAB_DEFS: Array<{ tab: HelpTab; labelKey: string }> = [
+  { tab: 'general', labelKey: 'general' },
+  { tab: 'commands', labelKey: 'commands' },
+  { tab: 'custom-commands', labelKey: 'custom-commands' },
 ];
 const DOCS_URL = 'https://qwenlm.github.io/qwen-code-docs/';
 
@@ -60,10 +60,10 @@ export const Help: React.FC<HelpProps> = ({
   const bodyWidth = safeWidth - 6;
   const handleTabChange = useCallback(
     (direction: 1 | -1) => {
-      const currentIndex = TAB_LABELS.findIndex((tab) => tab.tab === activeTab);
+      const currentIndex = TAB_DEFS.findIndex((tab) => tab.tab === activeTab);
       const nextIndex =
-        (currentIndex + direction + TAB_LABELS.length) % TAB_LABELS.length;
-      onTabChange?.(TAB_LABELS[nextIndex].tab);
+        (currentIndex + direction + TAB_DEFS.length) % TAB_DEFS.length;
+      onTabChange?.(TAB_DEFS[nextIndex].tab);
     },
     [activeTab, onTabChange],
   );
@@ -121,7 +121,7 @@ export const Help: React.FC<HelpProps> = ({
           </Box>
           <Box marginTop={1}>
             <Text italic color={theme.text.secondary}>
-              {t('Esc to cancel')}
+              {t('Tab/Shift+Tab to switch tabs  ·  Esc to cancel')}
             </Text>
           </Box>
         </Box>
@@ -136,7 +136,7 @@ const HelpTabs: React.FC<{ activeTab: HelpTab }> = ({ activeTab }) => (
       Qwen Code
     </Text>
     <Text color={theme.text.secondary}> </Text>
-    {TAB_LABELS.map(({ tab, label }) => {
+    {TAB_DEFS.map(({ tab, labelKey }) => {
       const active = tab === activeTab;
       return (
         <Box key={tab} marginLeft={1}>
@@ -144,7 +144,7 @@ const HelpTabs: React.FC<{ activeTab: HelpTab }> = ({ activeTab }) => (
             color={active ? theme.background.primary : theme.text.primary}
             backgroundColor={active ? theme.text.accent : undefined}
           >
-            {` ${label} `}
+            {` ${t(labelKey)} `}
           </Text>
         </Box>
       );
@@ -297,25 +297,48 @@ const CommandsHelp: React.FC<{
         </Text>
       </Box>
       <Box flexDirection="column" height={COMMAND_LIST_VISIBLE_LINES}>
-        {visibleLines.map((line, index) => (
-          <CommandLine key={`${scrollOffset}-${index}`} line={line} />
-        ))}
+        {visibleLines.map((line, index) => {
+          const stableKey =
+            line.type === 'blank'
+              ? `blank:${index}`
+              : `${line.type}:${line.text}:${index}`;
+          return <CommandLine key={stableKey} line={line} />;
+        })}
       </Box>
-      {maxScroll > 0 && (
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>
-            {t('Use ↑/↓ to scroll')}{' '}
-            {`(${Math.min(scrollOffset + COMMAND_LIST_VISIBLE_LINES, lines.length)}/${lines.length})`}
-          </Text>
-        </Box>
-      )}
+      {maxScroll > 0 &&
+        (() => {
+          const totalCommands = lines.filter(
+            (l) => l.type === 'signature',
+          ).length;
+          const visibleSignatures = visibleLines.filter(
+            (l): l is Extract<CommandLine, { type: 'signature' }> =>
+              l.type === 'signature',
+          );
+          const firstCmd =
+            visibleSignatures.length > 0
+              ? visibleSignatures[0].commandIndex + 1
+              : 0;
+          const lastCmd =
+            visibleSignatures.length > 0
+              ? visibleSignatures[visibleSignatures.length - 1].commandIndex + 1
+              : 0;
+          const range =
+            firstCmd === lastCmd ? `${firstCmd}` : `${firstCmd}-${lastCmd}`;
+          return (
+            <Box marginTop={1}>
+              <Text color={theme.text.secondary}>
+                {t('Use ↑/↓ to scroll')} {`(${range}/${totalCommands})`}
+              </Text>
+            </Box>
+          );
+        })()}
     </Box>
   );
 };
 
 type CommandLine =
   | { type: 'group'; text: string; count: number }
-  | { type: 'signature'; text: string; meta: string }
+  | { type: 'signature'; text: string; meta: string; commandIndex: number }
   | { type: 'description'; text: string }
   | { type: 'subcommands'; text: string }
   | { type: 'blank' };
@@ -364,6 +387,7 @@ function renderCommandLines(
   width: number,
 ): CommandLine[] {
   const lines: CommandLine[] = [];
+  let commandIndex = 0;
   groups.forEach((group, groupIndex) => {
     lines.push({
       type: 'group',
@@ -371,7 +395,8 @@ function renderCommandLines(
       count: group.commands.length,
     });
     group.commands.forEach((cmd) => {
-      lines.push(getCommandSignatureLine(cmd, width));
+      const sigLine = getCommandSignatureLine(cmd, width);
+      lines.push({ ...sigLine, commandIndex: commandIndex++ } as CommandLine);
       const descriptionLine = getCommandDescriptionLine(cmd, width);
       if (descriptionLine) {
         lines.push(descriptionLine);
@@ -410,6 +435,7 @@ function getCommandSignatureLine(
     type: 'signature',
     text: truncateText(signature, Math.floor(width * 0.42)),
     meta,
+    commandIndex: -1, // assigned by renderCommandLines
   };
 }
 

@@ -284,8 +284,8 @@ export function getBestSlashCommandMatch(
       const recentOrder =
         (rightRecent?.usedAt ?? 0) - (leftRecent?.usedAt ?? 0);
       return (
-        recentOrder ||
         (right.completionPriority ?? 0) - (left.completionPriority ?? 0) ||
+        recentOrder ||
         left.name.localeCompare(right.name)
       );
     });
@@ -335,9 +335,14 @@ export function findSlashCommandTokens(
 ): SlashCommandToken[] {
   if (!text) return [];
 
-  const commandMap = new Map<string, SlashCommand>(
-    commands.map((cmd) => [cmd.name.toLowerCase(), cmd]),
-  );
+  const commandMapEntries: Array<[string, SlashCommand]> = [];
+  for (const cmd of commands) {
+    commandMapEntries.push([cmd.name.toLowerCase(), cmd]);
+    for (const altName of cmd.altNames ?? []) {
+      commandMapEntries.push([altName.toLowerCase(), cmd]);
+    }
+  }
+  const commandMap = new Map<string, SlashCommand>(commandMapEntries);
 
   const tokens: SlashCommandToken[] = [];
   let match: RegExpExecArray | null;

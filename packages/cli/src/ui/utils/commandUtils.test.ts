@@ -16,7 +16,9 @@ import {
   CodePage,
   findMidInputSlashCommand,
   findSlashCommandTokens,
+  getBestSlashCommandMatch,
 } from './commandUtils.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 
 // Mock child_process
 vi.mock('child_process');
@@ -625,5 +627,119 @@ describe('findSlashCommandTokens', () => {
     expect(tokens).toHaveLength(1);
     expect(tokens[0].start).toBe(4);
     expect(tokens[0].end).toBe(11); // '/review' is 7 chars, starts at 4
+  });
+
+  it('marks altName token as valid (line-start)', () => {
+    const commandsWithAlt = [
+      ...mockCommands,
+      {
+        name: 'stats',
+        description: 'Show stats',
+        kind: 'built-in' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+        altNames: ['usage'],
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens('/usage', commandsWithAlt);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'usage', valid: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getBestSlashCommandMatch
+// ---------------------------------------------------------------------------
+describe('getBestSlashCommandMatch', () => {
+  const makeCommand = (
+    name: string,
+    opts: {
+      modelInvocable?: boolean;
+      completionPriority?: number;
+      argumentHint?: string;
+      altNames?: string[];
+    } = {},
+  ) =>
+    ({
+      name,
+      description: `${name} desc`,
+      kind: 'built-in',
+      modelInvocable: opts.modelInvocable ?? true,
+      completionPriority: opts.completionPriority ?? 0,
+      argumentHint: opts.argumentHint,
+      altNames: opts.altNames,
+      userInvocable: true,
+      hidden: false,
+    }) as Parameters<typeof getBestSlashCommandMatch>[1][number];
+
+  const cmds = [
+    makeCommand('review', { completionPriority: 5 }),
+    makeCommand('refactor', { completionPriority: 3 }),
+    makeCommand('run', { completionPriority: 1 }),
+  ];
+
+  it('returns null for empty partialCommand', () => {
+    expect(getBestSlashCommandMatch('', cmds)).toBeNull();
+  });
+
+  it('returns null when no commands match', () => {
+    expect(getBestSlashCommandMatch('xyz', cmds)).toBeNull();
+  });
+
+  it('returns null for non-modelInvocable commands', () => {
+    const nonInvocable = [makeCommand('reset', { modelInvocable: false })];
+    expect(getBestSlashCommandMatch('re', nonInvocable)).toBeNull();
+  });
+
+  it('returns the best prefix match by completionPriority', () => {
+    // 'r' matches review(5), refactor(3), run(1) — highest priority wins
+    const result = getBestSlashCommandMatch('r', cmds);
+    expect(result).not.toBeNull();
+    expect(result!.fullCommand).toBe('review');
+    expect(result!.suffix).toBe('eview');
+  });
+
+  it('returns argumentHint when command has one', () => {
+    const withHint = [makeCommand('ask', { argumentHint: '<query>' })];
+    const result = getBestSlashCommandMatch('as', withHint);
+    expect(result!.argumentHint).toBe('<query>');
+  });
+
+  it('respects recentCommands ordering (recent overrides lower priority)', () => {
+    // 'r' matches review(5), refactor(3), run(1)
+    // Make 'run' recently used — but completionPriority takes precedence
+    const recentCommands: RecentSlashCommands = new Map([
+      ['run', { name: 'run', usedAt: Date.now(), count: 10 }],
+    ]);
+    const result = getBestSlashCommandMatch('r', cmds, recentCommands);
+    // completionPriority is checked first, so review (priority=5) still wins
+    expect(result!.fullCommand).toBe('review');
+  });
+
+  it('uses recentCommands to break a tie in completionPriority', () => {
+    const tied = [
+      makeCommand('alpha', { completionPriority: 5 }),
+      makeCommand('albet', { completionPriority: 5 }),
+    ];
+    const recentCommands: RecentSlashCommands = new Map([
+      ['albet', { name: 'albet', usedAt: Date.now(), count: 1 }],
+    ]);
+    const result = getBestSlashCommandMatch('al', tied, recentCommands);
+    expect(result!.fullCommand).toBe('albet');
+  });
+
+  it('excludes exact-match commands without argumentHint', () => {
+    // 'review' exactly matches 'review' with no argumentHint → excluded
+    const result = getBestSlashCommandMatch('review', cmds);
+    expect(result).toBeNull();
+  });
+
+  it('includes exact-match command when it has argumentHint', () => {
+    const withHint = [makeCommand('review', { argumentHint: '<file>' })];
+    const result = getBestSlashCommandMatch('review', withHint);
+    expect(result).not.toBeNull();
+    expect(result!.suffix).toBe('');
   });
 });
