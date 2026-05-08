@@ -15,6 +15,7 @@ import {
   ConditionalRulesRegistry,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import { SettingScope } from '../../config/settings.js';
 
 export function expandHomeDir(p: string): string {
   if (!p) {
@@ -27,6 +28,30 @@ export function expandHomeDir(p: string): string {
     expandedPath = os.homedir() + p.substring(1);
   }
   return path.normalize(expandedPath);
+}
+
+function findExistingWorkspaceDirectory(
+  directory: string,
+  existingDirectories: Set<string>,
+): string | undefined {
+  if (existingDirectories.has(directory)) {
+    return directory;
+  }
+
+  try {
+    const absolutePath = path.isAbsolute(directory)
+      ? directory
+      : path.resolve(directory);
+    const resolvedDirectory = fs.realpathSync(absolutePath);
+    if (existingDirectories.has(resolvedDirectory)) {
+      return resolvedDirectory;
+    }
+  } catch {
+    // WorkspaceContext also skips unreadable paths; only report paths that
+    // resolve to an existing workspace directory as already present.
+  }
+
+  return undefined;
 }
 
 /**
@@ -90,7 +115,7 @@ export const directoryCommand: SlashCommand = {
       action: async (context: CommandContext, args: string) => {
         const {
           ui: { addItem },
-          services: { config },
+          services: { config, settings },
         } = context;
         const [...rest] = args.split(' ');
 
@@ -133,12 +158,30 @@ export const directoryCommand: SlashCommand = {
         }
 
         const added: string[] = [];
+        const alreadyAdded: string[] = [];
         const errors: string[] = [];
 
         for (const pathToAdd of pathsToAdd) {
+          const directory = expandHomeDir(pathToAdd.trim());
+          const directoriesBeforeAdd = new Set(
+            workspaceContext.getDirectories(),
+          );
           try {
-            workspaceContext.addDirectory(expandHomeDir(pathToAdd.trim()));
-            added.push(pathToAdd.trim());
+            workspaceContext.addDirectory(directory);
+            const acceptedDirectories = workspaceContext
+              .getDirectories()
+              .filter((dir) => !directoriesBeforeAdd.has(dir));
+            if (acceptedDirectories.length > 0) {
+              added.push(...acceptedDirectories);
+            } else {
+              const existingDirectory = findExistingWorkspaceDirectory(
+                directory,
+                directoriesBeforeAdd,
+              );
+              if (existingDirectory) {
+                alreadyAdded.push(existingDirectory);
+              }
+            }
           } catch (e) {
             const error = e as Error;
             errors.push(
@@ -150,15 +193,39 @@ export const directoryCommand: SlashCommand = {
           }
         }
 
-        try {
-          if (config.shouldLoadMemoryFromIncludeDirectories()) {
-            const { memoryContent, fileCount, conditionalRules, projectRoot } =
-              await loadServerHierarchicalMemory(
+        if (added.length > 0) {
+          try {
+            const existingIncludeDirectories =
+              settings.workspace.originalSettings.context?.includeDirectories ??
+              [];
+            const includeDirectories = Array.from(
+              new Set([...existingIncludeDirectories, ...added]),
+            );
+            settings.setValue(
+              SettingScope.Workspace,
+              'context.includeDirectories',
+              includeDirectories,
+            );
+          } catch (error) {
+            errors.push(
+              t('Error saving directories to workspace settings: {{error}}', {
+                error: (error as Error).message,
+              }),
+            );
+          }
+        }
+
+        if (added.length > 0) {
+          try {
+            if (config.shouldLoadMemoryFromIncludeDirectories()) {
+              const {
+                memoryContent,
+                fileCount,
+                conditionalRules,
+                projectRoot,
+              } = await loadServerHierarchicalMemory(
                 config.getWorkingDir(),
-                [
-                  ...config.getWorkspaceContext().getDirectories(),
-                  ...pathsToAdd,
-                ],
+                [...config.getWorkspaceContext().getDirectories(), ...added],
                 config.getFileService(),
                 config.getExtensionContextFilePaths(),
                 config.getFolderTrust(),
@@ -166,31 +233,32 @@ export const directoryCommand: SlashCommand = {
                   'tree', // Use setting or default to 'tree'
                 config.getContextRuleExcludes(),
               );
-            config.setUserMemory(memoryContent);
-            config.setGeminiMdFileCount(fileCount);
-            config.setConditionalRulesRegistry(
-              new ConditionalRulesRegistry(conditionalRules, projectRoot),
+              config.setUserMemory(memoryContent);
+              config.setGeminiMdFileCount(fileCount);
+              config.setConditionalRulesRegistry(
+                new ConditionalRulesRegistry(conditionalRules, projectRoot),
+              );
+              context.ui.setGeminiMdFileCount(fileCount);
+            }
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: t(
+                  'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}',
+                  {
+                    directories: added.join('\n- '),
+                  },
+                ),
+              },
+              Date.now(),
             );
-            context.ui.setGeminiMdFileCount(fileCount);
+          } catch (error) {
+            errors.push(
+              t('Error refreshing memory: {{error}}', {
+                error: (error as Error).message,
+              }),
+            );
           }
-          addItem(
-            {
-              type: MessageType.INFO,
-              text: t(
-                'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}',
-                {
-                  directories: added.join('\n- '),
-                },
-              ),
-            },
-            Date.now(),
-          );
-        } catch (error) {
-          errors.push(
-            t('Error refreshing memory: {{error}}', {
-              error: (error as Error).message,
-            }),
-          );
         }
 
         if (added.length > 0) {
@@ -203,6 +271,19 @@ export const directoryCommand: SlashCommand = {
               type: MessageType.INFO,
               text: t('Successfully added directories:\n- {{directories}}', {
                 directories: added.join('\n- '),
+              }),
+            },
+            Date.now(),
+          );
+        }
+
+        if (alreadyAdded.length > 0) {
+          const directories = Array.from(new Set(alreadyAdded));
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: t('Directories already in workspace:\n- {{directories}}', {
+                directories: directories.join('\n- '),
               }),
             },
             Date.now(),

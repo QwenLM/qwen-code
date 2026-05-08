@@ -9,13 +9,15 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { AuthType, Storage } from '@qwen-code/qwen-code-core';
 import {
-  AuthType,
-  Storage,
-  CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
-  getCodingPlanConfig,
-} from '@qwen-code/qwen-code-core';
+  CodingPlanRegion,
+  SUBSCRIPTION_PLAN_OPTIONS,
+  findSubscriptionPlanByConfig,
+  getSubscriptionPlanConfig,
+  isSubscriptionPlanConfig,
+} from './subscriptionPlanDefinitions.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -119,7 +121,7 @@ export function writeCodingPlanConfig(
   const settings = readSettings();
   const codingRegion =
     region === 'global' ? CodingPlanRegion.GLOBAL : CodingPlanRegion.CHINA;
-  const planConfig = getCodingPlanConfig(codingRegion);
+  const planConfig = getSubscriptionPlanConfig('coding', codingRegion);
 
   // Auth
   const auth = ensureNestedObject(settings, 'security', 'auth');
@@ -135,12 +137,22 @@ export function writeCodingPlanConfig(
     settings.modelProviders as Record<string, unknown>,
   );
   const nonCodingPlan = existing.filter(
-    (e) => e.envKey !== CODING_PLAN_ENV_KEY,
+    (e) => !isSubscriptionPlanConfig(e.baseUrl as string, e.envKey as string),
   );
-  providers[AuthType.USE_OPENAI] = [...planConfig.template, ...nonCodingPlan];
+  const planModels = planConfig.template.map((model) => ({
+    ...model,
+    envKey: planConfig.envKey,
+  }));
+  providers[AuthType.USE_OPENAI] = [...planModels, ...nonCodingPlan];
 
-  // Coding Plan metadata
-  settings.codingPlan = { region: codingRegion, version: planConfig.version };
+  // Coding Plan metadata — write to the providerMetadata namespace that
+  // the CLI now reads from. Remove legacy top-level key if present.
+  const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
+  providerMetadata['coding-plan'] = {
+    region: codingRegion,
+    version: planConfig.version,
+  };
+  delete settings.codingPlan;
 
   // Default model
   const defaultModelId = planConfig.template[0]?.id ?? 'qwen3.5-plus';
@@ -178,7 +190,9 @@ export function writeModelProvidersConfig(params: {
   // API key
   const env = ensureNestedObject(settings, 'env');
   env['OPENAI_API_KEY'] = params.apiKey;
-  delete env[CODING_PLAN_ENV_KEY];
+  for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
+    delete env[plan.envKey];
+  }
 
   // Convert key-value map to CLI's array format and merge with existing
   // non-target entries so reconfiguring one provider doesn't silently
@@ -203,7 +217,14 @@ export function writeModelProvidersConfig(params: {
     settings.model = { name: params.activeModel };
   }
 
-  delete settings.codingPlan;
+  for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
+    delete settings[plan.metadataKey];
+  }
+  const pm = settings.providerMetadata as Record<string, unknown> | undefined;
+  if (pm) {
+    delete pm['coding-plan'];
+    delete pm['token-plan'];
+  }
 
   writeSettings(settings);
 }
@@ -226,25 +247,29 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
   }
 
   const env = (settings.env ?? {}) as Record<string, string>;
-  const codingPlan = settings.codingPlan as Record<string, unknown> | undefined;
-
-  // Determine if this is a Coding Plan setup
-  const hasCodingPlanKey = !!env[CODING_PLAN_ENV_KEY];
-  const hasCodingPlanRegion = !!codingPlan?.region;
-
-  if (hasCodingPlanKey && hasCodingPlanRegion) {
-    return {
-      provider: 'coding-plan',
-      apiKey: env[CODING_PLAN_ENV_KEY] || '',
-      codingPlanRegion: (codingPlan?.region as 'china' | 'global') || 'china',
-    };
-  }
-
-  // Non-Coding-Plan — find API key from model providers
   const modelProviders = settings.modelProviders as
     | Record<string, unknown>
     | undefined;
   const openaiModels = findOpenaiModels(modelProviders);
+  const subscriptionPlan = openaiModels
+    .map((model) =>
+      findSubscriptionPlanByConfig(
+        model.baseUrl as string | undefined,
+        model.envKey as string | undefined,
+      ),
+    )
+    .find((match) => match !== undefined && !!env[match.plan.envKey]);
+
+  if (subscriptionPlan?.plan.id === 'coding') {
+    const region = subscriptionPlan.region === 'global' ? 'global' : 'china';
+    return {
+      provider: 'coding-plan',
+      apiKey: env[subscriptionPlan.plan.envKey] || '',
+      codingPlanRegion: region,
+    };
+  }
+
+  // Non-Coding-Plan — find API key from model providers
   const firstEnvKey = (openaiModels[0]?.envKey as string) || 'OPENAI_API_KEY';
   const apiKey = env[firstEnvKey] || '';
 
@@ -277,12 +302,21 @@ export function clearPersistedAuth(): void {
     // Remove API keys
     const env = settings.env as Record<string, unknown> | undefined;
     if (env) {
-      delete env[CODING_PLAN_ENV_KEY];
+      for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
+        delete env[plan.envKey];
+      }
       delete env['OPENAI_API_KEY'];
     }
 
-    // Remove coding plan metadata
-    delete settings.codingPlan;
+    // Remove subscription plan metadata (legacy + new namespace)
+    for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
+      delete settings[plan.metadataKey];
+    }
+    const pm = settings.providerMetadata as Record<string, unknown> | undefined;
+    if (pm) {
+      delete pm['coding-plan'];
+      delete pm['token-plan'];
+    }
 
     writeSettings(settings);
   } catch (error) {

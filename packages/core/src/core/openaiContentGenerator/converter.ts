@@ -22,6 +22,7 @@ import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { RequestContext } from './types.js';
+import { parseTaggedThinkingText } from './taggedThinkingParser.js';
 import {
   convertSchema,
   type SchemaComplianceMode,
@@ -862,6 +863,22 @@ function extractTextFromContentUnion(contentUnion: unknown): string {
   return '';
 }
 
+function convertOpenAITextToParts(
+  text: string,
+  requestContext: RequestContext,
+  final = true,
+): Part[] {
+  if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+    return text ? [{ text }] : [];
+  }
+
+  if (requestContext.taggedThinkingParser) {
+    return requestContext.taggedThinkingParser.parse(text, final);
+  }
+
+  return parseTaggedThinkingText(text);
+}
+
 /**
  * Convert OpenAI response to Gemini format.
  */
@@ -875,17 +892,24 @@ export function convertOpenAIResponseToGemini(
   if (choice) {
     const parts: Part[] = [];
 
-    // Handle reasoning content (thoughts)
-    const reasoningText =
-      (choice.message as ExtendedCompletionMessage).reasoning_content ??
-      (choice.message as ExtendedCompletionMessage).reasoning;
-    if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
+    // Handle reasoning content (thoughts).
+    // When taggedThinkingTags is enabled, thought content is already
+    // extracted from the text content via convertOpenAITextToParts.
+    // Skip reasoning_content extraction to avoid duplicating thought parts.
+    if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+      const reasoningText =
+        (choice.message as ExtendedCompletionMessage).reasoning_content ??
+        (choice.message as ExtendedCompletionMessage).reasoning;
+      if (reasoningText) {
+        parts.push({ text: reasoningText, thought: true });
+      }
     }
 
     // Handle text content
     if (choice.message.content) {
-      parts.push({ text: choice.message.content });
+      parts.push(
+        ...convertOpenAITextToParts(choice.message.content, requestContext),
+      );
     }
 
     // Handle tool calls
@@ -997,18 +1021,31 @@ export function convertOpenAIChunkToGemini(
   if (choice) {
     const parts: Part[] = [];
 
-    const reasoningText =
-      (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
-      (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
-    if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
+    // Handle reasoning content (thoughts).
+    // When taggedThinkingTags is enabled, thought content is already
+    // extracted from the text content via convertOpenAITextToParts.
+    // Skip reasoning_content extraction to avoid duplicating thought parts.
+    if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+      const reasoningText =
+        (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
+        (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
+      if (reasoningText) {
+        parts.push({ text: reasoningText, thought: true });
+      }
     }
 
     // Handle text content
-    if (choice.delta?.content) {
-      if (typeof choice.delta.content === 'string') {
-        parts.push({ text: choice.delta.content });
-      }
+    if (typeof choice.delta?.content === 'string') {
+      parts.push(
+        ...convertOpenAITextToParts(
+          choice.delta.content,
+          requestContext,
+          Boolean(choice.finish_reason),
+        ),
+      );
+    } else if (choice.finish_reason) {
+      // Flush any buffered tagged-thinking content on stream end
+      parts.push(...convertOpenAITextToParts('', requestContext, true));
     }
 
     // Handle tool calls using the stream-local parser

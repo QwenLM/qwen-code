@@ -17,6 +17,7 @@ import chalk from 'chalk';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import { useExportCompletion } from '../hooks/useExportCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { Key } from '../hooks/useKeypress.js';
@@ -65,6 +66,7 @@ export interface Attachment {
 }
 
 const debugLogger = createDebugLogger('INPUT_PROMPT');
+
 export interface InputPromptProps {
   buffer: TextBuffer;
   onSubmit: (value: string) => void;
@@ -189,6 +191,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   ]);
   const [expandedSuggestionIndex, setExpandedSuggestionIndex] =
     useState<number>(-1);
+  const exportCompletion = useExportCompletion(buffer, slashCommands);
   const shellHistory = useShellHistory(config.getProjectRoot());
   const shellHistoryData = shellHistory.history;
 
@@ -302,6 +305,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleSubmitAndClear = useCallback(
     (submittedValue: string) => {
+      exportCompletion.reset();
       // Expand any large paste placeholders to their full content before submitting
       let finalValue = submittedValue;
       if (pendingPastes.size > 0) {
@@ -353,6 +357,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       resetReverseSearchCompletionState();
     },
     [
+      exportCompletion,
       onSubmit,
       buffer,
       resetCompletionState,
@@ -615,6 +620,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (keyMatchers[Command.ESCAPE](key)) {
+        exportCompletion.reset();
         const cancelSearch = (
           setActive: (active: boolean) => void,
           resetCompletion: () => void,
@@ -780,8 +786,41 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       }
 
+      // Export-specific arrow/Tab/Enter handling (Phase 1 + Phase 2).
+      if (exportCompletion.handleExportInput(key, completion)) {
+        return true;
+      }
+
+      const acceptActiveCompletionSuggestion = () => {
+        if (completion.suggestions.length === 0) {
+          return false;
+        }
+
+        const targetIndex =
+          completion.activeSuggestionIndex === -1
+            ? 0
+            : completion.activeSuggestionIndex;
+        if (targetIndex >= completion.suggestions.length) {
+          return false;
+        }
+
+        completion.handleAutocomplete(targetIndex);
+        exportCompletion.navigatedRef.current = false;
+        setExpandedSuggestionIndex(-1);
+        return true;
+      };
+
       // If the command is a perfect match, pressing enter should execute it.
       if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
+        if (
+          completion.showSuggestions &&
+          exportCompletion.navigatedRef.current &&
+          exportCompletion.navigatedTextRef.current === buffer.text &&
+          acceptActiveCompletionSuggestion()
+        ) {
+          return true;
+        }
+
         handleSubmitAndClear(buffer.text);
         return true;
       }
@@ -819,29 +858,26 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (completion.showSuggestions) {
         if (completion.suggestions.length > 1) {
-          if (keyMatchers[Command.COMPLETION_UP](key)) {
+          const isCompletionUpKey = keyMatchers[Command.COMPLETION_UP](key);
+          const isCompletionDownKey = keyMatchers[Command.COMPLETION_DOWN](key);
+          if (isCompletionUpKey) {
             completion.navigateUp();
-            setExpandedSuggestionIndex(-1); // Reset expansion when navigating
+            exportCompletion.navigatedRef.current = true;
+            exportCompletion.navigatedTextRef.current = buffer.text;
+            setExpandedSuggestionIndex(-1);
             return true;
           }
-          if (keyMatchers[Command.COMPLETION_DOWN](key)) {
+          if (isCompletionDownKey) {
             completion.navigateDown();
-            setExpandedSuggestionIndex(-1); // Reset expansion when navigating
+            exportCompletion.navigatedRef.current = true;
+            exportCompletion.navigatedTextRef.current = buffer.text;
+            setExpandedSuggestionIndex(-1);
             return true;
           }
         }
 
         if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
-          if (completion.suggestions.length > 0) {
-            const targetIndex =
-              completion.activeSuggestionIndex === -1
-                ? 0 // Default to the first if none is active
-                : completion.activeSuggestionIndex;
-            if (targetIndex < completion.suggestions.length) {
-              completion.handleAutocomplete(targetIndex);
-              setExpandedSuggestionIndex(-1); // Reset expansion after selection
-            }
-          }
+          acceptActiveCompletionSuggestion();
           return true;
         }
       }
@@ -1068,8 +1104,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // No placeholder matched — fall through to BaseTextInput's default backspace
       }
 
+      // Ctrl+U (clear-line) — reset export cycling state so a subsequent
+      // manual typing of "/export <fmt>" doesn't mistakenly show the
+      // persistent suggestion panel as if the user had cycled.
+      if (key.ctrl && key.name === 'u') {
+        exportCompletion.reset();
+      }
+
       // Ctrl+C with completion active — also reset completion state
       if (keyMatchers[Command.CLEAR_INPUT](key)) {
+        exportCompletion.reset();
         if (buffer.text.length > 0) {
           resetCompletionState();
         }
@@ -1090,6 +1134,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         followup.dismiss();
         onPromptSuggestionDismiss?.();
       }
+
+      if (
+        !key.ctrl &&
+        !key.meta &&
+        !key.paste &&
+        ((key.sequence && key.sequence.length === 1) ||
+          key.name === 'backspace' ||
+          key.name === 'delete')
+      ) {
+        exportCompletion.markNextTextChangeAsUserInput();
+      }
+      // NOTE: the former unconditional
+      //   `exportCompletion.reset();`
+      // at this fallthrough was removed — the phase-2 buffer-text guard above
+      // already prevents stale state from affecting non-/export input, and
+      // the blanket reset was wiping selection on cursor-only keys such as
+      // Home / End / Ctrl+A.
       return false;
     },
     [
@@ -1137,6 +1198,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setBgPillFocused,
       followup,
       onPromptSuggestionDismiss,
+      exportCompletion,
     ],
   );
 
@@ -1255,7 +1317,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   };
 
   const activeCompletion = getActiveCompletion();
-  const shouldShowSuggestions = activeCompletion.showSuggestions;
+  const shouldUseExportSuggestions =
+    !commandSearchActive && !reverseSearchActive;
+  const suggestionDisplayProps =
+    shouldUseExportSuggestions && exportCompletion.suggestionDisplayProps
+      ? exportCompletion.suggestionDisplayProps
+      : {
+          suggestions: activeCompletion.suggestions,
+          activeIndex: activeCompletion.activeSuggestionIndex,
+          isLoading: activeCompletion.isLoadingSuggestions,
+          scrollOffset: activeCompletion.visibleStartIndex,
+        };
+  const shouldShowSuggestions =
+    (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
+    activeCompletion.showSuggestions;
 
   // Notify parent about suggestions visibility changes
   useEffect(() => {
@@ -1354,11 +1429,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       {shouldShowSuggestions && (
         <Box marginLeft={2} marginRight={2}>
           <SuggestionsDisplay
-            suggestions={activeCompletion.suggestions}
-            activeIndex={activeCompletion.activeSuggestionIndex}
-            isLoading={activeCompletion.isLoadingSuggestions}
+            suggestions={suggestionDisplayProps.suggestions}
+            activeIndex={suggestionDisplayProps.activeIndex}
+            isLoading={suggestionDisplayProps.isLoading}
             width={suggestionsWidth}
-            scrollOffset={activeCompletion.visibleStartIndex}
+            scrollOffset={suggestionDisplayProps.scrollOffset}
             userInput={buffer.text}
             mode={
               buffer.text.startsWith('/') &&
