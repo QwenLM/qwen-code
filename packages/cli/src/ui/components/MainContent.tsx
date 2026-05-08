@@ -5,7 +5,7 @@
  */
 
 import { Box, Static } from 'ink';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
@@ -25,6 +25,7 @@ import {
   isForceExpandGroup,
   mergeCompactToolGroups,
 } from '../utils/mergeCompactToolGroups.js';
+import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -81,6 +82,17 @@ function initialReplayCount(length: number): number {
     ? length
     : Math.min(PROGRESSIVE_REPLAY_CHUNK_SIZE, length);
 }
+
+// Memoized wrapper used only by the virtual scroll path. Prevents re-rendering
+// stable completed items when unrelated UIState fields change during streaming.
+const VirtualHistoryItem = memo(HistoryItemDisplay);
+
+// Pure functions with no closure deps — defined outside the component so they
+// are stable references and never trigger useMemo/useCallback invalidation.
+const virtualEstimatedItemHeight = () => 3;
+const virtualKeyExtractor = (item: HistoryItem) =>
+  item.id >= 0 ? `h-${item.id}` : `p-${-item.id - 1}`;
+const virtualIsStaticItem = (item: HistoryItem) => item.id > 0;
 
 export const MainContent = () => {
   const { version } = useAppContext();
@@ -231,6 +243,12 @@ export const MainContent = () => {
     prevMergedLengthRef.current = currMLen;
   }, [compactMode, uiState.history, mergedHistory, uiActions]);
 
+  // Virtual viewport path short-circuits below before any of the
+  // <Static>-only machinery is needed. The offsets / progressive-replay
+  // state still computes because it lives at the top of the component, but
+  // useMemo keeps it cheap when nothing changes.
+  const useVirtualScroll = uiState.useTerminalBuffer;
+
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
       let runningOffsets = createEmptySourceCopyOffsets();
@@ -344,6 +362,89 @@ export const MainContent = () => {
     PROGRESSIVE_REPLAY_CHUNK_SIZE
       ? historyItemsWithSourceCopyOffsets
       : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
+
+  // Combine completed history + live pending items for the virtualized list.
+  // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
+  const allVirtualItems = useMemo(
+    (): HistoryItem[] => [
+      ...mergedHistory,
+      ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
+    ],
+    [mergedHistory, pendingHistoryItems],
+  );
+
+  // Stable renderItem: completed items receive the original item reference so
+  // VirtualHistoryItem.memo can bail out on unchanged props. Pending items
+  // get id:0 (matching the legacy path) and always re-render during streaming.
+  const renderVirtualItem = useCallback(
+    ({ item }: { item: HistoryItem }) => {
+      const isPending = item.id < 0;
+      return (
+        <VirtualHistoryItem
+          terminalWidth={terminalWidth}
+          mainAreaWidth={mainAreaWidth}
+          availableTerminalHeight={
+            isPending
+              ? uiState.constrainHeight
+                ? availableTerminalHeight
+                : undefined
+              : staticAreaMaxItemHeight
+          }
+          availableTerminalHeightGemini={
+            isPending ? undefined : MAX_GEMINI_MESSAGE_LINES
+          }
+          item={isPending ? { ...item, id: 0 } : item}
+          isPending={isPending}
+          isFocused={isPending ? !uiState.isEditorDialogOpen : undefined}
+          activeShellPtyId={isPending ? uiState.activePtyId : undefined}
+          embeddedShellFocused={
+            isPending ? uiState.embeddedShellFocused : undefined
+          }
+          commands={uiState.slashCommands}
+          compactLabel={getCompactLabel(item)}
+          summaryAbsorbed={isSummaryAbsorbed(item)}
+        />
+      );
+    },
+    [
+      terminalWidth,
+      mainAreaWidth,
+      staticAreaMaxItemHeight,
+      availableTerminalHeight,
+      uiState.constrainHeight,
+      uiState.isEditorDialogOpen,
+      uiState.activePtyId,
+      uiState.embeddedShellFocused,
+      uiState.slashCommands,
+      getCompactLabel,
+      isSummaryAbsorbed,
+    ],
+  );
+
+  if (useVirtualScroll) {
+    return (
+      <>
+        <Box flexDirection="column" flexShrink={0}>
+          <AppHeader version={version} />
+          <DebugModeNotification />
+          <Notifications />
+        </Box>
+        <OverflowProvider>
+          <ScrollableList
+            hasFocus={!uiState.isInputActive && !uiState.isEditorDialogOpen}
+            data={allVirtualItems}
+            renderItem={renderVirtualItem}
+            estimatedItemHeight={virtualEstimatedItemHeight}
+            keyExtractor={virtualKeyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            isStaticItem={virtualIsStaticItem}
+            containerHeight={uiState.availableTerminalHeight}
+          />
+        </OverflowProvider>
+        <ShowMoreLines constrainHeight={uiState.constrainHeight} />
+      </>
+    );
+  }
 
   return (
     <>

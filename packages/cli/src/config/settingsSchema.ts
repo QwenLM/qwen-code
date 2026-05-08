@@ -841,6 +841,16 @@ const SETTINGS_SCHEMA = {
           'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
         showInDialog: true,
       },
+      useTerminalBuffer: {
+        type: 'boolean',
+        label: 'Virtualized History',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Render conversation history in a scrollable viewport instead of the terminal scrollback buffer. Reduces flicker on long sessions. Scroll with Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End.',
+        showInDialog: true,
+      },
       shellOutputMaxLines: {
         type: 'number',
         label: 'Shell Output Max Lines',

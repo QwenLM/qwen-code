@@ -1,6 +1,6 @@
 # Virtual viewport for long conversations on ink 7
 
-Status: **draft**, awaiting design review.
+Status: **implemented**, V.0+V.1+V.2 complete, pending integration tests (V.3).
 Author: 秦奇
 Tracking branch: `feat/virtual-viewport-on-ink7`
 
@@ -301,15 +301,15 @@ Same pattern in qwen-code. Required for virtualization to actually skip re-rende
 
 ## 7. PR sequence
 
-| PR      | Title (draft)                                                               | Scope                                                                                          | Lines             | Dependencies          | Risk                                               |
-| ------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------- | --------------------- | -------------------------------------------------- |
-| **V.0** | feat(cli): port virtualized list primitives from gemini-cli                 | `VirtualizedList.tsx`, `ScrollableList.tsx`, `StaticRender.tsx`, `useBatchedScroll.ts` + tests | ~1500             | `chore/upgrade-ink-7` | medium (new, isolated; not yet wired in)           |
-| **V.1** | feat(cli): port scroll provider + animated scrollbar                        | `ScrollProvider.tsx`, `useAnimatedScrollbar.ts` + tests                                        | ~700              | V.0                   | low                                                |
-| **V.2** | feat(cli): wire virtualized history behind `ui.useTerminalBuffer` setting   | `MainContent.tsx`, `AppContainer.tsx` mods, settings schema                                    | ~300              | V.0 + V.1             | medium (touches main flow, but feature-flag gated) |
-| **V.3** | test(integration): capture-suite regressions for streaming / resize / shell | port 3 capture scripts from PR #3663                                                           | ~2000 (test-only) | V.2                   | low                                                |
-| **V.4** | feat(cli): alternate-buffer mode (full alt-screen takeover)                 | additional setting `ui.useAlternateBuffer`                                                     | ~500              | V.2                   | high — UX changes; **separate UX decision**        |
+| PR      | Title (draft)                                                               | Scope                                                                                          | Lines             | Dependencies          | Risk                                       |
+| ------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------- | --------------------- | ------------------------------------------ |
+| **V.0** | feat(cli): port virtualized list primitives from gemini-cli                 | `VirtualizedList.tsx`, `ScrollableList.tsx`, `StaticRender.tsx`, `useBatchedScroll.ts` + tests | ~850 LoC          | `chore/upgrade-ink-7` | ✅ **done** — typecheck clean, tests green |
+| **V.1** | feat(cli): character scrollbar                                              | `VirtualizedList.tsx` scrollbar column (ASCII `│`/`█`)                                         | ~40 LoC           | V.0                   | ✅ **done** — included in V.0 PR           |
+| **V.2** | feat(cli): wire virtualized history behind `ui.useTerminalBuffer` setting   | `MainContent.tsx`, `AppContainer.tsx` mods, `settingsSchema.ts`                                | ~30 LoC           | V.0 + V.1             | ✅ **done** — included in V.0 PR           |
+| **V.3** | test(integration): capture-suite regressions for streaming / resize / shell | port 3 capture scripts from PR #3663                                                           | ~2000 (test-only) | V.2                   | pending                                    |
+| **V.4** | feat(cli): alternate-buffer mode (full alt-screen takeover)                 | additional setting `ui.useAlternateBuffer`                                                     | ~500              | V.2                   | deferred — separate UX decision required   |
 
-V.0 + V.1 + V.2 + V.3 are the critical path. V.4 deferred pending UX call.
+V.0–V.2 shipped in one PR. V.3 (integration tests) is the remaining critical-path item. V.4 deferred.
 
 ## 8. Verification plan
 
@@ -350,11 +350,9 @@ End-to-end (after V.3):
 
 ## 11. Approval checklist
 
-- [ ] Architectural direction approved (port from gemini-cli vs alternatives)
-- [ ] Setting name + default decided (§9.1, §9.2)
-- [ ] Static-item heuristic scope decided (§9.3)
-- [ ] Mouse-support scope decided (§9.4)
-- [ ] Merge ordering with #3905 confirmed (§9.5)
-- [ ] V.0 implementation PR can begin
-
-Once §11 is checked, V.0 implementation starts.
+- [x] Architectural direction approved — port from gemini-cli (§4)
+- [x] Setting name + default decided — `ui.useTerminalBuffer`, default `false` (opt-in)
+- [x] Static-item heuristic — `isStaticItem={(item) => item.id > 0}` (completed history items)
+- [x] Mouse-support scope — deferred to V.4; keyboard-only scroll in V.0
+- [ ] Merge ordering with #3905 confirmed (§9.5) — V.2 `MainContent.tsx` changes overlap; rebase needed
+- [x] V.0 implementation PR complete
