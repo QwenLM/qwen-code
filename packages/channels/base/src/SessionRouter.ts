@@ -164,8 +164,28 @@ export class SessionRouter {
 
     let entries: Record<string, PersistedEntry>;
     try {
-      entries = JSON.parse(readFileSync(this.persistPath, 'utf-8'));
+      const raw = readFileSync(this.persistPath, 'utf-8');
+      const parsed: unknown = JSON.parse(raw);
+
+      // Guard against JSON.parse(null) and other non-object results
+      if (
+        parsed === null ||
+        typeof parsed !== 'object' ||
+        Array.isArray(parsed)
+      ) {
+        process.stderr.write(
+          `[SessionRouter] Corrupted persist file (expected object, got ${parsed === null ? 'null' : Array.isArray(parsed) ? 'array' : typeof parsed}).\n`,
+        );
+        return { restored: 0, failed: 0 };
+      }
+
+      entries = parsed as Record<string, PersistedEntry>;
     } catch {
+      // Corrupted file — warn and return empty so the next persist()
+      // can write a clean file after a successful restore.
+      process.stderr.write(
+        `[SessionRouter] Failed to parse persist file: ${this.persistPath}\n`,
+      );
       return { restored: 0, failed: 0 };
     }
 
@@ -182,14 +202,21 @@ export class SessionRouter {
         this.toTarget.set(sessionId, entry.target);
         this.toCwd.set(sessionId, entry.cwd);
         restored++;
-      } catch {
+      } catch (err: unknown) {
         // Session can't be loaded — will create fresh on next message
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[SessionRouter] Failed to restore session ${entry.sessionId}: ${msg}\n`,
+        );
         failed++;
       }
     }
 
-    // Update persist file to only include successfully restored sessions
-    if (failed > 0) {
+    // Update persist file to remove failed entries.
+    // Only persist if at least one session was successfully restored —
+    // an all-failure persist() would write empty {} and permanently delete
+    // routing data that might be recoverable on a subsequent attempt.
+    if (failed > 0 && restored > 0) {
       this.persist();
     }
 
