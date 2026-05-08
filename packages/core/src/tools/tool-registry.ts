@@ -355,22 +355,25 @@ export class ToolRegistry {
       // Disconnect the MCP client
       await this.mcpClientManager.disconnectServer(serverName);
     } finally {
-      // Update the exclusion list before dropping the status entry, so a
-      // server is already marked as disabled by the time it disappears
-      // from the registry. Otherwise there's a (currently synchronous,
-      // but easy to widen) window where doctorChecks would observe a
-      // missing status (falling back to DISCONNECTED) while
-      // isMcpServerDisabled still returns false, mis-reporting an
-      // intentional disable as a connectivity failure.
-      const currentExcluded = this.config.getExcludedMcpServers() || [];
-      if (!currentExcluded.includes(serverName)) {
-        this.config.setExcludedMcpServers([...currentExcluded, serverName]);
+      try {
+        // Update the exclusion list before dropping the status entry,
+        // so a server is already marked as disabled by the time it
+        // disappears from the registry. Otherwise there's a (currently
+        // synchronous, but easy to widen) window where doctorChecks
+        // would observe a missing status (falling back to DISCONNECTED)
+        // while isMcpServerDisabled still returns false, mis-reporting
+        // an intentional disable as a connectivity failure.
+        const currentExcluded = this.config.getExcludedMcpServers() || [];
+        if (!currentExcluded.includes(serverName)) {
+          this.config.setExcludedMcpServers([...currentExcluded, serverName]);
+        }
+      } finally {
+        // Always drop the server from the global status registry — even
+        // if disconnect or the exclusion-list update throws — so the
+        // Footer's MCP health pill stops counting it as "offline". A
+        // leftover entry would resurrect the bug from #3895.
+        removeMCPServerStatus(serverName);
       }
-      // Then drop the server from the global status registry — even if
-      // disconnect throws — so the Footer's MCP health pill stops
-      // counting it as "offline". A leftover entry would resurrect the
-      // bug from #3895.
-      removeMCPServerStatus(serverName);
     }
   }
 

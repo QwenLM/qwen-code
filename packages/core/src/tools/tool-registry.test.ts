@@ -544,10 +544,12 @@ describe('ToolRegistry', () => {
       }
     });
 
-    it('still removes the registry entry when disconnect throws', async () => {
+    it('still removes the registry entry and updates the exclusion list when disconnect throws', async () => {
       updateMCPServerStatus('flaky-server', MCPServerStatus.DISCONNECTED);
       vi.spyOn(config, 'getExcludedMcpServers').mockReturnValue([]);
-      vi.spyOn(config, 'setExcludedMcpServers').mockImplementation(() => {});
+      const setExcludedSpy = vi
+        .spyOn(config, 'setExcludedMcpServers')
+        .mockImplementation(() => {});
       vi.spyOn(
         McpClientManager.prototype,
         'disconnectServer',
@@ -558,7 +560,30 @@ describe('ToolRegistry', () => {
       ).rejects.toThrow('boom');
 
       // Even though disconnect threw, the global status entry must be cleared
-      // so the health pill stops counting the server.
+      // so the health pill stops counting the server, and the exclusion list
+      // must still be updated so the server doesn't reappear on next discovery.
+      expect(getAllMCPServerStatuses().has('flaky-server')).toBe(false);
+      expect(setExcludedSpy).toHaveBeenCalledWith(['flaky-server']);
+    });
+
+    it('still removes the registry entry when the exclusion-list update throws', async () => {
+      // Defensive: if a future config implementation makes setExcludedMcpServers
+      // throw, the status registry must still be cleaned up — otherwise the
+      // health pill would keep a stale entry forever.
+      updateMCPServerStatus('flaky-server', MCPServerStatus.DISCONNECTED);
+      vi.spyOn(config, 'getExcludedMcpServers').mockReturnValue([]);
+      vi.spyOn(config, 'setExcludedMcpServers').mockImplementation(() => {
+        throw new Error('config write failed');
+      });
+      vi.spyOn(
+        McpClientManager.prototype,
+        'disconnectServer',
+      ).mockResolvedValue(undefined);
+
+      await expect(
+        toolRegistry.disableMcpServer('flaky-server'),
+      ).rejects.toThrow('config write failed');
+
       expect(getAllMCPServerStatuses().has('flaky-server')).toBe(false);
     });
 
