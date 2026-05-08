@@ -706,6 +706,13 @@ export async function parseArguments(): Promise<CliArgs> {
             if (argv['promptInteractive']) {
               return '--json-schema cannot be used with --prompt-interactive (-i); structured output only terminates the non-interactive flow.';
             }
+            // Stream-json input runs through runNonInteractiveStreamJson,
+            // which doesn't honor the structured-output termination
+            // contract. Reject the combination explicitly so users see
+            // the mismatch at parse time instead of confusion at runtime.
+            if (argv['inputFormat'] === 'stream-json') {
+              return '--json-schema cannot be used with --input-format stream-json; structured output is a single-shot contract incompatible with stream-json input.';
+            }
             const hasPrompt = !!argv['prompt'];
             const query = argv['query'] as string | string[] | undefined;
             const hasPositionalQuery = Array.isArray(query)
