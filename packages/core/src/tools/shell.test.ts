@@ -873,40 +873,36 @@ describe('ShellTool', () => {
         });
         const promise = invocation.execute(mockAbortSignal, updateOutputMock);
 
-        const ansiChunk1 = [
+        const ansiChunk1: import('../utils/terminalSerializer.js').AnsiOutput =
           [
-            {
-              text: 'Hello',
-              bold: false,
-              italic: false,
-              dim: false,
-              underline: false,
-              strikethrough: false,
-              inverse: false,
-              hidden: false,
-              blink: false,
-              foreground: undefined,
-              background: undefined,
-            },
-          ],
-        ];
-        const ansiChunk2 = [
+            [
+              {
+                text: 'Hello',
+                bold: false,
+                italic: false,
+                dim: false,
+                underline: false,
+                inverse: false,
+                fg: '',
+                bg: '',
+              },
+            ],
+          ];
+        const ansiChunk2: import('../utils/terminalSerializer.js').AnsiOutput =
           [
-            {
-              text: 'World',
-              bold: false,
-              italic: false,
-              dim: false,
-              underline: false,
-              strikethrough: false,
-              inverse: false,
-              hidden: false,
-              blink: false,
-              foreground: undefined,
-              background: undefined,
-            },
-          ],
-        ];
+            [
+              {
+                text: 'World',
+                bold: false,
+                italic: false,
+                dim: false,
+                underline: false,
+                inverse: false,
+                fg: '',
+                bg: '',
+              },
+            ],
+          ];
 
         // Both ANSI chunks should fire updateOutput immediately, back-to-back
         mockShellOutputCallback({ type: 'data', chunk: ansiChunk1 });
