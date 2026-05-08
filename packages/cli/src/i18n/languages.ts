@@ -84,13 +84,56 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
   },
 ];
 
+function normalizeLanguageCandidate(input: string): string {
+  return input.trim().replace(/_/g, '-').toLowerCase();
+}
+
+function matchesLocaleToken(candidate: string, token: string): boolean {
+  return (
+    candidate === token ||
+    candidate.startsWith(`${token}-`) ||
+    candidate.startsWith(`${token}.`) ||
+    candidate.startsWith(`${token}@`)
+  );
+}
+
+/**
+ * Resolves a language alias or locale ID to a supported canonical locale code.
+ * Returns undefined for unsupported values so callers can preserve custom codes.
+ */
+export function resolveSupportedLanguage(
+  input: string,
+): SupportedLanguage | undefined {
+  const normalized = normalizeLanguageCandidate(input);
+  if (!normalized) {
+    return undefined;
+  }
+
+  for (const language of SUPPORTED_LANGUAGES) {
+    const code = language.code.toLowerCase();
+    const id = language.id.toLowerCase();
+    if (
+      matchesLocaleToken(normalized, code) ||
+      matchesLocaleToken(normalized, id) ||
+      normalized === language.fullName.toLowerCase() ||
+      (language.nativeName && normalized === language.nativeName.toLowerCase())
+    ) {
+      return language.code;
+    }
+  }
+
+  return undefined;
+}
+
 /**
  * Maps a locale code to its English language name.
  * Used for LLM output language instructions.
  */
 export function getLanguageNameFromLocale(locale: SupportedLanguage): string {
-  const lower = locale.toLowerCase();
-  const lang = SUPPORTED_LANGUAGES.find((l) => l.code.toLowerCase() === lower);
+  const resolved = resolveSupportedLanguage(locale);
+  const lang = resolved
+    ? SUPPORTED_LANGUAGES.find((language) => language.code === resolved)
+    : undefined;
   return lang?.fullName || 'English';
 }
 

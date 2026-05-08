@@ -77,10 +77,10 @@ export const ToolListStep: React.FC<ToolListStepProps> = ({
 
   const getToolAnnotations = (tool: MCPToolDisplayInfo): string => {
     const hints: string[] = [];
-    if (tool.annotations?.destructiveHint) hints.push('destructive');
-    if (tool.annotations?.readOnlyHint) hints.push('read-only');
-    if (tool.annotations?.openWorldHint) hints.push('open-world');
-    if (tool.annotations?.idempotentHint) hints.push('idempotent');
+    if (tool.annotations?.destructiveHint) hints.push(t('destructive'));
+    if (tool.annotations?.readOnlyHint) hints.push(t('read-only'));
+    if (tool.annotations?.openWorldHint) hints.push(t('open-world'));
+    if (tool.annotations?.idempotentHint) hints.push(t('idempotent'));
     return hints.join(', ');
   };
 

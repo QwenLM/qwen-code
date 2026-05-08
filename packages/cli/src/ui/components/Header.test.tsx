@@ -75,6 +75,14 @@ describe('<Header />', () => {
     expect(lastFrame()).toContain('API Key');
   });
 
+  it('displays custom provider auth labels as-is', () => {
+    const { lastFrame } = render(
+      <Header {...defaultProps} authDisplayType="OpenRouter" />,
+    );
+    expect(lastFrame()).toContain('OpenRouter');
+    expect(lastFrame()).not.toContain('Unknown');
+  });
+
   it('displays Unknown when auth type is not set', () => {
     const { lastFrame } = render(
       <Header {...defaultProps} authDisplayType={undefined} />,

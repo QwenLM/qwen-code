@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import type { SummaryProps } from '../../types.js';
 import Spinner from 'ink-spinner';
 import { Colors } from '../../colors.js';
+import { t } from '../../../i18n/index.js';
 
 export interface SummaryDisplayProps {
   summary: SummaryProps;
@@ -23,9 +24,9 @@ export const SummaryMessage: React.FC<SummaryDisplayProps> = ({ summary }) => {
     if (summary.isPending) {
       switch (summary.stage) {
         case 'generating':
-          return 'Generating project summary...';
+          return t('Generating project summary...');
         case 'saving':
-          return 'Saving project summary...';
+          return t('Saving project summary...');
         default:
           return 'Processing summary...';
       }

@@ -36,6 +36,7 @@ import {
   type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
+import { t } from '../../../i18n/index.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -440,7 +441,7 @@ const DreamDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Error
+              {t('Error')}
             </Text>
           </Box>
           <Box>
@@ -634,7 +635,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Error
+              {t('Error')}
             </Text>
           </Box>
           <Box>
@@ -713,7 +714,7 @@ const ShellDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Error
+              {t('Error')}
             </Text>
           </Box>
           <Box>
@@ -791,7 +792,7 @@ const MonitorDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={errorColor}>
-              {errorIsFailure ? 'Error' : 'Stopped because'}
+              {errorIsFailure ? t('Error') : 'Stopped because'}
             </Text>
           </Box>
           <Box>
