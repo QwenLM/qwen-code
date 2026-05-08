@@ -243,4 +243,27 @@ describe('vscode-ide-companion paths – .env bootstrap', () => {
     expect(getRuntimeBaseDir()).toBe(configDir);
     expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
   });
+
+  it('reads QWEN_RUNTIME_DIR from <new QWEN_HOME>/.env after discovery via ~/.qwen/.env', () => {
+    const configDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-bootstrap-cfg-')),
+    );
+    const runtimeDir = path.resolve('/tmp/from-discovered-runtime');
+    fs.mkdirSync(path.join(home.tempHome, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home.tempHome, '.qwen', '.env'),
+      `QWEN_HOME=${configDir}\n`,
+    );
+    fs.writeFileSync(
+      path.join(configDir, '.env'),
+      `QWEN_RUNTIME_DIR=${runtimeDir}\n`,
+    );
+    try {
+      expect(getRuntimeBaseDir()).toBe(runtimeDir);
+      expect(process.env['QWEN_HOME']).toBe(configDir);
+      expect(process.env['QWEN_RUNTIME_DIR']).toBe(runtimeDir);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -502,17 +502,21 @@ export function createMinimalSettings(): LoadedSettings {
  * Returns the set of normalized .env file paths that count as user-level.
  *
  * User-level paths cover the home `.env` and the global Qwen config dir
- * `.env` (which respects `QWEN_HOME`). These are used both to allow loading
- * under untrusted workspaces and to opt out of the project-level excluded
- * vars filter inside `loadEnvironment`.
+ * `.env` (which respects `QWEN_HOME`). When `QWEN_HOME` redirects elsewhere,
+ * the legacy `<homedir>/.qwen/.env` is also included so credentials users
+ * left there continue to load (and the trust check in untrusted workspaces
+ * still allows reading it).
  */
 function getUserLevelEnvPaths(): Set<string> {
   const homeDir = homedir();
   const globalQwenDir = Storage.getGlobalQwenDir();
-  return new Set([
+  const paths = new Set([
     path.normalize(path.join(homeDir, '.env')),
     path.normalize(path.join(globalQwenDir, '.env')),
   ]);
+  const legacyQwenEnv = path.normalize(path.join(homeDir, QWEN_DIR, '.env'));
+  paths.add(legacyQwenEnv);
+  return paths;
 }
 
 /**
@@ -667,6 +671,18 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
       ) {
         return customQwenEnvPath;
       }
+      // Fall back to legacy ~/.qwen/.env. Users who add `QWEN_HOME=` to an
+      // existing global env file shouldn't lose the credentials still living
+      // in that file just because the new dir hasn't been populated. Routing
+      // vars inside it are pinned by no-override (preResolveHomeEnvOverrides
+      // already set them), so this only forwards ordinary keys.
+      const legacyQwenEnvPath = path.join(legacyQwenDir, '.env');
+      if (
+        fs.existsSync(legacyQwenEnvPath) &&
+        canUseEnvFile(legacyQwenEnvPath)
+      ) {
+        return legacyQwenEnvPath;
+      }
     }
 
     const envPath = path.join(currentDir, '.env');
@@ -680,6 +696,16 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
       const homeGeminiEnvPath = path.join(globalQwenDir, '.env');
       if (fs.existsSync(homeGeminiEnvPath)) {
         return homeGeminiEnvPath;
+      }
+      // Legacy ~/.qwen/.env fallback when QWEN_HOME redirects elsewhere — the
+      // walk skipped this file via `isLegacyHome`, so without an explicit
+      // fallback users who add `QWEN_HOME=` to an existing global env file
+      // would lose any credentials still living in it.
+      if (hasCustomConfigDir) {
+        const legacyQwenEnvPath = path.join(legacyQwenDir, '.env');
+        if (fs.existsSync(legacyQwenEnvPath)) {
+          return legacyQwenEnvPath;
+        }
       }
       const homeEnvPath = path.join(homeDir, '.env');
       if (fs.existsSync(homeEnvPath)) {

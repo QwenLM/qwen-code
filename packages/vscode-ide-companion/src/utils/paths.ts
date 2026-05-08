@@ -63,19 +63,15 @@ function bootstrapHomeEnvOverrides(): void {
     return;
   }
 
-  const currentQwenDir = process.env['QWEN_HOME']
-    ? resolvePath(process.env['QWEN_HOME'])
+  const initialQwenHome = process.env['QWEN_HOME'];
+  const currentQwenDir = initialQwenHome
+    ? resolvePath(initialQwenHome)
     : path.join(homeDir, '.qwen');
 
-  const candidates: string[] = [path.join(currentQwenDir, '.env')];
-  if (!process.env['QWEN_HOME']) {
-    candidates.push(path.join(homeDir, '.env'));
-  }
-
   const KEYS = ['QWEN_HOME', 'QWEN_RUNTIME_DIR'] as const;
-  for (const candidate of candidates) {
+  const readInto = (file: string) => {
     try {
-      const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
+      const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
       for (const key of KEYS) {
         if (parsed[key] && !Object.hasOwn(process.env, key)) {
           process.env[key] = parsed[key];
@@ -83,6 +79,24 @@ function bootstrapHomeEnvOverrides(): void {
       }
     } catch {
       // Match the dotenv quiet-mode behavior used by the CLI.
+    }
+  };
+
+  readInto(path.join(currentQwenDir, '.env'));
+  if (!initialQwenHome) {
+    readInto(path.join(homeDir, '.env'));
+  }
+
+  // If QWEN_HOME was discovered via one of the candidates above, also read
+  // <new QWEN_HOME>/.env so QWEN_RUNTIME_DIR can be sourced from there. The
+  // CLI's findEnvFile prefers <QWEN_HOME>/.env, so without this second pass
+  // the companion would fall back to QWEN_HOME and write lock files into a
+  // different runtime dir than the one the CLI is reading from.
+  const discoveredQwenHome = process.env['QWEN_HOME'];
+  if (discoveredQwenHome && discoveredQwenHome !== initialQwenHome) {
+    const discoveredDir = resolvePath(discoveredQwenHome);
+    if (discoveredDir !== currentQwenDir) {
+      readInto(path.join(discoveredDir, '.env'));
     }
   }
 }

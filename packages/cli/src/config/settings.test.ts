@@ -3351,6 +3351,53 @@ describe('Settings Loading and Merging', () => {
         // consulted.
         expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('fromQwenHome');
       });
+
+      it('falls back to legacy ~/.qwen/.env for non-routing keys when <QWEN_HOME>/.env is absent', () => {
+        // User keeps OPENAI_API_KEY in ~/.qwen/.env and adds QWEN_HOME to the
+        // same file. Adding the redirect must not silently drop credentials
+        // sitting in that file when the new dir hasn't been populated yet.
+        delete process.env['QWEN_HOME'];
+        delete process.env['OPENAI_API_KEY'];
+
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue('/mock/home/user');
+        const customHome = '/tmp/qwen-home-fresh-fallback';
+        const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+        const customSettingsPath = path.join(customHome, 'settings.json');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        // Only the legacy ~/.qwen/.env exists; <QWEN_HOME>/.env, the active
+        // settings.json under <QWEN_HOME>, and ~/.env all do not.
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, customSettingsPath, userQwenEnvPath].includes(
+            p.toString(),
+          ),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === customSettingsPath) return JSON.stringify({});
+            if (p === userQwenEnvPath)
+              return [
+                `QWEN_HOME=${customHome}`,
+                'OPENAI_API_KEY=secret-from-legacy',
+              ].join('\n');
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        expect(process.env['QWEN_HOME']).toEqual(customHome);
+        expect(process.env['OPENAI_API_KEY']).toEqual('secret-from-legacy');
+
+        delete process.env['OPENAI_API_KEY'];
+        cwdSpy.mockRestore();
+      });
     });
   });
 
