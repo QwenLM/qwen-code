@@ -244,12 +244,13 @@ describe('ToolSearchTool', () => {
     expect(matches).toBeGreaterThan(0);
   });
 
-  it('caps select: mode by max_results', async () => {
+  it('caps select: mode by max_results and surfaces dropped names', async () => {
     // Without a cap, `select:a,b,c,...` would unbound the result size:
     // the public schema advertises max_results but only the keyword
     // path used to honor it. With the cap, repeated/long select lists
-    // get truncated to the first N after dedup so the model can re-issue
-    // another call for the rest if it actually needs them.
+    // get truncated to the first N after dedup; the dropped names are
+    // surfaced in llmContent so the model can re-issue for them
+    // instead of assuming they were loaded.
     for (let i = 0; i < 10; i++) {
       registry.registerTool(
         new MockTool({ name: `tool_${i}`, shouldDefer: true }),
@@ -263,9 +264,17 @@ describe('ToolSearchTool', () => {
     });
     const result = await invocation.execute(new AbortController().signal);
 
-    const blocks = (String(result.llmContent).match(/<function>/g) ?? [])
-      .length;
+    const content = String(result.llmContent);
+    const blocks = (content.match(/<function>/g) ?? []).length;
     expect(blocks).toBe(3);
+    // Truncation note tells the model exactly what was dropped.
+    expect(content).toContain('Truncated by max_results');
+    expect(content).toContain('tool_3');
+    expect(content).toContain('tool_6');
+    // The first three were loaded — they should NOT appear in the
+    // truncated list.
+    const truncatedSection = content.split('Truncated by max_results')[1] ?? '';
+    expect(truncatedSection).not.toContain('tool_0');
   });
 
   it('revealed tools show up in subsequent getFunctionDeclarations', async () => {

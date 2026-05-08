@@ -101,22 +101,27 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // Mode 1: exact lookup via `select:Name1,Name2`. Dedupe so the same tool
     // isn't returned multiple times when the model writes the same name twice.
     // Cap at maxResults — without a cap, `select:a,b,c,...` would return
-    // an unbounded number of full schemas (token bloat). Truncation is
-    // silent + deterministic (first N after dedupe) so the model can
-    // re-issue another ToolSearch for the rest if needed.
+    // an unbounded number of full schemas (token bloat). When truncation
+    // happens, surface the dropped names in the result so the model knows
+    // to re-issue another ToolSearch for them instead of silently
+    // assuming they were loaded.
     if (query.toLowerCase().startsWith('select:')) {
       const seen = new Set<string>();
       const names: string[] = [];
+      const truncated: string[] = [];
       for (const raw of query.slice('select:'.length).split(',')) {
         const trimmed = raw.trim();
         if (!trimmed) continue;
         const key = trimmed.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);
+        if (names.length >= maxResults) {
+          truncated.push(trimmed);
+          continue;
+        }
         names.push(trimmed);
-        if (names.length >= maxResults) break;
       }
-      return this.loadAndReturnSchemas(names);
+      return this.loadAndReturnSchemas(names, truncated);
     }
 
     // Mode 2: keyword search. Require-word prefix with "+" boosts mandatory
@@ -187,7 +192,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
       );
   }
 
-  private async loadAndReturnSchemas(names: string[]): Promise<ToolResult> {
+  private async loadAndReturnSchemas(
+    names: string[],
+    truncated: string[] = [],
+  ): Promise<ToolResult> {
     if (names.length === 0) {
       return {
         llmContent: 'Error: no tool names provided.',
@@ -294,10 +302,20 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Not found: ${missing.join(', ')}`;
     }
+    if (truncated.length > 0) {
+      // Surface the dropped names so the model knows it must re-issue
+      // another ToolSearch for them — without this, the model would
+      // assume every requested name was loaded and later receive an
+      // "unknown tool" API error.
+      const header = llmContent ? '\n\n' : '';
+      llmContent += `${header}Truncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
+    }
 
     const displayParts: string[] = [];
     if (loaded.length > 0) displayParts.push(`Loaded ${loaded.length} tool(s)`);
     if (missing.length > 0) displayParts.push(`${missing.length} missing`);
+    if (truncated.length > 0)
+      displayParts.push(`${truncated.length} truncated`);
     const returnDisplay = displayParts.join(', ') || 'No tools loaded';
 
     return { llmContent, returnDisplay };
