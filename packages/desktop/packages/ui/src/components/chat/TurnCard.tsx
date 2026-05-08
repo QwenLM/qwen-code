@@ -1469,6 +1469,43 @@ function BranchDropdown({ onBranch }: BranchDropdownProps) {
   )
 }
 
+function ResponseActionButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  const button = (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={onClick}
+      className={cn(
+        "inline-flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors",
+        "hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      )}
+    >
+      {children}
+    </button>
+  )
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {button}
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 const MAX_HEIGHT = 540
 
 function clearAnnotationMarks(root: HTMLElement): void {
@@ -2411,28 +2448,42 @@ export function ResponseCard({
     return null
   }
 
-  // Completed response or plan - show with max height and footer
+  // Completed response or plan.
   if (isCompleted || variant === 'plan') {
     const isPlan = variant === 'plan'
+    const contentFadeStyle =
+      isPlan && isDarkMode
+        ? {
+            maskImage:
+              'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
+            WebkitMaskImage:
+              'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
+          }
+        : {}
 
     return (
       <>
-        <div className="bg-background shadow-minimal rounded-[8px] overflow-hidden relative group">
+        <div
+          className={cn(
+            "relative group/response",
+            isPlan && "bg-background shadow-minimal rounded-[8px] overflow-hidden",
+          )}
+        >
           {/* Fullscreen button - desktop only; compact mode keeps message chrome minimal */}
-          {!compactMode && (
-          <button
-            onClick={() => setIsFullscreen(true)}
-            className={cn(
-              "absolute top-2 right-2 p-1 rounded-[6px] transition-all z-10 select-none",
-              "opacity-0 group-hover:opacity-100",
-              "bg-background shadow-minimal",
-              "text-muted-foreground/50 hover:text-foreground",
-              "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100"
-            )}
-            title={t('common.viewFullscreen')}
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-          </button>
+          {!compactMode && isPlan && (
+            <button
+              onClick={() => setIsFullscreen(true)}
+              className={cn(
+                "absolute top-2 right-2 p-1 rounded-[6px] transition-all z-10 select-none",
+                "opacity-0 group-hover/response:opacity-100",
+                "bg-background shadow-minimal",
+                "text-muted-foreground/50 hover:text-foreground",
+                "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100",
+              )}
+              title={t('common.viewFullscreen')}
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+            </button>
           )}
 
           {/* Plan header - only shown for plan variant */}
@@ -2448,20 +2499,19 @@ export function ResponseCard({
             </div>
           )}
 
-          {/* Scrollable content area with subtle fade at edges (dark mode only) */}
+          {/* Response content. Plain responses grow with the outer scroll; plans keep their card scroll. */}
           <div
             ref={contentRef}
             data-search-root="response"
             onMouseDown={handleSelectionPointerDown}
             onMouseUp={handleTextSelection}
-            className="pl-[22px] pr-[16px] py-3 text-sm overflow-y-auto scrollbar-hover"
+            className={cn(
+              "pl-[22px] pr-[16px] py-3 text-sm",
+              isPlan && "overflow-y-auto scrollbar-hover",
+            )}
             style={{
-              maxHeight: MAX_HEIGHT,
-              // Subtle fade at top and bottom edges (16px) - only in dark mode for better contrast
-              ...(isDarkMode && {
-                maskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
-                WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
-              }),
+              ...(isPlan ? { maxHeight: MAX_HEIGHT } : {}),
+              ...contentFadeStyle,
             }}
           >
             <div ref={contentLayerRef} className="relative">
@@ -2476,12 +2526,14 @@ export function ResponseCard({
             </div>
           </div>
 
-          {/* Footer with actions - hidden in compact mode */}
-          {!compactMode && (
-            <div className={cn(
-              "pl-4 pr-2.5 py-2 border-t border-border/30 flex items-center justify-between bg-muted/20",
-              SIZE_CONFIG.fontSize
-            )}>
+          {/* Plan footer - hidden in compact mode */}
+          {!compactMode && isPlan && (
+            <div
+              className={cn(
+                "pl-4 pr-2.5 py-2 border-t border-border/30 flex items-center justify-between bg-muted/20",
+                SIZE_CONFIG.fontSize,
+              )}
+            >
               {/* Left side - Copy, View as Markdown, Annotation hint */}
               <div className="flex items-center gap-3">
                 <button
@@ -2489,18 +2541,18 @@ export function ResponseCard({
                   className={cn(
                     "turn-action-btn flex items-center gap-1.5 transition-colors select-none",
                     copied ? "text-success" : "text-muted-foreground hover:text-foreground",
-                    "focus:outline-none focus-visible:underline"
+                    "focus:outline-none focus-visible:underline",
                   )}
                 >
                   {copied ? (
                     <>
                       <Check className={SIZE_CONFIG.iconSize} />
-                      <span>{t("common.copied")}</span>
+                      <span>{t('common.copied')}</span>
                     </>
                   ) : (
                     <>
                       <Copy className={SIZE_CONFIG.iconSize} />
-                      <span>{t("common.copy")}</span>
+                      <span>{t('common.copy')}</span>
                     </>
                   )}
                 </button>
@@ -2510,7 +2562,7 @@ export function ResponseCard({
                     className={cn(
                       "turn-action-btn flex items-center gap-1.5 transition-colors select-none",
                       "text-muted-foreground hover:text-foreground",
-                      "focus:outline-none focus-visible:underline"
+                      "focus:outline-none focus-visible:underline",
                     )}
                   >
                     <FileText className={SIZE_CONFIG.iconSize} />
@@ -2528,7 +2580,7 @@ export function ResponseCard({
                       "flex items-center gap-3 transition-all duration-200",
                       isLastResponse
                         ? "opacity-100 translate-x-0"
-                        : "opacity-0 translate-x-2 pointer-events-none"
+                        : "opacity-0 translate-x-2 pointer-events-none",
                     )}
                   >
                     <AcceptPlanDropdown
@@ -2541,6 +2593,35 @@ export function ResponseCard({
                 )}
                 {onBranch && <BranchDropdown onBranch={onBranch} />}
               </div>
+            </div>
+          )}
+
+          {!compactMode && !isPlan && (
+            <div className="flex h-5 items-center justify-start gap-1.5 pl-[22px] pr-0.5 text-[11px] font-medium text-muted-foreground/70 opacity-0 pointer-events-none transition-opacity duration-150 select-none group-hover/response:pointer-events-auto group-hover/response:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
+              <ResponseActionButton
+                label={copied ? t('common.copied') : t('common.copy')}
+                onClick={() => {
+                  void handleCopy()
+                }}
+              >
+                {copied ? (
+                  <Check className="size-3.5 text-success" />
+                ) : (
+                  <Copy className="size-3.5" />
+                )}
+              </ResponseActionButton>
+              {onPopOut && (
+                <ResponseActionButton label="Markdown" onClick={onPopOut}>
+                  <FileText className="size-3.5" />
+                </ResponseActionButton>
+              )}
+              <ResponseActionButton
+                label={t('common.viewFullscreen')}
+                onClick={() => setIsFullscreen(true)}
+              >
+                <Maximize2 className="size-3.5" />
+              </ResponseActionButton>
+              {onBranch && <BranchDropdown onBranch={onBranch} />}
             </div>
           )}
         </div>
@@ -2571,23 +2652,14 @@ export function ResponseCard({
   // Streaming response - show throttled content with spinner
   return (
     <>
-      <div className="bg-background shadow-minimal rounded-[8px] overflow-hidden group">
+      <div className="relative group/response">
         {/* Content area - uses displayedText (throttled) for performance */}
-        {/* Subtle fade at top and bottom edges (dark mode only) */}
         <div
           ref={contentRef}
           data-search-root="response"
           onMouseDown={handleSelectionPointerDown}
           onMouseUp={handleTextSelection}
-          className="pl-[22px] pr-4 py-3 text-sm overflow-y-auto scrollbar-hover"
-          style={{
-            maxHeight: MAX_HEIGHT,
-            // Subtle fade at top and bottom edges (16px) - only in dark mode for better contrast
-            ...(isDarkMode && {
-              maskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
-              WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
-            }),
-          }}
+          className="pl-[22px] pr-4 py-3 text-sm"
         >
           <div ref={contentLayerRef} className="relative">
             <Markdown
@@ -2603,8 +2675,13 @@ export function ResponseCard({
 
         {/* Footer - hidden in compact mode */}
         {!compactMode && (
-          <div className={cn("px-4 py-2 border-t border-border/30 flex items-center bg-muted/20", SIZE_CONFIG.fontSize)}>
-            <div className="flex items-center gap-2 text-muted-foreground">
+          <div
+            className={cn(
+              "flex h-5 items-center gap-1.5 pl-[22px] text-muted-foreground/70",
+              SIZE_CONFIG.fontSize,
+            )}
+          >
+            <div className="flex items-center gap-2">
               <Spinner className={SIZE_CONFIG.spinnerSize} />
               <span>Streaming...</span>
             </div>
