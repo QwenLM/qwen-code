@@ -35,13 +35,8 @@ import type {
 } from '../agents/runtime/agent-events.js';
 import type { Config } from '../config/config.js';
 import { APPROVAL_MODES } from '../config/config.js';
-import {
-  type AuthType,
-  type ContentGenerator,
-  type ContentGeneratorConfig,
-  createContentGenerator,
-} from '../core/contentGenerator.js';
-import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { parseSubagentModelSelection } from './model-selection.js';
@@ -660,22 +655,27 @@ export class SubagentManager {
         options?.toolConfigOverride ?? runtimeConfig.toolConfig;
 
       // When the model selector specifies a different provider, build a
-      // per-agent Config with a dedicated ContentGenerator so the subagent
-      // talks to the right API without affecting the parent process.
-      const agentContext = await this.maybeOverrideContentGenerator(
+      // dedicated ContentGenerator + view so the subagent talks to the
+      // right API without affecting the parent process. The view is
+      // applied via AsyncLocalStorage when the agent runs.
+      const runtimeView = await this.buildRuntimeContentGeneratorView(
         config,
         runtimeContext,
       );
 
+      const subagentContext =
+        await this.buildSubagentContextOverride(runtimeContext);
+
       return await AgentHeadless.create(
         config.name,
-        agentContext,
+        subagentContext,
         promptConfig,
         modelConfig,
         runConfig,
         toolConfig,
         options?.eventEmitter,
         options?.hooks,
+        runtimeView,
       );
     } catch (error) {
       if (error instanceof Error) {
@@ -690,53 +690,55 @@ export class SubagentManager {
   }
 
   /**
-   * When a subagent's model selector specifies a model (bare ID or
-   * authType-prefixed), build a Config override with a dedicated
-   * ContentGenerator so the model actually reaches the API.
-   * For inherit selectors we still build a thin Object.create
-   * override so the subagent gets an isolated FileReadCache via
-   * the per-Config own-property machinery — returning `base`
-   * directly would let the subagent share the parent's read entries
-   * and silently weaken prior-read enforcement on its mutation
-   * paths.
+   * Build the per-subagent Config override used as the AgentHeadless
+   * runtime context. The override is a thin prototype-delegation wrapper
+   * (`Object.create(runtimeContext)`): no method changes, but a distinct
+   * instance triggers the lazy own-property init in
+   * `Config.getFileReadCache()` so the subagent gets its own cache
+   * rather than inheriting the parent's recorded reads — which would
+   * silently weaken prior-read enforcement on its mutation paths.
+   *
+   * The tool registry is also rebuilt on the override so `EditTool` /
+   * `WriteFileTool` / `ReadFileTool` resolve `this.config` to the
+   * subagent — without that step, the parent's cached tool instances
+   * still reach the parent's FileReadCache. The rebuild is skipped when
+   * a wrapper above `runtimeContext` already rebuilt one (typically
+   * `agent.ts:createApprovalModeOverride`, which marks itself via a
+   * Symbol-keyed flag — Symbol lookup walks the prototype chain, so
+   * this also catches wrapper-on-wrapper layering like
+   * `bgConfig = Object.create(agentConfig)` from the background path).
+   * Rebuilding twice would waste work, leak listeners on shared
+   * managers, and split caches across registry layers.
    */
-  private async maybeOverrideContentGenerator(
+  private async buildSubagentContextOverride(
+    runtimeContext: Config,
+  ): Promise<Config> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const subagentContext = Object.create(runtimeContext) as any as Config;
+    if (!hasRebuiltToolRegistry(runtimeContext)) {
+      await rebuildToolRegistryOnOverride(subagentContext, runtimeContext);
+    }
+    return subagentContext;
+  }
+
+  /**
+   * When a subagent's model selector specifies a model (bare ID or
+   * authType-prefixed), build a dedicated ContentGenerator and the view
+   * the agent runtime should publish via AsyncLocalStorage during the
+   * run. Returns `undefined` for inherit selectors (no override needed).
+   *
+   * FileReadCache isolation and tool-registry rebuilding are handled
+   * separately in {@link buildSubagentContextOverride} — every subagent
+   * (inherit or explicit) gets that, regardless of whether a runtime
+   * view is built here.
+   */
+  private async buildRuntimeContentGeneratorView(
     config: SubagentConfig,
     base: Config,
-  ): Promise<Config> {
+  ): Promise<RuntimeContentGeneratorView | undefined> {
     const selection = parseSubagentModelSelection(config.model);
-    // Skip the registry rebuild if any wrapper above `base` already
-    // rebuilt one (typically `agent.ts:createApprovalModeOverride`,
-    // which marks itself via Symbol-keyed flag — Symbol property lookup
-    // walks the prototype chain, so this also catches
-    // wrapper-on-wrapper layering like
-    // `bgConfig = Object.create(agentConfig)` passed in from the
-    // background path). Rebuilding a second time would waste work,
-    // leak listeners on shared managers (any AgentTool / SkillTool the
-    // second registry later instantiates registers a change-listener
-    // and the short-lived registry has no explicit stop() site), and
-    // split the cache so client-level cache clears target an empty
-    // second-layer cache while bound tools (still in the upstream
-    // layer's registry) keep using the upstream cache.
-    const upstreamRebuilt = hasRebuiltToolRegistry(base);
-
     if (selection.inherits) {
-      // Thin prototype-delegation override: no method changes, but a
-      // distinct instance triggers the lazy-init in
-      // `Config.getFileReadCache()` so the subagent gets its own
-      // cache rather than inheriting the parent's.
-      //
-      // When no upstream rebuild has happened, also rebuild the tool
-      // registry so `EditTool` / `WriteFileTool` / `ReadFileTool` are
-      // bound to the override and resolve `this.config` to the subagent
-      // — without that step, the parent's cached tool instances still
-      // reach the parent's FileReadCache and silently weaken prior-read
-      // enforcement on the subagent's mutation paths.
-      const isolated = Object.create(base) as Config;
-      if (!upstreamRebuilt) {
-        await rebuildToolRegistryOnOverride(isolated, base);
-      }
-      return isolated;
+      return undefined;
     }
 
     const authType =
@@ -745,39 +747,18 @@ export class SubagentManager {
       authType: authType as string,
     };
 
-    const agentGeneratorConfig = buildAgentContentGeneratorConfig(
+    const view = await createRuntimeContentGeneratorView(
+      base,
       base,
       selection.modelId,
       authOverrides,
     );
 
-    const agentGenerator = await createContentGenerator(
-      agentGeneratorConfig,
-      base,
-    );
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const override = Object.create(base) as any;
-    override.getContentGenerator = (): ContentGenerator => agentGenerator;
-    override.getContentGeneratorConfig = (): ContentGeneratorConfig =>
-      agentGeneratorConfig;
-    override.getAuthType = (): AuthType | undefined =>
-      agentGeneratorConfig.authType;
-    override.getModel = (): string => agentGeneratorConfig.model;
-
-    // Rebuild the tool registry on the override so core tools resolve
-    // `this.config` to the subagent — but only if the upstream caller
-    // did not already build one. See the comment at the top of this
-    // function for the reasoning.
-    if (!upstreamRebuilt) {
-      await rebuildToolRegistryOnOverride(override as Config, base);
-    }
-
     debugLogger.info(
-      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${agentGeneratorConfig.model}`,
+      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${view.contentGeneratorConfig.model}`,
     );
 
-    return override as Config;
+    return view;
   }
 
   /**

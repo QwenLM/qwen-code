@@ -19,6 +19,11 @@
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
+import {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from './agent-context.js';
 import { type ToolCallRequestInfo } from '../../core/turn.js';
 import {
   CoreToolScheduler,
@@ -183,6 +188,14 @@ export class AgentCore {
   readonly eventEmitter: AgentEventEmitter;
   readonly hooks?: AgentHooks;
   readonly stats = new AgentStatistics();
+  /**
+   * When the agent runs with a model different from the parent session,
+   * this view is published via AsyncLocalStorage during execution so any
+   * `Config.getContentGenerator{,Config}()` call inside the run resolves
+   * to the agent's values — even from tools that captured the parent
+   * Config at construction.
+   */
+  readonly runtimeView?: RuntimeContentGeneratorView;
 
   // Observable state lives on Core (not a wrapper) so headless and
   // background agents can be observed with the same accessors as
@@ -236,6 +249,7 @@ export class AgentCore {
     toolConfig?: ToolConfig,
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
+    runtimeView?: RuntimeContentGeneratorView,
   ) {
     const randomPart = Math.random().toString(36).slice(2, 8);
     this.subagentId = `${name}-${randomPart}`;
@@ -247,6 +261,7 @@ export class AgentCore {
     this.toolConfig = toolConfig;
     this.eventEmitter = eventEmitter ?? new AgentEventEmitter();
     this.hooks = hooks;
+    this.runtimeView = runtimeView;
     this.setupStateListeners();
   }
 
@@ -433,19 +448,64 @@ export class AgentCore {
     abortController: AbortController,
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
-    // Tag every API call emitted from this loop with the owning subagent's
-    // name so the `/stats` panel can attribute tokens/requests to the
-    // originating subagent. The store is read inside
-    // `LoggingContentGenerator` via `subagentNameContext.getStore()`.
-    return subagentNameContext.run(this.name, () =>
+    const inner = () =>
       this._runReasoningLoopInner(
         chat,
         initialMessages,
         toolsList,
         abortController,
         options,
-      ),
+      );
+    return this.runInAgentFrames(inner);
+  }
+
+  /**
+   * Run `fn` inside both ALS frames this agent owns:
+   * 1. {@link subagentNameContext} so token-attribution code resolves to
+   *    this agent's name.
+   * 2. The per-agent runtime ContentGenerator view (when set) so
+   *    `Config.getContentGenerator{,Config}()` calls inside resolve to
+   *    the agent rather than to the parent Config tools captured at
+   *    construction time.
+   *
+   * Used both around the reasoning loop and around the deferred-approval
+   * `onConfirm` continuation — the latter runs from the parent UI's input
+   * handler, on a different async chain than the loop, so without this
+   * re-entry the resumed tool body would fall back to the parent's view
+   * and mis-attribute its tokens.
+   *
+   * `inheritedView` lets a caller pass an ambient view captured earlier
+   * (e.g. at approval-emit time, when the parent's ALS frame is still
+   * live) for inheriting agents that own no view themselves. Without it,
+   * a nested `model: inherit` agent under a runtime-view-bearing parent
+   * would lose that view across the deferred-approval boundary, since
+   * the UI invokes `respond` from a fresh async chain where the parent's
+   * ALS frame is gone.
+   *
+   * Exposed (rather than inlined twice) so the contract stays testable in
+   * isolation; see `agent-core.test.ts`.
+   */
+  runInAgentFrames<T>(
+    fn: () => Promise<T>,
+    inheritedView?: RuntimeContentGeneratorView,
+  ): Promise<T> {
+    return subagentNameContext.run(this.name, () =>
+      this.withRuntimeView(fn, inheritedView),
     );
+  }
+
+  /**
+   * Wraps `fn` in the effective runtime view: this agent's own view if
+   * set, else `inheritedView` if the caller captured one. Internal —
+   * public callers should use {@link runInAgentFrames}, which also
+   * restores the subagent-name frame.
+   */
+  private withRuntimeView<T>(
+    fn: () => Promise<T>,
+    inheritedView?: RuntimeContentGeneratorView,
+  ): Promise<T> {
+    const view = this.runtimeView ?? inheritedView;
+    return view ? runWithRuntimeContentGenerator(view, fn) : fn();
   }
 
   private async _runReasoningLoopInner(
@@ -901,6 +961,12 @@ export class AgentCore {
           try {
             const { confirmationDetails } = waiting;
             const { onConfirm: _onConfirm, ...rest } = confirmationDetails;
+            // Snapshot the ambient runtime view here, while the loop frame
+            // is still live. For inheriting agents (no own runtimeView)
+            // this captures the parent's view so the deferred-approval
+            // continuation — invoked later from the UI's async chain — can
+            // restore it. See `runInAgentFrames` for the wiring.
+            const inheritedView = getRuntimeContentGenerator();
             this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
               subagentId: this.subagentId,
               round: currentRound,
@@ -919,7 +985,14 @@ export class AgentCore {
               ) => {
                 if (responded.has(waiting.request.callId)) return;
                 responded.add(waiting.request.callId);
-                await waiting.confirmationDetails.onConfirm(outcome, payload);
+                // UI invokes this from its own async chain (outside the
+                // reasoning-loop ALS frames), so re-enter both the agent's
+                // runtime view AND its name context before the resumed
+                // tool body runs. See `runInAgentFrames` for rationale.
+                await this.runInAgentFrames(
+                  () => waiting.confirmationDetails.onConfirm(outcome, payload),
+                  inheritedView,
+                );
               },
               timestamp: Date.now(),
             });

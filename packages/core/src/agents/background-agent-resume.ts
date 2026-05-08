@@ -27,7 +27,7 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
-import { runWithAgentContext } from '../tools/agent/agent-context.js';
+import { runWithAgentContext } from './runtime/agent-context.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
 import {
@@ -784,8 +784,7 @@ export class BackgroundAgentResumeService {
         }
       };
 
-      const framedRunBody = () =>
-        runWithAgentContext({ agentId: meta.agentId }, runBody);
+      const framedRunBody = () => runWithAgentContext(meta.agentId, runBody);
       void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
       return entry;
     } catch (error) {

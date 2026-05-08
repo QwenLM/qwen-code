@@ -83,16 +83,17 @@ Settings are organized into categories. Most settings should be placed within th
 
 #### general
 
-| Setting                                    | Type    | Description                                                                                                                                                                     | Default     |
-| ------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `general.preferredEditor`                  | string  | The preferred editor to open files in.                                                                                                                                          | `undefined` |
-| `general.vimMode`                          | boolean | Enable Vim keybindings.                                                                                                                                                         | `false`     |
-| `general.enableAutoUpdate`                 | boolean | Enable automatic update checks and installations on startup.                                                                                                                    | `true`      |
-| `general.showSessionRecap`                 | boolean | Auto-show a one-line "where you left off" recap when returning to the terminal after being away. Off by default. Use `/recap` to trigger manually regardless of this setting.   | `false`     |
-| `general.sessionRecapAwayThresholdMinutes` | number  | Minutes the terminal must be blurred before an auto-recap fires on focus-in. Only used when `showSessionRecap` is enabled.                                                      | `5`         |
-| `general.gitCoAuthor`                      | boolean | Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.                                                                      | `true`      |
-| `general.checkpointing.enabled`            | boolean | Enable session checkpointing for recovery.                                                                                                                                      | `false`     |
-| `general.defaultFileEncoding`              | string  | Default encoding for new files. Use `"utf-8"` (default) for UTF-8 without BOM, or `"utf-8-bom"` for UTF-8 with BOM. Only change this if your project specifically requires BOM. | `"utf-8"`   |
+| Setting                                    | Type    | Description                                                                                                                                                                               | Default     |
+| ------------------------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `general.preferredEditor`                  | string  | The preferred editor to open files in.                                                                                                                                                    | `undefined` |
+| `general.vimMode`                          | boolean | Enable Vim keybindings.                                                                                                                                                                   | `false`     |
+| `general.enableAutoUpdate`                 | boolean | Enable automatic update checks and installations on startup.                                                                                                                              | `true`      |
+| `general.showSessionRecap`                 | boolean | Auto-show a one-line "where you left off" recap when returning to the terminal after being away. Off by default. Use `/recap` to trigger manually regardless of this setting.             | `false`     |
+| `general.sessionRecapAwayThresholdMinutes` | number  | Minutes the terminal must be blurred before an auto-recap fires on focus-in. Only used when `showSessionRecap` is enabled.                                                                | `5`         |
+| `general.gitCoAuthor.commit`               | boolean | Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both. | `true`      |
+| `general.gitCoAuthor.pr`                   | boolean | Append a Qwen Code attribution line to pull request descriptions when running `gh pr create`.                                                                                             | `true`      |
+| `general.checkpointing.enabled`            | boolean | Enable session checkpointing for recovery.                                                                                                                                                | `false`     |
+| `general.defaultFileEncoding`              | string  | Default encoding for new files. Use `"utf-8"` (default) for UTF-8 without BOM, or `"utf-8-bom"` for UTF-8 with BOM. Only change this if your project specifically requires BOM.           | `"utf-8"`   |
 
 #### output
 
