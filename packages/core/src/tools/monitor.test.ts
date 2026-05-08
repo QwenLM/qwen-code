@@ -126,7 +126,7 @@ import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
 import type { Config } from '../config/config.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import type { ToolCallConfirmationDetails } from './tools.js';
-import { runWithAgentContext } from './agent/agent-context.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 /**
  * Create a mock child process with controllable stdout/stderr/events.
@@ -744,7 +744,7 @@ describe('MonitorTool', () => {
         command: 'tail -f log',
       });
 
-      await runWithAgentContext({ agentId: 'agent-123' }, () =>
+      await runWithAgentContext('agent-123', () =>
         invocation.execute(new AbortController().signal),
       );
 

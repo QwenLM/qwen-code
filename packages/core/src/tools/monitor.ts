@@ -49,7 +49,7 @@ import {
   extractCommandRules,
   isShellCommandReadOnlyAST,
 } from '../utils/shellAstParser.js';
-import { getCurrentAgentId } from './agent/agent-context.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
