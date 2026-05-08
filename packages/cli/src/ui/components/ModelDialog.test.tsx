@@ -136,38 +136,6 @@ describe('<ModelDialog />', () => {
     expect(props.showNumbers).toBe(true);
   });
 
-  it('limits fast model options to the current auth type', () => {
-    renderComponent(
-      { isFastModelMode: true },
-      {
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getModel: vi.fn(() => 'gpt-4'),
-        getAllConfiguredModels: vi.fn(() => [
-          {
-            id: DEFAULT_QWEN_MODEL,
-            label: 'Qwen Coder',
-            description: 'Qwen model',
-            authType: AuthType.QWEN_OAUTH,
-          },
-          {
-            id: 'gpt-4',
-            label: 'GPT-4',
-            description: 'OpenAI model',
-            authType: AuthType.USE_OPENAI,
-          },
-        ]),
-        getContentGeneratorConfig: vi.fn(() => ({
-          authType: AuthType.USE_OPENAI,
-          model: 'gpt-4',
-        })),
-      },
-    );
-
-    const props = mockedSelect.mock.calls[0][0];
-    expect(props.items).toHaveLength(1);
-    expect(props.items[0].value).toBe(`${AuthType.USE_OPENAI}::gpt-4`);
-  });
-
   it('initializes with the model from ConfigContext', () => {
     const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
     renderComponent(
