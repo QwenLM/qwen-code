@@ -21,6 +21,10 @@ import {
   parseExportSlashCommand,
   type SessionExportFormat,
 } from '../../services/sessionExportService.js';
+import {
+  DISCONTINUED_MESSAGES,
+  isDiscontinuedModel,
+} from '../utils/discontinuedModel.js';
 
 function formatExportSuccessMessage(
   formatLabel: string,
@@ -1256,6 +1260,21 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const modelId = data?.modelId;
       if (!modelId) {
         throw new Error('Model ID is required');
+      }
+      // Defensive guard: refuse non-runtime Qwen OAuth models in case the UI
+      // is bypassed (programmatic call, stale webview, restored session).
+      if (isDiscontinuedModel(modelId)) {
+        console.warn(
+          '[SessionMessageHandler] Rejected discontinued model',
+          modelId,
+        );
+        const message = `Failed to switch model: ${DISCONTINUED_MESSAGES.blockedError}`;
+        vscode.window.showErrorMessage(message);
+        this.sendToWebView({
+          type: 'error',
+          data: { message },
+        });
+        return;
       }
       await this.agentManager.setModelFromUi(modelId);
       void vscode.window.showInformationMessage(

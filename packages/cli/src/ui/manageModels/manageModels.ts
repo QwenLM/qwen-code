@@ -17,7 +17,7 @@ import {
   fetchOpenRouterModels,
   isOpenRouterConfig,
   mergeOpenRouterConfigs,
-} from '../../commands/auth/openrouterOAuth.js';
+} from '../../auth/providers/oauth/openrouterOAuth.js';
 
 export const MANAGE_MODELS_SOURCES = ['openrouter'] as const;
 

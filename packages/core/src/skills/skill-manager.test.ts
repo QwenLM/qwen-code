@@ -1364,11 +1364,11 @@ Body.
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // realpath stays within baseDir (in-tree symlink)
-      vi.mocked(fs.realpath).mockImplementation((p) =>
-        Promise.resolve(String(p)),
+      // Symlink target can point anywhere on disk — out-of-tree
+      // targets are the supported user workflow.
+      vi.mocked(fs.realpath).mockResolvedValue(
+        '/elsewhere/skills-repo/symlink-skill',
       );
-      // Mock fs.stat to return directory stats for the symlink target
       vi.mocked(fs.stat).mockResolvedValue({
         isDirectory: () => true,
       } as Awaited<ReturnType<typeof fs.stat>>);
@@ -1397,8 +1397,8 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      vi.mocked(fs.realpath).mockImplementation((p) =>
-        Promise.resolve(String(p)),
+      vi.mocked(fs.realpath).mockResolvedValue(
+        '/elsewhere/skills-repo/some-file',
       );
       // Mock fs.stat to return file stats (not a directory)
       vi.mocked(fs.stat).mockResolvedValue({
@@ -1420,61 +1420,14 @@ Symlink skill content`);
         },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
-      // realpath(baseDir) succeeds (the directory itself is fine);
-      // realpath(target) throws because the link is broken. Without
-      // discriminating, the new realpath-base step in loadSkillsFromDir
-      // would also throw and bail the whole directory before reaching
-      // the per-symlink check we want to test.
-      vi.mocked(fs.realpath).mockImplementation((p) => {
-        const s = String(p);
-        if (s.endsWith('broken-symlink')) {
-          return Promise.reject(new Error('ENOENT: no such file or directory'));
-        }
-        return Promise.resolve(s);
-      });
+      // realpath on the dangling link throws ENOENT; the entry is
+      // skipped with an `invalid` reason.
+      vi.mocked(fs.realpath).mockRejectedValue(
+        new Error('ENOENT: no such file or directory'),
+      );
 
       const skills = await manager.listSkills({ force: true });
 
-      expect(skills).toHaveLength(0);
-    });
-
-    it('should skip symlinks that escape baseDir (prevents arbitrary-skill-load attack)', async () => {
-      // Regression: a symlink whose target falls outside the skills
-      // tree (e.g. attacker pointing at /etc/cron.d) must be dropped
-      // — skills can ship hooks that execute shell commands, so
-      // arbitrary-load is a code-execution vector. realpath + scope
-      // check guards this.
-      vi.mocked(fs.readdir).mockResolvedValue([
-        {
-          name: 'escape-symlink',
-          isDirectory: () => false,
-          isSymbolicLink: () => true,
-          isFile: () => false,
-        },
-      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
-
-      // realpath(baseDir) returns the base canonical form; only the
-      // symlink target escapes. A bare `mockResolvedValue` would map
-      // both calls to the same value and accidentally let the attack
-      // through (path.relative(x, x) === '' which is in-scope).
-      vi.mocked(fs.realpath).mockImplementation((p) => {
-        const s = String(p);
-        if (s.endsWith('escape-symlink')) {
-          return Promise.resolve('/etc/cron.d/payload');
-        }
-        return Promise.resolve(s);
-      });
-      vi.mocked(fs.stat).mockResolvedValue({
-        isDirectory: () => true,
-      } as Awaited<ReturnType<typeof fs.stat>>);
-      vi.mocked(fs.access).mockResolvedValue(undefined);
-      vi.mocked(fs.readFile).mockResolvedValue(`---
-name: hijacked
-description: Should never load
----
-malicious body`);
-
-      const skills = await manager.listSkills({ force: true });
       expect(skills).toHaveLength(0);
     });
 

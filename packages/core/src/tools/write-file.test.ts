@@ -28,6 +28,7 @@ import { GeminiClient } from '../core/client.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const rootDir = path.resolve(os.tmpdir(), 'qwen-code-test-root');
 
@@ -826,6 +827,79 @@ describe('WriteFileTool', () => {
     });
   });
 
+  // Same as edit.test's wiring guard: the WriteFileTool feeds the
+  // commit-attribution singleton on success. The recordEdit call
+  // distinguishes a true file creation (`null` old content) from
+  // overwriting an existing empty file (`''` old content); these
+  // tests pin both shapes so the distinction can't drift silently.
+  describe('commit-attribution wiring', () => {
+    const abortSignal = new AbortController().signal;
+
+    beforeEach(() => {
+      CommitAttributionService.resetInstance();
+    });
+
+    it('records AI-originated writes in the attribution service', async () => {
+      const filePath = path.join(rootDir, 'attr_write.txt');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'fresh content',
+      });
+      await invocation.execute(abortSignal);
+
+      const attribution =
+        CommitAttributionService.getInstance().getFileAttribution(filePath);
+      expect(attribution).toBeDefined();
+      expect(attribution!.aiContribution).toBeGreaterThan(0);
+      // A truly new file should be flagged so deletions later in the
+      // session can be reconciled.
+      expect(attribution!.aiCreated).toBe(true);
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('skips attribution when modified_by_user', async () => {
+      const filePath = path.join(rootDir, 'attr_skip.txt');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'human-edited',
+        modified_by_user: true,
+      });
+      await invocation.execute(abortSignal);
+
+      expect(
+        CommitAttributionService.getInstance().getFileAttribution(filePath),
+      ).toBeUndefined();
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('marks aiCreated=false when overwriting an existing empty file', async () => {
+      const filePath = path.join(rootDir, 'attr_existing_empty.txt');
+      // Create an empty file first — the distinction we're guarding
+      // is that overwriting an empty existing file should NOT be
+      // counted as a creation, even though both old contents are
+      // length-0.
+      fs.writeFileSync(filePath, '', 'utf8');
+      // Prior-read enforcement (origin/main #3774) requires the file
+      // to have been Read before WriteFile can overwrite it.
+      seedPriorRead(filePath);
+
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'overwrite content',
+      });
+      await invocation.execute(abortSignal);
+
+      const attribution =
+        CommitAttributionService.getInstance().getFileAttribution(filePath);
+      expect(attribution).toBeDefined();
+      expect(attribution!.aiCreated).toBe(false);
+
+      fs.unlinkSync(filePath);
+    });
+  });
+
   describe('prior-read enforcement', () => {
     const abortSignal = new AbortController().signal;
 
@@ -843,7 +917,7 @@ describe('WriteFileTool', () => {
 
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
       expect(result.error?.message).toMatch(
-        /has not been fully read in this session/,
+        /has not been read in this session/,
       );
       // File must remain at its pre-call content, and the tool must
       // not have slurped the existing bytes into memory before
@@ -856,6 +930,13 @@ describe('WriteFileTool', () => {
     });
 
     it('rejects a write when the previous read was ranged (offset/limit)', async () => {
+      // WriteFile diverges from EditTool here: a partial read counts
+      // for in-place edits (Edit's `old_string` matching is the
+      // content-derived guard against editing bytes the model never
+      // saw), but WriteFile replaces the whole file and has no
+      // equivalent guard — a slice-only read followed by an
+      // overwrite would necessarily hallucinate the rest of the
+      // bytes, which is the issue #2499 data-loss scenario.
       const filePath = path.join(rootDir, 'enforce-ranged.txt');
       fs.writeFileSync(filePath, 'unchanged', 'utf-8');
       const stats = fs.statSync(filePath);
@@ -868,6 +949,11 @@ describe('WriteFileTool', () => {
         .build({ file_path: filePath, content: 'clobber' })
         .execute(abortSignal);
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      // Error message should explain why partial reads are not enough
+      // for overwrites, not just say "has not been read".
+      expect(result.error?.message).toMatch(
+        /only been partially read|replaces the entire file/,
+      );
       expect(fs.readFileSync(filePath, 'utf-8')).toBe('unchanged');
 
       fs.unlinkSync(filePath);
@@ -938,7 +1024,7 @@ describe('WriteFileTool', () => {
       });
       await expect(
         invocation.getConfirmationDetails(abortSignal),
-      ).rejects.toThrow(/has not been fully read in this session/);
+      ).rejects.toThrow(/has not been read in this session/);
 
       fs.unlinkSync(filePath);
     });

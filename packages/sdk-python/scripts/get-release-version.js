@@ -272,7 +272,10 @@ function isTimeoutError(error) {
   );
 }
 
-async function getReleaseState({ packageVersion, releaseVersion }, allVersions) {
+async function getReleaseState(
+  { packageVersion, releaseVersion },
+  allVersions,
+) {
   const state = {
     packageVersionExistsOnPyPI: allVersions.includes(packageVersion),
     gitTagExists: false,
