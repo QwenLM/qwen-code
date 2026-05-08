@@ -137,6 +137,9 @@ describe('AgentTool', () => {
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
       createToolRegistry: vi.fn().mockResolvedValue(stubToolRegistry),
+      storage: {
+        getProjectDir: vi.fn().mockReturnValue('/test/project/.qwen'),
+      },
     } as unknown as Config;
 
     changeListeners = [];
@@ -1693,13 +1696,13 @@ describe('AgentTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).not.toContain('Background agent launched');
       // Foreground subagents register in the same registry with
-      // flavor: 'foreground' so the pill+dialog can surface them while
+      // isBackgrounded: false so the pill+dialog can surface them while
       // the parent's tool-call awaits, then unregister in the finally
       // path once the call returns. (The tool-result is the durable
       // record — the entry does not persist.)
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
-          flavor: 'foreground',
+          isBackgrounded: false,
           description: 'Search files',
           subagentType: 'file-search',
           status: 'running',
@@ -1708,6 +1711,70 @@ describe('AgentTool', () => {
       expect(mockRegistry.unregisterForeground).toHaveBeenCalledWith(
         expect.stringContaining('file-search-'),
       );
+    });
+
+    it('foreground subagent reserves a JSONL+meta path on the registry entry', async () => {
+      // Foreground subagents persist a JSONL transcript + meta sidecar
+      // symmetrically with the background path. Without this, a cancelled
+      // or crashed foreground run leaves no on-disk evidence beyond
+      // whatever made it into the parent's tool result.
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isBackgrounded: false,
+          outputFile: expect.stringMatching(
+            /subagents\/test-session-id\/agent-file-search-.*\.jsonl$/,
+          ),
+          metaPath: expect.stringMatching(
+            /subagents\/test-session-id\/agent-file-search-.*\.meta\.json$/,
+          ),
+        }),
+      );
+      // Writer attached to the AgentTool's emitter so foreground tool
+      // calls / round text get recorded into the JSONL.
+      expect(attachSpy).toHaveBeenCalled();
+      // Meta sidecar is seeded eagerly at register time so resume
+      // discovery can surface paused foreground runs.
+      expect(writeMetaSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+        expect.objectContaining({
+          status: 'running',
+          agentType: 'file-search',
+          description: 'Search files',
+        }),
+      );
+      // Finally block patches the sidecar to the terminal status —
+      // without this a completed foreground run leaves the on-disk meta
+      // frozen at `running`.
+      expect(patchMetaSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+        expect.objectContaining({ status: 'completed' }),
+      );
+
+      attachSpy.mockRestore();
+      writeMetaSpy.mockRestore();
+      patchMetaSpy.mockRestore();
     });
 
     it('foreground CANCELLED prefixes the partial result so the parent sees the cancel', async () => {

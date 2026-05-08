@@ -37,7 +37,8 @@ import {
 } from '../tools/agent/fork-subagent.js';
 import type {
   AgentCompletionStats,
-  BackgroundTaskEntry,
+  AgentTask,
+  AgentTaskRegistration,
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import type {
@@ -86,7 +87,7 @@ interface ResolvedResumeTarget {
 
 interface ResumeOperation {
   continuationMessages: string[];
-  promise: Promise<BackgroundTaskEntry | undefined>;
+  promise: Promise<AgentTask | undefined>;
 }
 
 interface RestorePausedEntryOptions {
@@ -354,7 +355,7 @@ export class BackgroundAgentResumeService {
 
   async loadPausedBackgroundAgents(
     sessionId: string,
-  ): Promise<readonly BackgroundTaskEntry[]> {
+  ): Promise<readonly AgentTask[]> {
     const projectDir = this.config.storage.getProjectDir();
     const dir = getSubagentSessionDir(projectDir, sessionId);
     let files: string[];
@@ -368,7 +369,7 @@ export class BackgroundAgentResumeService {
     }
 
     const registry = this.config.getBackgroundTaskRegistry();
-    const recovered: BackgroundTaskEntry[] = [];
+    const recovered: AgentTask[] = [];
 
     for (const fileName of files) {
       if (!fileName.endsWith(META_FILE_SUFFIX)) continue;
@@ -399,10 +400,11 @@ export class BackgroundAgentResumeService {
               ? LEGACY_FORK_CAPABILITIES_BLOCKED_REASON
               : undefined);
 
-        const entry: BackgroundTaskEntry = {
+        const registration: AgentTaskRegistration = {
           agentId: meta.agentId,
           description: meta.description,
           subagentType: target.agentName,
+          isBackgrounded: true,
           status: 'paused',
           startTime: Number.isFinite(parsedStartTime)
             ? parsedStartTime
@@ -415,7 +417,7 @@ export class BackgroundAgentResumeService {
             meta.lastError === resumeBlockedReason ? undefined : meta.lastError,
           resumeBlockedReason,
         };
-        registry.register(entry);
+        const entry = registry.register(registration);
         recovered.push(entry);
       } catch (error) {
         debugLogger.warn(
@@ -431,7 +433,7 @@ export class BackgroundAgentResumeService {
   async resumeBackgroundAgent(
     agentId: string,
     initialMessage?: string,
-  ): Promise<BackgroundTaskEntry | undefined> {
+  ): Promise<AgentTask | undefined> {
     const trimmedMessage = initialMessage?.trim();
     const existingOperation = this.resumeOperations.get(agentId);
     if (existingOperation) {
@@ -461,7 +463,7 @@ export class BackgroundAgentResumeService {
   private async resumeBackgroundAgentInternal(
     agentId: string,
     operation: ResumeOperation,
-  ): Promise<BackgroundTaskEntry | undefined> {
+  ): Promise<AgentTask | undefined> {
     const registry = this.config.getBackgroundTaskRegistry();
     const existing = registry.get(agentId);
     if (!existing || existing.status !== 'paused') {
@@ -492,7 +494,6 @@ export class BackgroundAgentResumeService {
       stats: undefined,
       recentActivities: [],
       pendingMessages: [...(existing.pendingMessages ?? [])],
-      notified: false,
     });
 
     try {
@@ -636,9 +637,10 @@ export class BackgroundAgentResumeService {
       const pendingMessages = [
         ...(registry.get(meta.agentId)?.pendingMessages ?? []),
       ];
-      const entry: BackgroundTaskEntry = {
+      const registration: AgentTaskRegistration = {
         ...existing,
         subagentType: target.agentName,
+        isBackgrounded: true,
         status: 'running',
         abortController: bgAbortController,
         endTime: undefined,
@@ -649,9 +651,8 @@ export class BackgroundAgentResumeService {
         prompt: recovery.initialPrompt ?? existing.prompt,
         recentActivities: [],
         pendingMessages,
-        notified: false,
       };
-      registry.register(entry);
+      const entry = registry.register(registration);
       const lateContinuationMessages = operation.continuationMessages.slice(
         promptMessages.length,
       );
@@ -861,13 +862,14 @@ export class BackgroundAgentResumeService {
   private restorePausedEntry(
     agentId: string,
     options: RestorePausedEntryOptions = {},
-  ): BackgroundTaskEntry | undefined {
+  ): AgentTask | undefined {
     const registry = this.config.getBackgroundTaskRegistry();
     const latest = registry.get(agentId);
     if (!latest) return undefined;
 
-    const pausedEntry: BackgroundTaskEntry = {
+    const registration: AgentTaskRegistration = {
       ...latest,
+      isBackgrounded: true,
       status: 'paused',
       abortController: new AbortController(),
       endTime: undefined,
@@ -877,10 +879,8 @@ export class BackgroundAgentResumeService {
       stats: undefined,
       recentActivities: [],
       pendingMessages: [...(latest.pendingMessages ?? [])],
-      notified: false,
     };
-    registry.register(pausedEntry);
-    return pausedEntry;
+    return registry.register(registration);
   }
 
   private async createResumedForkSubagent(

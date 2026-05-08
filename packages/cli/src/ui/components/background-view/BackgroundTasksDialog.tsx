@@ -26,8 +26,8 @@ import {
   buildBackgroundEntryLabel,
   ToolDisplayNames,
   ToolNames,
-  type BackgroundTaskEntry,
-  type MonitorEntry,
+  type AgentTask,
+  type MonitorTask,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
@@ -117,9 +117,7 @@ function rowLabel(entry: DialogEntry): string {
   switch (entry.kind) {
     case 'agent': {
       const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-      return entry.flavor === 'foreground'
-        ? `${FOREGROUND_ROW_PREFIX} ${label}`
-        : label;
+      return entry.isBackgrounded ? label : `${FOREGROUND_ROW_PREFIX} ${label}`;
     }
     case 'shell':
       // Shell / monitor prefixes mirror the dialog's "section" visual hint
@@ -649,7 +647,7 @@ const AgentDetailBody: React.FC<{
 };
 
 const ShellDetailBody: React.FC<{
-  entry: import('@qwen-code/qwen-code-core').BackgroundShellEntry;
+  entry: import('@qwen-code/qwen-code-core').ShellTask;
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
@@ -705,7 +703,7 @@ const ShellDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        <Text wrap="truncate-end">{entry.outputPath}</Text>
+        <Text wrap="truncate-end">{entry.outputFile}</Text>
       </Box>
 
       {hasError && (
@@ -728,7 +726,7 @@ const ShellDetailBody: React.FC<{
 };
 
 const MonitorDetailBody: React.FC<{
-  entry: MonitorEntry;
+  entry: MonitorTask;
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
@@ -900,7 +898,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     if (!dialogOpen || dialogMode !== 'detail' || !selectedAgentIdForActivity)
       return;
     const registry = config.getBackgroundTaskRegistry();
-    const onActivity = (entry: BackgroundTaskEntry) => {
+    const onActivity = (entry: AgentTask) => {
       if (entry.agentId !== selectedAgentIdForActivity) return;
       setActivityTick((n) => n + 1);
     };
@@ -986,7 +984,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     if (!isCancelable && !isAbandonable) return;
     const entryKey = entryId(selectedEntry);
     const isForegroundAgent =
-      selectedEntry.kind === 'agent' && selectedEntry.flavor === 'foreground';
+      selectedEntry.kind === 'agent' && !selectedEntry.isBackgrounded;
     if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
       setPendingCancelEntryId(entryKey);
       return;

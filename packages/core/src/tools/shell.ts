@@ -35,7 +35,7 @@ import type {
   ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
-import type { BackgroundShellEntry } from '../services/backgroundShellRegistry.js';
+import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.js';
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
@@ -1940,7 +1940,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     });
 
     const startTime = Date.now();
-    const entry: BackgroundShellEntry = {
+    const registration: ShellTaskRegistration = {
       shellId,
       command: processedCommand,
       cwd,
@@ -1977,9 +1977,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       { streamStdout: true },
     );
 
-    if (pid !== undefined) entry.pid = pid;
+    if (pid !== undefined) registration.pid = pid;
     const registry = this.config.getBackgroundShellRegistry();
-    registry.register(entry);
+    registry.register(registration);
 
     // Settle in the background — do NOT await here, the agent should be
     // unblocked immediately.

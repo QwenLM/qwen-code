@@ -6,23 +6,25 @@
 
 /**
  * @fileoverview BackgroundTaskRegistry — tracks background (async) sub-agents
- * and, with `flavor: 'foreground'`, the currently-running synchronous
+ * and, with `isBackgrounded: false`, the currently-running synchronous
  * sub-agents whose UI is routed through the same pill+dialog while the
- * parent turn waits on them. The two flavors share the registry (and the
- * dialog wiring) but differ in lifecycle:
+ * parent turn waits on them. Both share the registry (and the dialog
+ * wiring) but differ in lifecycle:
  *
- * - `background` entries persist across turns, emit a `<task-notification>`
- *   on terminal status (the parent's only return channel), and contribute to
- *   `hasUnfinalizedTasks()` so headless callers keep their loop alive.
- * - `foreground` entries live for the duration of the parent's tool-call,
- *   are unregistered as soon as `execute()` returns, deliver their result
- *   through the normal tool-result channel (no XML envelope), and don't
- *   participate in the headless holdback.
+ * - `isBackgrounded: true` entries persist across turns, emit a
+ *   `<task-notification>` on terminal status (the parent's only return
+ *   channel), and contribute to `hasUnfinalizedTasks()` so headless callers
+ *   keep their loop alive.
+ * - `isBackgrounded: false` entries live for the duration of the parent's
+ *   tool-call, are unregistered as soon as `execute()` returns, deliver
+ *   their result through the normal tool-result channel (no XML envelope),
+ *   and don't participate in the headless holdback.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
+import type { TaskBase, TaskRegistration } from './tasks/types.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
@@ -102,22 +104,42 @@ export interface BackgroundActivity {
   at: number;
 }
 
+/**
+ * @deprecated Use `boolean` directly via `AgentTask.isBackgrounded`. Kept as
+ * a one-release shim for external SDK consumers that imported the string
+ * union; will be removed in the release after PR 2 lands.
+ */
 export type BackgroundTaskFlavor = 'foreground' | 'background';
 
-export interface BackgroundTaskEntry {
+/**
+ * Agent kind of `TaskState`. Tracks one running subagent — either a
+ * synchronous foreground run (`isBackgrounded: false`, awaited by the
+ * parent's tool-call) or an async background run (`isBackgrounded: true`,
+ * persists across turns and emits a terminal `<task-notification>`).
+ *
+ * Carries the shared `TaskBase` envelope plus agent-specific state:
+ * subagent config, prompt, stats, recent activity buffer, persisted
+ * sidecar metadata path, message queue, and resume hooks.
+ */
+export interface AgentTask extends TaskBase {
+  kind: 'agent';
+  /**
+   * @deprecated Read `id` instead; kept as a synonym during the back-compat
+   * window. Always equals `id`.
+   */
   agentId: string;
-  description: string;
   subagentType?: string;
   /**
-   * `'background'` — async, persists across turns, emits XML notification.
-   * `'foreground'` — synchronous, unregistered when the tool-call returns,
-   * delivers results via the normal tool-result channel.
-   * Defaults to `'background'` when absent (older callers).
+   * True if the task is running asynchronously (parent has moved on, the
+   * task persists across turns and emits a terminal XML notification).
+   * False if the parent's tool-call is synchronously awaiting it; the
+   * result is delivered through the normal tool-result channel and no
+   * XML envelope fires. Replaces the older `flavor: 'foreground' |
+   * 'background'` discriminator — same binary fact, named after the
+   * question every read site asks.
    */
-  flavor?: BackgroundTaskFlavor;
+  isBackgrounded: boolean;
   status: BackgroundTaskStatus;
-  startTime: number;
-  endTime?: number;
   result?: string;
   error?: string;
   /**
@@ -125,7 +147,6 @@ export interface BackgroundTaskEntry {
    * safely resumed under the current conditions.
    */
   resumeBlockedReason?: string;
-  abortController: AbortController;
   stats?: AgentCompletionStats;
   toolUseId?: string;
   /**
@@ -143,19 +164,10 @@ export interface BackgroundTaskEntry {
    * initializes the array lazily.
    */
   recentActivities?: readonly BackgroundActivity[];
-  /** Absolute path to the agent's on-disk JSONL transcript file. */
-  outputFile?: string;
   /** Absolute path to the agent's sidecar metadata file. */
   metaPath?: string;
   /** Messages queued by SendMessage, drained between tool rounds. */
   pendingMessages?: string[];
-  /**
-   * True once a terminal task-notification has been emitted for this entry.
-   * Prevents duplicate notifications when cancel races with the natural
-   * completion path (cancel aborts the signal; the agent's own handler then
-   * fires the notification with the real partial/final result).
-   */
-  notified?: boolean;
   /**
    * Persisted sidecar status to write when the current cancellation settles.
    * Explicit user cancellation uses `cancelled`; shutdown interruption keeps
@@ -166,6 +178,21 @@ export interface BackgroundTaskEntry {
     'running' | 'cancelled'
   >;
 }
+
+/**
+ * @deprecated Renamed to `AgentTask`. Kept as a one-release type alias for
+ * external SDK consumers; will be removed in the release after PR 2 lands.
+ */
+export type BackgroundTaskEntry = AgentTask;
+
+/**
+ * Shape callers pass to {@link BackgroundTaskRegistry.register}; the
+ * registry derives the shared `TaskBase` envelope (`id`, `kind`,
+ * `outputOffset`, `notified`) from these and the surrounding context.
+ * `outputFile` is required here because every agent run reserves a JSONL
+ * transcript path at registration.
+ */
+export type AgentTaskRegistration = TaskRegistration<AgentTask>;
 
 export interface NotificationMeta {
   agentId: string;
@@ -180,7 +207,7 @@ export type BackgroundNotificationCallback = (
   meta: NotificationMeta,
 ) => void;
 
-export type BackgroundRegisterCallback = (entry: BackgroundTaskEntry) => void;
+export type BackgroundRegisterCallback = (entry: AgentTask) => void;
 
 interface BackgroundTaskCancelOptions {
   notify?: boolean;
@@ -208,33 +235,39 @@ interface BackgroundTaskCancelOptions {
  *     last live state for log / display consumers; `registry.get`
  *     and `getAll` already reflect the deletion.
  */
-export type BackgroundStatusChangeCallback = (
-  entry?: BackgroundTaskEntry,
-) => void;
+export type BackgroundStatusChangeCallback = (entry?: AgentTask) => void;
 
 /** Fires on `appendActivity` — scoped to detail-view consumers. */
-export type BackgroundActivityChangeCallback = (
-  entry: BackgroundTaskEntry,
-) => void;
+export type BackgroundActivityChangeCallback = (entry: AgentTask) => void;
 
 export class BackgroundTaskRegistry {
-  private readonly agents = new Map<string, BackgroundTaskEntry>();
+  private readonly agents = new Map<string, AgentTask>();
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
   private activityChangeCallback?: BackgroundActivityChangeCallback;
 
-  register(entry: BackgroundTaskEntry): void {
-    if (!entry.pendingMessages) entry.pendingMessages = [];
+  register(registration: AgentTaskRegistration): AgentTask {
+    // Mutate the registration in place to graduate it to an `AgentTask`.
+    // Returning the same reference lets callers (e.g. the resume service)
+    // continue using their local variable post-register and lets external
+    // consumers see updates the registry makes without an extra `get()`.
+    const entry = registration as AgentTask;
+    entry.id = registration.agentId;
+    entry.kind = 'agent';
+    entry.outputOffset = 0;
+    entry.notified = false;
+    entry.pendingMessages = registration.pendingMessages ?? [];
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
 
     // Foreground entries are paired with a synchronous tool-call result on
     // the parent's response and never emit a terminal `task_notification`
-    // (see emitNotification's flavor gate). Letting them fire the register
-    // callback would emit a `task_started` SDK event without a matching
-    // completion event, breaking the lifecycle contract for SDK consumers.
-    if (entry.flavor !== 'foreground' && this.registerCallback) {
+    // (see emitNotification's isBackgrounded gate). Letting them fire the
+    // register callback would emit a `task_started` SDK event without a
+    // matching completion event, breaking the lifecycle contract for SDK
+    // consumers.
+    if (entry.isBackgrounded && this.registerCallback) {
       try {
         this.registerCallback(entry);
       } catch (error) {
@@ -242,6 +275,7 @@ export class BackgroundTaskRegistry {
       }
     }
     this.emitStatusChange(entry);
+    return entry;
   }
 
   // Transition a still-running entry to 'completed' and emit the terminal
@@ -283,10 +317,10 @@ export class BackgroundTaskRegistry {
   unregisterForeground(agentId: string): void {
     const entry = this.agents.get(agentId);
     if (!entry) return;
-    if (entry.flavor !== 'foreground') {
+    if (entry.isBackgrounded) {
       throw new Error(
         `unregisterForeground called on non-foreground entry ${agentId} ` +
-          `(flavor=${entry.flavor ?? 'undefined'}). ` +
+          `(isBackgrounded=true). ` +
           `Background entries must terminate via complete/fail/finalizeCancelled.`,
       );
     }
@@ -351,7 +385,7 @@ export class BackgroundTaskRegistry {
     // Foreground entries don't emit XML notifications and unregister
     // themselves in the tool-call's finally path, so the grace timer
     // would only ever no-op for them.
-    if (entry.flavor === 'foreground') return;
+    if (!entry.isBackgrounded) return;
 
     if (options.notify === false) {
       // Session reset paths intentionally suppress the old task's terminal
@@ -435,7 +469,7 @@ export class BackgroundTaskRegistry {
     this.emitActivityChange(entry);
   }
 
-  get(agentId: string): BackgroundTaskEntry | undefined {
+  get(agentId: string): AgentTask | undefined {
     return this.agents.get(agentId);
   }
 
@@ -446,7 +480,7 @@ export class BackgroundTaskRegistry {
    * instead, so callers that only need the running slice can filter
    * this snapshot at the call site.
    */
-  getAll(): BackgroundTaskEntry[] {
+  getAll(): AgentTask[] {
     return Array.from(this.agents.values());
   }
 
@@ -464,7 +498,7 @@ export class BackgroundTaskRegistry {
       // headless event loop is already pinned by the `await` on the caller's
       // promise — counting them here would be redundant and would also keep
       // the loop alive for entries that don't even emit a notification.
-      if (entry.flavor === 'foreground') continue;
+      if (!entry.isBackgrounded) continue;
       if (entry.status === 'running') return true;
       if (entry.status === 'cancelled' && !entry.notified) return true;
     }
@@ -481,7 +515,7 @@ export class BackgroundTaskRegistry {
    */
   reset(): void {
     const firstEntry = this.agents.values().next().value as
-      | BackgroundTaskEntry
+      | AgentTask
       | undefined;
     if (!firstEntry) return;
     this.agents.clear();
@@ -561,11 +595,11 @@ export class BackgroundTaskRegistry {
     debugLogger.info('Aborted all background agents');
   }
 
-  private buildDisplayLabel(entry: BackgroundTaskEntry): string {
+  private buildDisplayLabel(entry: AgentTask): string {
     return buildBackgroundEntryLabel(entry);
   }
 
-  private emitNotification(entry: BackgroundTaskEntry): void {
+  private emitNotification(entry: AgentTask): void {
     // Mark notified *before* invoking the callback so that a re-entrant
     // terminal call inside the callback chain (cancel → complete race)
     // sees the flag and short-circuits, rather than firing twice.
@@ -576,7 +610,7 @@ export class BackgroundTaskRegistry {
     // tool-result channel (the `returnDisplay` field on the synchronous
     // tool-call). Emitting the XML envelope on top would feed the parent
     // model the same payload twice.
-    if (entry.flavor === 'foreground') return;
+    if (!entry.isBackgrounded) return;
 
     if (!this.notificationCallback) return;
 
@@ -637,7 +671,7 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  private emitStatusChange(entry?: BackgroundTaskEntry): void {
+  private emitStatusChange(entry?: AgentTask): void {
     if (!this.statusChangeCallback) return;
     try {
       this.statusChangeCallback(entry);
@@ -646,7 +680,7 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  private emitActivityChange(entry: BackgroundTaskEntry): void {
+  private emitActivityChange(entry: AgentTask): void {
     if (!this.activityChangeCallback) return;
     try {
       this.activityChangeCallback(entry);

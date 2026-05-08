@@ -15,8 +15,11 @@
  * so the two can be unified into a single registry when #3488 lands.
  */
 
+import * as path from 'node:path';
+import { sanitizeFilenameComponent } from '../agents/agent-transcript.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeXml } from '../utils/xml.js';
+import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 
 const debugLogger = createDebugLogger('MONITOR_REGISTRY');
 
@@ -49,15 +52,45 @@ function stripDisplayControlChars(text: string): string {
 
 export type MonitorStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
-export interface MonitorEntry {
+/**
+ * Resolves a per-monitor reserved output path.
+ *
+ * Today no writer is attached at this path — monitors deliver their
+ * events through the parent's chat record via the notification callback.
+ * The path is reserved on every `MonitorTask` so the `TaskBase` contract
+ * ("every task has a path it would write to if it produces a primary
+ * stream") holds, and so a future per-monitor file writer can land
+ * without changing the type signature.
+ */
+export function getMonitorOutputPath(
+  projectDir: string,
+  sessionId: string,
+  monitorId: string,
+): string {
+  return path.join(
+    projectDir,
+    'monitors',
+    sanitizeFilenameComponent(sessionId),
+    `monitor-${sanitizeFilenameComponent(monitorId)}.log`,
+  );
+}
+
+/**
+ * Monitor kind of `TaskState`. Tracks one long-running monitor process
+ * whose stdout lines are pushed to the parent agent as event
+ * notifications. `outputFile` is reserved on registration but no writer
+ * is attached today — events stream into the parent's chat record.
+ */
+export interface MonitorTask extends TaskBase {
+  kind: 'monitor';
+  /**
+   * @deprecated Read `id` instead; kept as a synonym during the back-compat
+   * window. Always equals `id`.
+   */
   monitorId: string;
   command: string;
-  description: string;
   status: MonitorStatus;
   pid?: number;
-  startTime: number;
-  endTime?: number;
-  abortController: AbortController;
   toolUseId?: string;
   eventCount: number;
   lastEventTime: number;
@@ -69,7 +102,7 @@ export interface MonitorEntry {
   exitCode?: number;
   /**
    * Reason for terminal status, when one exists. Mirrors
-   * `BackgroundShellEntry.error`. Populated for:
+   * `ShellTask.error`. Populated for:
    *   - `failed` — spawn error (passed to `fail(monitorId, error)`).
    *   - `completed` via auto-stop — currently `'Max events reached'`
    *     from `emitEvent` and `'Idle timeout'` from the idle timer; any
@@ -82,6 +115,22 @@ export interface MonitorEntry {
    */
   error?: string;
 }
+
+/**
+ * @deprecated Renamed to `MonitorTask`. Kept as a one-release type alias
+ * for external SDK consumers; will be removed in the release after PR 2
+ * lands.
+ */
+export type MonitorEntry = MonitorTask;
+
+/**
+ * Shape callers pass to {@link MonitorRegistry.register}; the registry
+ * derives the shared `TaskBase` envelope (`id`, `kind`, `outputOffset`,
+ * `notified`) from these. Callers are responsible for computing
+ * `outputFile` via {@link getMonitorOutputPath} so the registry stays
+ * decoupled from the project/session paths owned by `Config`.
+ */
+export type MonitorTaskRegistration = TaskRegistration<MonitorTask>;
 
 export interface MonitorNotificationMeta {
   monitorId: string;
@@ -96,7 +145,7 @@ export type MonitorNotificationCallback = (
   meta: MonitorNotificationMeta,
 ) => void;
 
-export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
+export type MonitorRegisterCallback = (entry: MonitorTask) => void;
 
 /**
  * Fires on any change to the registry's contents that a snapshot
@@ -115,24 +164,35 @@ export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
  * `BackgroundShellRegistry.setStatusChangeCallback` so the same UI hook
  * can subscribe to all three registries.
  */
-export type MonitorStatusChangeCallback = (entry?: MonitorEntry) => void;
+export type MonitorStatusChangeCallback = (entry?: MonitorTask) => void;
 
 interface MonitorCancelOptions {
   notify?: boolean;
 }
 
 export class MonitorRegistry {
-  private readonly monitors = new Map<string, MonitorEntry>();
+  private readonly monitors = new Map<string, MonitorTask>();
   private notificationCallback?: MonitorNotificationCallback;
   private registerCallback?: MonitorRegisterCallback;
   private statusChangeCallback?: MonitorStatusChangeCallback;
 
-  register(entry: MonitorEntry): void {
+  register(registration: MonitorTaskRegistration): MonitorTask {
     if (this.getRunning().length >= MAX_CONCURRENT_MONITORS) {
       throw new Error(
         `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`,
       );
     }
+    // Mutate the registration in place to graduate it to a `MonitorTask`.
+    // Returning the same reference lets the caller continue using the
+    // variable for the post-register mutations (`status`, `droppedLines`,
+    // …) the existing monitor.ts flow relies on; the registry stores this
+    // exact reference, so external mutations remain observable through
+    // `get()` / `getAll()`.
+    const entry = registration as MonitorTask;
+    entry.id = registration.monitorId;
+    entry.kind = 'monitor';
+    entry.outputOffset = 0;
+    entry.notified = false;
     this.monitors.set(entry.monitorId, entry);
     debugLogger.info(`Registered monitor: ${entry.monitorId}`);
     this.resetIdleTimer(entry);
@@ -149,6 +209,7 @@ export class MonitorRegistry {
     // care about "what's in the registry now" can subscribe to a single
     // callback and see new entries the same way they see status changes.
     this.fireStatusChange(entry);
+    return entry;
   }
 
   /**
@@ -235,15 +296,15 @@ export class MonitorRegistry {
     }
   }
 
-  get(monitorId: string): MonitorEntry | undefined {
+  get(monitorId: string): MonitorTask | undefined {
     return this.monitors.get(monitorId);
   }
 
-  getAll(): MonitorEntry[] {
+  getAll(): MonitorTask[] {
     return Array.from(this.monitors.values());
   }
 
-  getRunning(): MonitorEntry[] {
+  getRunning(): MonitorTask[] {
     return Array.from(this.monitors.values()).filter(
       (e) => e.status === 'running',
     );
@@ -294,7 +355,7 @@ export class MonitorRegistry {
   // --- Internal helpers ---
 
   private settle(
-    entry: MonitorEntry,
+    entry: MonitorTask,
     status: 'completed' | 'failed' | 'cancelled',
   ): void {
     entry.status = status;
@@ -304,7 +365,7 @@ export class MonitorRegistry {
     this.fireStatusChange(entry);
   }
 
-  private fireStatusChange(entry?: MonitorEntry): void {
+  private fireStatusChange(entry?: MonitorTask): void {
     if (!this.statusChangeCallback) return;
     try {
       this.statusChangeCallback(entry);
@@ -330,7 +391,7 @@ export class MonitorRegistry {
     }
   }
 
-  private resetIdleTimer(entry: MonitorEntry): void {
+  private resetIdleTimer(entry: MonitorTask): void {
     this.clearIdleTimer(entry);
     entry.idleTimer = setTimeout(() => {
       if (entry.status === 'running') {
@@ -349,7 +410,7 @@ export class MonitorRegistry {
     entry.idleTimer.unref?.();
   }
 
-  private clearIdleTimer(entry: MonitorEntry): void {
+  private clearIdleTimer(entry: MonitorTask): void {
     if (entry.idleTimer !== undefined) {
       clearTimeout(entry.idleTimer);
       entry.idleTimer = undefined;
@@ -357,7 +418,7 @@ export class MonitorRegistry {
   }
 
   /** Emit a streaming event notification (status=running, includes stdout line). */
-  private emitNotification(entry: MonitorEntry, eventLine: string): void {
+  private emitNotification(entry: MonitorTask, eventLine: string): void {
     if (!this.notificationCallback) return;
 
     const desc = stripDisplayControlChars(
@@ -397,7 +458,7 @@ export class MonitorRegistry {
   }
 
   /** Emit a terminal notification (completed/failed/cancelled). */
-  private emitTerminalNotification(entry: MonitorEntry, detail?: string): void {
+  private emitTerminalNotification(entry: MonitorTask, detail?: string): void {
     if (!this.notificationCallback) return;
 
     const statusText =
