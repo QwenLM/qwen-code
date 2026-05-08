@@ -137,6 +137,7 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -175,6 +176,12 @@ const SHELL_HEIGHT_PADDING = 10;
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
   const historyManager = useHistory();
+  // `useHistory()` returns a fresh memoized object whenever `history` changes,
+  // so depending on `historyManager` directly inside event-handler callbacks
+  // would rebuild them on every message. Mirror history into a ref so
+  // handlers can read the latest snapshot at call time without reactive deps.
+  const historyRef = useRef(historyManager.history);
+  historyRef.current = historyManager.history;
   useMemoryMonitor(historyManager);
   const [debugMessage, setDebugMessage] = useState<string>('');
   const [quittingMessages, setQuittingMessages] = useState<
@@ -1878,7 +1885,15 @@ export const AppContainer = (props: AppContainerProps) => {
         const newValue = !compactMode;
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
-        refreshStatic();
+        // Skip the expensive clearTerminal + Static remount when no past
+        // item would render differently (no tool_group / gemini_thought*).
+        // Future items pick up the new mode naturally because Static is
+        // append-only. Issue #3899: this unfreezes Ctrl+O for plain-chat
+        // long sessions; tool/thinking-bearing sessions still go through
+        // the (now chunked) full path in MainContent.
+        if (compactToggleHasVisualEffect(historyRef.current)) {
+          refreshStatic();
+        }
       }
     },
     [
