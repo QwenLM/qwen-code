@@ -2592,7 +2592,7 @@ SOFTWARE.
 
 
 ============================================================
-scheduler@0.26.0
+scheduler@0.27.0
 (https://github.com/facebook/react.git)
 
 MIT License
