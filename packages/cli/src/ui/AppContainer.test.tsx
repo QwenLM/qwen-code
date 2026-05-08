@@ -14,7 +14,12 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
-import { AppContainer, dedupeNewestFirst } from './AppContainer.js';
+import {
+  AppContainer,
+  dedupeNewestFirst,
+  getNextRenderMode,
+  isRenderModeToggleKey,
+} from './AppContainer.js';
 import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
@@ -29,7 +34,11 @@ import {
   UIActionsContext,
   type UIActions,
 } from './contexts/UIActionsContext.js';
-import { ToolCallStatus } from './types.js';
+import {
+  useRenderMode,
+  type RenderMode,
+} from './contexts/RenderModeContext.js';
+import { type HistoryItem, ToolCallStatus } from './types.js';
 import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
 
@@ -48,9 +57,11 @@ vi.mock('ink', async (importOriginal) => {
 // so we can assert against them in our tests.
 let capturedUIState: UIState;
 let capturedUIActions: UIActions;
+let capturedRenderMode: RenderMode;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
+  capturedRenderMode = useRenderMode().renderMode;
   return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
@@ -79,6 +90,12 @@ vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');
 vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
+vi.mock('./hooks/useProviderUpdates.js', () => ({
+  useProviderUpdates: vi.fn(() => ({
+    providerUpdateRequest: undefined,
+    dismissProviderUpdate: vi.fn(),
+  })),
+}));
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
 vi.mock('./contexts/AgentViewContext.js', () => ({
@@ -124,6 +141,7 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
+import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 
 describe('AppContainer State Management', () => {
@@ -151,6 +169,8 @@ describe('AppContainer State Management', () => {
   const mockedUseTextBuffer = useTextBuffer as Mock;
   const mockedUseLogger = useLogger as Mock;
   const mockedUseLoadingIndicator = useLoadingIndicator as Mock;
+  const mockedUseTerminalSize = useTerminalSize as Mock;
+  const mockedUseKeypress = useKeypress as Mock;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -169,6 +189,7 @@ describe('AppContainer State Management', () => {
 
     capturedUIState = null!;
     capturedUIActions = null!;
+    capturedRenderMode = 'render';
 
     // **Provide a default return value for EVERY mocked hook.**
     mockedUseHistory.mockReturnValue({
@@ -198,12 +219,36 @@ describe('AppContainer State Management', () => {
         authStatus: 'idle',
         authMessage: null,
       },
+      state: {
+        authError: null,
+        isAuthDialogOpen: false,
+        isAuthenticating: false,
+        pendingAuthType: undefined,
+        externalAuthState: null,
+        qwenAuthState: {
+          deviceAuth: null,
+          authStatus: 'idle',
+          authMessage: null,
+        },
+      },
       handleAuthSelect: vi.fn(),
+      handleSubscriptionPlanSubmit: vi.fn(),
       handleCodingPlanSubmit: vi.fn(),
-      handleAlibabaStandardSubmit: vi.fn(),
+      handleTokenPlanSubmit: vi.fn(),
+      handleApiKeyProviderSubmit: vi.fn(),
       handleOpenRouterSubmit: vi.fn(),
+      handleCustomApiKeySubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
+      actions: {
+        setAuthState: vi.fn(),
+        onAuthError: vi.fn(),
+        handleAuthSelect: vi.fn(),
+        handleProviderSubmit: vi.fn(),
+        handleOpenRouterSubmit: vi.fn(),
+        openAuthDialog: vi.fn(),
+        cancelAuthentication: vi.fn(),
+      },
     });
     mockedUseEditorSettings.mockReturnValue({
       isEditorDialogOpen: false,
@@ -276,6 +321,7 @@ describe('AppContainer State Management', () => {
       elapsedTime: '0.0s',
       currentLoadingPhrase: '',
     });
+    mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
 
     // Mock Config
     mockConfig = makeFakeConfig();
@@ -450,6 +496,34 @@ describe('AppContainer State Management', () => {
       capturedUIActions.refreshStatic();
 
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+    });
+
+    it('does not clear the terminal just because width changed', () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      mockStdout.write.mockClear();
+
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 24 });
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
     });
 
     it('handleClearScreen avoids a second clearTerminal write', () => {
@@ -924,6 +998,103 @@ describe('AppContainer State Management', () => {
         );
       }).not.toThrow();
     });
+
+    it('initializes Markdown render mode from ui.renderMode', () => {
+      const rawSettings = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            renderMode: 'raw',
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={rawSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedRenderMode).toBe('raw');
+    });
+
+    it('falls back to rendered Markdown mode for missing or invalid ui.renderMode', () => {
+      const invalidSettings = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            renderMode: 'unsupported',
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={invalidSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedRenderMode).toBe('render');
+    });
+
+    it('computes render mode toggles from the global render shortcut', () => {
+      const optionMKey: Key = {
+        name: 'm',
+        ctrl: false,
+        meta: true,
+        shift: false,
+        paste: false,
+        sequence: '\u001bm',
+      };
+
+      expect(isRenderModeToggleKey(optionMKey)).toBe(true);
+      expect(getNextRenderMode('render')).toBe('raw');
+      expect(getNextRenderMode(getNextRenderMode('render'))).toBe('render');
+    });
+
+    it('handles global render mode shortcut through the captured keypress handler', async () => {
+      const optionMKey: Key = {
+        name: 'm',
+        ctrl: false,
+        meta: true,
+        shift: false,
+        paste: false,
+        sequence: '\u001bm',
+      };
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedRenderMode).toBe('render');
+      await Promise.resolve();
+      await Promise.resolve();
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('handleRenderModeToggleKey'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+      expect(() => handleKeypress!(optionMKey)).not.toThrow();
+    });
   });
 
   describe('Version Handling', () => {
@@ -1359,6 +1530,43 @@ describe('AppContainer State Management', () => {
   describe('Terminal Height Calculation', () => {
     const mockedMeasureElement = measureElement as Mock;
     const mockedUseTerminalSize = useTerminalSize as Mock;
+    const makeTodoHistory = (
+      status: 'pending' | 'in_progress' | 'completed',
+    ): HistoryItem[] => [
+      {
+        type: 'tool_group',
+        id: 1,
+        tools: [
+          {
+            callId: 'todo-1',
+            name: 'TodoWrite',
+            description: 'Update todos',
+            resultDisplay: {
+              type: 'todo_list',
+              todos: [
+                {
+                  id: 'todo-1',
+                  content: 'Run focused tests',
+                  status,
+                },
+              ],
+            },
+            status: ToolCallStatus.Success,
+            confirmationDetails: undefined,
+          },
+        ],
+      },
+      {
+        type: 'gemini',
+        id: 2,
+        text: 'First response after todo',
+      },
+      {
+        type: 'gemini',
+        id: 3,
+        text: 'Second response after todo',
+      },
+    ];
 
     it('should prevent terminal height from being less than 1', () => {
       const resizePtySpy = vi.spyOn(ShellExecutionService, 'resizePty');
@@ -1394,6 +1602,44 @@ describe('AppContainer State Management', () => {
       // Check the height argument specifically
       expect(lastCall[2]).toBe(1);
     });
+
+    it('does not remeasure footer height for sticky todo status-only updates', () => {
+      const historyManager = {
+        history: makeTodoHistory('pending'),
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+      mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
+      mockedMeasureElement.mockReturnValue({ width: 80, height: 4 });
+
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const callsAfterInitialRender = mockedMeasureElement.mock.calls.length;
+
+      historyManager.history = makeTodoHistory('in_progress');
+      view.rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(mockedMeasureElement).toHaveBeenCalledTimes(
+        callsAfterInitialRender,
+      );
+    });
   });
 
   describe('Keyboard Input Handling', () => {
@@ -1412,12 +1658,36 @@ describe('AppContainer State Management', () => {
           authStatus: 'idle',
           authMessage: null,
         },
+        state: {
+          authError: null,
+          isAuthDialogOpen: false,
+          isAuthenticating: true,
+          pendingAuthType: undefined,
+          externalAuthState: null,
+          qwenAuthState: {
+            deviceAuth: null,
+            authStatus: 'idle',
+            authMessage: null,
+          },
+        },
         handleAuthSelect: vi.fn(),
+        handleSubscriptionPlanSubmit: vi.fn(),
         handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
+        handleTokenPlanSubmit: vi.fn(),
+        handleApiKeyProviderSubmit: vi.fn(),
         handleOpenRouterSubmit: vi.fn(),
+        handleCustomApiKeySubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
+        actions: {
+          setAuthState: vi.fn(),
+          onAuthError: vi.fn(),
+          handleAuthSelect: vi.fn(),
+          handleProviderSubmit: vi.fn(),
+          handleOpenRouterSubmit: vi.fn(),
+          openAuthDialog: vi.fn(),
+          cancelAuthentication: vi.fn(),
+        },
       });
 
       const mockHandleSlashCommand = vi.fn();

@@ -37,6 +37,26 @@
       href="https://unpkg.com/@qwen-code/webui@__WEBUI_VERSION__/dist/styles.css"
     />
     <title>Qwen Code Chat Export</title>
+    <script>
+      // Pre-hydrate FOUC guard: must run before <style> below applies layout.
+      // The storage key 'qwen-export-theme' is duplicated here verbatim and
+      // MUST stay in sync with EXPORT_THEME_STORAGE_KEY in
+      // src/components/useExportTheme.ts.
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('qwen-export-theme');
+          var theme = stored === 'light' || stored === 'dark' ? stored : 'dark';
+          var root = document.documentElement;
+          // Toggle-style writes mirror the React hook's effect, so the two
+          // code paths converge on identical class state.
+          root.classList.toggle('light', theme === 'light');
+          root.classList.toggle('dark', theme === 'dark');
+        } catch (e) {
+          // localStorage may be unavailable (private mode, file:// sandbox);
+          // the static class="dark" attribute on <html> remains the default.
+        }
+      })();
+    </script>
     <style>
       @font-face {
         font-family: "Press Start 2P";

@@ -1200,8 +1200,8 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
-    'Switch the model for this session (--fast for suggestion model)',
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
+    'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':
@@ -1209,6 +1209,8 @@ export default {
   'Authentication type not available.': 'Authentication type not available.',
   'No models available for the current authentication type ({{authType}}).':
     'No models available for the current authentication type ({{authType}}).',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
@@ -1359,7 +1361,23 @@ export default {
     '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
+  'For teams \u00B7 Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
+    'For teams \u00B7 Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
+  'For individual developers \u00B7 Pay per model call \u00B7 5-hour/weekly quotas':
+    'For individual developers \u00B7 Pay per model call \u00B7 5-hour/weekly quotas',
+  Subscribe: 'Subscribe',
+  'Paid subscription plans from Alibaba Cloud ModelStudio':
+    'Paid subscription plans from Alibaba Cloud ModelStudio',
+  'Select Subscription Plan': 'Select Subscription Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Alibaba Cloud Token Plan': 'Alibaba Cloud Token Plan',
+  'Pay-as-you-go tokens \u00B7 Configure ModelStudio standard API key':
+    'Pay-as-you-go tokens \u00B7 Configure ModelStudio standard API key',
+  'For individuals \u00B7 Pay-as-you-go tokens \u00B7 Dedicated Token Plan endpoint':
+    'For individuals \u00B7 Pay-as-you-go tokens \u00B7 Dedicated Token Plan endpoint',
+  'For teams/companies \u00B7 Credits deducted by token usage \u00B7 Dedicated API key and base URL':
+    'For teams/companies \u00B7 Credits deducted by token usage \u00B7 Dedicated API key and base URL',
+  'Token Plan documentation': 'Token Plan documentation',
   'Bring your own API key': 'Bring your own API key',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)',
@@ -1691,6 +1709,7 @@ export default {
   'Command Format Migration': 'Command Format Migration',
   'Found {{count}} TOML command file:': 'Found {{count}} TOML command file:',
   'Found {{count}} TOML command files:': 'Found {{count}} TOML command files:',
+  'Current tasks': 'Current tasks',
   '... and {{count}} more': '... and {{count}} more',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'The TOML format is deprecated. Would you like to migrate them to Markdown format?',
@@ -1905,6 +1924,8 @@ export default {
     'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
   'You can get your Coding Plan API key here':
     'You can get your Coding Plan API key here',
+  'You can get your Token Plan API key here':
+    'You can get your Token Plan API key here',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
     'API key is stored in settings.env. You can migrate it to a .env file for better security.',
   'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
@@ -1941,6 +1962,7 @@ export default {
   'Choose based on where your account is registered':
     'Choose based on where your account is registered',
   'Enter Coding Plan API Key': 'Enter Coding Plan API Key',
+  'Enter Token Plan API Key': 'Enter Token Plan API Key',
 
   // ============================================================================
   // Coding Plan International Updates

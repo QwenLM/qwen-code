@@ -47,6 +47,11 @@ import {
   getErrorType,
 } from '../../utils/errors.js';
 
+const MAX_RESPONSE_TEXT_LENGTH = 4096;
+const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
+const MAX_RESPONSE_TEXT_PREFIX_LENGTH =
+  MAX_RESPONSE_TEXT_LENGTH - RESPONSE_TEXT_TRUNCATION_SUFFIX.length;
+
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
  */
@@ -167,12 +172,16 @@ export class LoggingContentGenerator implements ContentGenerator {
     try {
       const response = await this.wrapped.generateContent(req, userPromptId);
       const durationMs = Date.now() - startTime;
+      const responseText = isInternal
+        ? undefined
+        : this.extractResponseText(response);
       this._logApiResponse(
         response.responseId ?? '',
         durationMs,
         response.modelVersion || req.model,
         userPromptId,
         response.usageMetadata,
+        responseText,
       );
       if (!isInternal) {
         await this.logOpenAIInteraction(openaiRequest, response);
@@ -261,16 +270,18 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       // Only log successful API response if no error occurred
       const durationMs = Date.now() - startTime;
+      const consolidatedResponse = isInternal
+        ? undefined
+        : this.consolidateGeminiResponsesForLogging(responses);
       this._logApiResponse(
         firstResponseId,
         durationMs,
         firstModelVersion || model,
         userPromptId,
         lastUsageMetadata,
+        this.extractResponseText(consolidatedResponse),
       );
       if (!isInternal) {
-        const consolidatedResponse =
-          this.consolidateGeminiResponsesForLogging(responses);
         await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
       }
     } catch (error) {
@@ -467,6 +478,55 @@ export class LoggingContentGenerator implements ContentGenerator {
     ];
 
     return consolidated;
+  }
+
+  private extractResponseText(
+    response: GenerateContentResponse | undefined,
+  ): string | undefined {
+    const parts = response?.candidates?.[0]?.content?.parts;
+    if (!parts?.length) {
+      return undefined;
+    }
+
+    let text = '';
+    let hasText = false;
+    let truncated = false;
+    const appendText = (partText: string) => {
+      hasText = true;
+      if (truncated) {
+        return;
+      }
+
+      const remaining = MAX_RESPONSE_TEXT_PREFIX_LENGTH - text.length;
+      if (partText.length <= remaining) {
+        text += partText;
+        return;
+      }
+
+      text += partText.slice(0, Math.max(0, remaining));
+      truncated = true;
+    };
+
+    for (const part of parts as Part[]) {
+      if (typeof part === 'string') {
+        appendText(part);
+        continue;
+      }
+
+      if (
+        'text' in part &&
+        typeof part.text === 'string' &&
+        !('thought' in part && part.thought)
+      ) {
+        appendText(part.text);
+      }
+    }
+
+    if (!hasText) {
+      return undefined;
+    }
+
+    return truncated ? `${text}${RESPONSE_TEXT_TRUNCATION_SUFFIX}` : text;
   }
 
   async countTokens(req: CountTokensParameters): Promise<CountTokensResponse> {

@@ -18,13 +18,14 @@ import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
 const KIND_NAMES = {
   agent: { singular: 'local agent', plural: 'local agents' },
   shell: { singular: 'shell', plural: 'shells' },
+  monitor: { singular: 'monitor', plural: 'monitors' },
+  dream: { singular: 'dream', plural: 'dreams' },
 } as const;
 
 /**
- * Pill label: counts running entries grouped by kind while any are
- * running ("1 shell, 2 local agents"), and once everything has terminated
- * switches to a "done" form so the pill still invites reopening the
- * dialog to inspect final state ("3 done").
+ * Pill label: prefer live running counts, then paused resumable agent counts;
+ * once everything is terminal, switch to a generic "done" form so the pill
+ * still invites reopening the dialog to inspect final state.
  */
 export function getPillLabel(entries: readonly DialogEntry[]): string {
   if (entries.length === 0) return '';
@@ -33,18 +34,32 @@ export function getPillLabel(entries: readonly DialogEntry[]): string {
   if (running.length > 0) {
     return groupAndFormat(running);
   }
+  const pausedAgents = entries.filter(
+    (e): e is Extract<DialogEntry, { kind: 'agent' }> =>
+      e.kind === 'agent' && e.status === 'paused',
+  );
+  if (pausedAgents.length > 0) {
+    return pausedAgents.length === 1
+      ? '1 local agent paused'
+      : `${pausedAgents.length} local agents paused`;
+  }
   // All terminal — collapse into a single tally; per-kind detail isn't
   // useful at this point and would clutter the footer.
   return entries.length === 1 ? '1 task done' : `${entries.length} tasks done`;
 }
 
 function groupAndFormat(entries: readonly DialogEntry[]): string {
-  const counts = { agent: 0, shell: 0 };
+  const counts = { agent: 0, shell: 0, monitor: 0, dream: 0 };
   for (const e of entries) counts[e.kind]++;
   const parts: string[] = [];
-  // Order: shell first (matches Claude Code's pill convention), agent second.
+  // Order: shell first (matches Claude Code's pill convention), then
+  // agent, then monitor, then dream. Dream sits last because it is
+  // system-initiated (not user-triggered) and the user is least likely
+  // to need it at a glance.
   if (counts.shell > 0) parts.push(formatCount('shell', counts.shell));
   if (counts.agent > 0) parts.push(formatCount('agent', counts.agent));
+  if (counts.monitor > 0) parts.push(formatCount('monitor', counts.monitor));
+  if (counts.dream > 0) parts.push(formatCount('dream', counts.dream));
   return parts.join(', ');
 }
 
@@ -59,7 +74,14 @@ export const BackgroundTasksPill: React.FC = () => {
 
   const onKeypress = useCallback(
     (key: Key) => {
-      if (key.name === 'return') {
+      // `return` and `down` both open the dialog. Down completes the
+      // focus chain Composer ↓ → AgentTabBar ↓ → Pill ↓ → Dialog,
+      // so users can `↓ ↓ (↓)` their way from an empty composer
+      // straight into the roster without having to remember the
+      // Enter shortcut. The LiveAgentPanel's overflow callout
+      // (`↓ to view all`) relies on this; without a Down handler
+      // the chain dead-ends at the highlighted pill.
+      if (key.name === 'return' || key.name === 'down') {
         openDialog();
       } else if (key.name === 'up' || key.name === 'escape') {
         setPillFocused(false);

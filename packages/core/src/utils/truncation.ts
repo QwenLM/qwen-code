@@ -85,6 +85,7 @@ export async function truncateAndSaveToFile(
   const safeFileName = `${path.basename(fileName)}.output`;
   const outputFile = path.join(projectTempDir, safeFileName);
   try {
+    await fs.mkdir(projectTempDir, { recursive: true });
     await fs.writeFile(outputFile, content);
 
     return {

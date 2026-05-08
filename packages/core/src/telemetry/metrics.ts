@@ -86,7 +86,7 @@ const COUNTER_DEFINITIONS = {
     assign: (c: Counter) => (tokenUsageCounter = c),
     attributes: {} as {
       model: string;
-      type: 'input' | 'output' | 'thought' | 'cache' | 'tool';
+      type: 'input' | 'output' | 'thought' | 'cache';
     },
   },
   [SESSION_COUNT]: {
@@ -959,7 +959,7 @@ export function recordMemoryDreamMetrics(
   durationMs: number,
   attrs: {
     trigger: 'auto' | 'manual';
-    status: 'updated' | 'noop' | 'failed';
+    status: 'updated' | 'noop' | 'failed' | 'cancelled';
     deduped_entries: number;
   },
 ): void {
