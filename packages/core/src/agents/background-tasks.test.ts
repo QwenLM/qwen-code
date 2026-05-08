@@ -1078,10 +1078,13 @@ describe('BackgroundTaskRegistry', () => {
       expect(onRegister.mock.calls[0]![0].agentId).toBe('bg-fires-register-cb');
     });
 
-    it('unregisterForeground emits status change before removing the entry', () => {
-      // Mirrors the ordering used by complete/fail/cancel/finalize so a
-      // statusChange callback that re-reads `registry.get(agentId)` from
-      // inside the callback sees the entry across every terminal path.
+    it('unregisterForeground emits status change after removing the entry', () => {
+      // The entry is deleted from the Map before the status-change callback
+      // fires, so a callback that rebuilds its snapshot via getAll() no
+      // longer includes this entry. This ordering prevents the entry from
+      // lingering in React state with status='running' — the bug that
+      // caused "1 local agent" to stay visible after the foreground agent
+      // completed.
       registry.register({
         agentId: 'fg-unregister-order',
         description: 'sync agent',
@@ -1092,16 +1095,20 @@ describe('BackgroundTaskRegistry', () => {
       });
 
       let observedFromCallback: BackgroundTaskEntry | undefined;
+      let snapshotDuringCallback: BackgroundTaskEntry[] = [];
       registry.setStatusChangeCallback((entry) => {
         if (entry?.agentId === 'fg-unregister-order') {
           observedFromCallback = registry.get(entry.agentId);
+          snapshotDuringCallback = registry.getAll();
         }
       });
 
       registry.unregisterForeground('fg-unregister-order');
 
-      expect(observedFromCallback).toBeDefined();
-      expect(observedFromCallback!.agentId).toBe('fg-unregister-order');
+      // The entry has been deleted before the callback fires, so
+      // registry.get() returns undefined and getAll() omits it.
+      expect(observedFromCallback).toBeUndefined();
+      expect(snapshotDuringCallback).toEqual([]);
       expect(registry.get('fg-unregister-order')).toBeUndefined();
     });
 

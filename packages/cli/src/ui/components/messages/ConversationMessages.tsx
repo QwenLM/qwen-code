@@ -7,7 +7,10 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
-import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import {
+  MarkdownDisplay,
+  type MarkdownSourceCopyIndexOffsets,
+} from '../../utils/MarkdownDisplay.js';
 import { theme } from '../../semantic-colors.js';
 import {
   SCREEN_READER_MODEL_PREFIX,
@@ -27,6 +30,7 @@ interface AssistantMessageProps {
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
 interface AssistantMessageContentProps {
@@ -34,6 +38,7 @@ interface AssistantMessageContentProps {
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
 interface ThinkMessageProps {
@@ -69,6 +74,7 @@ interface PrefixedMarkdownMessageProps {
   contentWidth: number;
   ariaLabel?: string;
   textColor?: string;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
 interface ContinuationMarkdownMessageProps {
@@ -78,6 +84,7 @@ interface ContinuationMarkdownMessageProps {
   contentWidth: number;
   basePrefix: string;
   textColor?: string;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
 function getPrefixWidth(prefix: string): number {
@@ -126,6 +133,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   contentWidth,
   ariaLabel,
   textColor,
+  sourceCopyIndexOffsets,
 }) => {
   const prefixWidth = getPrefixWidth(prefix);
 
@@ -143,6 +151,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
           availableTerminalHeight={availableTerminalHeight}
           contentWidth={contentWidth - prefixWidth}
           textColor={textColor}
+          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       </Box>
     </Box>
@@ -158,6 +167,7 @@ const ContinuationMarkdownMessage: React.FC<
   contentWidth,
   basePrefix,
   textColor,
+  sourceCopyIndexOffsets,
 }) => {
   const prefixWidth = getPrefixWidth(basePrefix);
 
@@ -169,6 +179,7 @@ const ContinuationMarkdownMessage: React.FC<
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth - prefixWidth}
         textColor={textColor}
+        sourceCopyIndexOffsets={sourceCopyIndexOffsets}
       />
     </Box>
   );
@@ -203,6 +214,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
   isPending,
   availableTerminalHeight,
   contentWidth,
+  sourceCopyIndexOffsets,
 }) => (
   <PrefixedMarkdownMessage
     text={text}
@@ -212,18 +224,26 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
+    sourceCopyIndexOffsets={sourceCopyIndexOffsets}
   />
 );
 
 export const AssistantMessageContent: React.FC<
   AssistantMessageContentProps
-> = ({ text, isPending, availableTerminalHeight, contentWidth }) => (
+> = ({
+  text,
+  isPending,
+  availableTerminalHeight,
+  contentWidth,
+  sourceCopyIndexOffsets,
+}) => (
   <ContinuationMarkdownMessage
     text={text}
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
     basePrefix="✦"
+    sourceCopyIndexOffsets={sourceCopyIndexOffsets}
   />
 );
 
