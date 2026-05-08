@@ -910,10 +910,18 @@ function compareManagedSessionsByActivityDesc(a: ManagedSession, b: ManagedSessi
 
 // Performance: Batch IPC delta events to reduce renderer load
 const DELTA_BATCH_INTERVAL_MS = 50  // Flush batched deltas every 50ms
+const DRAFT_AGENT_IDLE_TTL_MS = 2 * 60 * 1000
 
 interface PendingDelta {
   delta: string
   turnId?: string
+}
+
+interface DraftAgentEntry {
+  agent: AgentInstance
+  workspace: Workspace
+  workingDirectory?: string
+  cleanupTimer?: NodeJS.Timeout
 }
 
 export class SessionManager implements ISessionManager {
@@ -949,6 +957,7 @@ export class SessionManager implements ISessionManager {
   private externalSessionListSyncPromises: Map<string, Promise<void>> = new Map()
   private pendingExternalSessionDeletes: Set<string> = new Set()
   private externalSessionAgents: Map<string, AgentBackend> = new Map()
+  private draftAgents: Map<string, DraftAgentEntry> = new Map()
   /**
    * Track which session the user is actively viewing (per workspace).
    * Map of workspaceId -> sessionId. Used to determine if a session should be
@@ -5048,38 +5057,208 @@ export class SessionManager implements ISessionManager {
   async updateSessionModel(sessionId: string, workspaceId: string, model: string | null, connection?: string): Promise<void> {
     sessionLog.info(`[updateSessionModel] sessionId=${sessionId}, model=${model}, connection=${connection}`)
     const managed = this.sessions.get(sessionId)
-    if (managed) {
-      const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
-      const nextConnectionSlug = connection && !managed.connectionLocked ? connection : managed.llmConnection
-      const sessionConn = resolveSessionConnection(nextConnectionSlug, wsConfig?.defaults?.defaultLlmConnection)
-      const provider = sessionConn ? providerTypeToAgentProvider(sessionConn.providerType) : 'qwen'
-      const resolveModel = (candidate: string | undefined) =>
-        resolveModelForProvider(provider, candidate, sessionConn)
-      const persistedModel = model === null ? undefined : (resolveModel(model) || undefined)
+    if (!managed) {
+      if (sessionId === '__new_session_draft__' && model) {
+        await this.persistDraftModelSelection(workspaceId, model, connection)
+        return
+      }
+      sessionLog.warn(`[updateSessionModel] session ${sessionId} not found`)
+      return
+    }
 
-      managed.model = persistedModel
-      // Also update connection if provided and not already locked
-      if (connection && !managed.connectionLocked) {
-        managed.llmConnection = connection
+    const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+    const nextConnectionSlug = connection && !managed.connectionLocked ? connection : managed.llmConnection
+    const sessionConn = resolveSessionConnection(nextConnectionSlug, wsConfig?.defaults?.defaultLlmConnection)
+    const provider = sessionConn ? providerTypeToAgentProvider(sessionConn.providerType) : 'qwen'
+    const resolveModel = (candidate: string | undefined) =>
+      resolveModelForProvider(provider, candidate, sessionConn)
+    const persistedModel = model === null ? undefined : (resolveModel(model) || undefined)
+
+    managed.model = persistedModel
+    // Also update connection if provided and not already locked
+    if (connection && !managed.connectionLocked) {
+      managed.llmConnection = connection
+    }
+    // Persist to disk (include connection if it was updated)
+    const updates: { model?: string; llmConnection?: string } = { model: persistedModel }
+    if (connection && !managed.connectionLocked) {
+      updates.llmConnection = connection
+    }
+    await updateSessionMetadata(managed.workspace.rootPath, sessionId, updates)
+    // Update agent model if it already exists (takes effect on next query)
+    if (managed.agent) {
+      // Fallback chain: session model > workspace default > connection default
+      const effectiveModel = resolveModel(persistedModel ?? wsConfig?.defaults?.model ?? sessionConn?.defaultModel)
+      sessionLog.info(`[updateSessionModel] Calling agent.setModel(${effectiveModel}) [agent exists=${!!managed.agent}, connectionLocked=${managed.connectionLocked}]`)
+      if (effectiveModel) managed.agent.setModel(effectiveModel)
+    } else {
+      sessionLog.info(`[updateSessionModel] No agent yet, model will apply on next agent creation`)
+    }
+    // Notify renderer of the model change
+    this.sendEvent({ type: 'session_model_changed', sessionId, model: persistedModel ?? null }, managed.workspace.id)
+    sessionLog.info(`Session ${sessionId} model updated to: ${persistedModel ?? '(global config)'}`)
+  }
+
+  private getDraftAgentKey(workspaceId: string, connection: string | undefined, workingDirectory: string | undefined): string {
+    return [workspaceId, connection ?? '', workingDirectory ?? ''].join('\u0000')
+  }
+
+  private scheduleDraftAgentCleanup(key: string, entry: DraftAgentEntry): void {
+    if (entry.cleanupTimer) clearTimeout(entry.cleanupTimer)
+    entry.cleanupTimer = setTimeout(() => {
+      void this.destroyDraftAgent(key, 'idle timeout')
+    }, DRAFT_AGENT_IDLE_TTL_MS)
+  }
+
+  private async destroyDraftAgent(key: string, reason: string): Promise<void> {
+    const entry = this.draftAgents.get(key)
+    if (!entry) return
+
+    this.draftAgents.delete(key)
+    if (entry.cleanupTimer) clearTimeout(entry.cleanupTimer)
+
+    const nativeSessionId = entry.agent.getSessionId()
+    if (nativeSessionId && entry.agent.deleteBackendSession) {
+      try {
+        await entry.agent.deleteBackendSession(nativeSessionId, {
+          cwd: entry.workingDirectory ?? entry.workspace.rootPath,
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        sessionLog.warn(`Draft agent cleanup failed for ${nativeSessionId}: ${message}`)
       }
-      // Persist to disk (include connection if it was updated)
-      const updates: { model?: string; llmConnection?: string } = { model: persistedModel }
-      if (connection && !managed.connectionLocked) {
-        updates.llmConnection = connection
+    }
+
+    entry.agent.destroy()
+    sessionLog.info(`Destroyed draft agent (${reason})`)
+  }
+
+  private async getOrCreateDraftAgent(args: {
+    workspace: Workspace
+    workspaceConfig: ReturnType<typeof loadWorkspaceConfig>
+    backendContext: ReturnType<typeof resolveBackendContext>
+    connectionSlug?: string
+    workingDirectory?: string
+    model?: string
+    permissionMode?: PermissionMode
+    thinkingLevel?: ThinkingLevel
+    enabledSourceSlugs?: string[]
+    debugPrefix: string
+  }): Promise<{ key: string; agent: AgentInstance; created: boolean }> {
+    const key = this.getDraftAgentKey(args.workspace.id, args.connectionSlug, args.workingDirectory)
+    const cached = this.draftAgents.get(key)
+    if (cached) {
+      if (cached.cleanupTimer) clearTimeout(cached.cleanupTimer)
+      if (args.model) cached.agent.setModel(args.model)
+      if (args.permissionMode) cached.agent.setPermissionMode(args.permissionMode)
+      if (args.thinkingLevel) cached.agent.setThinkingLevel(args.thinkingLevel)
+      this.scheduleDraftAgentCleanup(key, cached)
+      return { key, agent: cached.agent, created: false }
+    }
+
+    const connection = args.backendContext.connection
+    const miniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
+    const now = Date.now()
+    const draftSession: SessionConfig = {
+      id: `draft-${randomUUID()}`,
+      workspaceRootPath: args.workspace.rootPath,
+      createdAt: now,
+      lastUsedAt: now,
+      lastMessageAt: now,
+      workingDirectory: args.workingDirectory,
+      model: args.model,
+      llmConnection: args.connectionSlug,
+      permissionMode: args.permissionMode,
+      thinkingLevel: args.thinkingLevel,
+      enabledSourceSlugs: args.enabledSourceSlugs,
+    }
+    const agent = createBackendFromResolvedContext({
+      context: args.backendContext,
+      hostRuntime: buildBackendHostRuntimeContext(),
+      coreConfig: {
+        workspace: args.workspace,
+        miniModel,
+        thinkingLevel: args.thinkingLevel,
+        session: draftSession,
+        onAvailableModelsUpdate: connection?.providerType === 'qwen'
+          ? (models, currentModelId) => this.updateQwenConnectionModels(connection.slug, models, currentModelId)
+          : undefined,
+        envOverrides: {
+          CRAFT_WORKSPACE_PATH: args.workspace.rootPath,
+        },
+        isHeadless: !AGENT_FLAGS.defaultModesEnabled,
+        skipConfigWatcher: true,
+        initialSources: {
+          enabledSources: [],
+          mcpServers: {},
+          apiServers: {},
+          enabledSlugs: [],
+        },
+      },
+    }) as AgentInstance
+
+    agent.onDebug = (message: string) => {
+      sessionLog.info(`[${args.debugPrefix}] ${message}`)
+    }
+    agent.onBackendAuthRequired = (reason: string) => {
+      sessionLog.warn(`Draft agent auth required: ${reason}`)
+    }
+    if (args.model) agent.setModel(args.model)
+    if (args.permissionMode) agent.setPermissionMode(args.permissionMode)
+
+    const postInitResult = await agent.postInit()
+    if (postInitResult.authWarning) {
+      sessionLog.warn(`Draft agent auth warning: ${postInitResult.authWarning}`)
+    }
+
+    const entry: DraftAgentEntry = {
+      agent,
+      workspace: args.workspace,
+      workingDirectory: args.workingDirectory,
+    }
+    this.draftAgents.set(key, entry)
+    this.scheduleDraftAgentCleanup(key, entry)
+    return { key, agent, created: true }
+  }
+
+  private async persistDraftModelSelection(workspaceId: string, model: string, connection?: string): Promise<void> {
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) {
+      sessionLog.warn(`[persistDraftModelSelection] workspace ${workspaceId} not found`)
+      return
+    }
+
+    const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
+    const backendContext = resolveBackendContext({
+      sessionConnectionSlug: connection,
+      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+      managedModel: model,
+    })
+    const sessionConnection = backendContext.connection
+    const provider = sessionConnection ? providerTypeToAgentProvider(sessionConnection.providerType) : 'qwen'
+    if (provider !== 'qwen') {
+      sessionLog.info(`[persistDraftModelSelection] provider ${provider} does not support ACP model persistence`)
+      return
+    }
+
+    const resolvedModel = backendContext.resolvedModel || model
+    try {
+      const { agent, created } = await this.getOrCreateDraftAgent({
+        workspace,
+        workspaceConfig,
+        backendContext,
+        connectionSlug: connection,
+        workingDirectory: workspaceConfig?.defaults?.workingDirectory,
+        model: resolvedModel,
+        debugPrefix: 'draft model',
+      })
+      if (created || !agent.getSessionId()) {
+        await agent.refreshAvailableCommands?.()
       }
-      await updateSessionMetadata(managed.workspace.rootPath, sessionId, updates)
-      // Update agent model if it already exists (takes effect on next query)
-      if (managed.agent) {
-        // Fallback chain: session model > workspace default > connection default
-        const effectiveModel = resolveModel(persistedModel ?? wsConfig?.defaults?.model ?? sessionConn?.defaultModel)
-        sessionLog.info(`[updateSessionModel] Calling agent.setModel(${effectiveModel}) [agent exists=${!!managed.agent}, connectionLocked=${managed.connectionLocked}]`)
-        if (effectiveModel) managed.agent.setModel(effectiveModel)
-      } else {
-        sessionLog.info(`[updateSessionModel] No agent yet, model will apply on next agent creation`)
-      }
-      // Notify renderer of the model change
-      this.sendEvent({ type: 'session_model_changed', sessionId, model: persistedModel ?? null }, managed.workspace.id)
-      sessionLog.info(`Session ${sessionId} model updated to: ${persistedModel ?? '(global config)'}`)
+      sessionLog.info(`[persistDraftModelSelection] persisted draft model via ACP: ${resolvedModel}`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      sessionLog.warn(`Draft model persistence failed: ${message}`)
     }
   }
 
@@ -6614,67 +6793,25 @@ export class SessionManager implements ISessionManager {
       return { success: false, error: 'Provider does not support slash command discovery' }
     }
 
-    const sessionId = `draft-commands-${randomUUID()}`
     sessionLog.info('refreshAvailableCommands: starting draft discovery', {
-      sessionId,
       workspaceId: workspace.id,
       llmConnection: connection?.slug ?? options.llmConnection,
       workingDirectory,
     })
 
-    const miniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
-    const now = Date.now()
-    const draftSession: SessionConfig = {
-      id: sessionId,
-      workspaceRootPath: workspace.rootPath,
-      createdAt: now,
-      lastUsedAt: now,
-      lastMessageAt: now,
-      workingDirectory,
-      model: options.model,
-      llmConnection: options.llmConnection,
-      permissionMode,
-      thinkingLevel,
-      enabledSourceSlugs: options.enabledSourceSlugs,
-    }
-
-    const agent = createBackendFromResolvedContext({
-      context: backendContext,
-      hostRuntime: buildBackendHostRuntimeContext(),
-      coreConfig: {
-        workspace,
-        miniModel,
-        thinkingLevel,
-        session: draftSession,
-        onAvailableModelsUpdate: connection?.providerType === 'qwen'
-          ? (models, currentModelId) => this.updateQwenConnectionModels(connection.slug, models, currentModelId)
-          : undefined,
-        envOverrides: {
-          CRAFT_WORKSPACE_PATH: workspace.rootPath,
-        },
-        isHeadless: !AGENT_FLAGS.defaultModesEnabled,
-        skipConfigWatcher: true,
-        initialSources: {
-          enabledSources: [],
-          mcpServers: {},
-          apiServers: {},
-          enabledSlugs: [],
-        },
-      },
-    }) as AgentInstance
-
     try {
-      agent.onDebug = (message: string) => {
-        sessionLog.info(`[draft slash] ${message}`)
-      }
-      agent.onBackendAuthRequired = (reason: string) => {
-        sessionLog.warn(`Draft slash command discovery auth required: ${reason}`)
-      }
-
-      const postInitResult = await agent.postInit()
-      if (postInitResult.authWarning) {
-        sessionLog.warn(`Draft slash command discovery auth warning: ${postInitResult.authWarning}`)
-      }
+      const { agent } = await this.getOrCreateDraftAgent({
+        workspace,
+        workspaceConfig,
+        backendContext,
+        connectionSlug: options.llmConnection,
+        workingDirectory,
+        model: options.model,
+        permissionMode,
+        thinkingLevel,
+        enabledSourceSlugs: options.enabledSourceSlugs,
+        debugPrefix: 'draft slash',
+      })
 
       if (!agent.refreshAvailableCommands) {
         return { success: false, error: 'Provider does not support slash command discovery' }
@@ -6683,7 +6820,6 @@ export class SessionManager implements ISessionManager {
       const snapshot = await agent.refreshAvailableCommands()
       if (!snapshot || (snapshot.availableCommands.length === 0 && (!snapshot.availableSkills || snapshot.availableSkills.length === 0))) {
         sessionLog.warn('refreshAvailableCommands: draft discovery returned no commands', {
-          sessionId,
           llmConnection: connection?.slug ?? options.llmConnection,
           workingDirectory,
         })
@@ -6691,7 +6827,7 @@ export class SessionManager implements ISessionManager {
       }
 
       sessionLog.info('refreshAvailableCommands: draft discovery received commands', {
-        sessionId,
+        sessionId: agent.getSessionId(),
         commandCount: snapshot.availableCommands.length,
         skillCount: snapshot.availableSkills?.length ?? 0,
         commandNames: snapshot.availableCommands.map(command => command.name),
@@ -6703,17 +6839,6 @@ export class SessionManager implements ISessionManager {
       const message = error instanceof Error ? error.message : String(error)
       sessionLog.warn(`refreshAvailableCommands draft discovery failed: ${message}`)
       return { success: false, error: message }
-    } finally {
-      const nativeSessionId = agent.getSessionId()
-      if (nativeSessionId && agent.deleteBackendSession) {
-        try {
-          await agent.deleteBackendSession(nativeSessionId, { cwd: workingDirectory ?? workspace.rootPath })
-        } catch (deleteError) {
-          const message = deleteError instanceof Error ? deleteError.message : String(deleteError)
-          sessionLog.warn(`Draft slash command discovery cleanup failed for ${nativeSessionId}: ${message}`)
-        }
-      }
-      agent.destroy()
     }
   }
 
@@ -8054,6 +8179,17 @@ export class SessionManager implements ISessionManager {
       }
     }
     this.externalSessionAgents.clear()
+
+    for (const [key, entry] of this.draftAgents) {
+      try {
+        if (entry.cleanupTimer) clearTimeout(entry.cleanupTimer)
+        entry.agent.dispose()
+        sessionLog.info(`Disposed draft agent ${key}`)
+      } catch (error) {
+        sessionLog.warn(`Failed to dispose draft agent ${key}:`, error)
+      }
+    }
+    this.draftAgents.clear()
 
     sessionLog.info('Cleanup complete')
   }

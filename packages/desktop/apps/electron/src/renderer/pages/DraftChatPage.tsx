@@ -286,6 +286,13 @@ export default function DraftChatPage() {
           onModelChange={(nextModel, connection) => {
             setModel(nextModel)
             if (connection) setLlmConnection(connection)
+            if (activeWorkspaceId) {
+              window.electronAPI
+                .setSessionModel(NEW_SESSION_DRAFT_ID, activeWorkspaceId, nextModel, connection)
+                .catch((error) => {
+                  console.error('[DraftChatPage] Failed to persist draft model selection:', error)
+                })
+            }
           }}
           onConnectionChange={setLlmConnection}
           thinkingLevel={thinkingLevel}
