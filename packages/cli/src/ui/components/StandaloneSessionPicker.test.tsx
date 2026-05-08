@@ -86,6 +86,40 @@ function createMockSessionService(
 
 describe('SessionPicker', () => {
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+  const waitForFrame = async (
+    lastFrame: () => string | undefined,
+    predicate: (frame: string) => boolean,
+  ) => {
+    const deadline = Date.now() + 1000;
+    let frame = lastFrame() ?? '';
+    while (!predicate(frame) && Date.now() < deadline) {
+      await wait(20);
+      frame = lastFrame() ?? '';
+    }
+    return frame;
+  };
+  const waitForSearchFrame = async (
+    lastFrame: () => string | undefined,
+    query: string,
+  ) => {
+    const frame = await waitForFrame(
+      lastFrame,
+      (frame) => frame.includes('Search:') && frame.includes(query),
+    );
+    await wait(50);
+    return frame;
+  };
+  const waitForFilterFrame = async (
+    lastFrame: () => string | undefined,
+    query: string,
+  ) => {
+    const frame = await waitForFrame(
+      lastFrame,
+      (frame) => frame.includes('Filter:') && frame.includes(query),
+    );
+    await wait(50);
+    return frame;
+  };
 
   afterEach(() => {
     vi.clearAllMocks();
@@ -677,8 +711,9 @@ describe('SessionPicker', () => {
 
       // First Esc: exit search back to list, do not cancel.
       stdin.write(ESC);
-      await wait(30);
-      output = lastFrame() ?? '';
+      output = await waitForFrame(lastFrame, (frame) =>
+        frame.includes('Press / to search'),
+      );
       expect(output).toContain('login bug');
       expect(output).toContain('unrelated');
       expect(output).toContain('Press / to search');
@@ -763,8 +798,7 @@ describe('SessionPicker', () => {
 
       // Enter search; the highlight should disappear.
       stdin.write('/login');
-      await wait(50);
-      output = lastFrame() ?? '';
+      output = await waitForSearchFrame(lastFrame, 'login');
       expect(output).toContain('Search:');
       expect(output).not.toContain('› ');
 
@@ -809,17 +843,18 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/special');
-      await wait(30);
+      await waitForSearchFrame(lastFrame, 'special');
 
       // First Enter: search → list, query stays applied, no resume.
       stdin.write('\r');
-      await wait(30);
+      await waitForFilterFrame(lastFrame, 'special');
       expect(onSelect).not.toHaveBeenCalled();
       const afterFirstEnter = lastFrame() ?? '';
       expect(afterFirstEnter).toContain('Filter:');
       expect(afterFirstEnter).toContain('special-target');
 
       // Second Enter from list view selects the highlighted row.
+      await wait(50);
       stdin.write('\r');
       await wait(30);
       expect(onSelect).toHaveBeenCalledWith('matching');
@@ -851,7 +886,7 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/zzz'); // matches nothing
-      await wait(30);
+      await waitForSearchFrame(lastFrame, 'No sessions match');
       stdin.write('\r');
       await wait(30);
 
@@ -898,7 +933,7 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/login');
-      await wait(30);
+      await waitForSearchFrame(lastFrame, 'login');
 
       let output = lastFrame() ?? '';
       // In search mode: caret-bearing "Search:" row is visible.
@@ -972,9 +1007,10 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/login');
-      await wait(30);
+      await waitForSearchFrame(lastFrame, 'login');
       stdin.write(ARROW_DOWN); // exits search, cursor on filtered first item
-      await wait(30);
+      await waitForFilterFrame(lastFrame, 'login');
+      await wait(50);
       stdin.write(' '); // Space → preview
       await wait(150);
 
@@ -1018,18 +1054,22 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/login');
-      await wait(30);
+      await waitForSearchFrame(lastFrame, 'login');
       stdin.write(ARROW_DOWN); // exit search to filtered-list
-      await wait(30);
+      let output = await waitForFrame(lastFrame, (frame) =>
+        frame.includes('Filter:'),
+      );
+      await wait(50);
 
       // Both still visible (filter='login' matches both).
-      let output = lastFrame() ?? '';
       expect(output).toContain('login on feature');
 
       stdin.write(CTRL_B);
-      await wait(50);
-
-      output = lastFrame() ?? '';
+      output = await waitForFrame(
+        lastFrame,
+        (frame) =>
+          frame.includes('Filter:') && !frame.includes('login on feature'),
+      );
       // Branch filter narrows to main; query still applied.
       expect(output).toContain('Filter:');
       expect(output).toContain('login');
@@ -1069,14 +1109,15 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/login');
-      await wait(30);
+      await waitForSearchFrame(lastFrame, 'login');
       stdin.write(ARROW_DOWN); // → filtered-list with q='login'
-      await wait(30);
+      await waitForFilterFrame(lastFrame, 'login');
 
       let output = lastFrame() ?? '';
       expect(output).toContain('Filter:');
 
       // First Esc: drop the filter, stay open.
+      await wait(50);
       stdin.write(ESC);
       await wait(30);
       output = lastFrame() ?? '';
@@ -1122,12 +1163,13 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/login');
-      await wait(30);
+      await waitForSearchFrame(lastFrame, 'login');
       stdin.write(ARROW_DOWN); // exit to filtered-list
-      await wait(30);
+      await waitForFilterFrame(lastFrame, 'login');
 
       // Re-press '/' from filtered-list: viewMode flips back to
       // search but the query stays.
+      await wait(50);
       stdin.write('/');
       await wait(30);
 
@@ -1210,17 +1252,17 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/login');
-      await wait(30);
+      await waitForSearchFrame(lastFrame, 'login');
 
       // ↓ from search exits to filtered-list at the first match
       // (selectedIndex was reset to 0 when the query changed, and
       // ↓ no longer advances past it).
       stdin.write(ARROW_DOWN);
-      await wait(30);
-      let output = lastFrame() ?? '';
+      let output = await waitForFilterFrame(lastFrame, 'login');
       expect(output).toContain('Filter:');
 
       // ↑ at index 0 wraps focus right back into search.
+      await wait(50);
       stdin.write(ARROW_UP);
       await wait(30);
       output = lastFrame() ?? '';
@@ -1258,7 +1300,7 @@ describe('SessionPicker', () => {
       const mockService = createMockSessionService(sessions);
       const onSelect = vi.fn();
 
-      const { stdin } = render(
+      const { stdin, lastFrame } = render(
         <KeypressProvider kittyProtocolEnabled={false}>
           <SessionPicker
             sessionService={mockService as never}
@@ -1270,8 +1312,9 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/login');
-      await wait(50);
+      await waitForSearchFrame(lastFrame, 'login');
       stdin.write(ARROW_DOWN); // exit search → first match should be highlighted
+      await waitForFilterFrame(lastFrame, 'login');
       await wait(50);
       stdin.write('\r'); // Enter from list = select highlighted row
       await wait(50);
@@ -1307,8 +1350,7 @@ describe('SessionPicker', () => {
       await wait(100);
       // Type a query that matches nothing.
       stdin.write('/zzznomatch');
-      await wait(50);
-      let output = lastFrame() ?? '';
+      let output = await waitForSearchFrame(lastFrame, 'No sessions match');
       expect(output).toContain('Search:');
       expect(output).toContain('No sessions match');
 
@@ -1357,11 +1399,12 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/login');
-      await wait(30);
+      await waitForSearchFrame(lastFrame, 'login');
       stdin.write(ARROW_DOWN);
-      await wait(30);
+      await waitForFilterFrame(lastFrame, 'login');
       // Now list-mode + query='login'. Type 'bug' — implicit entry
       // re-enters search and appends, yielding query='loginbug'.
+      await wait(50);
       stdin.write('bug');
       await wait(50);
 
