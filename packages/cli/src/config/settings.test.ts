@@ -59,6 +59,22 @@ import {
 import { needsMigration } from './migration/index.js';
 import { QWEN_DIR } from '@qwen-code/qwen-code-core';
 
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    createDebugLogger: () => mockDebugLogger,
+  };
+});
+
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
 // Use the (mocked) SETTINGS_DIRECTORY_NAME for consistency
 const MOCK_WORKSPACE_SETTINGS_PATH = pathActual.join(
@@ -2415,6 +2431,13 @@ describe('Settings Loading and Merging', () => {
 
       // The mock should have been called (the migration path was reached)
       expect(mockFn).toHaveBeenCalled();
+
+      // Verify the error was logged via debugLogger
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'updateSettingsFilePreservingFormat returned false',
+        ),
+      );
     });
   });
 
