@@ -29,6 +29,7 @@ import {
   ndJsonStream,
   PROTOCOL_VERSION,
 } from '@agentclientprotocol/sdk';
+import type { Content } from '@google/genai';
 import type {
   Agent,
   AuthenticateRequest,
@@ -519,10 +520,38 @@ class QwenAgent implements Agent {
           );
         }
 
+        const historyBeforeRewind = session.captureHistorySnapshot();
         return {
           success: true,
+          historyBeforeRewind,
           ...session.rewindToTurn(targetTurnIndex as number),
         };
+      }
+      case 'restoreSessionHistory': {
+        const sessionId = params['sessionId'] as string;
+        const history = params['history'];
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (!Array.isArray(history)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing history',
+          );
+        }
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Session not found for id: ${sessionId}`,
+          );
+        }
+
+        session.restoreHistory(history as Content[]);
+        return { success: true };
       }
       case 'getAccountInfo': {
         const sessionId = params['sessionId'] as string | undefined;

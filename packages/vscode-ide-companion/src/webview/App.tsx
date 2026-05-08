@@ -608,6 +608,38 @@ export const App: React.FC = () => {
     isWaitingForResponse: messageHandling.isWaitingForResponse,
   });
 
+  useEffect(() => {
+    const clearEditingOnRestoreOrFailure = (event: MessageEvent) => {
+      const message = event.data;
+      if (message?.type === 'conversationLoaded') {
+        setEditingMessage(null);
+        return;
+      }
+
+      if (message?.type === 'streamEnd') {
+        const reason = String(message.data?.reason ?? '').toLowerCase();
+        if (
+          reason === 'user_cancelled' ||
+          reason === 'cancelled' ||
+          reason === 'timeout' ||
+          reason === 'error' ||
+          reason === 'session_expired'
+        ) {
+          setEditingMessage(null);
+        }
+        return;
+      }
+
+      if (message?.type === 'error' || message?.type === 'sessionExpired') {
+        setEditingMessage(null);
+      }
+    };
+
+    window.addEventListener('message', clearEditingOnRestoreOrFailure);
+    return () =>
+      window.removeEventListener('message', clearEditingOnRestoreOrFailure);
+  }, []);
+
   const canSubmit = shouldSendMessage({
     inputText,
     attachedImages,

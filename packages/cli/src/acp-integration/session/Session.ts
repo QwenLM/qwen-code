@@ -53,6 +53,7 @@ import {
   getPlanModeSystemReminder,
   getSubagentSystemReminder,
   getArenaSystemReminder,
+  STARTUP_CONTEXT_MODEL_ACK,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -106,7 +107,6 @@ import {
 } from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
-const STARTUP_CONTEXT_MODEL_ACK = 'Got it. Thanks for the context!';
 
 /**
  * Session represents an active conversation session with the AI model.
@@ -235,6 +235,24 @@ export class Session implements SessionContext {
     });
 
     return { targetTurnIndex, apiTruncateIndex };
+  }
+
+  captureHistorySnapshot(): Content[] {
+    return this.config.getGeminiClient()!.getChat().getHistory();
+  }
+
+  restoreHistory(history: Content[]): void {
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot restore history while a prompt is running',
+      );
+    }
+
+    this.config
+      .getGeminiClient()!
+      .getChat()
+      .setHistory(structuredClone(history));
   }
 
   #computeApiTruncationIndexForUserTurn(

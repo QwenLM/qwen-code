@@ -232,7 +232,10 @@ describe('SessionMessageHandler', () => {
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockResolvedValue(undefined),
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+      }),
+      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
     };
     const conversationStore = {
@@ -249,8 +252,8 @@ describe('SessionMessageHandler', () => {
         updatedAt: 3,
       }),
       addMessage: vi.fn(),
-      replaceMessages: vi.fn().mockResolvedValue(undefined),
-      truncateFromUserTurn: vi.fn().mockResolvedValue(undefined),
+      replaceMessages: vi.fn().mockResolvedValue(true),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
     };
     const sendToWebView = vi.fn();
 
@@ -281,6 +284,9 @@ describe('SessionMessageHandler', () => {
     expect(agentManager.sendMessage).toHaveBeenCalledWith([
       { type: 'text', text: 'edited prompt' },
     ]);
+    expect(
+      conversationStore.truncateFromUserTurn.mock.invocationCallOrder[0],
+    ).toBeLessThan(agentManager.rewindSession.mock.invocationCallOrder[0]);
     expect(agentManager.rewindSession.mock.invocationCallOrder[0]).toBeLessThan(
       agentManager.sendMessage.mock.invocationCallOrder[0],
     );
@@ -309,15 +315,18 @@ describe('SessionMessageHandler', () => {
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockResolvedValue(undefined),
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+      }),
+      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockRejectedValue(new Error('send failed')),
     };
     const conversationStore = {
       createConversation: vi.fn(),
       getConversation: vi.fn().mockResolvedValue(originalConversation),
       addMessage: vi.fn(),
-      replaceMessages: vi.fn().mockResolvedValue(undefined),
-      truncateFromUserTurn: vi.fn().mockResolvedValue(undefined),
+      replaceMessages: vi.fn().mockResolvedValue(true),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
     };
     const sendToWebView = vi.fn();
 
@@ -336,6 +345,9 @@ describe('SessionMessageHandler', () => {
       },
     });
 
+    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith([
+      { role: 'user', parts: [{ text: 'first' }] },
+    ]);
     expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
       'session-1',
       originalConversation.messages,
@@ -347,6 +359,47 @@ describe('SessionMessageHandler', () => {
     expect(sendToWebView).toHaveBeenCalledWith({
       type: 'error',
       data: { message: 'send failed' },
+    });
+  });
+
+  it('rejects edit submissions with invalid target turn indexes', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn(),
+      restoreSessionHistory: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn(),
+      truncateFromUserTurn: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: -1,
+      },
+    });
+
+    expect(agentManager.rewindSession).not.toHaveBeenCalled();
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(conversationStore.truncateFromUserTurn).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'Invalid message edit target.' },
     });
   });
 

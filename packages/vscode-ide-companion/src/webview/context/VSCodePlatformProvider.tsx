@@ -21,6 +21,12 @@ interface VSCodePlatformProviderProps {
   children: ReactNode;
 }
 
+interface PendingCopyRequest {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
 /**
  * VSCodePlatformProvider - Provides platform context for VSCode extension
  *
@@ -32,17 +38,61 @@ export const VSCodePlatformProvider: FC<VSCodePlatformProviderProps> = ({
 }) => {
   const vscode = useVSCode();
   const messageHandlersRef = useRef<Set<(message: unknown) => void>>(new Set());
+  const copyRequestCounterRef = useRef(0);
+  const pendingCopyRequestsRef = useRef<Map<string, PendingCopyRequest>>(
+    new Map(),
+  );
 
   // Set up message listener
   useEffect(() => {
+    const pendingCopyRequests = pendingCopyRequestsRef.current;
     const handleMessage = (event: MessageEvent) => {
+      const message = event.data as
+        | {
+            type?: string;
+            data?: {
+              requestId?: string;
+              success?: boolean;
+              error?: string;
+            };
+          }
+        | undefined;
+
+      if (message?.type === 'copyToClipboardResult') {
+        const requestId = message.data?.requestId;
+        const pending = requestId
+          ? pendingCopyRequests.get(requestId)
+          : undefined;
+        if (!requestId || !pending) {
+          return;
+        }
+
+        clearTimeout(pending.timeoutId);
+        pendingCopyRequests.delete(requestId);
+        if (message.data?.success) {
+          pending.resolve();
+        } else {
+          pending.reject(
+            new Error(message.data?.error || 'Failed to copy to clipboard.'),
+          );
+        }
+        return;
+      }
+
       messageHandlersRef.current.forEach((handler) => {
         handler(event.data);
       });
     };
 
     window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
+    return () => {
+      window.removeEventListener('message', handleMessage);
+      pendingCopyRequests.forEach((pending) => {
+        clearTimeout(pending.timeoutId);
+        pending.reject(new Error('Copy request was interrupted.'));
+      });
+      pendingCopyRequests.clear();
+    };
   }, []);
 
   // Open file handler
@@ -108,8 +158,30 @@ export const VSCodePlatformProvider: FC<VSCodePlatformProviderProps> = ({
   // Copy to clipboard handler
   const copyToClipboard = useCallback(
     (text: string) => {
-      vscode.postMessage({ type: 'copyToClipboard', data: { text } });
-      return Promise.resolve();
+      const requestId = `copy-${Date.now()}-${copyRequestCounterRef.current++}`;
+      return new Promise<void>((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          pendingCopyRequestsRef.current.delete(requestId);
+          reject(new Error('Timed out copying to clipboard.'));
+        }, 10000);
+
+        pendingCopyRequestsRef.current.set(requestId, {
+          resolve,
+          reject,
+          timeoutId,
+        });
+
+        try {
+          vscode.postMessage({
+            type: 'copyToClipboard',
+            data: { text, requestId },
+          });
+        } catch (error) {
+          clearTimeout(timeoutId);
+          pendingCopyRequestsRef.current.delete(requestId);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
     },
     [vscode],
   );

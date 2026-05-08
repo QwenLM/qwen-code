@@ -66,26 +66,37 @@ export class ConversationStore {
   async replaceMessages(
     conversationId: string,
     messages: ChatMessage[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const conversations = await this.getAllConversations();
     const conversation = conversations.find((c) => c.id === conversationId);
 
-    if (conversation) {
-      conversation.messages = messages.map((message) => ({ ...message }));
-      conversation.updatedAt = Date.now();
-      await this.context.globalState.update('conversations', conversations);
+    if (!conversation) {
+      console.warn(
+        '[ConversationStore] replaceMessages: conversation not found:',
+        conversationId,
+      );
+      return false;
     }
+
+    conversation.messages = messages.map((message) => ({ ...message }));
+    conversation.updatedAt = Date.now();
+    await this.context.globalState.update('conversations', conversations);
+    return true;
   }
 
   async truncateFromUserTurn(
     conversationId: string,
     targetTurnIndex: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const conversations = await this.getAllConversations();
     const conversation = conversations.find((c) => c.id === conversationId);
 
     if (!conversation) {
-      return;
+      console.warn(
+        '[ConversationStore] truncateFromUserTurn: conversation not found:',
+        conversationId,
+      );
+      return false;
     }
 
     let userTurnIndex = 0;
@@ -105,6 +116,7 @@ export class ConversationStore {
     conversation.messages = conversation.messages.slice(0, truncateAt);
     conversation.updatedAt = Date.now();
     await this.context.globalState.update('conversations', conversations);
+    return true;
   }
 
   async deleteConversation(id: string): Promise<void> {

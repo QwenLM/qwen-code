@@ -81,6 +81,7 @@ describe('Session', () => {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
     } as unknown as GeminiChat;
@@ -243,6 +244,48 @@ describe('Session', () => {
         'Cannot rewind while a prompt is running',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects invalid target turn indexes', () => {
+      expect(() => session.rewindToTurn(-1)).toThrow(
+        'targetTurnIndex must be a non-negative integer',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a prompt is running', () => {
+      (session as unknown as { pendingPrompt: AbortController }).pendingPrompt =
+        new AbortController();
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a cron abort is active', () => {
+      (
+        session as unknown as { cronAbortController: AbortController }
+      ).cronAbortController = new AbortController();
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('restores a captured history snapshot', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+
+      const snapshot = session.captureHistorySnapshot();
+      session.restoreHistory(snapshot);
+
+      expect(snapshot).toEqual(history);
+      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
     });
   });
 

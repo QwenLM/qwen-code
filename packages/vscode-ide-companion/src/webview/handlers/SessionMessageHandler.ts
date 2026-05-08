@@ -254,10 +254,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       return;
     }
 
-    await this.conversationStore.replaceMessages(
+    const restored = await this.conversationStore.replaceMessages(
       snapshot.id,
       snapshot.messages,
     );
+    if (!restored) {
+      console.warn(
+        '[SessionMessageHandler] Failed to restore conversation snapshot; conversation not found:',
+        snapshot.id,
+      );
+    }
     this.currentConversationId = snapshot.id;
     this.sendToWebView({
       type: 'conversationLoaded',
@@ -555,7 +561,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
 
     let editRestoreSnapshot: Conversation | null = null;
-    let editMutationApplied = false;
+    let editStoreMutationApplied = false;
+    let editAcpMutationApplied = false;
+    let editAcpHistorySnapshot: unknown[] | null = null;
 
     if (editTargetTurnIndex !== undefined) {
       if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
@@ -611,18 +619,38 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
 
       try {
-        await this.agentManager.rewindSession(editTargetTurnIndex);
-        editMutationApplied = true;
-        await this.conversationStore.truncateFromUserTurn(
+        const truncated = await this.conversationStore.truncateFromUserTurn(
           this.currentConversationId,
           editTargetTurnIndex,
         );
+        if (!truncated) {
+          throw new Error('Conversation not found for edit target.');
+        }
+        editStoreMutationApplied = true;
+
+        const rewindResult =
+          await this.agentManager.rewindSession(editTargetTurnIndex);
+        editAcpHistorySnapshot = rewindResult?.historyBeforeRewind ?? null;
+        editAcpMutationApplied = true;
+
         this.sendToWebView({
           type: 'conversationRewound',
           data: { targetTurnIndex: editTargetTurnIndex },
         });
       } catch (error) {
-        if (editMutationApplied) {
+        if (editAcpMutationApplied && editAcpHistorySnapshot) {
+          try {
+            await this.agentManager.restoreSessionHistory(
+              editAcpHistorySnapshot,
+            );
+          } catch (restoreError) {
+            console.warn(
+              '[SessionMessageHandler] Failed to restore ACP history after rewind failure:',
+              restoreError,
+            );
+          }
+        }
+        if (editStoreMutationApplied) {
           await this.restoreConversationSnapshot(editRestoreSnapshot);
         }
         const errorMsg = this.getErrorMessage(error);
@@ -777,7 +805,18 @@ export class SessionMessageHandler extends BaseMessageHandler {
     } catch (error) {
       console.error('[SessionMessageHandler] Error sending message:', error);
 
-      if (editMutationApplied) {
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        try {
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+        } catch (restoreError) {
+          console.warn(
+            '[SessionMessageHandler] Failed to restore ACP history after send failure:',
+            restoreError,
+          );
+        }
+      }
+
+      if (editStoreMutationApplied) {
         await this.restoreConversationSnapshot(editRestoreSnapshot);
       }
 
