@@ -188,10 +188,25 @@ interface BackgroundTaskCancelOptions {
 }
 
 /**
- * Fires on entry status transitions — register, complete, fail, cancel.
- * Intentionally does NOT fire on `appendActivity` so consumers that only
- * care about the pill / roster (Footer, AppContainer) don't re-render
- * on every tool call a background agent makes.
+ * Fires on entry status transitions: `register`, `complete`, `fail`,
+ * `cancel`, `finalizeCancelled`, `finalizeCancellationIfPending`,
+ * `abandon`, `unregisterForeground`, and `reset`. Intentionally does
+ * NOT fire on `appendActivity` so consumers that only care about the
+ * roster don't re-render on every tool call a background agent makes.
+ *
+ * Ordering relative to the registry mutation falls into two camps:
+ *   - **Keeps the entry around** (`register` / `complete` / `fail` /
+ *     `cancel` / `finalizeCancelled` /
+ *     `finalizeCancellationIfPending` / `abandon`): emit while the
+ *     entry is still in the Map (the status field has been mutated
+ *     in place to its terminal value), so a callback that re-reads
+ *     `registry.get(entry.agentId)` sees the entry. Snapshot-style
+ *     consumers calling `getAll()` see the new status too.
+ *   - **Removes the entry** (`unregisterForeground`, `reset`):
+ *     deletes from the Map BEFORE emitting so snapshot-style
+ *     consumers drop the row. The `entry` arg carries the agent's
+ *     last live state for log / display consumers; `registry.get`
+ *     and `getAll` already reflect the deletion.
  */
 export type BackgroundStatusChangeCallback = (
   entry?: BackgroundTaskEntry,
@@ -275,14 +290,18 @@ export class BackgroundTaskRegistry {
           `Background entries must terminate via complete/fail/finalizeCancelled.`,
       );
     }
-    // Delete before emitting so the status-change callback (which rebuilds
-    // its snapshot via getAll()) no longer includes this entry. Emitting
-    // before delete caused the entry to linger in React state with
-    // status='running' because the callback's getAll() still saw it, and
-    // no second status-change fired after the deletion.
+    // Delete BEFORE emitting so snapshot-style consumers (those that
+    // re-pull `getAll()` from inside the callback) no longer include
+    // this entry. The reverse order (emit-then-delete) caused the
+    // foreground agent to linger as `status='running'` in the footer
+    // pill / dialog: the callback's `getAll()` still saw it, and no
+    // second status-change fired after the deletion. Diverges from
+    // complete/fail/cancel/finalize ordering on purpose — those
+    // keep the entry around (terminal state) so callbacks can inspect
+    // it on re-read; unregister removes it outright.
     this.agents.delete(agentId);
-    debugLogger.info(`Unregistered foreground agent: ${agentId}`);
     this.emitStatusChange(entry);
+    debugLogger.info(`Unregistered foreground agent: ${agentId}`);
   }
 
   // See complete() for the cancelled → terminal path rationale.
