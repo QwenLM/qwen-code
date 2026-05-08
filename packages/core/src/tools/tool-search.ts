@@ -110,16 +110,22 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const names: string[] = [];
       const truncated: string[] = [];
       for (const raw of query.slice('select:'.length).split(',')) {
-        const trimmed = raw.trim();
-        if (!trimmed) continue;
-        const key = trimmed.toLowerCase();
+        // The deferred-tools system prompt section renders names as JSON
+        // string literals ("cron_list"), so models often paste them back
+        // verbatim with surrounding quotes. Strip a single layer of
+        // matching `"…"` or `'…'` so `select:"foo"` and `select:foo`
+        // resolve to the same tool. Without this the lookup would search
+        // for a tool literally named `"foo"` (with quotes) and miss.
+        const stripped = stripMatchingQuotes(raw.trim());
+        if (!stripped) continue;
+        const key = stripped.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);
         if (names.length >= maxResults) {
-          truncated.push(trimmed);
+          truncated.push(stripped);
           continue;
         }
-        names.push(trimmed);
+        names.push(stripped);
       }
       return this.loadAndReturnSchemas(names, truncated);
     }
@@ -393,6 +399,23 @@ export function tokenize(query: string): string[] {
 function clamp(n: number, lo: number, hi: number): number {
   if (!Number.isFinite(n)) return lo;
   return Math.min(hi, Math.max(lo, Math.floor(n)));
+}
+
+/**
+ * Strip a single layer of surrounding `"…"` or `'…'` if present.
+ * Used to normalize `select:"foo"` → `foo` so models that paste tool
+ * names back as JSON-quoted literals (the form they appear in the
+ * deferred-tools section of the system prompt) resolve correctly.
+ * Mismatched / unbalanced quotes are returned unchanged.
+ */
+function stripMatchingQuotes(s: string): string {
+  if (s.length < 2) return s;
+  const first = s[0];
+  const last = s[s.length - 1];
+  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+    return s.slice(1, -1);
+  }
+  return s;
 }
 
 function candidateMatchesRequired(

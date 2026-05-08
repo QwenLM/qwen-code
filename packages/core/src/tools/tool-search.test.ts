@@ -431,6 +431,28 @@ describe('ToolSearchTool', () => {
     expect(content).not.toContain('"name":"email_send"');
   });
 
+  it('select: tolerates JSON-quoted tool names (model often pastes them back verbatim)', async () => {
+    // Pin: deferred-tools section of the system prompt renders names
+    // as JSON string literals ("cron_create"); models often paste them
+    // back as `select:"cron_create"`. Without quote-stripping the
+    // lookup searches for a tool literally named `"cron_create"`
+    // (with quotes) and misses.
+    registry.registerTool(
+      new MockTool({ name: 'cron_create', shouldDefer: true }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const dq = await tool
+      .build({ query: 'select:"cron_create"' })
+      .execute(new AbortController().signal);
+    expect(String(dq.llmContent)).toContain('"name":"cron_create"');
+
+    const sq = await tool
+      .build({ query: "select:'cron_create'" })
+      .execute(new AbortController().signal);
+    expect(String(sq.llmContent)).toContain('"name":"cron_create"');
+  });
+
   it('keyword search excludes already-revealed deferred tools', async () => {
     // Pin: once a deferred tool is revealed via a prior `select:` lookup,
     // it should no longer appear in subsequent keyword searches — it's

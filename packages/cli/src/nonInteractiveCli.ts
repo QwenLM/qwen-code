@@ -43,8 +43,6 @@ import {
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
-
-const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -54,6 +52,8 @@ import {
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
 // Human-readable labels for the detectors that can fire mid-stream.
 // Surfaced to stderr in TEXT mode so a headless run that halts on a loop
