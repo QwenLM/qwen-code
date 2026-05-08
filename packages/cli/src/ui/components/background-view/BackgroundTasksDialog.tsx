@@ -105,9 +105,12 @@ function terminalStatusPresentation(
 }
 
 // Foreground agent rows get this prefix so users can tell at a glance
-// that cancelling one will end the parent's current turn — a much heavier
-// consequence than cancelling a truly async background entry.
-const FOREGROUND_ROW_PREFIX = '[in turn]';
+// that cancelling one will unblock — and end — the parent's current
+// turn, a much heavier consequence than cancelling a truly async
+// background entry. `[blocking]` reads more directly than the earlier
+// `[in turn]` (which was widely misread as "queued / sequential" —
+// the opposite meaning).
+const FOREGROUND_ROW_PREFIX = '[blocking]';
 const SHELL_ROW_PREFIX = '[shell]';
 
 function rowLabel(entry: DialogEntry): string {
@@ -1083,9 +1086,11 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const hints: string[] = [];
   if (showCancelConfirmHint) {
     // Force the confirmation step into the hint row so the user sees
-    // exactly what the next `x` will do.
+    // exactly what the next `x` will do. Phrasing matches the
+    // `[blocking]` row prefix \u2014 "blocking turn" reads as "your input
+    // is waiting on this", which is what the cancel actually unblocks.
     hints.push(
-      'x again to confirm stop \u00b7 ends current turn',
+      'x again to confirm stop \u00b7 ends the blocking turn',
       'Esc cancel',
     );
   } else if (dialogMode === 'list') {

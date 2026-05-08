@@ -162,6 +162,61 @@ describe('ModelRegistry', () => {
     });
   });
 
+  describe('modalities auto-fill', () => {
+    // Sub-agents that read straight from the registry (e.g. via
+    // getResolvedModel) need the registry to populate modalities for them;
+    // otherwise they inherit the parent session's modalities and fail the
+    // image/pdf/video gates set on tools like ReadFile.
+    it('populates modalities from the model name when not provided', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'gpt-4-turbo',
+            name: 'GPT-4 Turbo',
+            baseUrl: 'https://api.openai.com/v1',
+            generationConfig: {},
+          },
+        ],
+      });
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'gpt-4-turbo');
+      expect(model?.generationConfig.modalities).toEqual({ image: true });
+    });
+
+    it('preserves caller-provided modalities verbatim', () => {
+      const explicitModalities = { image: true, pdf: true };
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'gpt-4-turbo',
+            name: 'GPT-4 Turbo',
+            baseUrl: 'https://api.openai.com/v1',
+            generationConfig: { modalities: explicitModalities },
+          },
+        ],
+      });
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'gpt-4-turbo');
+      expect(model?.generationConfig.modalities).toEqual(explicitModalities);
+    });
+
+    it('returns text-only ({}) for models with no multimodal default', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'qwen3-coder-plus',
+            name: 'Qwen3 Coder Plus',
+            baseUrl: 'https://example.invalid',
+            generationConfig: {},
+          },
+        ],
+      });
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'qwen3-coder-plus');
+      expect(model?.generationConfig.modalities).toEqual({});
+    });
+  });
+
   describe('hasModel', () => {
     let registry: ModelRegistry;
 

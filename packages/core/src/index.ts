@@ -37,6 +37,7 @@ export {
   type ModelsConfigOptions,
   type ModelProvidersConfig,
   type ModelSwitchMetadata,
+  MODEL_GENERATION_CONFIG_FIELDS,
   type OnModelChangeCallback,
   QWEN_OAUTH_MODELS,
   resolveModelConfig,

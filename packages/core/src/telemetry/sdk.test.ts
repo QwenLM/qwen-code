@@ -111,6 +111,7 @@ describe('Telemetry SDK', () => {
       getTelemetryTarget: () => 'local',
       getTelemetryUseCollector: () => false,
       getTelemetryOutfile: () => undefined,
+      getTelemetryIncludeSensitiveSpanAttributes: () => false,
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
       getCliVersion: () => '1.0.0-test',
@@ -239,8 +240,28 @@ describe('Telemetry SDK', () => {
     });
     // Logs falls back to LogToSpanProcessor (bridges logs → spans)
     expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
-    expect(LogToSpanProcessor).toHaveBeenCalled();
+    expect(LogToSpanProcessor).toHaveBeenCalledWith(expect.anything(), {
+      includeSensitiveSpanAttributes: false,
+    });
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
+  });
+
+  it('passes sensitive span attribute config to the log-to-span bridge', () => {
+    vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+      'http://traces-host/token/api/otlp/traces',
+    );
+    vi.spyOn(
+      mockConfig,
+      'getTelemetryIncludeSensitiveSpanAttributes',
+    ).mockReturnValue(true);
+
+    initializeTelemetry(mockConfig);
+
+    expect(LogToSpanProcessor).toHaveBeenCalledWith(expect.anything(), {
+      includeSensitiveSpanAttributes: true,
+    });
   });
 
   it('should warn and skip startup for gRPC per-signal endpoints without base endpoint', () => {
