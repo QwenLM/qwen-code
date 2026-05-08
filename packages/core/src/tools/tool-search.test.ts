@@ -476,6 +476,31 @@ describe('ToolSearchTool', () => {
     // cron_list was already revealed before this call, so it stays revealed.
     expect(registry.isDeferredToolRevealed('cron_list')).toBe(true);
   });
+
+  it('treats a null GeminiClient identically to setTools() throwing', async () => {
+    // Without the explicit null-check, optional chaining (`?.setTools()`)
+    // silently no-ops if init hasn't completed yet, leaving the reveal
+    // in the registry while the API never received the schema. The
+    // dedupe filter in `collectCandidates` would then exclude that tool
+    // from future keyword searches, making it unreachable until /clear.
+    registry.registerTool(
+      new MockTool({ name: 'cron_create', shouldDefer: true }),
+    );
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue(
+      null as unknown as ReturnType<typeof config.getGeminiClient>,
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:cron_create' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.error?.message).toContain('GeminiClient not initialised');
+    expect(String(result.llmContent)).not.toContain('"name":"cron_create"');
+    // Reveal rolled back so subsequent ToolSearch can find the tool.
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
+  });
 });
 
 describe('ToolRegistry.clearRevealedDeferredTools', () => {

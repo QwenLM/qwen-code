@@ -232,24 +232,37 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
 
     // Re-sync the active chat's tool list so the revealed tools appear in the
-    // next API request. Safe to call even if the client hasn't initialised.
+    // next API request.
     let setToolsError: string | undefined;
     if (loaded.length > 0) {
-      try {
-        await this.config.getGeminiClient()?.setTools();
-      } catch (err) {
-        // Capture the failure: the schemas appear in llmContent so the
-        // model SEES the tools, but the chat's declaration list didn't
-        // update — calling them next turn would surface as `unknown
-        // tool` from the API. Surface as a tool error so the agent
-        // knows the loaded tools aren't actually available, instead
-        // of silently swallowing into debugLogger.warn (which is off
-        // in production).
-        setToolsError = err instanceof Error ? err.message : String(err);
-        debugLogger.warn(
-          'setTools() failed while revealing deferred tools:',
-          err,
-        );
+      const geminiClient = this.config.getGeminiClient();
+      if (!geminiClient) {
+        // Optional chaining (`?.setTools()`) used to silently no-op here,
+        // leaving the registry with reveals the API never received —
+        // exactly the inconsistency `setTools() throws` already guards
+        // against. Treat null client identically: rollback + surface an
+        // error so the caller can retry once init is complete.
+        setToolsError = 'GeminiClient not initialised';
+      } else {
+        try {
+          await geminiClient.setTools();
+        } catch (err) {
+          setToolsError = err instanceof Error ? err.message : String(err);
+          debugLogger.warn(
+            'setTools() failed while revealing deferred tools:',
+            err,
+          );
+        }
+      }
+
+      if (setToolsError) {
+        // Surface as a tool error so the agent knows the loaded tools
+        // aren't actually available, instead of silently swallowing into
+        // debugLogger.warn (which is off in production). Schemas are
+        // withheld from llmContent (built below only when no error) so
+        // the model doesn't think the tool is callable while the API
+        // declaration list doesn't have it.
+        //
         // Roll back this call's reveals so the registry stays consistent
         // with the API's declaration list. Without this, keyword search
         // would treat these tools as "already loaded" and exclude them
