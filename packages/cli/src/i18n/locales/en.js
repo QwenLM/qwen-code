@@ -1310,10 +1310,34 @@ export default {
   'Path is not a directory.': 'Path is not a directory.',
   'This directory is already in the workspace.':
     'This directory is already in the workspace.',
+  // Status Bar
+  // ============================================================================
+=======
   'Already covered by existing directory: {{dir}}':
     'Already covered by existing directory: {{dir}}',
 
   // ============================================================================
+  // /directory remove command
+  // ============================================================================
+  'Remove a directory from the workspace':
+    'Remove a directory from the workspace',
+  'Please provide a directory path to remove.':
+    'Please provide a directory path to remove.',
+  'Cannot remove initial workspace directory: {{directory}}':
+    'Cannot remove initial workspace directory: {{directory}}',
+  'Directory not found in workspace: {{directory}}':
+    'Directory not found in workspace: {{directory}}',
+  'Directory removed from workspace but error updating settings: {{error}}':
+    'Directory removed from workspace but error updating settings: {{error}}',
+  'Removed directory: {{directory}}': 'Removed directory: {{directory}}',
+  'The /directory remove command is not supported in restrictive sandbox profiles.':
+    'The /directory remove command is not supported in restrictive sandbox profiles.',
+  'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.':
+    'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.',
+
+  // ============================================================================
+  // Status Bar
+  // ========================================================================================================================================================
   // Status Bar
   // ============================================================================
   'Using:': 'Using:',

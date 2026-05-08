@@ -300,6 +300,223 @@ export const directoryCommand: SlashCommand = {
       },
     },
     {
+      name: 'remove',
+      get description() {
+        return t('Remove a directory from the workspace');
+      },
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive'] as const,
+      completion: async (context: CommandContext) => {
+        const { services } = context;
+        if (!services.config) return [];
+        const dirs = services.config.getWorkspaceContext().getDirectories();
+        const initialDirs =
+          services.config.getWorkspaceContext().getInitialDirectories?.() ?? [];
+        return dirs.filter((d) => !initialDirs.includes(d));
+      },
+      action: async (context: CommandContext, args: string) => {
+        const {
+          ui: { addItem },
+          services: { config, settings },
+        } = context;
+        if (!config) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Configuration is not available.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const directory = args.trim();
+        if (!directory) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Please provide a directory path to remove.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        if (config.isRestrictiveSandbox()) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'The /directory remove command is not supported in restrictive sandbox profiles.',
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const workspaceContext = config.getWorkspaceContext();
+
+        // Resolve to the same canonical (realpath) form that
+        // WorkspaceContext stores internally, so the persistence filter
+        // matches correctly even when the stored entry uses a symlink or
+        // other non-canonical spelling.
+        const expandedDir = expandHomeDir(directory);
+        let canonicalDirectory: string;
+        try {
+          canonicalDirectory = fs.realpathSync(expandedDir);
+        } catch {
+          canonicalDirectory = path.isAbsolute(expandedDir)
+            ? expandedDir
+            : path.resolve(expandedDir);
+        }
+
+        if (
+          workspaceContext.isInitialDirectory(expandedDir) ??
+          workspaceContext.getInitialDirectories().includes(expandedDir)
+        ) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Cannot remove initial workspace directory: {{directory}}',
+                { directory },
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const removed = workspaceContext.removeDirectory(expandedDir);
+        if (!removed) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Directory not found in workspace: {{directory}}', {
+                directory,
+              }),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        try {
+          // Find the scope(s) that contain this directory entry so we
+          // update the correct persisted setting.  The merged workspace
+          // context is built from all scopes via MergeStrategy.CONCAT, so a
+          // directory added at user scope would reappear on restart if we
+          // only clear the workspace-scoped list.
+          //
+          // Persisted entries may use ~, $HOME, or symlink spellings, so
+          // we resolve each raw entry via expandHomeDir + realpath before
+          // comparing against the canonical directory.
+          const targetDir = canonicalDirectory;
+          let found = false;
+
+          for (const scope of [
+            SettingScope.Workspace,
+            SettingScope.User,
+          ] as const) {
+            const scopeDirs =
+              settings.forScope(scope).originalSettings.context
+                ?.includeDirectories ?? [];
+            const matchingIndex = scopeDirs.findIndex((d: string) => {
+              try {
+                const resolved = fs.realpathSync(expandHomeDir(d));
+                return resolved === targetDir;
+              } catch {
+                return d === targetDir;
+              }
+            });
+            if (matchingIndex !== -1) {
+              found = true;
+              const includeDirectories = scopeDirs.filter(
+                (_: string, i: number) => i !== matchingIndex,
+              );
+              settings.setValue(
+                scope,
+                'context.includeDirectories',
+                includeDirectories,
+              );
+            }
+          }
+
+          if (!found) {
+            addItem(
+              {
+                type: MessageType.WARNING,
+                text: t(
+                  'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.',
+                ),
+              },
+              Date.now(),
+            );
+          }
+        } catch (error) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Directory removed from workspace but error updating settings: {{error}}',
+                { error: (error as Error).message },
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // Refresh hierarchical memory to drop QWEN.md content and
+        // conditional rules that were loaded from the removed directory,
+        // mirroring what the add path already does.
+        if (config.shouldLoadMemoryFromIncludeDirectories()) {
+          try {
+            const {
+              memoryContent,
+              fileCount,
+              conditionalRules,
+              projectRoot,
+            } = await loadServerHierarchicalMemory(
+              config.getWorkingDir(),
+              config.getWorkspaceContext().getDirectories(),
+              config.getFileService(),
+              config.getExtensionContextFilePaths(),
+              config.getFolderTrust(),
+              context.services.settings.merged.context?.importFormat ||
+                'tree',
+              config.getContextRuleExcludes(),
+            );
+            config.setUserMemory(memoryContent);
+            config.setGeminiMdFileCount(fileCount);
+            config.setConditionalRulesRegistry(
+              new ConditionalRulesRegistry(conditionalRules, projectRoot),
+            );
+            context.ui.setGeminiMdFileCount(fileCount);
+          } catch (error) {
+            addItem(
+              {
+                type: MessageType.ERROR,
+                text: t('Error refreshing memory: {{error}}', {
+                  error: (error as Error).message,
+                }),
+              },
+              Date.now(),
+            );
+          }
+        }
+
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t('Removed directory: {{directory}}', { directory }),
+          },
+          Date.now(),
+        );
+      },
+    },
+    {
       name: 'show',
       get description() {
         return t('Show all directories in the workspace');
