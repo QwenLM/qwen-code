@@ -81,10 +81,14 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
         case 'ArrowDown':
           event.preventDefault();
           setSelected((prev) => Math.min(prev + 1, models.length - 1));
+          // Clear stale block banner so keyboard navigation gives the same
+          // feedback as mouse hover.
+          setBlockedMessage(null);
           break;
         case 'ArrowUp':
           event.preventDefault();
           setSelected((prev) => Math.max(prev - 1, 0));
+          setBlockedMessage(null);
           break;
         case 'Enter': {
           // Prevent form submission AND stop propagation so the input form

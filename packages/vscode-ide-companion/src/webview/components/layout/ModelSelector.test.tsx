@@ -217,4 +217,46 @@ describe('ModelSelector — discontinued state (Issue #3745)', () => {
       container.querySelector('[data-testid="model-selector-blocked"]'),
     ).toBeNull();
   });
+
+  it('clears a stale blocked message when navigating with ArrowDown / ArrowUp', () => {
+    const { container } = renderModelSelector({
+      models: [discontinuedModel, otherProviderModel],
+    });
+    const discontinuedRow = container.querySelector(
+      '[data-discontinued="true"]',
+    ) as HTMLElement;
+
+    act(() => {
+      discontinuedRow.click();
+    });
+    expect(
+      container.querySelector('[data-testid="model-selector-blocked"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="model-selector-blocked"]'),
+    ).toBeNull();
+
+    // Re-trigger the banner, then verify ArrowUp also clears it.
+    act(() => {
+      discontinuedRow.click();
+    });
+    expect(
+      container.querySelector('[data-testid="model-selector-blocked"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }),
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="model-selector-blocked"]'),
+    ).toBeNull();
+  });
 });
