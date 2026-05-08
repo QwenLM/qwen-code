@@ -21,7 +21,12 @@ import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
-import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
+import {
+  getRateLimitErrorDetails,
+  getRateLimitRetryDelayMs,
+  isRateLimitError,
+  type RetryInfo,
+} from '../utils/rateLimit.js';
 import type { Config } from '../config/config.js';
 import { ESCALATED_MAX_TOKENS, tokenLimit } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
@@ -110,12 +115,14 @@ const OUTPUT_RECOVERY_MESSAGE =
 
 /**
  * Options for retrying on rate-limit throttling errors returned as stream content.
- * Fixed 60s delay matches the DashScope per-minute quota window.
+ * Starts at 60s to match DashScope's per-minute quota window, then backs off
+ * across repeated stream-side throttling errors.
  * 10 retries aligns with Claude Code's retry behavior.
  */
 const RATE_LIMIT_RETRY_OPTIONS = {
   maxRetries: 10,
-  delayMs: 60000,
+  initialDelayMs: 60000,
+  maxDelayMs: 5 * 60 * 1000,
 };
 
 /**
@@ -576,14 +583,22 @@ export class GeminiChat {
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
               rateLimitRetryCount++;
-              const delayMs = RATE_LIMIT_RETRY_OPTIONS.delayMs;
+              const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
+                ...RATE_LIMIT_RETRY_OPTIONS,
+                error,
+              });
               const message = parseAndFormatApiError(
                 error instanceof Error ? error.message : String(error),
               );
-              debugLogger.warn(
-                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${maxRateLimitRetries}). ` +
-                  `Waiting ${delayMs / 1000}s before retrying...`,
-              );
+              const details = getRateLimitErrorDetails(error);
+              debugLogger.warn('Rate limit retry scheduled', {
+                retryPath: 'stream',
+                retryDecision: 'retry',
+                attempt: rateLimitRetryCount,
+                maxRetries: maxRateLimitRetries,
+                retryDelayMs: delayMs,
+                ...details,
+              });
               const { promise: delayPromise, skip } = delay(
                 delayMs,
                 params.config?.abortSignal,
@@ -602,6 +617,15 @@ export class GeminiChat {
               attempt--;
               await delayPromise;
               continue;
+            }
+            if (isRateLimit) {
+              debugLogger.warn('Rate limit retry exhausted', {
+                retryPath: 'stream',
+                retryDecision: 'exhausted',
+                attempts: rateLimitRetryCount,
+                maxRetries: maxRateLimitRetries,
+                ...getRateLimitErrorDetails(error),
+              });
             }
 
             // Transient stream anomalies (NO_FINISH_REASON / NO_RESPONSE_TEXT):

@@ -18,6 +18,10 @@ import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 import {
+  countMarkdownSourceBlocks,
+  type MarkdownSourceCopyIndexOffsets,
+} from '../utils/MarkdownDisplay.js';
+import {
   isForceExpandGroup,
   mergeCompactToolGroups,
 } from '../utils/mergeCompactToolGroups.js';
@@ -27,6 +31,34 @@ import {
 // This threshold is arbitrary but should be high enough to never impact normal
 // usage.
 const MAX_GEMINI_MESSAGE_LINES = 65536;
+
+function createEmptySourceCopyOffsets(): MarkdownSourceCopyIndexOffsets {
+  return {
+    codeBlockLanguageCounts: new Map<string, number>(),
+    mathBlockCount: 0,
+  };
+}
+
+function cloneSourceCopyOffsets(
+  offsets: MarkdownSourceCopyIndexOffsets,
+): MarkdownSourceCopyIndexOffsets {
+  return {
+    codeBlockLanguageCounts: new Map(offsets.codeBlockLanguageCounts),
+    mathBlockCount: offsets.mathBlockCount,
+  };
+}
+
+function addSourceBlockCounts(
+  offsets: MarkdownSourceCopyIndexOffsets,
+  text: string,
+) {
+  const counts = countMarkdownSourceBlocks(text);
+  for (const [lang, count] of counts.codeBlockLanguageCounts) {
+    const current = offsets.codeBlockLanguageCounts.get(lang) ?? 0;
+    offsets.codeBlockLanguageCounts.set(lang, current + count);
+  }
+  offsets.mathBlockCount += counts.mathBlockCount;
+}
 
 export const MainContent = () => {
   const { version } = useAppContext();
@@ -177,51 +209,118 @@ export const MainContent = () => {
     prevMergedLengthRef.current = currMLen;
   }, [compactMode, uiState.history, mergedHistory, uiActions]);
 
+  const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
+    useMemo(() => {
+      let runningOffsets = createEmptySourceCopyOffsets();
+
+      const items = mergedHistory.map((item) => {
+        if (item.type === 'gemini') {
+          runningOffsets = createEmptySourceCopyOffsets();
+          const offsets = cloneSourceCopyOffsets(runningOffsets);
+          addSourceBlockCounts(runningOffsets, item.text);
+          return { item, sourceCopyIndexOffsets: offsets };
+        }
+
+        if (item.type === 'gemini_content') {
+          const offsets = cloneSourceCopyOffsets(runningOffsets);
+          addSourceBlockCounts(runningOffsets, item.text);
+          return { item, sourceCopyIndexOffsets: offsets };
+        }
+
+        if (item.type === 'user') {
+          runningOffsets = createEmptySourceCopyOffsets();
+        }
+
+        return { item, sourceCopyIndexOffsets: undefined };
+      });
+
+      return {
+        historyItemsWithSourceCopyOffsets: items,
+        pendingStartSourceCopyOffsets: cloneSourceCopyOffsets(runningOffsets),
+      };
+    }, [mergedHistory]);
+
+  const pendingHistoryItemsWithSourceCopyOffsets = useMemo(() => {
+    let runningOffsets = cloneSourceCopyOffsets(pendingStartSourceCopyOffsets);
+
+    return pendingHistoryItems.map((item) => {
+      if (item.type === 'gemini') {
+        runningOffsets = createEmptySourceCopyOffsets();
+        const offsets = cloneSourceCopyOffsets(runningOffsets);
+        addSourceBlockCounts(runningOffsets, item.text);
+        return { item, sourceCopyIndexOffsets: offsets };
+      }
+
+      if (item.type === 'gemini_content') {
+        const offsets = cloneSourceCopyOffsets(runningOffsets);
+        addSourceBlockCounts(runningOffsets, item.text);
+        return { item, sourceCopyIndexOffsets: offsets };
+      }
+
+      if (item.type === 'user') {
+        runningOffsets = createEmptySourceCopyOffsets();
+      }
+
+      return { item, sourceCopyIndexOffsets: undefined };
+    });
+  }, [pendingHistoryItems, pendingStartSourceCopyOffsets]);
+
   return (
     <>
+      {/*
+        renderMode is intentionally omitted here. AppContainer calls
+        refreshStatic() when renderMode changes, which updates
+        historyRemountKey; including both would remount Static twice.
+      */}
       <Static
-        key={historyRemountKey}
+        key={`${historyRemountKey}-${uiState.currentModel}`}
         items={[
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,
           <Notifications key="notifications" />,
-          ...mergedHistory.map((h) => (
-            <HistoryItemDisplay
-              terminalWidth={terminalWidth}
-              mainAreaWidth={mainAreaWidth}
-              availableTerminalHeight={staticAreaMaxItemHeight}
-              availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
-              key={h.id}
-              item={h}
-              isPending={false}
-              commands={uiState.slashCommands}
-              compactLabel={getCompactLabel(h)}
-              summaryAbsorbed={isSummaryAbsorbed(h)}
-            />
-          )),
+          ...historyItemsWithSourceCopyOffsets.map(
+            ({ item: h, sourceCopyIndexOffsets }) => (
+              <HistoryItemDisplay
+                terminalWidth={terminalWidth}
+                mainAreaWidth={mainAreaWidth}
+                availableTerminalHeight={staticAreaMaxItemHeight}
+                availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
+                key={h.id}
+                item={h}
+                isPending={false}
+                commands={uiState.slashCommands}
+                compactLabel={getCompactLabel(h)}
+                summaryAbsorbed={isSummaryAbsorbed(h)}
+                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+              />
+            ),
+          ),
         ]}
       >
         {(item) => item}
       </Static>
       <OverflowProvider>
         <Box flexDirection="column">
-          {pendingHistoryItems.map((item, i) => (
-            <HistoryItemDisplay
-              key={i}
-              availableTerminalHeight={
-                uiState.constrainHeight ? availableTerminalHeight : undefined
-              }
-              terminalWidth={terminalWidth}
-              mainAreaWidth={mainAreaWidth}
-              item={{ ...item, id: 0 }}
-              isPending={true}
-              isFocused={!uiState.isEditorDialogOpen}
-              activeShellPtyId={uiState.activePtyId}
-              embeddedShellFocused={uiState.embeddedShellFocused}
-              compactLabel={getCompactLabel(item)}
-              summaryAbsorbed={isSummaryAbsorbed(item)}
-            />
-          ))}
+          {pendingHistoryItemsWithSourceCopyOffsets.map(
+            ({ item, sourceCopyIndexOffsets }, i) => (
+              <HistoryItemDisplay
+                key={i}
+                availableTerminalHeight={
+                  uiState.constrainHeight ? availableTerminalHeight : undefined
+                }
+                terminalWidth={terminalWidth}
+                mainAreaWidth={mainAreaWidth}
+                item={{ ...item, id: 0 }}
+                isPending={true}
+                isFocused={!uiState.isEditorDialogOpen}
+                activeShellPtyId={uiState.activePtyId}
+                embeddedShellFocused={uiState.embeddedShellFocused}
+                compactLabel={getCompactLabel(item)}
+                summaryAbsorbed={isSummaryAbsorbed(item)}
+                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+              />
+            ),
+          )}
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </Box>
       </OverflowProvider>
