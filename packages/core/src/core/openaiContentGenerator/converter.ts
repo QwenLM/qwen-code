@@ -59,7 +59,16 @@ export interface ExtendedCompletionChunkDelta
   reasoning?: string | null;
 }
 
+// Threshold for treating an exact-repeat chunk as a cumulative marker rather
+// than legitimate repeated content. Cumulative providers typically emit whole
+// words/phrases (≥20 chars); sub-word repeats (e.g. "ha") are more likely to
+// be valid incremental output.
 const CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH = 20;
+
+// Once this many bytes have been emitted without entering cumulative mode the
+// stream is almost certainly a standard incremental provider. Stop growing
+// emittedText beyond this point to bound per-stream memory and CPU.
+const CUMULATIVE_DETECTION_WINDOW_BYTES = 1024;
 
 // Some OpenAI-compatible providers send accumulated content in each
 // delta.content field. Normalize that shape to incremental suffixes before the
@@ -124,7 +133,9 @@ function normalizeStreamingTextDelta(
     return rawDelta;
   }
 
-  state.emittedText += rawDelta;
+  if (state.emittedText.length < CUMULATIVE_DETECTION_WINDOW_BYTES) {
+    state.emittedText += rawDelta;
+  }
   return rawDelta;
 }
 
