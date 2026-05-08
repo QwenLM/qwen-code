@@ -9,6 +9,25 @@ import { QwenAgent } from '../qwen-agent.ts';
 
 type QwenModelInternals = {
   recordSessionModels: (result: Record<string, unknown>) => void;
+  applySessionSettings: (sessionId: string) => Promise<void>;
+  callAcp: <T>(
+    method: string,
+    execute: (connection: {
+      unstable_setSessionModel: (params: {
+        sessionId: string;
+        modelId: string;
+      }) => Promise<T>;
+      setSessionConfigOption: (params: {
+        sessionId: string;
+        configId: string;
+        value: string;
+      }) => Promise<T>;
+      setSessionMode: (params: {
+        sessionId: string;
+        modeId: string;
+      }) => Promise<T>;
+    }) => Promise<T>,
+  ) => Promise<T>;
   captureUsage: (update: Record<string, unknown>) => void;
   eventQueue: {
     drain: () => AsyncGenerator<unknown>;
@@ -111,6 +130,56 @@ describe('QwenAgent model metadata', () => {
       inputTokens: 100,
       contextTokens: 150,
       outputTokens: 50,
+    });
+  });
+
+  it('applies configured session models through ACP session/set_model', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const agent = createAgent(cwd, () => {});
+    const internals = agent as unknown as QwenModelInternals;
+    const methods: string[] = [];
+    const setModelParams: Array<{ sessionId: string; modelId: string }> = [];
+
+    internals.recordSessionModels({
+      models: {
+        currentModelId: 'qwen3-coder-flash',
+        availableModels: [
+          {
+            modelId: 'qwen3-coder-flash',
+            name: 'Qwen3 Coder Flash',
+          },
+          {
+            modelId: 'qwen3-coder-plus',
+            name: 'Qwen3 Coder Plus',
+          },
+        ],
+      },
+    });
+    agent.setModel('qwen3-coder-plus');
+
+    internals.callAcp = async (method, execute) => {
+      methods.push(method);
+      return execute({
+        unstable_setSessionModel: async (params) => {
+          setModelParams.push(params);
+          return undefined as Awaited<ReturnType<typeof execute>>;
+        },
+        setSessionConfigOption: async () => {
+          return undefined as Awaited<ReturnType<typeof execute>>;
+        },
+        setSessionMode: async () => {
+          return undefined as Awaited<ReturnType<typeof execute>>;
+        },
+      });
+    };
+
+    await internals.applySessionSettings('qwen-session-1');
+
+    expect(methods).toContain('session/set_model');
+    expect(methods).not.toContain('session/set_config_option');
+    expect(setModelParams).toContainEqual({
+      sessionId: 'qwen-session-1',
+      modelId: 'qwen3-coder-plus',
     });
   });
 

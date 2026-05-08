@@ -1488,7 +1488,7 @@ export class QwenAgent extends BaseAgent {
     }
 
     if (this._model) {
-      await this.forwardModel(this._model, sessionId, { persistDefault: false });
+      await this.forwardModel(this._model, sessionId);
     }
   }
 
