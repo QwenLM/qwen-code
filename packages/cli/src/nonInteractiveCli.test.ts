@@ -21,7 +21,9 @@ import {
   FatalInputError,
   ApprovalMode,
   SendMessageType,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
+import type { JsonOutputAdapterInterface } from './nonInteractive/io/BaseJsonOutputAdapter.js';
 import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
@@ -2418,5 +2420,155 @@ describe('runNonInteractive', () => {
       'prompt-blocks-content',
       { type: SendMessageType.UserQuery },
     );
+  });
+
+  // ---- --json-schema (structured_output) contract --------------------
+  // These two cover the runtime branches gpt-5.5 review S8 flagged as
+  // missing test coverage. We mock the LLM at sendMessageStream so the
+  // assertions are deterministic; the L2 integration tests in
+  // integration-tests/cli/json-schema.test.ts run the same flow against
+  // a real model as smoke coverage.
+
+  function makeMockAdapter(): JsonOutputAdapterInterface {
+    return {
+      startAssistantMessage: vi.fn(),
+      processEvent: vi.fn(),
+      finalizeAssistantMessage: vi.fn().mockReturnValue({
+        type: 'assistant',
+        uuid: 'mock-uuid',
+        session_id: 'test-session-id',
+        parent_tool_use_id: null,
+        message: {
+          id: 'mock-uuid',
+          type: 'message',
+          role: 'assistant',
+          model: 'test-model',
+          content: [],
+          stop_reason: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      }),
+      emitResult: vi.fn(),
+      emitMessage: vi.fn(),
+      emitUserMessage: vi.fn(),
+      emitToolResult: vi.fn(),
+      emitSystemMessage: vi.fn(),
+      emitToolProgress: vi.fn(),
+      getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getModel: vi.fn().mockReturnValue('test-model'),
+    } as unknown as JsonOutputAdapterInterface;
+  }
+
+  it('emits structuredResult and stops when structured_output is called under --json-schema', async () => {
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'number' } },
+    });
+
+    // Single turn: model fires the synthetic structured_output tool with
+    // its final payload as args, then Finished. No follow-up turn should
+    // run — runNonInteractive's structured-output branch returns early.
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'so-1',
+        name: ToolNames.STRUCTURED_OUTPUT,
+        args: { answer: 42 },
+        isClientInitiated: false,
+        prompt_id: 'p-structured-success',
+      },
+    };
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        toolCallEvent,
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+        },
+      ]),
+    );
+    // No error → runtime sets structuredSubmission and terminates.
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Structured output accepted.' }],
+    });
+
+    const adapter = makeMockAdapter();
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'compute 21*2',
+      'p-structured-success',
+      { adapter },
+    );
+
+    // Single-shot contract: no follow-up turn was issued.
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    // Background tasks aborted so they don't race the terminal emitResult.
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(1);
+    // structuredResult lands in the result message exactly as the model
+    // submitted it (no schema massaging at the runtime layer).
+    expect(adapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(adapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: false,
+        structuredResult: { answer: 42 },
+        numTurns: 1,
+      }),
+    );
+  });
+
+  it('sets process.exitCode=1 and writes stderr when model emits text under --json-schema', async () => {
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'string' } },
+    });
+
+    // Snapshot/restore the global so a stray exitCode=1 doesn't bleed into
+    // sibling tests in the file.
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+
+    try {
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'plain answer' },
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+      const adapter = makeMockAdapter();
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'q',
+        'p-structured-text',
+        { adapter },
+      );
+
+      expect(process.exitCode).toBe(1);
+      // adapter sees the contract violation as an error result.
+      expect(adapter.emitResult).toHaveBeenCalledTimes(1);
+      expect(adapter.emitResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isError: true,
+          errorMessage: expect.stringMatching(/Model produced plain text/),
+        }),
+      );
+      // TEXT-mode users get a visible stderr line — emitResult is a no-op
+      // in TEXT mode for the isError-true path, so the stderr write is
+      // the only feedback they'd see if --output-format is unset.
+      expect(processStderrSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/qwen --json-schema: Model produced plain text/),
+      );
+    } finally {
+      process.exitCode = priorExitCode;
+    }
   });
 });
