@@ -351,13 +351,16 @@ export class ToolRegistry {
     // Remove prompts
     this.config.getPromptRegistry().removePromptsByServer(serverName);
 
-    // Disconnect the MCP client
-    await this.mcpClientManager.disconnectServer(serverName);
-
-    // Drop the server from the global status registry so the Footer's
-    // MCP health pill doesn't keep counting it as "offline" — disabling
-    // is intentional, not a connectivity failure.
-    removeMCPServerStatus(serverName);
+    try {
+      // Disconnect the MCP client
+      await this.mcpClientManager.disconnectServer(serverName);
+    } finally {
+      // Always drop the server from the global status registry — even if
+      // disconnect throws — so the Footer's MCP health pill stops counting
+      // it as "offline". Disabling is intentional, not a connectivity
+      // failure, and a leftover entry would resurrect the bug from #3895.
+      removeMCPServerStatus(serverName);
+    }
 
     // Update config's exclusion list
     const currentExcluded = this.config.getExcludedMcpServers() || [];

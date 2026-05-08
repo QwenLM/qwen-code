@@ -544,6 +544,24 @@ describe('ToolRegistry', () => {
       }
     });
 
+    it('still removes the registry entry when disconnect throws', async () => {
+      updateMCPServerStatus('flaky-server', MCPServerStatus.DISCONNECTED);
+      vi.spyOn(config, 'getExcludedMcpServers').mockReturnValue([]);
+      vi.spyOn(config, 'setExcludedMcpServers').mockImplementation(() => {});
+      vi.spyOn(
+        McpClientManager.prototype,
+        'disconnectServer',
+      ).mockRejectedValue(new Error('boom'));
+
+      await expect(
+        toolRegistry.disableMcpServer('flaky-server'),
+      ).rejects.toThrow('boom');
+
+      // Even though disconnect threw, the global status entry must be cleared
+      // so the health pill stops counting the server.
+      expect(getAllMCPServerStatuses().has('flaky-server')).toBe(false);
+    });
+
     it('removes the server from the global status registry so the health pill stops counting it', async () => {
       // Simulate an MCP server that connected and then dropped — the global
       // registry would carry a DISCONNECTED entry for it.

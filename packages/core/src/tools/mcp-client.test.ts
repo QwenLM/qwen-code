@@ -555,6 +555,48 @@ describe('mcp-client', () => {
       removeMCPStatusChangeListener(listener);
       expect(listener).not.toHaveBeenCalled();
     });
+
+    it('a stale status update from an in-flight connect cannot resurrect a removed server', async () => {
+      // Race scenario from PR review: `disableMcpServer` removes the entry,
+      // but `McpClient.connect()`'s catch block could still fire afterwards
+      // and call `updateStatus(DISCONNECTED)`. The `isDisconnecting` guard
+      // inside `McpClient.updateStatus` must prevent that resurrection.
+      const mockedClient = {
+        connect: vi.fn().mockRejectedValue(new Error('connect failed')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn(),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+
+      const client = new McpClient(
+        'racy-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+
+      // Kick off connect() but don't await it; it will reject and run its
+      // catch block which calls updateStatus(DISCONNECTED).
+      const connectPromise = client.connect();
+
+      // Simulate the disable path running before connect's catch fires.
+      await client.disconnect();
+      removeMCPServerStatus('racy-server');
+
+      // Now let the rejected connect propagate.
+      await expect(connectPromise).rejects.toThrow('connect failed');
+
+      // The entry must remain absent — no resurrection.
+      expect(getAllMCPServerStatuses().has('racy-server')).toBe(false);
+    });
   });
 
   describe('hasNetworkTransport', () => {

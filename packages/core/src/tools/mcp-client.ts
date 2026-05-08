@@ -224,6 +224,14 @@ export class McpClient {
 
   private updateStatus(status: MCPServerStatus): void {
     this.status = status;
+    // Once disconnect has begun, don't propagate further status changes to
+    // the global registry. An in-flight `connect()` whose catch block fires
+    // after `disableMcpServer` has already removed the entry would otherwise
+    // silently resurrect the server and the Footer's MCP health pill would
+    // continue to count it as offline.
+    if (this.isDisconnecting) {
+      return;
+    }
     updateMCPServerStatus(this.serverName, status);
   }
 
@@ -306,8 +314,10 @@ export function updateMCPServerStatus(
   status: MCPServerStatus,
 ): void {
   serverStatuses.set(serverName, status);
-  // Notify all listeners
-  for (const listener of statusChangeListeners) {
+  // Snapshot the listener list so a listener that detaches itself (or
+  // attaches a new one) during dispatch doesn't mutate the array we're
+  // iterating.
+  for (const listener of [...statusChangeListeners]) {
     listener(serverName, status);
   }
 }
@@ -322,7 +332,7 @@ export function removeMCPServerStatus(serverName: string): void {
     return;
   }
   serverStatuses.delete(serverName);
-  for (const listener of statusChangeListeners) {
+  for (const listener of [...statusChangeListeners]) {
     listener(serverName, undefined);
   }
 }
