@@ -522,12 +522,13 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   /**
    * True while the tool message is rendered inside `pendingHistoryItems`
    * (live area), false (or omitted — undefined is treated as false)
-   * once committed to `<Static>`. Live-area renderers MUST pass
-   * `true` explicitly; committed renderers can omit it. Used by the
-   * subagent renderer to gate the scrollback summary so the live
-   * area stays panel-only — without this gate the summary would
-   * duplicate the synthesized row LiveAgentPanel already renders
-   * below the composer the moment a subagent terminates.
+   * once committed to `<Static>`. Forwarded for parity with sibling
+   * renderers and possible future gating; currently inert inside this
+   * component. The live-phase filter for panel-owned subagent entries
+   * lives in `ToolGroupMessage` (the only call site), and the terminal
+   * `SubagentScrollbackSummary` fires regardless of `isPending` so the
+   * inline path can bridge the gap between `unregisterForeground`'s
+   * post-delete panel-snapshot drop and the parent turn committing.
    */
   isPending?: boolean;
 }

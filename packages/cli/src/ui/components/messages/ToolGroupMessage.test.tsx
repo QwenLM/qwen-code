@@ -803,5 +803,41 @@ describe('<ToolGroupMessage />', () => {
       );
       expect(lastFrame() ?? '').toContain('MockSubagent[task-failed]');
     });
+
+    it('compact mode: live mixed group filters panel-owned subagent out of count + active tool', () => {
+      // Regression: in compact mode, the per-tool live-phase filter
+      // used to live inside the expanded `.map()`, which `showCompact`
+      // returned BEFORE. So a mixed live group (running subagent +
+      // sibling tool) sent the unfiltered list to
+      // `CompactToolGroupDisplay`, where the running subagent could
+      // (a) inflate the count to N (`× N` suffix), and (b) win
+      // `getActiveTool` (Executing beats sibling's Success / Pending),
+      // overriding the header with the subagent's name. The fix
+      // derives `inlineToolCalls` ONCE before any compact decision so
+      // both the count and the active-tool selection see only what
+      // will actually render inline.
+      const sibling = createToolCall({
+        callId: 'read-1',
+        name: 'read_file',
+        description: 'read config.yaml',
+        status: ToolCallStatus.Success,
+      });
+      const { lastFrame } = renderCompact(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={[subagentCall('running'), sibling]}
+          isPending={true}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // Sibling is the only inline survivor → wins active-tool, count
+      // collapses to 1 (no `× N` suffix).
+      expect(frame).toContain('read_file');
+      expect(frame).not.toMatch(/× 2/);
+      // Sibling description should appear; subagent description
+      // should not.
+      expect(frame).toContain('read config.yaml');
+      expect(frame).not.toContain('Delegate task to subagent');
+    });
   });
 });
