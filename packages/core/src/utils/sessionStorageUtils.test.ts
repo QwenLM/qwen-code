@@ -301,6 +301,51 @@ describe('sessionStorageUtils', () => {
       ).toBe('last');
     });
 
+    it('does not pick up a customTitle from a partial trailing line in the head window', () => {
+      // The head buffer is a fixed 64KB slice — its last bytes can fall
+      // mid-record. Without trimming to the last newline, the extractor
+      // sees a partial line whose `customTitle` value happens to be
+      // closed within the buffer, picks it up as the latest match, and
+      // returns the (possibly-misleading) value from a record we never
+      // saw end. The fix drops everything past the final newline before
+      // running the extractor, so only complete lines vote.
+      //
+      // Layout:
+      //   line1: a complete custom_title record at offset 0
+      //   line2: a record that begins inside the head window with both
+      //          `"customTitle":"phantom"` and `"subtype":"custom_title"`
+      //          fully visible (and a closed value), but whose body
+      //          extends >64KB so its trailing `\n` is past the head
+      //          boundary
+      //   filler: pads file size past 2× LITE_READ_BUF_SIZE so head
+      //          fallback runs and tail has no match
+      const line1 =
+        '{"type":"system","subtype":"custom_title","customTitle":"complete"}\n';
+      const line2Prefix =
+        '{"type":"system","subtype":"custom_title","customTitle":"phantom","filler":"';
+      // Make line2 long enough that its closing `"}\n` is past the head
+      // window (LITE_READ_BUF_SIZE = 64KB). 70KB of `x` guarantees that.
+      const line2 =
+        line2Prefix + 'x'.repeat(LITE_READ_BUF_SIZE + 8 * 1024) + '"}\n';
+      // Push file size past 2 × LITE_READ_BUF_SIZE so listSessions-style
+      // callers go through head fallback (tail has no match).
+      const tailFiller =
+        '{"type":"user","message":"' +
+        'a'.repeat(LITE_READ_BUF_SIZE + 4 * 1024) +
+        '"}\n';
+      const p = writeFile(
+        'partial-line-head.jsonl',
+        line1 + line2 + tailFiller,
+      );
+
+      // Head trim drops the partial line2 prefix; only the complete
+      // line1 contributes a match. Without the fix, "phantom" would
+      // win by virtue of being later in the buffer.
+      expect(
+        readLastJsonStringFieldSync(p, 'customTitle', 'custom_title'),
+      ).toBe('complete');
+    });
+
     it('reuses a caller-provided scratch buffer across tail and head reads', () => {
       // Smoke test for the buffer-pool plumbing: when the caller hands
       // in a scratch buffer (as `listSessions` does on every page), the

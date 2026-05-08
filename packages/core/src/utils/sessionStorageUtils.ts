@@ -305,7 +305,16 @@ export function readLastJsonStringFieldSync(
     const headLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const headBytes = fs.readSync(fd, buffer, 0, headLength, 0);
     if (headBytes > 0) {
-      const headText = buffer.toString('utf-8', 0, headBytes);
+      const rawHead = buffer.toString('utf-8', 0, headBytes);
+      // Drop the trailing partial line: a record that started inside the
+      // head window but whose closing quote lives past 64KB would be
+      // silently skipped by the extractor (no terminating `"` before EOS).
+      // For boundary-straddling pre-invariant records, that means the title
+      // is lost. Truncating at the last newline keeps us on whole lines.
+      const headText =
+        headBytes < fileSize
+          ? rawHead.slice(0, rawHead.lastIndexOf('\n') + 1)
+          : rawHead;
       const headHit = extractLastJsonStringField(headText, key, lineContains);
       if (headHit !== undefined) {
         return headHit;
@@ -385,7 +394,12 @@ export function readLastJsonStringFieldsSync(
     const headLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const headBytes = fs.readSync(fd, buffer, 0, headLength, 0);
     if (headBytes > 0) {
-      const headText = buffer.toString('utf-8', 0, headBytes);
+      const rawHead = buffer.toString('utf-8', 0, headBytes);
+      // Truncate to whole lines — see the single-field variant for why.
+      const headText =
+        headBytes < fileSize
+          ? rawHead.slice(0, rawHead.lastIndexOf('\n') + 1)
+          : rawHead;
       const hit = extractLastJsonStringFields(
         headText,
         primaryKey,
