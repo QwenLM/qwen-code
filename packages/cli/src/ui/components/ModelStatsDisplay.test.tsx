@@ -14,6 +14,8 @@ import type {
   SessionMetrics,
 } from '../contexts/SessionContext.js';
 import { MAIN_SOURCE } from '@qwen-code/qwen-code-core';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 const mainOnly = (core: ModelMetricsCore): ModelMetrics => ({
   ...core,
@@ -31,9 +33,16 @@ vi.mock('../contexts/SessionContext.js', async (importOriginal) => {
 
 const useSessionStatsMock = vi.mocked(SessionContext.useSessionStats);
 
-const renderWithMockedStats = (metrics: SessionMetrics) => {
+const renderWithMockedStats = (
+  metrics: SessionMetrics,
+  modelPricing?: Record<
+    string,
+    { inputPerMillionTokens?: number; outputPerMillionTokens?: number }
+  >,
+) => {
   useSessionStatsMock.mockReturnValue({
     stats: {
+      sessionId: '',
       sessionStartTime: new Date(),
       metrics,
       lastPromptTokenCount: 0,
@@ -42,9 +51,18 @@ const renderWithMockedStats = (metrics: SessionMetrics) => {
 
     getPromptCount: () => 5,
     startNewPrompt: vi.fn(),
+    startNewSession: vi.fn(),
   });
 
-  return render(<ModelStatsDisplay />);
+  const mockSettings = {
+    merged: { modelPricing },
+  } as unknown as LoadedSettings;
+
+  return render(
+    <SettingsContext.Provider value={mockSettings}>
+      <ModelStatsDisplay />
+    </SettingsContext.Provider>,
+  );
 };
 
 describe('<ModelStatsDisplay />', () => {
@@ -69,9 +87,10 @@ describe('<ModelStatsDisplay />', () => {
         totalSuccess: 0,
         totalFail: 0,
         totalDurationMs: 0,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
       },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     });
 
     expect(lastFrame()).toContain(
@@ -99,9 +118,10 @@ describe('<ModelStatsDisplay />', () => {
         totalSuccess: 0,
         totalFail: 0,
         totalDurationMs: 0,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
       },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     });
 
     const output = lastFrame();
@@ -139,9 +159,10 @@ describe('<ModelStatsDisplay />', () => {
         totalSuccess: 0,
         totalFail: 0,
         totalDurationMs: 0,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
       },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     });
 
     const output = lastFrame();
@@ -179,9 +200,10 @@ describe('<ModelStatsDisplay />', () => {
         totalSuccess: 0,
         totalFail: 0,
         totalDurationMs: 0,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
       },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     });
 
     const output = lastFrame();
@@ -213,9 +235,10 @@ describe('<ModelStatsDisplay />', () => {
         totalSuccess: 0,
         totalFail: 0,
         totalDurationMs: 0,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
       },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     });
 
     expect(lastFrame()).toMatchSnapshot();
@@ -240,9 +263,10 @@ describe('<ModelStatsDisplay />', () => {
         totalSuccess: 0,
         totalFail: 0,
         totalDurationMs: 0,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
       },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     });
 
     const output = lastFrame();
@@ -257,7 +281,7 @@ describe('<ModelStatsDisplay />', () => {
       totalSuccess: 0,
       totalFail: 0,
       totalDurationMs: 0,
-      totalDecisions: { accept: 0, reject: 0, modify: 0 },
+      totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
       byName: {},
     };
     const baseFiles: SessionMetrics['files'] = {
@@ -312,6 +336,145 @@ describe('<ModelStatsDisplay />', () => {
       const output = lastFrame();
       expect(output).toContain('glm-5 (main)');
       expect(output).toContain('glm-5 (echoer)');
+    });
+
+    describe('Cost estimation', () => {
+      const makeCore = (
+        prompt: number,
+        candidates: number,
+        thoughts: number,
+      ): ModelMetricsCore => ({
+        api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+        tokens: {
+          prompt,
+          candidates,
+          total: prompt + candidates + thoughts,
+          cached: 0,
+          thoughts,
+          tool: 0,
+        },
+      });
+
+      const baseTools: SessionMetrics['tools'] = {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+        byName: {},
+      };
+      const baseFiles: SessionMetrics['files'] = {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      };
+
+      const renderCostTest = (
+        models: Record<string, ModelMetrics>,
+        pricing?: Record<
+          string,
+          { inputPerMillionTokens?: number; outputPerMillionTokens?: number }
+        >,
+      ) =>
+        renderWithMockedStats(
+          { models, tools: baseTools, files: baseFiles },
+          pricing,
+        );
+
+      it('should not display Cost section when no pricing and no thoughts', () => {
+        const { lastFrame } = renderCostTest(
+          { 'gemini-2.5-pro': mainOnly(makeCore(10, 20, 0)) },
+          {},
+        );
+        expect(lastFrame()).not.toContain('Cost');
+        expect(lastFrame()).not.toContain('Estimated');
+      });
+
+      it('should display Cost section when pricing is configured', () => {
+        const { lastFrame } = renderCostTest(
+          { 'gemini-2.5-pro': mainOnly(makeCore(10, 20, 0)) },
+          {
+            'gemini-2.5-pro': {
+              inputPerMillionTokens: 1,
+              outputPerMillionTokens: 2,
+            },
+          },
+        );
+        expect(lastFrame()).toContain('Cost');
+        expect(lastFrame()).toContain('Estimated');
+        // 10 * 1/1M + 20 * 2/1M = 0.00001 + 0.00004 = 0.00005 -> 0.0001
+        expect(lastFrame()).toContain('0.0001');
+      });
+
+      it('should include thoughts tokens in cost calculation (regression)', () => {
+        const { lastFrame } = renderCostTest(
+          { 'gemini-2.5-pro': mainOnly(makeCore(10, 20, 5)) },
+          {
+            'gemini-2.5-pro': {
+              inputPerMillionTokens: 1,
+              outputPerMillionTokens: 2,
+            },
+          },
+        );
+        expect(lastFrame()).toContain('Cost');
+        // With thoughts=5: (10*1 + 25*2)/1M = 0.00006 -> rounds to 0.0001
+        // Without thoughts: (10*1 + 20*2)/1M = 0.00005 -> rounds to 0.0001
+        // Use larger numbers to make the difference visible
+      });
+
+      it('should include thoughts tokens — larger numbers to expose difference', () => {
+        // 1000 prompt, 2000 candidates, 500 thoughts
+        // With thoughts: (1000*1 + 2500*2)/1M = 0.001 + 0.005 = 0.006
+        // Without thoughts: (1000*1 + 2000*2)/1M = 0.001 + 0.004 = 0.005
+        const { lastFrame } = renderCostTest(
+          { 'gemini-2.5-pro': mainOnly(makeCore(1000, 2000, 500)) },
+          {
+            'gemini-2.5-pro': {
+              inputPerMillionTokens: 1,
+              outputPerMillionTokens: 2,
+            },
+          },
+        );
+        expect(lastFrame()).toContain('Cost');
+        expect(lastFrame()).toContain('0.0060');
+      });
+
+      it('should use raw model name for pricing with subagent attribution', () => {
+        const core = makeCore(10, 20, 0);
+        const { lastFrame } = renderCostTest(
+          {
+            'gemini-2.5-pro': {
+              ...core,
+              bySource: {
+                [MAIN_SOURCE]: core,
+                echoer: { ...core, tokens: { ...core.tokens } },
+              },
+            } as unknown as ModelMetrics,
+          },
+          // Pricing keyed by raw name, not "gemini-2.5-pro::echoer"
+          {
+            'gemini-2.5-pro': {
+              inputPerMillionTokens: 1,
+              outputPerMillionTokens: 2,
+            },
+          },
+        );
+        expect(lastFrame()).toContain('Cost');
+        expect(lastFrame()).toContain('Estimated');
+      });
+
+      it('should handle multiple models with different pricing', () => {
+        const { lastFrame } = renderCostTest(
+          {
+            'model-a': mainOnly(makeCore(100, 200, 10)),
+            'model-b': mainOnly(makeCore(50, 80, 0)),
+          },
+          {
+            'model-a': { inputPerMillionTokens: 2, outputPerMillionTokens: 4 },
+            'model-b': { inputPerMillionTokens: 1, outputPerMillionTokens: 3 },
+          },
+        );
+        expect(lastFrame()).toContain('Cost');
+      });
     });
   });
 });

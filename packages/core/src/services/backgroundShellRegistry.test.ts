@@ -116,7 +116,9 @@ describe('BackgroundShellRegistry', () => {
     it('fires statusChange callback on register too (mirrors BackgroundTaskRegistry)', () => {
       const reg = new BackgroundShellRegistry();
       const seen: string[] = [];
-      reg.setStatusChangeCallback((e) => seen.push(e.shellId));
+      reg.setStatusChangeCallback((entry) => {
+        if (entry) seen.push(entry.shellId);
+      });
       reg.register(makeEntry({ shellId: 'a' }));
       reg.register(makeEntry({ shellId: 'b' }));
       expect(seen).toEqual(['a', 'b']);
@@ -128,9 +130,11 @@ describe('BackgroundShellRegistry', () => {
       reg.register(makeEntry({ shellId: 'b' }));
       reg.register(makeEntry({ shellId: 'c' }));
       const transitions: Array<{ id: string; status: string }> = [];
-      reg.setStatusChangeCallback((entry) =>
-        transitions.push({ id: entry.shellId, status: entry.status }),
-      );
+      reg.setStatusChangeCallback((entry) => {
+        if (entry) {
+          transitions.push({ id: entry.shellId, status: entry.status });
+        }
+      });
 
       reg.complete('a', 0, 1000);
       reg.fail('b', 'boom', 1100);
@@ -146,7 +150,9 @@ describe('BackgroundShellRegistry', () => {
     it('does not fire statusChange when a transition is a no-op', () => {
       const reg = new BackgroundShellRegistry();
       const transitions: string[] = [];
-      reg.setStatusChangeCallback((e) => transitions.push(e.shellId));
+      reg.setStatusChangeCallback((entry) => {
+        if (entry) transitions.push(entry.shellId);
+      });
       reg.register(makeEntry({ shellId: 'a' }));
       reg.complete('a', 0, 1000);
       transitions.length = 0;
@@ -236,6 +242,26 @@ describe('BackgroundShellRegistry', () => {
     it('is a no-op when registry is empty', () => {
       const reg = new BackgroundShellRegistry();
       expect(() => reg.abortAll()).not.toThrow();
+    });
+  });
+
+  describe('session switch helpers', () => {
+    it('reports whether any shell is still running', () => {
+      const reg = new BackgroundShellRegistry();
+      reg.register(makeEntry({ shellId: 'a' }));
+      expect(reg.hasRunningEntries()).toBe(true);
+      reg.complete('a', 0, 1234);
+      expect(reg.hasRunningEntries()).toBe(false);
+    });
+
+    it('reset clears all tracked entries', () => {
+      const reg = new BackgroundShellRegistry();
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.register(makeEntry({ shellId: 'b' }));
+
+      reg.reset();
+
+      expect(reg.getAll()).toEqual([]);
     });
   });
 

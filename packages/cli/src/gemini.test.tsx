@@ -493,11 +493,19 @@ describe('gemini.tsx main function kitty protocol', () => {
   let setRawModeSpy: MockInstance<
     (mode: boolean) => NodeJS.ReadStream & { fd: 0 }
   >;
+  let initialSigintListeners: NodeJS.SignalsListener[];
+  let initialSigtermListeners: NodeJS.SignalsListener[];
 
   beforeEach(() => {
     // Set no relaunch in tests since process spawning causing issues in tests
     originalEnvNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
     process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    initialSigintListeners = process.listeners(
+      'SIGINT',
+    ) as NodeJS.SignalsListener[];
+    initialSigtermListeners = process.listeners(
+      'SIGTERM',
+    ) as NodeJS.SignalsListener[];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (!(process.stdin as any).setRawMode) {
@@ -517,12 +525,24 @@ describe('gemini.tsx main function kitty protocol', () => {
   });
 
   afterEach(() => {
+    for (const listener of process.listeners('SIGINT')) {
+      if (!initialSigintListeners.includes(listener)) {
+        process.removeListener('SIGINT', listener as NodeJS.SignalsListener);
+      }
+    }
+    for (const listener of process.listeners('SIGTERM')) {
+      if (!initialSigtermListeners.includes(listener)) {
+        process.removeListener('SIGTERM', listener as NodeJS.SignalsListener);
+      }
+    }
+
     // Restore original env variables
     if (originalEnvNoRelaunch !== undefined) {
       process.env['QWEN_CODE_NO_RELAUNCH'] = originalEnvNoRelaunch;
     } else {
       delete process.env['QWEN_CODE_NO_RELAUNCH'];
     }
+    vi.restoreAllMocks();
   });
 
   it('should call setRawMode and detectAndEnableKittyProtocol when isInteractive is true', async () => {
@@ -617,6 +637,79 @@ describe('gemini.tsx main function kitty protocol', () => {
 
     expect(setRawModeSpy).toHaveBeenCalledWith(true);
     expect(detectAndEnableKittyProtocol).toHaveBeenCalledTimes(1);
+  });
+
+  it('should run cleanup before exiting on interactive SIGINT', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const processOnceSpy = vi.spyOn(process, 'once').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+        signalHandlers.set(eventName, listener);
+      }
+      return process;
+    }) as typeof process.once);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      initialize: vi.fn(),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      getModelsConfig: () => ({
+        getCurrentAuthType: () => null,
+        getGenerationConfig: () => ({}),
+      }),
+      getProxy: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    await main();
+    signalHandlers.get('SIGINT')?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(setRawModeSpy).toHaveBeenCalledWith(false);
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    expect(processExitSpy).toHaveBeenCalledWith(130);
+
+    processOnceSpy.mockRestore();
+    processExitSpy.mockRestore();
   });
 });
 

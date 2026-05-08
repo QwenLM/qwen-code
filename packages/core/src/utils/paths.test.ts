@@ -25,6 +25,7 @@ import {
   isSubpath,
   shortenPath,
   tildeifyPath,
+  expandHomeDir,
   getProjectHash,
   _resetValidatePathCacheForTest,
 } from './paths.js';
@@ -192,81 +193,97 @@ describe('escapePath', () => {
 });
 
 describe('unescapePath', () => {
-  it('should unescape spaces', () => {
-    expect(unescapePath('my\\ file.txt')).toBe('my file.txt');
-  });
+  const isWindows = process.platform === 'win32';
 
-  it('should unescape tabs', () => {
-    expect(unescapePath('file\\\twith\\\ttabs.txt')).toBe(
-      'file\twith\ttabs.txt',
+  // On Windows, backslashes are path separators, not shell escape chars.
+  // unescapePath is intentionally a no-op on win32.
+  it.skipIf(!isWindows)('should be a no-op on Windows', () => {
+    expect(unescapePath('C:\\Users\\my file.txt')).toBe(
+      'C:\\Users\\my file.txt',
+    );
+    expect(unescapePath('C:\\(v2)\\file.txt')).toBe('C:\\(v2)\\file.txt');
+    expect(unescapePath('path\\to\\file\\ name.txt')).toBe(
+      'path\\to\\file\\ name.txt',
     );
   });
 
-  it('should unescape parentheses', () => {
-    expect(unescapePath('file\\(1\\).txt')).toBe('file(1).txt');
-  });
-
-  it('should unescape square brackets', () => {
-    expect(unescapePath('file\\[backup\\].txt')).toBe('file[backup].txt');
-  });
-
-  it('should unescape curly braces', () => {
-    expect(unescapePath('file\\{temp\\}.txt')).toBe('file{temp}.txt');
-  });
-
-  it('should unescape multiple special characters', () => {
-    expect(unescapePath('my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt')).toBe(
-      'my file (backup) [v1.2].txt',
-    );
-  });
-
-  it('should handle paths without escaped characters', () => {
-    expect(unescapePath('normalfile.txt')).toBe('normalfile.txt');
-    expect(unescapePath('path/to/normalfile.txt')).toBe(
-      'path/to/normalfile.txt',
-    );
-  });
-
-  it('should handle all special characters', () => {
-    expect(
-      unescapePath(
-        '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
-      ),
-    ).toBe(' ()[]{};&|*?$`\'"#!~<>');
-  });
-
-  it('should be the inverse of escapePath', () => {
-    const testCases = [
-      'my file.txt',
-      'file(1).txt',
-      'file[backup].txt',
-      'My Documents/Project (2024)/file [backup].txt',
-      'file with $special &chars!.txt',
-      ' ()[]{};&|*?$`\'"#!~<>',
-      'file\twith\ttabs.txt',
-    ];
-
-    testCases.forEach((testCase) => {
-      expect(unescapePath(escapePath(testCase))).toBe(testCase);
+  describe.skipIf(isWindows)('on Unix', () => {
+    it('should unescape spaces', () => {
+      expect(unescapePath('my\\ file.txt')).toBe('my file.txt');
     });
-  });
 
-  it('should handle empty strings', () => {
-    expect(unescapePath('')).toBe('');
-  });
+    it('should unescape tabs', () => {
+      expect(unescapePath('file\\\twith\\\ttabs.txt')).toBe(
+        'file\twith\ttabs.txt',
+      );
+    });
 
-  it('should not affect backslashes not followed by special characters', () => {
-    expect(unescapePath('file\\name.txt')).toBe('file\\name.txt');
-    expect(unescapePath('path\\to\\file.txt')).toBe('path\\to\\file.txt');
-  });
+    it('should unescape parentheses', () => {
+      expect(unescapePath('file\\(1\\).txt')).toBe('file(1).txt');
+    });
 
-  it('should handle escaped backslashes in unescaping', () => {
-    // Should correctly unescape when there are escaped backslashes
-    expect(unescapePath('path\\\\\\ file.txt')).toBe('path\\\\ file.txt');
-    expect(unescapePath('path\\\\\\\\\\ file.txt')).toBe(
-      'path\\\\\\\\ file.txt',
-    );
-    expect(unescapePath('file\\\\\\(test\\).txt')).toBe('file\\\\(test).txt');
+    it('should unescape square brackets', () => {
+      expect(unescapePath('file\\[backup\\].txt')).toBe('file[backup].txt');
+    });
+
+    it('should unescape curly braces', () => {
+      expect(unescapePath('file\\{temp\\}.txt')).toBe('file{temp}.txt');
+    });
+
+    it('should unescape multiple special characters', () => {
+      expect(unescapePath('my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt')).toBe(
+        'my file (backup) [v1.2].txt',
+      );
+    });
+
+    it('should handle paths without escaped characters', () => {
+      expect(unescapePath('normalfile.txt')).toBe('normalfile.txt');
+      expect(unescapePath('path/to/normalfile.txt')).toBe(
+        'path/to/normalfile.txt',
+      );
+    });
+
+    it('should handle all special characters', () => {
+      expect(
+        unescapePath(
+          '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
+        ),
+      ).toBe(' ()[]{};&|*?$`\'"#!~<>');
+    });
+
+    it('should be the inverse of escapePath', () => {
+      const testCases = [
+        'my file.txt',
+        'file(1).txt',
+        'file[backup].txt',
+        'My Documents/Project (2024)/file [backup].txt',
+        'file with $special &chars!.txt',
+        ' ()[]{};&|*?$`\'"#!~<>',
+        'file\twith\ttabs.txt',
+      ];
+
+      testCases.forEach((testCase) => {
+        expect(unescapePath(escapePath(testCase))).toBe(testCase);
+      });
+    });
+
+    it('should handle empty strings', () => {
+      expect(unescapePath('')).toBe('');
+    });
+
+    it('should not affect backslashes not followed by special characters', () => {
+      expect(unescapePath('file\\name.txt')).toBe('file\\name.txt');
+      expect(unescapePath('path\\to\\file.txt')).toBe('path\\to\\file.txt');
+    });
+
+    it('should handle escaped backslashes in unescaping', () => {
+      // Should correctly unescape when there are escaped backslashes
+      expect(unescapePath('path\\\\\\ file.txt')).toBe('path\\\\ file.txt');
+      expect(unescapePath('path\\\\\\\\\\ file.txt')).toBe(
+        'path\\\\\\\\ file.txt',
+      );
+      expect(unescapePath('file\\\\\\(test\\).txt')).toBe('file\\\\(test).txt');
+    });
   });
 });
 
@@ -893,5 +910,47 @@ describe('getProjectHash', () => {
     }
 
     platformSpy.mockRestore();
+  });
+});
+
+describe('expandHomeDir', () => {
+  const homeDir = os.homedir();
+
+  it('should return empty string for empty input', () => {
+    expect(expandHomeDir('')).toBe('');
+  });
+
+  it('should expand ~ to home directory', () => {
+    expect(expandHomeDir('~')).toBe(path.normalize(homeDir));
+  });
+
+  it('should expand ~/path to home directory path', () => {
+    expect(expandHomeDir('~/documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should not expand ~path (no slash)', () => {
+    expect(expandHomeDir('~documents')).toBe('~documents');
+  });
+
+  it('should expand %userprofile% (case-insensitive) to home directory', () => {
+    expect(expandHomeDir('%userprofile%')).toBe(path.normalize(homeDir));
+    expect(expandHomeDir('%USERPROFILE%')).toBe(path.normalize(homeDir));
+  });
+
+  it('should expand %userprofile%\\path to home directory path', () => {
+    const result = expandHomeDir('%userprofile%\\documents');
+    expect(result).toBe(path.normalize(homeDir + '\\documents'));
+  });
+
+  it('should return regular absolute path unchanged (but normalized)', () => {
+    expect(expandHomeDir('/absolute/path')).toBe(
+      path.normalize('/absolute/path'),
+    );
+  });
+
+  it('should return relative path unchanged (but normalized)', () => {
+    expect(expandHomeDir('relative/path')).toBe(
+      path.normalize('relative/path'),
+    );
   });
 });

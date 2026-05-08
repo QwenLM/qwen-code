@@ -136,16 +136,25 @@ describe('dreamAgentPlanner', () => {
     ).rejects.toThrow('Model timed out');
   });
 
-  it('returns cancelled result without throwing', async () => {
+  it('throws when the agent terminates as cancelled', async () => {
+    // runForkedAgent maps AgentTerminateMode.CANCELLED to a resolved
+    // `{status: 'cancelled'}` rather than a rejection. Without
+    // re-throwing here, `runDreamByAgent` and downstream callers would
+    // treat an aborted run as a normal completion — bumping
+    // `lastDreamAt` metadata and overwriting a user-cancelled task
+    // record with `'completed'`. The throw lets the manager's existing
+    // catch path (which checks `signal.aborted && status === 'cancelled'`)
+    // do the right thing.
     const mockResult: ForkedAgentResult = {
       status: 'cancelled',
+      terminateReason: 'CANCELLED',
       filesTouched: [],
     };
 
     vi.mocked(runForkedAgent).mockResolvedValue(mockResult);
 
-    const result = await planManagedAutoMemoryDreamByAgent(config, projectRoot);
-    expect(result.status).toBe('cancelled');
-    expect(result.filesTouched).toHaveLength(0);
+    await expect(
+      planManagedAutoMemoryDreamByAgent(config, projectRoot),
+    ).rejects.toThrow(/cancelled/i);
   });
 });

@@ -177,7 +177,9 @@ const MessageList = React.memo<MessageListProps>(
       }
       // No wrapper div — message components render directly as children
       // of the scroll container, preserving the original CSS layout.
-      if (child == null) return null;
+      if (child == null) {
+        return null;
+      }
       mapping.push(index);
       return <React.Fragment key={`msg-${index}`}>{child}</React.Fragment>;
     });
@@ -213,7 +215,9 @@ function findMessageIndex(
   while (directChild && directChild.parentElement !== container) {
     directChild = directChild.parentElement;
   }
-  if (!directChild) return -1;
+  if (!directChild) {
+    return -1;
+  }
 
   // Find DOM child position among container's children
   const children = container.children;
@@ -1211,7 +1215,9 @@ export const App: React.FC = () => {
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const message = event.data;
-      if (message?.type !== 'copyCommand') return;
+      if (message?.type !== 'copyCommand') {
+        return;
+      }
 
       const { action } = message.data as { action: string };
 
@@ -1242,7 +1248,9 @@ export const App: React.FC = () => {
               msg.kind === 'image' && msg.imagePath
                 ? `![image](${msg.imagePath})`
                 : (msg.content || '').trim();
-            if (!content) continue;
+            if (!content) {
+              continue;
+            }
             if (msg.role === 'user') {
               parts.push(`**User:** ${content}`);
             } else if (msg.role === 'thinking') {
@@ -1255,7 +1263,9 @@ export const App: React.FC = () => {
             item.type === 'in-progress-tool-call'
           ) {
             const tc = item.data as ToolCallData;
-            if (!shouldShowToolCall(tc.kind)) continue;
+            if (!shouldShowToolCall(tc.kind)) {
+              continue;
+            }
             const text = formatToolCallForCopy(tc, true);
             if (text) {
               parts.push(`**[Tool: ${tc.kind}]**\n\n${text}`);
