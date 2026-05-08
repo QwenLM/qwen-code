@@ -849,6 +849,7 @@ export class AgentCore {
     for (const input of inputs) {
       this.eventEmitter?.emit(AgentEventType.EXTERNAL_MESSAGE, {
         subagentId: this.subagentId,
+        kind: typeof input === 'string' ? 'message' : input.kind,
         text: typeof input === 'string' ? input : input.text,
         timestamp: Date.now(),
       });

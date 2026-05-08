@@ -818,6 +818,15 @@ describe('AgentTool', () => {
 
       await expect(waitPromise).resolves.toEqual([]);
 
+      const firstOverlapWait = waiter(new AbortController().signal);
+      const secondOverlapWait = waiter(new AbortController().signal);
+
+      lifecycleCallback();
+
+      await expect(
+        Promise.all([firstOverlapWait, secondOverlapWait]),
+      ).resolves.toEqual([[], []]);
+
       releaseExecute?.();
       await vi.runAllTimersAsync();
 

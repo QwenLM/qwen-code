@@ -278,6 +278,8 @@ export interface ChatRecord {
   agentColor?: string;
   /** True for records produced by a subagent (a sidechain off the parent session). */
   isSidechain?: boolean;
+  /** Source kind for injected external input records. */
+  externalInputKind?: 'message' | 'notification';
 }
 
 export interface NotificationRecordPayload {

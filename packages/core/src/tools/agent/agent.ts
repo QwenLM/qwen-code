@@ -88,19 +88,25 @@ function createLocalExternalInputQueue(): {
   wake: () => void;
 } {
   const inputs: AgentExternalInput[] = [];
-  let wake: (() => void) | undefined;
+  const waiters = new Set<() => void>();
 
   const drain = () => inputs.splice(0);
+  const wakeWaiters = () => {
+    const pending = Array.from(waiters);
+    for (const waiter of pending) {
+      waiter();
+    }
+  };
 
   return {
     enqueue(input: AgentExternalInput): boolean {
       inputs.push(input);
-      wake?.();
+      wakeWaiters();
       return true;
     },
     drain,
     wake(): void {
-      wake?.();
+      wakeWaiters();
     },
     wait(signal: AbortSignal): Promise<AgentExternalInput[]> {
       const immediate = drain();
@@ -110,9 +116,7 @@ function createLocalExternalInputQueue(): {
 
       return new Promise<AgentExternalInput[]>((resolve) => {
         const cleanup = () => {
-          if (wake === onWake) {
-            wake = undefined;
-          }
+          waiters.delete(onWake);
           signal.removeEventListener('abort', onAbort);
         };
         const onWake = () => {
@@ -123,7 +127,7 @@ function createLocalExternalInputQueue(): {
           cleanup();
           resolve([]);
         };
-        wake = onWake;
+        waiters.add(onWake);
         signal.addEventListener('abort', onAbort, { once: true });
         if (signal.aborted) {
           cleanup();
