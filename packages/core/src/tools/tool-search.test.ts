@@ -420,6 +420,38 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).not.toContain('"name":"cron_create"');
     expect(String(result.llmContent)).toContain('setTools failed');
   });
+
+  it("rolls back this call's reveals when setTools() throws", async () => {
+    // The reveal happens BEFORE setTools() so that getFunctionDeclarations
+    // includes the tool when setTools rebuilds the chat's declaration
+    // list. If setTools throws, the reveal must be undone — otherwise
+    // the registry says "revealed" while the API has no schema, and
+    // collectCandidates will exclude the tool from future keyword
+    // searches (per its isDeferredToolRevealed filter), making the
+    // tool effectively unreachable until /clear.
+    registry.registerTool(
+      new MockTool({ name: 'cron_create', shouldDefer: true }),
+    );
+    registry.registerTool(
+      new MockTool({ name: 'cron_list', shouldDefer: true }),
+    );
+    // Pre-reveal cron_list to confirm rollback only undoes THIS call's
+    // reveals, not pre-existing ones.
+    registry.revealDeferredTool('cron_list');
+
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: vi.fn().mockRejectedValue(new Error('chat not initialised')),
+    } as never);
+
+    const tool = new ToolSearchTool(config);
+    await tool
+      .build({ query: 'select:cron_create,cron_list' })
+      .execute(new AbortController().signal);
+
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
+    // cron_list was already revealed before this call, so it stays revealed.
+    expect(registry.isDeferredToolRevealed('cron_list')).toBe(true);
+  });
 });
 
 describe('ToolRegistry.clearRevealedDeferredTools', () => {

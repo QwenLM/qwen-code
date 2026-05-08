@@ -588,6 +588,18 @@ export class ToolRegistry {
     this.revealedDeferred.add(name);
   }
 
+  /**
+   * Removes a single tool from the revealed-deferred set. Used for rollback
+   * when a `setTools()` re-sync fails after revealing — leaving the tool
+   * "revealed" in the registry while the chat's declaration list never
+   * received the schema would mean future ToolSearch keyword queries
+   * exclude the tool (per `collectCandidates`'s isDeferredToolRevealed
+   * filter), making it unreachable until `/clear`.
+   */
+  unrevealDeferredTool(name: string): void {
+    this.revealedDeferred.delete(name);
+  }
+
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */
   isDeferredToolRevealed(name: string): boolean {
     return this.revealedDeferred.has(name);

@@ -203,6 +203,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
       lowerIndex.set(realName.toLowerCase(), realName);
     }
 
+    // Track only the tools this call newly reveals so we can roll them
+    // back if setTools() throws. Tools already revealed by an earlier
+    // ToolSearch must stay revealed regardless of this call's outcome.
+    const newlyRevealed: string[] = [];
     for (const requested of names) {
       const canonical = lowerIndex.get(requested.toLowerCase());
       if (!canonical) {
@@ -214,7 +218,11 @@ class ToolSearchInvocation extends BaseToolInvocation<
         missing.push(requested);
         continue;
       }
+      const wasRevealed = registry.isDeferredToolRevealed(canonical);
       registry.revealDeferredTool(canonical);
+      if (!wasRevealed) {
+        newlyRevealed.push(canonical);
+      }
       loaded.push(tool);
     }
 
@@ -237,6 +245,13 @@ class ToolSearchInvocation extends BaseToolInvocation<
           'setTools() failed while revealing deferred tools:',
           err,
         );
+        // Roll back this call's reveals so the registry stays consistent
+        // with the API's declaration list. Without this, keyword search
+        // would treat these tools as "already loaded" and exclude them
+        // from candidates while the API still has no schema for them.
+        for (const name of newlyRevealed) {
+          registry.unrevealDeferredTool(name);
+        }
       }
     }
 
