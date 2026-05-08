@@ -259,6 +259,12 @@ export function useSessionPicker({
 
   const moveSelection = useCallback(
     (delta: -1 | 1) => {
+      // Both directions need the same empty-list guard. Without it, the
+      // -1 branch coasts on `Math.max(0, 0-1) === 0` (no crash), but the
+      // asymmetry was a tell that the empty case wasn't being thought
+      // about — share the early-return so a future tweak in either
+      // branch can't drift past length 0.
+      if (filteredSessions.length === 0) return;
       if (delta === -1) {
         setSelectedIndex((prev) => {
           const newIndex = Math.max(0, prev - 1);
@@ -269,7 +275,6 @@ export function useSessionPicker({
         });
         return;
       }
-      if (filteredSessions.length === 0) return;
       setSelectedIndex((prev) => {
         const newIndex = Math.min(filteredSessions.length - 1, prev + 1);
         if (
@@ -363,6 +368,11 @@ export function useSessionPicker({
         return;
       }
 
+      // `j`/`k` are list-mode navigation only — intentionally claimed
+      // BEFORE the implicit-search-seed branch below, so typing `j`
+      // never seeds the query with "j". vim users stay in list mode;
+      // anyone wanting to search for a literal "j..." can press `/`
+      // first to enter search explicitly.
       if (name === 'k') {
         moveSelection(-1);
         return;
