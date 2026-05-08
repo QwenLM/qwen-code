@@ -1407,6 +1407,8 @@ export interface ResponseCardProps {
   showAcceptPlan?: boolean
   /** Hide footer for compact embedding (EditPopover) */
   compactMode?: boolean
+  /** Whether to show copy/fullscreen/branch actions for the final response */
+  showResponseActions?: boolean
   /** Callback to branch the session from this response */
   onBranch?: (options?: { newPanel?: boolean }) => void
   /** Callback to add annotation from selected text */
@@ -1693,6 +1695,7 @@ export function ResponseCard({
   isLastResponse = true,
   showAcceptPlan = true,
   compactMode = false,
+  showResponseActions = false,
   onBranch,
   onAddAnnotation,
   onRemoveAnnotation,
@@ -2470,7 +2473,7 @@ export function ResponseCard({
           )}
         >
           {/* Fullscreen button - desktop only; compact mode keeps message chrome minimal */}
-          {!compactMode && isPlan && (
+          {!compactMode && isPlan && showResponseActions && (
             <button
               onClick={() => setIsFullscreen(true)}
               className={cn(
@@ -2534,42 +2537,45 @@ export function ResponseCard({
                 SIZE_CONFIG.fontSize,
               )}
             >
-              {/* Left side - Copy, View as Markdown, Annotation hint */}
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleCopy}
-                  className={cn(
-                    "turn-action-btn flex items-center gap-1.5 transition-colors select-none",
-                    copied ? "text-success" : "text-muted-foreground hover:text-foreground",
-                    "focus:outline-none focus-visible:underline",
-                  )}
-                >
-                  {copied ? (
-                    <>
-                      <Check className={SIZE_CONFIG.iconSize} />
-                      <span>{t('common.copied')}</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className={SIZE_CONFIG.iconSize} />
-                      <span>{t('common.copy')}</span>
-                    </>
-                  )}
-                </button>
-                {onPopOut && (
+              {showResponseActions ? (
+                <div className="flex items-center gap-3">
                   <button
-                    onClick={onPopOut}
+                    onClick={handleCopy}
                     className={cn(
                       "turn-action-btn flex items-center gap-1.5 transition-colors select-none",
-                      "text-muted-foreground hover:text-foreground",
+                      copied ? "text-success" : "text-muted-foreground hover:text-foreground",
                       "focus:outline-none focus-visible:underline",
                     )}
                   >
-                    <FileText className={SIZE_CONFIG.iconSize} />
-                    <span>Markdown</span>
+                    {copied ? (
+                      <>
+                        <Check className={SIZE_CONFIG.iconSize} />
+                        <span>{t('common.copied')}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className={SIZE_CONFIG.iconSize} />
+                        <span>{t('common.copy')}</span>
+                      </>
+                    )}
                   </button>
-                )}
-              </div>
+                  {onPopOut && (
+                    <button
+                      onClick={onPopOut}
+                      className={cn(
+                        "turn-action-btn flex items-center gap-1.5 transition-colors select-none",
+                        "text-muted-foreground hover:text-foreground",
+                        "focus:outline-none focus-visible:underline",
+                      )}
+                    >
+                      <FileText className={SIZE_CONFIG.iconSize} />
+                      <span>Markdown</span>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div />
+              )}
 
               {/* Right side */}
               <div className="flex items-center gap-3">
@@ -2596,7 +2602,7 @@ export function ResponseCard({
             </div>
           )}
 
-          {!compactMode && !isPlan && (
+          {!compactMode && !isPlan && showResponseActions && (
             <div className="flex h-5 items-center justify-start gap-1.5 pl-[22px] pr-0.5 text-[11px] font-medium text-muted-foreground/70 opacity-0 pointer-events-none transition-opacity duration-150 select-none group-hover/response:pointer-events-auto group-hover/response:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
               <ResponseActionButton
                 label={copied ? t('common.copied') : t('common.copy')}
@@ -3217,6 +3223,7 @@ export const TurnCard = React.memo(function TurnCard({
                 onAcceptWithCompact={onAcceptPlanWithCompact}
                 isLastResponse={isLastResponse}
                 compactMode={compactMode}
+                showResponseActions
                 onBranch={onBranch && response.messageId ? (options?: { newPanel?: boolean }) => onBranch(response.messageId!, options) : undefined}
                 sendMessageKey={sendMessageKey}
                 hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
@@ -3249,6 +3256,7 @@ export const TurnCard = React.memo(function TurnCard({
             onAcceptWithCompact={onAcceptPlanWithCompact}
             isLastResponse={isLastResponse}
             compactMode={compactMode}
+            showResponseActions
             onBranch={onBranch && response.messageId ? (options?: { newPanel?: boolean }) => onBranch(response.messageId!, options) : undefined}
             sendMessageKey={sendMessageKey}
             hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
