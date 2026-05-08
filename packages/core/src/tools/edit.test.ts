@@ -30,6 +30,7 @@ import { ApprovalMode } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 describe('EditTool', () => {
   let tool: EditTool;
@@ -498,6 +499,60 @@ describe('EditTool', () => {
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+    });
+
+    // The Edit tool feeds the commit-attribution singleton on success so
+    // commit notes can later report per-file AI/human ratios. Service-
+    // level tests for `recordEdit` already exist; these guard against
+    // the wiring at the tool boundary regressing (e.g. someone moves
+    // the call out of the success path).
+    describe('commit-attribution wiring', () => {
+      beforeEach(() => {
+        CommitAttributionService.resetInstance();
+      });
+
+      it('records AI-originated edits in the attribution service', async () => {
+        const initial = 'old line';
+        const updated = 'new line';
+        fs.writeFileSync(filePath, initial, 'utf8');
+        // Prior-read enforcement (origin/main #3774) requires the file
+        // to have been Read before Edit can mutate it.
+        seedPriorRead(filePath);
+        const invocation = tool.build({
+          file_path: filePath,
+          old_string: 'old',
+          new_string: 'new',
+        });
+
+        await invocation.execute(new AbortController().signal);
+
+        const attribution =
+          CommitAttributionService.getInstance().getFileAttribution(filePath);
+        expect(attribution).toBeDefined();
+        // The actual char count is implementation detail of
+        // computeCharContribution; we only assert the entry exists
+        // with a positive contribution.
+        expect(attribution!.aiContribution).toBeGreaterThan(0);
+        // Length sanity: contribution is bounded by the new content.
+        expect(attribution!.aiContribution).toBeLessThanOrEqual(updated.length);
+      });
+
+      it('skips attribution when the edit is modified_by_user', async () => {
+        fs.writeFileSync(filePath, 'old line', 'utf8');
+        seedPriorRead(filePath);
+        const invocation = tool.build({
+          file_path: filePath,
+          old_string: 'old',
+          new_string: 'new',
+          modified_by_user: true,
+        });
+
+        await invocation.execute(new AbortController().signal);
+
+        expect(
+          CommitAttributionService.getInstance().getFileAttribution(filePath),
+        ).toBeUndefined();
+      });
     });
 
     it('should create a new file if old_string is empty and file does not exist, and return created message', async () => {
@@ -1013,31 +1068,35 @@ describe('EditTool', () => {
 
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
       expect(result.error?.message).toMatch(
-        /has not been fully read in this session/,
+        /has not been read in this session/,
       );
       // File must remain untouched.
       expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
     });
 
-    it('rejects an edit when the previous read was ranged (offset/limit)', async () => {
-      // A model that only Read part of a file has not seen the bytes
-      // a free-form old_string would touch. Treat this the same as
-      // "no prior read".
+    it('allows an edit after a ranged (offset/limit) read', async () => {
+      // A partial read still counts as a prior read: requiring the
+      // model to re-read multi-thousand-line files just to change one
+      // line is wasteful, and the existing `0 occurrences` failure
+      // mode catches the case the full-read requirement was meant to
+      // defend against (a fabricated old_string that misses the
+      // actual bytes). This matches Claude Code's `readFileState`
+      // contract, which also accepts partial reads.
       fs.writeFileSync(filePath, 'line a\nline b\nline c\n', 'utf8');
       const stats = fs.statSync(filePath);
-      // Record as a ranged read: lastReadWasFull = false.
       fileReadCache.recordRead(filePath, stats, {
         full: false,
         cacheable: true,
       });
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
 
       const result = await tool
         .build({ file_path: filePath, old_string: 'line a', new_string: 'X' })
         .execute(abortSignal);
-      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
-      expect(fs.readFileSync(filePath, 'utf8')).toBe(
-        'line a\nline b\nline c\n',
-      );
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('X\nline b\nline c\n');
     });
 
     it('rejects an edit when the previous read was non-cacheable (binary / pdf / image)', async () => {
@@ -1161,7 +1220,7 @@ describe('EditTool', () => {
       });
       await expect(
         invocation.getConfirmationDetails(abortSignal),
-      ).rejects.toThrow(/has not been fully read in this session/);
+      ).rejects.toThrow(/has not been read in this session/);
     });
 
     it('rejects an edit when the file has been modified since the last read', async () => {
@@ -1239,13 +1298,15 @@ describe('EditTool', () => {
       expect(fs.readFileSync(newPath, 'utf8')).toBe('second content\n');
     });
 
-    it('allows Edit after Write→partial-Read (sticky-on-true preserves write-author rights)', async () => {
-      // Reproduction for the maintainer-review regression: pre-fix,
-      // a partial read recorded `lastReadWasFull = false` and
-      // clobbered the `true` that recordWrite had stamped at
-      // create time, so this Edit would then be rejected with
-      // EDIT_REQUIRES_PRIOR_READ even though the model had
-      // authored the file's full content.
+    it('allows Edit after Write→partial-Read', async () => {
+      // The Write authors the bytes (recordWrite seeds the cache), and
+      // a follow-up partial Read at the same fingerprint must not
+      // disqualify the next Edit. After dropping the `lastReadWasFull`
+      // requirement from prior-read enforcement, this is just the
+      // generic "partial read counts" path; pre-fix it failed for a
+      // different reason (the partial read overwrote the full-read
+      // flag recordWrite had stamped, and enforcement still required
+      // that flag).
       const newPath = path.join(rootDir, 'write-then-partial-read.txt');
       (mockConfig.getApprovalMode as Mock).mockReturnValue(
         ApprovalMode.AUTO_EDIT,

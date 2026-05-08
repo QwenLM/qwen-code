@@ -203,6 +203,48 @@ describe('mergeCompactToolGroups', () => {
     // Group 2 with subagent pending confirmation stays separate
   });
 
+  it.each([
+    ['completed', 'completed'],
+    ['failed', 'failed'],
+    ['cancelled', 'cancelled'],
+  ] as const)(
+    'does NOT merge tool_group with terminal subagent (%s)',
+    (_label, status) => {
+      // Terminal task_execution groups must not be absorbed: their
+      // SubagentScrollbackSummary lands inline as the persistent
+      // record of the run's outcome, and the compact path can't
+      // surface it. Mirrors `hasTerminalSubagent` in
+      // `ToolGroupMessage.showCompact`.
+      const subagentResult = {
+        type: 'task_execution',
+        subagentName: 'test-agent',
+        taskDescription: 'test task',
+        status,
+      };
+      const items: HistoryItem[] = [
+        createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
+        createToolGroup(2, [
+          createTool(
+            'c2',
+            'Agent',
+            status === 'failed' ? ToolCallStatus.Error : ToolCallStatus.Success,
+            subagentResult,
+          ),
+        ]),
+        createToolGroup(3, [createTool('c3', 'Shell', ToolCallStatus.Success)]),
+      ];
+      const merged = mergeCompactToolGroups(items);
+      // Three separate groups: terminal subagent stays its own batch
+      // so SubagentScrollbackSummary renders as a standalone entry.
+      expect(merged.length).toBe(3);
+      const ids = merged
+        .filter(isToolGroup)
+        .map((g) => g.id)
+        .sort();
+      expect(ids).toEqual([1, 2, 3]);
+    },
+  );
+
   it('does NOT merge focused executing shell', () => {
     const items: HistoryItem[] = [
       createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),

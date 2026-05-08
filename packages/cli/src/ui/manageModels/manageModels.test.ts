@@ -27,8 +27,8 @@ const {
   mockIsOpenRouterConfig: vi.fn(),
 }));
 
-vi.mock('../../commands/auth/openrouterOAuth.js', () => ({
-  OPENROUTER_DEFAULT_MODEL: 'openai/gpt-4o-mini',
+vi.mock('../../auth/providers/oauth/openrouterOAuth.js', () => ({
+  OPENROUTER_DEFAULT_MODEL: 'z-ai/glm-4.5-air:free',
   fetchOpenRouterModels: mockFetchOpenRouterModels,
   mergeOpenRouterConfigs: mockMergeOpenRouterConfigs,
   isOpenRouterConfig: mockIsOpenRouterConfig,
