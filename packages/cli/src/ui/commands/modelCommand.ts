@@ -13,7 +13,11 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
-import { AuthType, type Config } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  type AvailableModel,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 
@@ -50,6 +54,27 @@ async function switchMainModel(
   await config.switchModel(currentAuthType, modelArg, undefined);
   persistSetting(settings, 'model.name', modelArg);
   return modelArg;
+}
+
+function formatUnavailableModelMessage(
+  kind: 'Model' | 'Fast model',
+  modelName: string,
+  authType: AuthType,
+  availableModels: AvailableModel[],
+): string {
+  const availableModelIds = Array.from(
+    new Set(availableModels.map((model) => model.id)),
+  );
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? `No models are configured for auth type '${authType}'.`
+      : `Available models for '${authType}': ${availableModelIds.join(', ')}.`;
+
+  return (
+    `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders or run /model to select an available model.'
+  );
 }
 
 // Get an array of the available model IDs as strings
@@ -153,7 +178,12 @@ export const modelCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'error',
-          content: `Fast model '${modelName}' is not available for the current authentication type.`,
+          content: formatUnavailableModelMessage(
+            'Fast model',
+            modelName,
+            authType,
+            availableModels,
+          ),
         };
       }
 
@@ -193,6 +223,22 @@ export const modelCommand: SlashCommand = {
           type: 'message',
           messageType: 'error',
           content: t('Settings service not available.'),
+        };
+      }
+      const parsed = parseAcpModelOption(modelName);
+      const targetAuthType = parsed.authType ?? authType;
+      const availableModels =
+        config.getAvailableModelsForAuthType(targetAuthType);
+      if (!availableModels.some((model) => model.id === parsed.modelId)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatUnavailableModelMessage(
+            'Model',
+            parsed.modelId,
+            targetAuthType,
+            availableModels,
+          ),
         };
       }
       const effectiveModelName = await switchMainModel(

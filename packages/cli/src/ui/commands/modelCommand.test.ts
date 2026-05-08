@@ -162,6 +162,9 @@ describe('modelCommand', () => {
             model: 'qwen-plus',
             authType: AuthType.QWEN_OAUTH,
           }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
           switchModel,
         },
         settings: createMockSettings(setValue),
@@ -187,9 +190,9 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should not persist the model when direct model switching fails', async () => {
+  it('should not persist the model when direct model validation fails', async () => {
     const setValue = vi.fn();
-    const switchError = new Error('Model not found');
+    const switchModel = vi.fn();
     mockContext = createMockCommandContext({
       invocation: {
         raw: '/model missing-model',
@@ -202,25 +205,67 @@ describe('modelCommand', () => {
             model: 'qwen-plus',
             authType: AuthType.QWEN_OAUTH,
           }),
-          switchModel: vi.fn().mockRejectedValue(switchError),
+          switchModel,
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([]),
         },
         settings: createMockSettings(setValue),
       },
     });
 
-    await expect(
-      modelCommand.action!(mockContext, 'missing-model'),
-    ).rejects.toThrow('Model not found');
+    const result = await modelCommand.action!(mockContext, 'missing-model');
 
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Model 'missing-model' is not available for auth type 'qwen-oauth'.\n" +
+        "No models are configured for auth type 'qwen-oauth'.\n" +
+        'Configure models in settings.modelProviders or run /model to select an available model.',
+    });
+  });
+
+  it('should not persist the model when direct model switching fails after validation', async () => {
+    const setValue = vi.fn();
+    const switchError = new Error('Refresh failed');
+    const switchModel = vi.fn().mockRejectedValue(switchError);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model qwen-max',
+        name: 'model',
+        args: 'qwen-max',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    await expect(modelCommand.action!(mockContext, 'qwen-max')).rejects.toThrow(
+      'Refresh failed',
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      'qwen-max',
+      undefined,
+    );
     expect(setValue).not.toHaveBeenCalled();
   });
 
-  it('should reject unavailable main models for the current auth type', async () => {
+  it('should explain how to configure models when direct switching fails', async () => {
     const setValue = vi.fn();
-    const switchError = new Error(
-      "Model 'definitely-not-a-model' not found for authType 'openai'",
-    );
-    const switchModel = vi.fn().mockRejectedValue(switchError);
+    const switchModel = vi.fn();
     mockContext = createMockCommandContext({
       invocation: {
         raw: '/model definitely-not-a-model',
@@ -233,22 +278,69 @@ describe('modelCommand', () => {
             model: 'qwen-plus',
             authType: AuthType.USE_OPENAI,
           }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
           switchModel,
         },
         settings: createMockSettings(setValue),
       },
     });
 
-    await expect(
-      modelCommand.action!(mockContext, 'definitely-not-a-model'),
-    ).rejects.toThrow("Model 'definitely-not-a-model' not found");
-
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.USE_OPENAI,
+    const result = await modelCommand.action!(
+      mockContext,
       'definitely-not-a-model',
-      undefined,
     );
+
+    expect(switchModel).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Model 'definitely-not-a-model' is not available for auth type 'openai'.\n" +
+        "Available models for 'openai': gpt-4.\n" +
+        'Configure models in settings.modelProviders or run /model to select an available model.',
+    });
+  });
+
+  it('should explain when no models are configured for direct switching', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi
+      .fn()
+      .mockRejectedValue(
+        new Error("Model 'gpt-4o' not found for authType 'openai'"),
+      );
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model gpt-4o',
+        name: 'model',
+        args: 'gpt-4o',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, 'gpt-4o');
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Model 'gpt-4o' is not available for auth type 'openai'.\n" +
+        "No models are configured for auth type 'openai'.\n" +
+        'Configure models in settings.modelProviders or run /model to select an available model.',
+    });
   });
 
   it('should switch provider-qualified models through switchModel', async () => {
@@ -267,6 +359,9 @@ describe('modelCommand', () => {
             authType: AuthType.QWEN_OAUTH,
           }),
           getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
           switchModel,
         },
         settings: createMockSettings(setValue),
@@ -335,7 +430,9 @@ describe('modelCommand', () => {
       type: 'message',
       messageType: 'error',
       content:
-        "Fast model 'missing-model' is not available for the current authentication type.",
+        "Fast model 'missing-model' is not available for auth type 'openai'.\n" +
+        "Available models for 'openai': qwen-turbo.\n" +
+        'Configure models in settings.modelProviders or run /model to select an available model.',
     });
   });
 
@@ -354,6 +451,9 @@ describe('modelCommand', () => {
             model: 'qwen-plus',
             authType: AuthType.USE_OPENAI,
           }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: '--fast-model', label: '--fast-model' }]),
           switchModel,
         },
         settings: createMockSettings(setValue),

@@ -185,7 +185,15 @@ export function ModelDialog({
   const authType = config?.getAuthType();
 
   const availableModelEntries = useMemo(() => {
-    const allModels = config ? config.getAllConfiguredModels() : [];
+    const configuredModels = config
+      ? config.getAllConfiguredModels(
+          isFastModelMode && authType ? [authType] : undefined,
+        )
+      : [];
+    const allModels =
+      isFastModelMode && authType
+        ? configuredModels.filter((model) => model.authType === authType)
+        : configuredModels;
 
     // Separate runtime models from registry models
     const runtimeModels = allModels.filter((m) => m.isRuntimeModel);
@@ -242,7 +250,7 @@ export function ModelDialog({
     }
 
     return result;
-  }, [config]);
+  }, [authType, config, isFastModelMode]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
