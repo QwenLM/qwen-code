@@ -33,6 +33,7 @@ import {
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -1285,7 +1286,9 @@ export class Config {
   }
 
   getContentGenerator(): ContentGenerator {
-    return this.contentGenerator;
+    return (
+      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator
+    );
   }
 
   /**
@@ -1471,7 +1474,10 @@ export class Config {
   }
 
   getContentGeneratorConfig(): ContentGeneratorConfig {
-    return this.contentGeneratorConfig;
+    return (
+      getRuntimeContentGenerator()?.contentGeneratorConfig ??
+      this.contentGeneratorConfig
+    );
   }
 
   getContentGeneratorConfigSources(): ContentGeneratorConfigSources {
@@ -1487,7 +1493,9 @@ export class Config {
   }
 
   getModel(): string {
-    return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
+    return (
+      this.getContentGeneratorConfig()?.model || this.modelsConfig.getModel()
+    );
   }
 
   onModelChange(listener: (model: string) => void): () => void {
@@ -2455,7 +2463,7 @@ export class Config {
   }
 
   getAuthType(): AuthType | undefined {
-    return this.contentGeneratorConfig?.authType;
+    return this.getContentGeneratorConfig()?.authType;
   }
 
   getCliVersion(): string | undefined {

@@ -2197,4 +2197,102 @@ describe('Model Switching and Config Updates', () => {
       expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
     });
   });
+
+  describe('runtime ContentGenerator view (AsyncLocalStorage)', () => {
+    // The Config getters consult the per-run ALS view published by the
+    // agent runtime when a sub-agent runs on a different model than the
+    // parent. These tests pin that integration: tools that captured the
+    // parent Config at construction must still resolve to the agent's
+    // values when called inside the agent's runtime frame.
+    function setInstanceFields(
+      config: Config,
+      contentGenerator: ContentGenerator,
+      generatorConfig: ContentGeneratorConfig,
+    ): void {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (config as any).contentGenerator = contentGenerator;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (config as any).contentGeneratorConfig = generatorConfig;
+    }
+
+    it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const config = new Config(baseParams);
+      const parentGenerator = {
+        generateContentStream: vi.fn(),
+      } as unknown as ContentGenerator;
+      const parentGeneratorConfig: ContentGeneratorConfig = {
+        model: 'parent-model',
+        authType: AuthType.QWEN_OAUTH,
+        apiKey: 'parent-key',
+      };
+      setInstanceFields(config, parentGenerator, parentGeneratorConfig);
+
+      const agentGenerator = {
+        generateContentStream: vi.fn(),
+      } as unknown as ContentGenerator;
+      const agentGeneratorConfig: ContentGeneratorConfig = {
+        model: 'agent-model',
+        authType: AuthType.USE_OPENAI,
+        apiKey: 'agent-key',
+      };
+
+      // Outside the frame, getters resolve to the parent's instance fields.
+      expect(config.getContentGenerator()).toBe(parentGenerator);
+      expect(config.getContentGeneratorConfig()).toBe(parentGeneratorConfig);
+      expect(config.getModel()).toBe('parent-model');
+      expect(config.getAuthType()).toBe(AuthType.QWEN_OAUTH);
+
+      // Inside the frame, every getter resolves to the agent's view.
+      await runWithRuntimeContentGenerator(
+        {
+          contentGenerator: agentGenerator,
+          contentGeneratorConfig: agentGeneratorConfig,
+        },
+        async () => {
+          expect(config.getContentGenerator()).toBe(agentGenerator);
+          expect(config.getContentGeneratorConfig()).toBe(agentGeneratorConfig);
+          expect(config.getModel()).toBe('agent-model');
+          expect(config.getAuthType()).toBe(AuthType.USE_OPENAI);
+        },
+      );
+
+      // Frame exit restores resolution to the parent's instance fields.
+      expect(config.getContentGenerator()).toBe(parentGenerator);
+      expect(config.getModel()).toBe('parent-model');
+    });
+
+    it('falls back to the parent model id when the runtime view config has no model', async () => {
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const config = new Config(baseParams);
+      setInstanceFields(
+        config,
+        { generateContentStream: vi.fn() } as unknown as ContentGenerator,
+        {
+          model: 'parent-model',
+          authType: AuthType.QWEN_OAUTH,
+        } as ContentGeneratorConfig,
+      );
+
+      await runWithRuntimeContentGenerator(
+        {
+          contentGenerator: {
+            generateContentStream: vi.fn(),
+          } as unknown as ContentGenerator,
+          contentGeneratorConfig: {
+            model: '',
+            authType: AuthType.USE_OPENAI,
+          } as ContentGeneratorConfig,
+        },
+        async () => {
+          // Empty model on the runtime view falls through to modelsConfig.
+          expect(config.getModel()).toBe(baseParams.model);
+        },
+      );
+    });
+  });
 });
