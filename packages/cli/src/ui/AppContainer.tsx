@@ -67,7 +67,6 @@ import {
   getStickyTodosRenderKey,
 } from './utils/todoSnapshot.js';
 import type { TodoItem } from './components/TodoDisplay.js';
-import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import process from 'node:process';
 import { useHistory } from './hooks/useHistoryManager.js';
@@ -132,7 +131,7 @@ import {
   useSettingInputRequests,
   usePluginChoiceRequests,
 } from './hooks/useExtensionUpdates.js';
-import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
+import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import {
   RenderModeProvider,
@@ -339,8 +338,11 @@ export const AppContainer = (props: AppContainerProps) => {
     config.getWorkingDir(),
   );
 
-  const { codingPlanUpdateRequest, dismissCodingPlanUpdate } =
-    useCodingPlanUpdates(settings, config, historyManager.addItem);
+  const { providerUpdateRequest, dismissProviderUpdate } = useProviderUpdates(
+    settings,
+    config,
+    historyManager.addItem,
+  );
 
   const [isTrustDialogOpen, setTrustDialogOpen] = useState(false);
   const openTrustDialog = useCallback(() => setTrustDialogOpen(true), []);
@@ -595,23 +597,15 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeSelect,
   } = useApprovalModeCommand(settings, config);
 
-  const {
-    setAuthState,
-    authError,
-    onAuthError,
-    isAuthDialogOpen,
-    isAuthenticating,
-    pendingAuthType,
-    externalAuthState,
-    qwenAuthState,
-    handleAuthSelect,
-    handleCodingPlanSubmit,
-    handleAlibabaStandardSubmit,
-    handleOpenRouterSubmit,
-    handleCustomApiKeySubmit,
-    openAuthDialog,
-    cancelAuthentication,
-  } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
+  const auth = useAuthCommand(
+    settings,
+    config,
+    historyManager.addItem,
+    refreshStatic,
+  );
+  const { state: authState, actions: authActions } = auth;
+  const { onAuthError, openAuthDialog, handleAuthSelect } = authActions;
+  const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
   useInitializationAuthError(initializationResult.authError, onAuthError);
 
@@ -642,22 +636,8 @@ export const AppContainer = (props: AppContainerProps) => {
           },
         ),
       );
-    } else if (!settings.merged.security?.auth?.useExternal) {
-      // If no authType is selected yet, allow the auth UI flow to prompt the user.
-      // Only validate credentials once a concrete authType exists.
-      if (currentAuthType) {
-        const error = validateAuthMethod(currentAuthType, config);
-        if (error) {
-          onAuthError(error);
-        }
-      }
     }
-  }, [
-    settings.merged.security?.auth?.enforcedType,
-    settings.merged.security?.auth?.useExternal,
-    config,
-    onAuthError,
-  ]);
+  }, [settings.merged.security?.auth?.enforcedType, config, onAuthError]);
 
   const [editorError, setEditorError] = useState<string | null>(null);
   const {
@@ -1662,7 +1642,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
-    !!codingPlanUpdateRequest ||
+    !!providerUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
@@ -2364,14 +2344,8 @@ export const AppContainer = (props: AppContainerProps) => {
       historyManager,
       isThemeDialogOpen,
       themeError,
-      isAuthenticating,
+      auth: authState,
       isConfigInitialized,
-      authError,
-      isAuthDialogOpen,
-      pendingAuthType,
-      externalAuthState,
-      // Qwen OAuth state
-      qwenAuthState,
       editorError,
       isEditorDialogOpen,
       debugMessage,
@@ -2394,7 +2368,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
-      codingPlanUpdateRequest,
+      providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -2485,14 +2459,8 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       isThemeDialogOpen,
       themeError,
-      isAuthenticating,
+      authState,
       isConfigInitialized,
-      authError,
-      isAuthDialogOpen,
-      pendingAuthType,
-      externalAuthState,
-      // Qwen OAuth state
-      qwenAuthState,
       editorError,
       isEditorDialogOpen,
       debugMessage,
@@ -2515,7 +2483,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
-      codingPlanUpdateRequest,
+      providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -2614,14 +2582,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
-      handleAuthSelect,
-      setAuthState,
-      onAuthError,
-      cancelAuthentication,
-      handleCodingPlanSubmit,
-      handleAlibabaStandardSubmit,
-      handleOpenRouterSubmit,
-      handleCustomApiKeySubmit,
+      auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -2633,7 +2594,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissCodingPlanUpdate,
+      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -2688,14 +2649,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
-      handleAuthSelect,
-      setAuthState,
-      onAuthError,
-      cancelAuthentication,
-      handleCodingPlanSubmit,
-      handleAlibabaStandardSubmit,
-      handleOpenRouterSubmit,
-      handleCustomApiKeySubmit,
+      authActions,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -2707,7 +2661,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissCodingPlanUpdate,
+      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,

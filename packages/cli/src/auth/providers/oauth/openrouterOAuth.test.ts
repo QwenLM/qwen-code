@@ -1,12 +1,10 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AuthType, type Config } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
 import {
   buildOpenRouterAuthorizationUrl,
   createOpenRouterOAuthSession,
@@ -20,11 +18,13 @@ import {
   OPENROUTER_DEFAULT_MODELS,
   OPENROUTER_MODELS_URL,
   OPENROUTER_OAUTH_AUTHORIZE_URL,
+  OPENROUTER_OAUTH_CALLBACK_PORT,
   OPENROUTER_OAUTH_EXCHANGE_URL,
   runOpenRouterOAuthLogin,
   selectRecommendedOpenRouterModels,
   startOAuthCallbackListener,
-  applyOpenRouterModelsConfiguration,
+  startOAuthCallbackListenerWithRetry,
+  type OAuthCallbackListenerWithPort,
 } from './openrouterOAuth.js';
 import { request } from 'node:http';
 
@@ -199,7 +199,7 @@ describe('openrouterOAuth', () => {
 
   it('returns OAuth result without waiting for slow listener close', async () => {
     let resolveClose!: () => void;
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: Promise.resolve('auth-code-123'),
       close: vi.fn(
@@ -208,6 +208,7 @@ describe('openrouterOAuth', () => {
             resolveClose = resolve;
           }),
       ),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn(async () => ({
@@ -218,7 +219,7 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
       {
         openBrowser,
-        startListener: vi.fn(() => listener),
+        startListener: vi.fn(async () => listener),
         exchangeApiKey,
         now: () => 1000,
       },
@@ -234,13 +235,14 @@ describe('openrouterOAuth', () => {
   });
 
   it('passes the session state to the OAuth callback listener', async () => {
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: Promise.resolve('auth-code-123'),
       close: vi.fn(async () => undefined),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
-    const startListener = vi.fn(() => listener);
+    const startListener = vi.fn(async () => listener);
     const exchangeApiKey = vi.fn(async () => ({
       apiKey: 'or-key-123',
       userId: 'user-1',
@@ -254,7 +256,8 @@ describe('openrouterOAuth', () => {
         callbackUrl: 'http://localhost:3000/openrouter/callback',
         codeVerifier: 'verifier-123',
         state: 'state-123',
-        authorizationUrl: 'https://openrouter.ai/auth?state=state-123',
+        authorizationUrl:
+          'https://openrouter.ai/auth?state=state-123&code_challenge=challenge-123',
       },
     });
 
@@ -266,10 +269,11 @@ describe('openrouterOAuth', () => {
   });
 
   it('records wait and exchange timings during OAuth login', async () => {
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: Promise.resolve('auth-code-123'),
       close: vi.fn(async () => undefined),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn(async () => ({
@@ -287,7 +291,7 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
       {
         openBrowser,
-        startListener: () => listener,
+        startListener: async () => listener,
         exchangeApiKey,
         now,
       },
@@ -333,10 +337,11 @@ describe('openrouterOAuth', () => {
         ) => undefined,
       ),
     };
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: new Promise<string>(() => undefined),
       close: vi.fn(async () => undefined),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn();
@@ -345,7 +350,7 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
       {
         openBrowser,
-        startListener: () => listener,
+        startListener: async () => listener,
         exchangeApiKey,
         signalTarget,
       },
@@ -376,10 +381,11 @@ describe('openrouterOAuth', () => {
 
   it('allows cancelling OAuth wait with an abort signal', async () => {
     const abortController = new AbortController();
-    const listener = {
+    const listener: OAuthCallbackListenerWithPort = {
       ready: Promise.resolve(),
       waitForCode: new Promise<string>(() => undefined),
       close: vi.fn(async () => undefined),
+      port: OPENROUTER_OAUTH_CALLBACK_PORT,
     };
     const openBrowser = vi.fn(async () => ({}) as never);
     const exchangeApiKey = vi.fn();
@@ -388,7 +394,7 @@ describe('openrouterOAuth', () => {
       'http://localhost:3000/openrouter/callback',
       {
         openBrowser,
-        startListener: () => listener,
+        startListener: async () => listener,
         exchangeApiKey,
         abortSignal: abortController.signal,
       },
@@ -511,164 +517,90 @@ describe('openrouterOAuth', () => {
     ]);
   });
 
-  it('selects a recommended OpenRouter subset instead of returning the full catalog', () => {
-    const recommended = selectRecommendedOpenRouterModels(
-      [
-        {
-          id: 'qwen/qwen3-coder:free',
-          name: 'OpenRouter · Qwen3 Coder',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'qwen/qwen3-max',
-          name: 'OpenRouter · Qwen3 Max',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'glm/glm-4.5-air:free',
-          name: 'OpenRouter · GLM 4.5 Air',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'minimax/minimax-m1',
-          name: 'OpenRouter · MiniMax M1',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'anthropic/claude-3.7-sonnet',
-          name: 'OpenRouter · Claude 3.7 Sonnet',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'google/gemini-2.5-flash',
-          name: 'OpenRouter · Gemini 2.5 Flash',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'openai/gpt-5-mini',
-          name: 'OpenRouter · GPT-5 Mini',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-          capabilities: { vision: true },
-        },
-        {
-          id: 'deepseek/deepseek-r1',
-          name: 'OpenRouter · DeepSeek R1',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-          generationConfig: { contextWindowSize: 1048576 },
-        },
-        {
-          id: 'meta/llama-3.3-70b',
-          name: 'OpenRouter · Llama 3.3 70B',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-      ],
-      6,
-    );
+  it('selects verified free OpenRouter models', () => {
+    const recommended = selectRecommendedOpenRouterModels([
+      {
+        id: 'qwen/qwen3-max',
+        name: 'OpenRouter · Qwen3 Max',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'z-ai/glm-4.5-air:free',
+        name: 'OpenRouter · GLM 4.5 Air',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'openai/gpt-oss-120b:free',
+        name: 'OpenRouter · GPT OSS 120B',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'anthropic/claude-3.7-sonnet',
+        name: 'OpenRouter · Claude 3.7 Sonnet',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'openai/gpt-5-mini',
+        name: 'OpenRouter · GPT-5 Mini',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+        capabilities: { vision: true },
+      },
+    ]);
 
     expect(recommended.map((model) => model.id)).toEqual([
-      'qwen/qwen3-coder:free',
-      'glm/glm-4.5-air:free',
-      'qwen/qwen3-max',
-      'minimax/minimax-m1',
-      'anthropic/claude-3.7-sonnet',
-      'google/gemini-2.5-flash',
+      'z-ai/glm-4.5-air:free',
+      'openai/gpt-oss-120b:free',
     ]);
   });
 
-  it('applies OpenRouter configuration to settings and reloads providers', async () => {
-    const settings = {
-      merged: {
-        modelProviders: {
-          [AuthType.USE_OPENAI]: [
-            { id: 'custom/model', baseUrl: 'https://example.com/v1' },
-          ],
-        },
+  it('fills missing preferred free OpenRouter models with other free models', () => {
+    const recommended = selectRecommendedOpenRouterModels([
+      {
+        id: 'custom/experimental-free-model:free',
+        name: 'OpenRouter · Experimental Free Model',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
       },
-      user: { settings: { modelProviders: {} }, path: '/user.json' },
-      workspace: { settings: {}, path: '/workspace.json' },
-      system: { settings: {}, path: '/system.json' },
-      systemDefaults: { settings: {}, path: '/system-defaults.json' },
-      setValue: vi.fn(),
-      forScope: vi.fn(),
-    } as unknown as LoadedSettings;
-    const config = {
-      reloadModelProvidersConfig: vi.fn(),
-    } as unknown as Config;
-    const fetchSpy = vi
-      .spyOn(
-        await import('./openrouterOAuth.js'),
-        'getOpenRouterModelsWithFallback',
-      )
-      .mockResolvedValue([
-        {
-          id: 'openai/gpt-4o-mini',
-          name: 'OpenRouter · GPT-4o mini',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-      ]);
+      {
+        id: 'anthropic/claude-3.7-sonnet',
+        name: 'OpenRouter · Claude 3.7 Sonnet',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+      {
+        id: 'z-ai/glm-4.5-air:free',
+        name: 'OpenRouter · GLM 4.5 Air',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      },
+    ]);
 
-    const result = await applyOpenRouterModelsConfiguration({
-      settings,
-      config,
-      apiKey: 'or-key-123',
-      reloadConfig: true,
-    });
-
-    expect(settings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      'env.OPENROUTER_API_KEY',
-      'or-key-123',
-    );
-
-    const modelProvidersCall = vi
-      .mocked(settings.setValue)
-      .mock.calls.find(
-        (call) => call[1] === `modelProviders.${AuthType.USE_OPENAI}`,
-      );
-    expect(modelProvidersCall).toBeDefined();
-    expect(modelProvidersCall?.[2]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        }),
-        expect.objectContaining({
-          id: 'custom/model',
-          baseUrl: 'https://example.com/v1',
-        }),
-      ]),
-    );
-
-    expect(config.reloadModelProvidersConfig).toHaveBeenCalled();
-    expect(result.activeModelId).toBeDefined();
-    fetchSpy.mockRestore();
+    expect(recommended.map((model) => model.id)).toEqual([
+      'z-ai/glm-4.5-air:free',
+      'custom/experimental-free-model:free',
+    ]);
   });
 
   it('prefers the default OpenRouter model when it remains enabled', () => {
     expect(
       getPreferredOpenRouterModelId([
-        { id: 'anthropic/claude-3.7-sonnet' },
-        { id: 'openai/gpt-4o-mini' },
+        { id: 'openai/gpt-oss-120b:free' },
+        { id: 'z-ai/glm-4.5-air:free' },
       ] as never),
-    ).toBe('openai/gpt-4o-mini');
+    ).toBe('z-ai/glm-4.5-air:free');
   });
 
   it('falls back to the first enabled OpenRouter model when the default is unavailable', () => {
     expect(
       getPreferredOpenRouterModelId([
-        { id: 'anthropic/claude-3.7-sonnet' },
+        { id: 'openai/gpt-oss-120b:free' },
       ] as never),
-    ).toBe('anthropic/claude-3.7-sonnet');
+    ).toBe('openai/gpt-oss-120b:free');
   });
 
   it('falls back to default models when dynamic fetch fails', async () => {
@@ -726,5 +658,117 @@ describe('openrouterOAuth', () => {
         envKey: 'OPENAI_API_KEY',
       },
     ]);
+  });
+
+  it('returns 404 for non-callback paths', async () => {
+    const listener = startOAuthCallbackListener(
+      'http://localhost:3102/openrouter/callback',
+      5000,
+      'state-123',
+    );
+    await listener.ready;
+
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request('http://localhost:3102/wrong-path', (res) => {
+        resolve(res.statusCode!);
+        res.resume();
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    expect(status).toBe(404);
+    await listener.close();
+  });
+
+  it('rejects with error when OpenRouter returns an error parameter', async () => {
+    const listener = startOAuthCallbackListener(
+      'http://localhost:3103/openrouter/callback',
+      5000,
+      'state-123',
+    );
+    await listener.ready;
+
+    const codePromise = listener.waitForCode.catch((err: unknown) => err);
+    await new Promise<void>((resolve, reject) => {
+      const req = request(
+        'http://localhost:3103/openrouter/callback?error=access_denied&state=state-123',
+        (res) => {
+          expect(res.statusCode).toBe(400);
+          res.resume();
+          res.on('end', resolve);
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    await expect(codePromise).resolves.toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('access_denied'),
+      }),
+    );
+  });
+
+  it('rejects with missing code error', async () => {
+    const listener = startOAuthCallbackListener(
+      'http://localhost:3104/openrouter/callback',
+      5000,
+      'state-123',
+    );
+    await listener.ready;
+
+    const codePromise = listener.waitForCode.catch((err: unknown) => err);
+    await new Promise<void>((resolve, reject) => {
+      const req = request(
+        'http://localhost:3104/openrouter/callback?state=state-123',
+        (res) => {
+          expect(res.statusCode).toBe(400);
+          res.resume();
+          res.on('end', resolve);
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    await expect(codePromise).resolves.toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('Missing authorization code'),
+      }),
+    );
+  });
+
+  it('retries ports when address is in use', async () => {
+    const blockingListener = startOAuthCallbackListener(
+      'http://localhost:3150/openrouter/callback',
+      10000,
+      'block-state',
+    );
+    await blockingListener.ready;
+
+    try {
+      const retried = await startOAuthCallbackListenerWithRetry(
+        'http://localhost:3150/openrouter/callback',
+        5000,
+        'retry-state',
+        5,
+      );
+
+      expect(retried.port).toBeGreaterThan(3150);
+      await retried.close();
+    } finally {
+      await blockingListener.close();
+    }
+  });
+
+  it('throws non-http protocol error', () => {
+    expect(() =>
+      startOAuthCallbackListener(
+        'https://localhost:3000/callback',
+        5000,
+        'state-123',
+      ),
+    ).toThrow('Only http localhost callback URLs are currently supported.');
   });
 });

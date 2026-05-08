@@ -372,7 +372,7 @@ export class ModelsConfig {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean },
+    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
   ): Promise<void> {
     // Check if this is a RuntimeModelSnapshot reference
     const runtimeModelSnapshotId = this.extractRuntimeModelSnapshotId(modelId);
@@ -390,7 +390,11 @@ export class ModelsConfig {
       const isAuthTypeChange = authType !== this.currentAuthType;
       this.currentAuthType = authType;
 
-      const model = this.modelRegistry.getModel(authType, modelId);
+      const model = this.modelRegistry.getModel(
+        authType,
+        modelId,
+        options?.baseUrl,
+      );
       if (!model) {
         throw new Error(
           `Model '${modelId}' not found for authType '${authType}'`,
@@ -613,7 +617,7 @@ export class ModelsConfig {
     }
 
     // Check if model exists in registry - if so, don't create RuntimeModelSnapshot
-    if (this.modelRegistry.hasModel(currentAuthType, model)) {
+    if (this.modelRegistry.hasModel(currentAuthType, model, baseUrl)) {
       return;
     }
 
@@ -826,14 +830,16 @@ export class ModelsConfig {
       return false;
     }
 
-    // Get previous and current model configs
-    const previousModel = this.modelRegistry.getModel(
-      authType,
-      previousModelId,
-    );
+    // Get previous and current model configs.
+    // Use current baseUrl to disambiguate when multiple models share the same id.
     const currentModel = this.modelRegistry.getModel(
       authType,
       this._generationConfig.model || '',
+      this._generationConfig.baseUrl || undefined,
+    );
+    const previousModel = this.modelRegistry.getModel(
+      authType,
+      previousModelId,
     );
 
     // If either model is not in registry, require refresh to be safe
@@ -874,57 +880,64 @@ export class ModelsConfig {
     // Manual credentials won't have a modelId that matches a provider model (handleAuthSelect prevents it),
     // so if modelId exists in registry, we should always use provider config.
     // This handles provider switching even within the same authType.
-    if (modelId && this.modelRegistry.hasModel(authType, modelId)) {
-      const resolved = this.modelRegistry.getModel(authType, modelId);
-      if (resolved) {
-        // When authType and modelId haven't changed (startup/restart scenario),
-        // the current apiKey was already correctly resolved by
-        // resolveCliGenerationConfig. Save it so we can restore it if
-        // applyResolvedModelDefaults clears it (i.e. process.env[envKey] is
-        // absent). For cross-provider switches (different modelId), we must
-        // NOT preserve the previous key — it may belong to a different
-        // service. Also detect hot-reload scenarios where the provider
-        // config changed in place (same modelId, different envKey/baseUrl)
-        // by comparing fields that applyResolvedModelDefaults sets. Use
-        // baseUrl source === 'modelProviders' as the "has been applied"
-        // signal — it covers both envKey and no-envKey models, and avoids
-        // false positives when startup baseUrl differs from registry
-        // default. (See #3417)
-        const hasBeenApplied =
-          this.generationConfigSources['baseUrl']?.kind === 'modelProviders';
-        const isProviderChanged =
-          hasBeenApplied &&
-          (this._generationConfig.apiKeyEnvKey !== resolved.envKey ||
-            this._generationConfig.baseUrl !== resolved.baseUrl);
-        const isUnchanged =
-          previousAuthType === authType &&
-          this._generationConfig.model === modelId &&
-          !isProviderChanged;
-        const savedApiKey = isUnchanged
-          ? this._generationConfig.apiKey
-          : undefined;
-        const savedApiKeySource = isUnchanged
-          ? this.generationConfigSources['apiKey']
-            ? { ...this.generationConfigSources['apiKey'] }
-            : undefined
-          : undefined;
+    // Prefer exact match (id+baseUrl) when the current baseUrl was set by a
+    // model provider switch; fall back to any model with the same id.
+    const providerBaseUrl =
+      this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
+        ? this._generationConfig.baseUrl
+        : undefined;
+    const resolved = modelId
+      ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
+        this.modelRegistry.getModel(authType, modelId))
+      : undefined;
+    if (resolved) {
+      // When authType and modelId haven't changed (startup/restart scenario),
+      // the current apiKey was already correctly resolved by
+      // resolveCliGenerationConfig. Save it so we can restore it if
+      // applyResolvedModelDefaults clears it (i.e. process.env[envKey] is
+      // absent). For cross-provider switches (different modelId), we must
+      // NOT preserve the previous key — it may belong to a different
+      // service. Also detect hot-reload scenarios where the provider
+      // config changed in place (same modelId, different envKey/baseUrl)
+      // by comparing fields that applyResolvedModelDefaults sets. Use
+      // baseUrl source === 'modelProviders' as the "has been applied"
+      // signal — it covers both envKey and no-envKey models, and avoids
+      // false positives when startup baseUrl differs from registry
+      // default. (See #3417)
+      const hasBeenApplied =
+        this.generationConfigSources['baseUrl']?.kind === 'modelProviders';
+      const isProviderChanged =
+        hasBeenApplied &&
+        (this._generationConfig.apiKeyEnvKey !== resolved.envKey ||
+          this._generationConfig.baseUrl !== resolved.baseUrl);
+      const isUnchanged =
+        previousAuthType === authType &&
+        this._generationConfig.model === modelId &&
+        !isProviderChanged;
+      const savedApiKey = isUnchanged
+        ? this._generationConfig.apiKey
+        : undefined;
+      const savedApiKeySource = isUnchanged
+        ? this.generationConfigSources['apiKey']
+          ? { ...this.generationConfigSources['apiKey'] }
+          : undefined
+        : undefined;
 
-        this.applyResolvedModelDefaults(resolved);
+      this.applyResolvedModelDefaults(resolved);
 
-        // Restore the previously-resolved apiKey if applyResolvedModelDefaults
-        // cleared it (env var not found) and this is the same model.
-        if (isUnchanged && !this._generationConfig.apiKey && savedApiKey) {
-          this._generationConfig.apiKey = savedApiKey;
-          if (savedApiKeySource) {
-            this.generationConfigSources['apiKey'] = savedApiKeySource;
-          }
+      // Restore the previously-resolved apiKey if applyResolvedModelDefaults
+      // cleared it (env var not found) and this is the same model.
+      if (isUnchanged && !this._generationConfig.apiKey && savedApiKey) {
+        this._generationConfig.apiKey = savedApiKey;
+        if (savedApiKeySource) {
+          this.generationConfigSources['apiKey'] = savedApiKeySource;
         }
-
-        this.strictModelProviderSelection = true;
-        // Clear active runtime model snapshot since we're now using a registry model
-        this.activeRuntimeModelSnapshotId = undefined;
-        return;
       }
+
+      this.strictModelProviderSelection = true;
+      // Clear active runtime model snapshot since we're now using a registry model
+      this.activeRuntimeModelSnapshotId = undefined;
+      return;
     }
 
     // Step 2: Check if there are existing credentials from other sources (not modelProviders)
@@ -1021,7 +1034,7 @@ export class ModelsConfig {
     }
 
     // Check if model exists in registry - if so, it's not a runtime model
-    if (this.modelRegistry.hasModel(currentAuthType, currentModel)) {
+    if (this.modelRegistry.hasModel(currentAuthType, currentModel, baseUrl)) {
       // Current is a registry model, clear any previous RuntimeModelSnapshot for this authType
       this.clearRuntimeModelSnapshotForAuthType(currentAuthType);
       return undefined;

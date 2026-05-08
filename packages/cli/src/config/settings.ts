@@ -438,6 +438,10 @@ export class LoadedSettings {
     saveSettings(settingsFile, createSettingsUpdate(key, value));
   }
 
+  recomputeMerged(): void {
+    this._merged = this.computeMergedSettings();
+  }
+
   /**
    * Set a value and persist using the full originalSettings, ensuring that
    * the on-disk file exactly matches the in-memory state for all keys.
