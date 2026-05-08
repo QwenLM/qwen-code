@@ -903,6 +903,10 @@ export class AgentCore {
         return { inputs: [] };
       }
 
+      if (!options.shouldWaitForExternalMessages?.()) {
+        return { inputs: [] };
+      }
+
       const waitAbortController = new AbortController();
       const onAbort = () => waitAbortController.abort();
       abortController.signal.addEventListener('abort', onAbort, { once: true });

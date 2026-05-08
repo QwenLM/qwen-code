@@ -238,15 +238,19 @@ export class MonitorRegistry {
     const entry = this.monitors.get(monitorId);
     if (!entry || entry.status !== 'running') return;
 
+    if (options.notify === false) {
+      this.settle(entry, 'cancelled');
+      debugLogger.info(`Monitor cancelled: ${monitorId}`);
+      entry.abortController.abort();
+      this.dispatchOwnerLifecycleWake(entry);
+      return;
+    }
+
     entry.abortController.abort();
     if (entry.status !== 'running') return;
     this.settle(entry, 'cancelled');
     debugLogger.info(`Monitor cancelled: ${monitorId}`);
-    if (options.notify !== false) {
-      this.emitTerminalNotification(entry);
-    } else {
-      this.dispatchOwnerLifecycleWake(entry);
-    }
+    this.emitTerminalNotification(entry);
   }
 
   get(monitorId: string): MonitorEntry | undefined {

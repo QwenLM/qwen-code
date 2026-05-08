@@ -791,6 +791,94 @@ describe('BackgroundAgentResumeService', () => {
     });
   });
 
+  it('cleans up owned monitor callbacks when resume setup fails before execution', async () => {
+    const sessionId = 'session-monitor-setup-fail';
+    const agentId = 'agent-monitor-setup-fail';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume monitor setup failure',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Resume monitor setup failure' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Resume monitor setup failure',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume monitor setup failure',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(),
+      setExternalMessageProvider: vi.fn(),
+      setExternalMessageWaiter: vi.fn(),
+      setExternalMessageWaitPredicate: vi.fn(),
+      getCore: vi.fn(() => {
+        throw new Error('setup failed');
+      }),
+      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+    const { service, subagentManager, monitorRegistry } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+
+    await expect(
+      service.resumeBackgroundAgent(agentId, 'continue'),
+    ).resolves.toBeUndefined();
+
+    expect(subagent.execute).not.toHaveBeenCalled();
+    expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+      agentId,
+      expect.any(Function),
+    );
+    expect(monitorRegistry.setAgentLifecycleCallback).toHaveBeenCalledWith(
+      agentId,
+      expect.any(Function),
+    );
+    expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+      agentId,
+      undefined,
+    );
+    expect(monitorRegistry.setAgentLifecycleCallback).toHaveBeenCalledWith(
+      agentId,
+      undefined,
+    );
+    expect(monitorRegistry.cancelRunningForOwner).toHaveBeenCalledWith(
+      agentId,
+      {
+        notify: false,
+      },
+    );
+  });
+
   it('resumes fork agents from transcript bootstrap instead of current parent config', async () => {
     const sessionId = 'session-fork-resume';
     const agentId = 'agent-fork-resume';

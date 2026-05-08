@@ -105,12 +105,23 @@ describe('MonitorRegistry', () => {
   it('wakes owner lifecycle callback for silent owner cancellation only', () => {
     const ownerCallback = vi.fn();
     const lifecycleCallback = vi.fn();
+    const ac = new AbortController();
     registry.setAgentNotificationCallback('agent-1', ownerCallback);
     registry.setAgentLifecycleCallback('agent-1', lifecycleCallback);
-    registry.register(createEntry({ ownerAgentId: 'agent-1' }));
+    registry.register(
+      createEntry({ ownerAgentId: 'agent-1', abortController: ac }),
+    );
+    ac.signal.addEventListener(
+      'abort',
+      () => {
+        registry.emitEvent('mon-1', 'late partial line');
+      },
+      { once: true },
+    );
 
     registry.cancel('mon-1', { notify: false });
 
+    expect(registry.get('mon-1')!.eventCount).toBe(0);
     expect(ownerCallback).not.toHaveBeenCalled();
     expect(lifecycleCallback).toHaveBeenCalledOnce();
   });

@@ -815,6 +815,40 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
+      it('should skip idle wait when the predicate flips false before wait registration', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        let predicateCalls = 0;
+        const waitForExternalMessages = vi.fn(async () => [
+          {
+            kind: 'notification' as const,
+            text: '<task-notification>late</task-notification>',
+          },
+        ]);
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => {
+          predicateCalls += 1;
+          return predicateCalls === 1;
+        });
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('Done.');
+        expect(waitForExternalMessages).not.toHaveBeenCalled();
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
       it('should keep waiting after an empty wake while an owner monitor is still running', async () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockImplementation(

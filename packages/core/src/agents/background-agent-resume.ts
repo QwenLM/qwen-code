@@ -495,6 +495,8 @@ export class BackgroundAgentResumeService {
       notified: false,
     });
 
+    let cleanupOwnedMonitorNotifications: (() => void) | undefined;
+
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
       const target = await this.resolveResumeTarget(subagentName);
@@ -680,6 +682,16 @@ export class BackgroundAgentResumeService {
       monitorRegistry.setAgentLifecycleCallback(meta.agentId, () =>
         registry.wakeExternalInputWaiters(meta.agentId),
       );
+      let cleanedUpOwnedMonitorNotifications = false;
+      cleanupOwnedMonitorNotifications = () => {
+        if (cleanedUpOwnedMonitorNotifications) return;
+        cleanedUpOwnedMonitorNotifications = true;
+        monitorRegistry.setAgentNotificationCallback(meta.agentId, undefined);
+        monitorRegistry.setAgentLifecycleCallback(meta.agentId, undefined);
+        monitorRegistry.cancelRunningForOwner(meta.agentId, {
+          notify: false,
+        });
+      };
 
       const hookSystem = this.config.getHookSystem();
       const contextState = new ContextState();
@@ -788,11 +800,7 @@ export class BackgroundAgentResumeService {
         } finally {
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
-          monitorRegistry.setAgentNotificationCallback(meta.agentId, undefined);
-          monitorRegistry.setAgentLifecycleCallback(meta.agentId, undefined);
-          monitorRegistry.cancelRunningForOwner(meta.agentId, {
-            notify: false,
-          });
+          cleanupOwnedMonitorNotifications?.();
           cleanupJsonl?.();
           // Release the per-subagent ToolRegistry the resumed agent's
           // wrapper Config built in `createApprovalModeOverride` so any
@@ -811,6 +819,7 @@ export class BackgroundAgentResumeService {
       void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
       return entry;
     } catch (error) {
+      cleanupOwnedMonitorNotifications?.();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.warn(
