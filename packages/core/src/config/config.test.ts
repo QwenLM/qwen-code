@@ -1030,6 +1030,95 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('GitCoAuthor Settings', () => {
+    it('defaults both commit and pr to true when not specified', () => {
+      const config = new Config({ ...baseParams, gitCoAuthor: undefined });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(true);
+    });
+
+    it('accepts an object with independent commit and pr toggles', () => {
+      const config = new Config({
+        ...baseParams,
+        gitCoAuthor: { commit: true, pr: false },
+      });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(false);
+    });
+
+    // Legacy shape: before commit and PR attribution were split, this
+    // setting was a single boolean. Treat it as governing both toggles so
+    // existing users' preferences carry over.
+    it.each([true, false])(
+      'coerces legacy boolean %s to { commit, pr } with the same value',
+      (value) => {
+        const config = new Config({ ...baseParams, gitCoAuthor: value });
+        const settings = config.getGitCoAuthor();
+        expect(settings.commit).toBe(value);
+        expect(settings.pr).toBe(value);
+      },
+    );
+
+    // settings.json is hand-editable; without intent-aware string
+    // parsing a hand-edited `{ commit: "false" }` would silently
+    // inflate to `commit: true` (the previous "default-to-true on
+    // mismatch" policy). Honor common string disable-intent forms
+    // and fall through to disabled on genuinely unrecognisable
+    // input — safer-by-default than turning attribution on against
+    // the user's clear opt-out.
+    it.each([
+      // Disable-intent strings.
+      ['string "false"', 'false', false],
+      ['string "FALSE"', 'FALSE', false],
+      ['string "no"', 'no', false],
+      ['string "off"', 'off', false],
+      ['string "0"', '0', false],
+      ['empty string', '', false],
+      // Enable-intent strings.
+      ['string "true"', 'true', true],
+      ['string "yes"', 'yes', true],
+      ['string "on"', 'on', true],
+      ['string "1"', '1', true],
+      // Numbers.
+      ['number 1', 1, true],
+      ['number 0', 0, false],
+      ['number 42', 42, false],
+      // Other types fall through to disabled.
+      ['null', null, false],
+      ['object', {}, false],
+      ['array', [], false],
+      // Unknown strings → disabled (don't quietly enable).
+      ['unknown string', 'maybe', false],
+    ])(
+      'parses %s as %s for both commit and pr',
+      (_label, badValue, expected) => {
+        const config = new Config({
+          ...baseParams,
+          gitCoAuthor: {
+            commit: badValue as unknown as boolean,
+            pr: badValue as unknown as boolean,
+          },
+        });
+        const settings = config.getGitCoAuthor();
+        expect(settings.commit).toBe(expected);
+        expect(settings.pr).toBe(expected);
+      },
+    );
+
+    // A genuinely-absent sub-field still defaults to true (schema default).
+    it('defaults absent commit/pr to true', () => {
+      const config = new Config({
+        ...baseParams,
+        gitCoAuthor: {} as { commit?: boolean; pr?: boolean },
+      });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(true);
+    });
+  });
+
   describe('Telemetry Settings', () => {
     it('should return default telemetry target if not provided', () => {
       const params: ConfigParameters = {

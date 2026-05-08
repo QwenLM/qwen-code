@@ -295,7 +295,8 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   'ui.enableWelcomeBack',
 
   // Git Behavior
-  'general.gitCoAuthor',
+  'general.gitCoAuthor.commit',
+  'general.gitCoAuthor.pr',
 
   // File Filtering
   'context.fileFiltering.respectGitIgnore',

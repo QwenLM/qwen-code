@@ -19,6 +19,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
 import type {
   ChatCompressionInfo,
@@ -216,6 +217,7 @@ export interface ChatRecord {
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
+    | 'attribution_snapshot'
     | 'notification'
     | 'cron'
     | 'custom_title'
@@ -262,6 +264,7 @@ export interface ChatRecord {
     | SlashCommandRecordPayload
     | UiTelemetryRecordPayload
     | AtCommandRecordPayload
+    | AttributionSnapshotPayload
     | CustomTitleRecordPayload
     | NotificationRecordPayload
     | RewindRecordPayload
@@ -375,6 +378,14 @@ export interface UiTelemetryRecordPayload {
 }
 
 /**
+ * Stored payload for attribution state snapshots.
+ * Enables session persistence of AI contribution tracking.
+ */
+export interface AttributionSnapshotPayload {
+  snapshot: AttributionSnapshot;
+}
+
+/**
  * Stored payload for conversation rewind events.
  */
 export interface RewindRecordPayload {
@@ -465,6 +476,16 @@ export class ChatRecordingService {
    * it burn tokens after the session has already moved on.
    */
   private autoTitleController: AbortController | undefined;
+
+  /**
+   * JSON-serialized form of the most recent attribution snapshot we
+   * wrote, used to deduplicate identical writes on every non-retry
+   * turn. Without this, sessions that touch many files would write a
+   * full duplicate of the entire snapshot to the JSONL on every turn,
+   * inflating the on-disk session and making `/resume` slower to
+   * hydrate.
+   */
+  private lastAttributionSnapshotJson: string | undefined;
 
   constructor(config: Config) {
     this.config = config;
@@ -612,7 +633,25 @@ export class ChatRecordingService {
    * local-disk writes failures are rare enough to accept the fire-and-forget
    * simplification.
    */
-  private appendRecord(record: ChatRecord): void {
+  /**
+   * Fire-and-forget: queues a JSONL write on the internal writeChain
+   * and swallows async failures (logs them via debugLogger). All
+   * existing call sites — recordUserMessage, recordAssistantTurn,
+   * etc. — invoke this synchronously without awaiting, so the
+   * internal swallow keeps an unhandled-promise-rejection from
+   * surfacing on a single transient writeLine failure.
+   *
+   * Callers that need to react to per-record write FAILURE (e.g. the
+   * snapshot dedup-key rollback in `recordAttributionSnapshot`) pass
+   * an `onError` callback, which fires after the write rejects (and
+   * after the rejection has been logged + the chain re-armed). Sync
+   * throws still propagate so the caller's outer try/catch can roll
+   * back optimistic state — see the synchronous-failure test.
+   */
+  private appendRecord(
+    record: ChatRecord,
+    onError?: (err: unknown) => void,
+  ): void {
     let conversationFile: string;
     try {
       conversationFile = this.ensureConversationFile();
@@ -626,6 +665,13 @@ export class ChatRecordingService {
       .then(() => jsonl.writeLine(conversationFile, record))
       .catch((err) => {
         debugLogger.error('Error appending record (async):', err);
+        if (onError) {
+          try {
+            onError(err);
+          } catch (cbErr) {
+            debugLogger.error('appendRecord onError callback threw:', cbErr);
+          }
+        }
       });
   }
 
@@ -945,6 +991,12 @@ export class ChatRecordingService {
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
+      // The previous attribution snapshot now sits on the abandoned
+      // branch — clear the dedup key so the next snapshot lands on the
+      // active branch and `/resume` can find it. Without this, a
+      // post-rewind identical snapshot would be skipped and the rewound
+      // session would lose all attribution state on restore.
+      this.lastAttributionSnapshotJson = undefined;
 
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -1081,6 +1133,61 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving @-command record:', error);
+    }
+  }
+
+  /**
+   * Records an attribution state snapshot for session persistence.
+   * Called at the start of every non-retry turn so that a resumed session
+   * sees the most recent state including edits made during the prior turn.
+   *
+   * Deduplicates identical successive writes: if the snapshot's JSON
+   * form is byte-identical to the last one we wrote, skip the append.
+   * Without this, sessions that touch many files would write a full
+   * duplicate of the entire snapshot to the JSONL on every turn, even
+   * when nothing changed — inflating session size and slowing /resume.
+   *
+   * Set the dedup key optimistically and roll it back if the write
+   * fails. Synchronous identical calls (common during a tool-driven
+   * turn) all dedup correctly, but a transient write failure clears
+   * the key so the next identical snapshot retries the write rather
+   * than being permanently suppressed.
+   */
+  recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
+    let json: string | undefined;
+    try {
+      json = JSON.stringify(snapshot);
+      if (json === this.lastAttributionSnapshotJson) {
+        return;
+      }
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'attribution_snapshot',
+        systemPayload: { snapshot },
+      };
+
+      this.lastAttributionSnapshotJson = json;
+      this.appendRecord(record, () => {
+        // Async write failed — only roll back if the key still
+        // belongs to our snapshot (a later distinct write may have
+        // overwritten it).
+        if (this.lastAttributionSnapshotJson === json) {
+          this.lastAttributionSnapshotJson = undefined;
+        }
+      });
+    } catch (error) {
+      // appendRecord (and createBaseRecord/JSON.stringify) can throw
+      // synchronously — e.g. ensureConversationFile() fails because
+      // the project temp dir isn't writable. The .catch() handler
+      // attached to the promise never runs in that case, so we'd
+      // otherwise leave the dedup key set without a write ever
+      // having landed and permanently suppress identical retries.
+      // Roll back here too.
+      if (json !== undefined && this.lastAttributionSnapshotJson === json) {
+        this.lastAttributionSnapshotJson = undefined;
+      }
+      debugLogger.error('Error saving attribution snapshot:', error);
     }
   }
 }
