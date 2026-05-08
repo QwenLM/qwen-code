@@ -1291,7 +1291,23 @@ export default {
     '\n⚠ Qwen OAuth 免费额度已于 2026-04-15 停用。请选择其他选项。\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     '付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
+  'For teams \u00B7 Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
+    '适合团队 \u00B7 付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
+  'For individual developers \u00B7 Pay per model call \u00B7 5-hour/weekly quotas':
+    '适合个人开发场景 \u00B7 按模型调用次数计费 \u00B7 每 5 小时/每周限额',
+  Subscribe: '订阅计划',
+  'Paid subscription plans from Alibaba Cloud ModelStudio':
+    '阿里云百炼付费订阅计划',
+  'Select Subscription Plan': '选择订阅计划',
   'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
+  'Alibaba Cloud Token Plan': '阿里云百炼 Token Plan',
+  'Pay-as-you-go tokens \u00B7 Configure ModelStudio standard API key':
+    '按 Token 付费 \u00B7 配置百炼标准 API Key',
+  'For individuals \u00B7 Pay-as-you-go tokens \u00B7 Dedicated Token Plan endpoint':
+    '适合个人 \u00B7 按 Token 付费 \u00B7 使用独立 Token Plan Endpoint',
+  'For teams/companies \u00B7 Credits deducted by token usage \u00B7 Dedicated API key and base URL':
+    '适合一人公司/团队/企业 \u00B7 按 Token 消耗抵扣 Credits \u00B7 专属 API Key 和 Base URL',
+  'Token Plan documentation': 'Token Plan 参考文档',
   'Bring your own API key': '使用自己的 API 密钥',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     '基于浏览器的第三方提供商认证（例如 OpenRouter、ModelScope）',
@@ -1722,6 +1738,8 @@ export default {
     '无效的 API Key，Coding Plan API Key 均以 "sk-sp-" 开头，请检查',
   'You can get your Coding Plan API key here':
     '您可以在这里获取 Coding Plan API Key',
+  'You can get your Token Plan API key here':
+    '您可以在这里获取 Token Plan API Key',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
     'API Key 已存储在 settings.env 中。您可以将其迁移到 .env 文件以获得更好的安全性。',
   'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
@@ -1757,6 +1775,7 @@ export default {
   'Choose based on where your account is registered':
     '请根据您的账号注册地区选择',
   'Enter Coding Plan API Key': '输入 Coding Plan API Key',
+  'Enter Token Plan API Key': '输入 Token Plan API Key',
 
   // ============================================================================
   // Coding Plan International Updates

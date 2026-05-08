@@ -70,6 +70,33 @@ export function isForceExpandGroup(
     return true;
   }
 
+  // Terminal subagent tool calls must show — the inline
+  // `SubagentScrollbackSummary` is the persistent record of the
+  // run's outcome (LiveAgentPanel evicts terminal rows after its
+  // visibility window). If the group merged into a compact batch,
+  // the summary would never render and the user would lose the
+  // committed audit trail. Mirrors the `hasTerminalSubagent`
+  // predicate in `ToolGroupMessage.showCompact`.
+  if (
+    tools.some((t) => {
+      const rd = t.resultDisplay;
+      if (
+        !rd ||
+        typeof rd !== 'object' ||
+        !('type' in rd) ||
+        (rd as { type?: string }).type !== 'task_execution'
+      ) {
+        return false;
+      }
+      const status = (rd as { status?: string }).status;
+      return (
+        status === 'completed' || status === 'failed' || status === 'cancelled'
+      );
+    })
+  ) {
+    return true;
+  }
+
   // Active focused shell must be visible
   if (
     embeddedShellFocused &&

@@ -247,4 +247,105 @@ describe('ToolConfirmationMessage', () => {
       expect(lastFrame()).not.toContain('Modify with external editor');
     });
   });
+
+  describe('compactMode', () => {
+    it('renders the command and exec-specific question for exec confirmations', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'rm -f /tmp/foo.txt',
+        rootCommand: 'rm',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('rm -f /tmp/foo.txt');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('Allow always');
+      expect(frame).toContain('No');
+      // Compact mode swaps the type-specific exec question for the
+      // generic prompt (the body already shows the command) and trims
+      // project/user-scope variants.
+      expect(frame).not.toContain('Allow execution of:');
+      expect(frame).not.toContain('Always allow in this project');
+      expect(frame).not.toContain('Always allow for this user');
+    });
+
+    it('renders MCP server and tool name for mcp confirmations', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'mcp',
+        title: 'Confirm MCP Tool',
+        serverName: 'my-server',
+        toolName: 'my-tool',
+        toolDisplayName: 'My Tool',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MCP Server: my-server');
+      expect(frame).toContain('Tool: my-tool');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('Allow always');
+      expect(frame).toContain('No');
+      // Compact mode swaps the type-specific mcp question for the
+      // generic prompt (the body already shows server + tool) and trims
+      // project/user-scope variants.
+      expect(frame).not.toContain('Allow execution of MCP tool');
+      expect(frame).not.toContain('Always allow in this project');
+      expect(frame).not.toContain('Always allow for this user');
+    });
+
+    it('caps multi-line exec body at 5 lines with overflow indicator', () => {
+      const lines = Array.from({ length: 12 }, (_, i) => `Line ${i + 1}`);
+      const command = `cat <<'EOF'\n${lines.join('\n')}\nEOF`;
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command,
+        rootCommand: 'cat',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={50}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // Head of the command is preserved (so the user sees what's being
+      // run); the heredoc tail elides behind the overflow indicator.
+      expect(frame).toContain("cat <<'EOF'");
+      expect(frame).toContain('Line 1');
+      expect(frame).not.toContain('Line 8');
+      expect(frame).not.toContain('Line 12');
+      expect(frame).toMatch(/\.{3} last \d+ lines hidden \.{3}/);
+    });
+  });
 });

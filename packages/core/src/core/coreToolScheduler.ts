@@ -216,6 +216,16 @@ export type ExecutingToolCall = {
   executionStartTime?: number;
   outcome?: ToolConfirmationOutcome;
   pid?: number;
+  /**
+   * Set during a foreground shell-tool invocation: the AbortController
+   * the user/UI can fire (with `signal.reason = { kind: 'background' }`)
+   * to promote the running command to a background entry. Set right
+   * after `setPidCallback` fires (see ShellTool.execute), cleared
+   * implicitly when the tool transitions to a terminal status. Only
+   * meaningful for the shell tool's foreground path; absent on every
+   * other tool kind.
+   */
+  promoteAbortController?: AbortController;
 };
 
 export type CancelledToolCall = {
@@ -1929,11 +1939,23 @@ export class CoreToolScheduler {
             );
             this.notifyToolCallsUpdate();
           };
+          // Stash the promote AbortController on the executing tool call so
+          // a UI surface (Ctrl+B keybind) can find the foreground shell's
+          // promote trigger by callId.
+          const setPromoteAbortControllerCallback = (ac: AbortController) => {
+            this.toolCalls = this.toolCalls.map((tc) =>
+              tc.request.callId === callId && tc.status === 'executing'
+                ? { ...tc, promoteAbortController: ac }
+                : tc,
+            );
+            this.notifyToolCallsUpdate();
+          };
           promise = invocation.execute(
             signal,
             liveOutputCallback,
             shellExecutionConfig,
             setPidCallback,
+            setPromoteAbortControllerCallback,
           );
         } else {
           promise = invocation.execute(

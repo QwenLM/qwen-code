@@ -438,6 +438,10 @@ export class LoadedSettings {
     saveSettings(settingsFile, createSettingsUpdate(key, value));
   }
 
+  recomputeMerged(): void {
+    this._merged = this.computeMergedSettings();
+  }
+
   /**
    * Get user-level hooks from user settings (not merged with workspace).
    * These hooks should always be loaded regardless of folder trust.

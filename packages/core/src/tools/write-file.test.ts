@@ -917,7 +917,7 @@ describe('WriteFileTool', () => {
 
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
       expect(result.error?.message).toMatch(
-        /has not been fully read in this session/,
+        /has not been read in this session/,
       );
       // File must remain at its pre-call content, and the tool must
       // not have slurped the existing bytes into memory before
@@ -930,6 +930,13 @@ describe('WriteFileTool', () => {
     });
 
     it('rejects a write when the previous read was ranged (offset/limit)', async () => {
+      // WriteFile diverges from EditTool here: a partial read counts
+      // for in-place edits (Edit's `old_string` matching is the
+      // content-derived guard against editing bytes the model never
+      // saw), but WriteFile replaces the whole file and has no
+      // equivalent guard — a slice-only read followed by an
+      // overwrite would necessarily hallucinate the rest of the
+      // bytes, which is the issue #2499 data-loss scenario.
       const filePath = path.join(rootDir, 'enforce-ranged.txt');
       fs.writeFileSync(filePath, 'unchanged', 'utf-8');
       const stats = fs.statSync(filePath);
@@ -942,6 +949,11 @@ describe('WriteFileTool', () => {
         .build({ file_path: filePath, content: 'clobber' })
         .execute(abortSignal);
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      // Error message should explain why partial reads are not enough
+      // for overwrites, not just say "has not been read".
+      expect(result.error?.message).toMatch(
+        /only been partially read|replaces the entire file/,
+      );
       expect(fs.readFileSync(filePath, 'utf-8')).toBe('unchanged');
 
       fs.unlinkSync(filePath);
@@ -1012,7 +1024,7 @@ describe('WriteFileTool', () => {
       });
       await expect(
         invocation.getConfirmationDetails(abortSignal),
-      ).rejects.toThrow(/has not been fully read in this session/);
+      ).rejects.toThrow(/has not been read in this session/);
 
       fs.unlinkSync(filePath);
     });
