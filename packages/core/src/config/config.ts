@@ -538,7 +538,7 @@ export interface ConfigParameters {
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
   enableManagedAutoDream?: boolean;
-  /** Enable automatic project skill review after tool-heavy sessions. Defaults to true. */
+  /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).

@@ -173,6 +173,12 @@ async function resolveAutoMemoryWithDeadline(
   }
 }
 
+/** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
+const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ToolNames.WRITE_FILE,
+  ToolNames.EDIT,
+]);
+
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
@@ -634,10 +640,64 @@ export class GeminiClient {
   private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
   ): void {
+    // autoSkill counts tool calls and can trigger on both UserQuery and
+    // ToolResult turns so the threshold can fire mid-session.
     if (
-      messageType !== SendMessageType.UserQuery &&
-      messageType !== SendMessageType.ToolResult
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.ToolResult
     ) {
+      const projectRoot = this.config.getProjectRoot();
+      const sessionId = this.config.getSessionId();
+      const history = this.getHistory();
+      const mgr = this.config.getMemoryManager();
+      const autoSkillEnabled = this.config.getAutoSkillEnabled();
+
+      if (autoSkillEnabled) {
+        const skillReviewResult = mgr.scheduleSkillReview({
+          projectRoot,
+          sessionId,
+          history,
+          config: this.config,
+          toolCallCount: this.toolCallCount,
+          skillsModified: this.skillsModifiedInSession,
+          enabled: autoSkillEnabled,
+          threshold: AUTO_SKILL_THRESHOLD,
+          maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
+          timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+        });
+        if (skillReviewResult.status === 'scheduled') {
+          // Reset tool-call counter only when a review is actually dispatched,
+          // so the count accumulates correctly across turns within a session.
+          this.toolCallCount = 0;
+          if (skillReviewResult.promise) {
+            this.pendingMemoryTaskPromises.push(
+              skillReviewResult.promise
+                .then((record) => {
+                  const touched = record.metadata?.['touchedSkillFiles'];
+                  return Array.isArray(touched) ? touched.length : 0;
+                })
+                .catch((error: unknown) => {
+                  debugLogger.warn(
+                    'Failed to run managed skill review.',
+                    error,
+                  );
+                  return 0;
+                }),
+            );
+          }
+        }
+        // Always reset the skills-modified flag after the scheduleSkillReview
+        // check, regardless of whether a review was dispatched. This prevents
+        // a deadlock where skillsModifiedInSession stays true forever: when
+        // the flag is set, scheduleSkillReview returns 'skipped' immediately
+        // (never 'scheduled'), so without this reset the flag can never clear.
+        this.skillsModifiedInSession = false;
+      }
+    }
+
+    // extract and dream keep the original UserQuery-only gate to preserve
+    // the existing "once per user turn" semantics and avoid redundant work.
+    if (messageType !== SendMessageType.UserQuery) {
       return;
     }
 
@@ -645,36 +705,6 @@ export class GeminiClient {
     const sessionId = this.config.getSessionId();
     const history = this.getHistory();
     const mgr = this.config.getMemoryManager();
-    const autoSkillEnabled = this.config.getAutoSkillEnabled();
-
-    if (autoSkillEnabled) {
-      const skillReviewResult = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId,
-        history,
-        config: this.config,
-        toolCallCount: this.toolCallCount,
-        skillsModified: this.skillsModifiedInSession,
-        enabled: autoSkillEnabled,
-        threshold: AUTO_SKILL_THRESHOLD,
-        maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
-        timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
-      });
-      if (skillReviewResult.status === 'scheduled') {
-        // Reset per-session counters only when review is actually dispatched,
-        // so the count accumulates correctly across turns within a session.
-        this.toolCallCount = 0;
-        this.skillsModifiedInSession = false;
-        if (skillReviewResult.promise) {
-          this.pendingMemoryTaskPromises.push(
-            skillReviewResult.promise.then((record) => {
-              const touched = record.metadata?.['touchedSkillFiles'];
-              return Array.isArray(touched) ? touched.length : 0;
-            }),
-          );
-        }
-      }
-    }
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
       return;
@@ -739,12 +769,6 @@ export class GeminiClient {
     toolName: string,
     args?: Record<string, unknown>,
   ): void {
-    const SKILL_WRITE_TOOL_NAMES = new Set([
-      'write_file',
-      'edit',
-      'replace',
-      'create_file',
-    ]);
     if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
       const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
       if (

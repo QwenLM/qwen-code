@@ -475,9 +475,9 @@ export class MemoryManager {
    * subscribers can be reached too; the unfiltered subscriber set
    * always receives the wakeup either way.
    */
-  private notify(taskType?: 'extract' | 'dream'): void {
+  private notify(taskType?: 'extract' | 'dream' | 'skill-review'): void {
     for (const fn of this.subscribers) fn();
-    if (taskType) {
+    if (taskType && taskType !== 'skill-review') {
       const typed = this.subscribersByType.get(taskType);
       if (typed) for (const fn of typed) fn();
     }

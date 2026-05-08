@@ -6,6 +6,7 @@
 
 import type { Content } from '@google/genai';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
@@ -15,8 +16,6 @@ import type {
 import { runForkedAgent } from '../utils/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
   assertRealProjectSkillPath,
   getProjectSkillsRoot,
@@ -72,7 +71,6 @@ function isScopedTool(toolName: string): boolean {
   return (
     toolName === ToolNames.READ_FILE ||
     toolName === ToolNames.LS ||
-    toolName === ToolNames.SHELL ||
     toolName === ToolNames.EDIT ||
     toolName === ToolNames.WRITE_FILE
   );
@@ -99,17 +97,20 @@ async function evaluateScopedDecision(
 ): Promise<PermissionDecision> {
   switch (ctx.toolName) {
     case ToolNames.READ_FILE:
-    case ToolNames.LS:
-      // Read tools are always allowed — the agent needs to inspect skills.
-      return 'allow';
-    case ToolNames.SHELL: {
-      if (!ctx.command) {
-        return 'deny';
+    case ToolNames.LS: {
+      // Read tools are allowed only within the project root. This prevents
+      // the review agent from reading arbitrary files (e.g. ~/.aws/credentials)
+      // and embedding them into a SKILL.md that gets committed.
+      if (!ctx.filePath) return 'allow'; // no path means listing root — allow
+      const resolvedRead = path.resolve(projectRoot, ctx.filePath);
+      const resolvedRoot = path.resolve(projectRoot);
+      if (
+        resolvedRead === resolvedRoot ||
+        resolvedRead.startsWith(resolvedRoot + path.sep)
+      ) {
+        return 'allow';
       }
-      const isReadOnly = await isShellCommandReadOnlyAST(
-        stripShellWrapper(ctx.command),
-      );
-      return isReadOnly ? 'allow' : 'deny';
+      return 'deny';
     }
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE: {
@@ -142,9 +143,7 @@ function getScopedDenyRule(
   switch (ctx.toolName) {
     case ToolNames.READ_FILE:
     case ToolNames.LS:
-      return undefined; // always allow — no deny rule needed
-    case ToolNames.SHELL:
-      return 'ManagedSkillReview(run_shell_command: read-only only)';
+      return undefined; // allow within project root — no deny rule needed
     case ToolNames.EDIT:
       return `ManagedSkillReview(edit: only within ${getProjectSkillsRoot(projectRoot)} and only on skills with 'source: auto-skill' in frontmatter)`;
     case ToolNames.WRITE_FILE:
@@ -211,6 +210,12 @@ const SKILL_REVIEW_SYSTEM_PROMPT = [
 function buildAgentHistory(history: Content[]): Content[] {
   if (history.length === 0) return [];
   const last = history[history.length - 1];
+  // If the final message is a user turn (not a model turn), drop it. A trailing
+  // user message means the session ended mid-exchange (e.g. user sent a new
+  // query that has not yet received a model response). Including it would make
+  // the skill-review agent see an open "conversation" with an unanswered user
+  // prompt, which can confuse the model and produce hallucinated tool calls
+  // attempting to "answer" the user instead of reviewing skills.
   if (last.role !== 'model') return history.slice(0, -1);
   const openCalls = (last.parts ?? []).filter((p) => p.functionCall);
   if (openCalls.length === 0) return [...history];
@@ -267,7 +272,6 @@ export async function runSkillReviewByAgent(params: {
     tools: [
       ToolNames.READ_FILE,
       ToolNames.LS,
-      ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
     ],

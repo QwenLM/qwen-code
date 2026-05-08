@@ -19,7 +19,7 @@ export function isProjectSkillPath(
   projectRoot: string,
 ): boolean {
   const skillsRoot = path.resolve(getProjectSkillsRoot(projectRoot));
-  const resolved = path.resolve(filePath);
+  const resolved = path.resolve(projectRoot, filePath);
   return resolved === skillsRoot || resolved.startsWith(skillsRoot + path.sep);
 }
 
@@ -82,6 +82,24 @@ export async function assertRealProjectSkillPath(
       return;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // Before treating a missing path as safe, check whether the path
+        // itself exists as a dangling symlink (lstat succeeds but realpath
+        // fails with ENOENT because the link target is missing). A dangling
+        // symlink could be used to pre-aim a write at an arbitrary location.
+        try {
+          const lstatResult = await fs.lstat(check);
+          if (lstatResult.isSymbolicLink()) {
+            throw new Error(
+              `Skills write blocked: dangling symlink detected at "${check}".`,
+            );
+          }
+        } catch (lstatErr) {
+          // lstat itself threw — re-throw only if it's not ENOENT (path truly
+          // doesn't exist at all, which is safe to walk up from).
+          if ((lstatErr as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw lstatErr;
+          }
+        }
         const parent = path.dirname(check);
         if (parent === check) {
           // Reached filesystem root without finding an existing node.

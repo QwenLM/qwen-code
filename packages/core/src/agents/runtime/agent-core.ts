@@ -391,10 +391,13 @@ export class AgentCore {
             .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
         );
       } else {
-        // Explicit tool list: only prevent recursive agent spawning.
+        // Explicit tool list: apply the full subagent exclusion set (not just
+        // the recursion guard). This prevents control-plane tools
+        // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
+        // explicitly-configured subagents that happen to list them.
         toolsList.push(
           ...toolRegistry.getFunctionDeclarationsFiltered(
-            asStrings.filter((name) => !recursionGuardOnly.has(name)),
+            asStrings.filter((name) => !excludedFromSubagents.has(name)),
           ),
         );
       }
