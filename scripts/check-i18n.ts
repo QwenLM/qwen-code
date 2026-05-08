@@ -46,6 +46,7 @@ interface CheckResult {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WRITE_UNUSED_KEYS_FLAG = '--write-unused-locale-keys';
 const WRITE_UNUSED_KEYS_ENV = 'QWEN_CHECK_I18N_WRITE_UNUSED_KEYS';
+const STRICT_KEY_PARITY_LOCALES = new Set(['zh', 'zh-TW']);
 
 function shouldWriteUnusedKeysJson(): boolean {
   return (
@@ -352,22 +353,44 @@ async function checkI18n(): Promise<CheckResult> {
       untranslatedMustKeys,
     });
 
+    const requiresStrictKeyParity = STRICT_KEY_PARITY_LOCALES.has(locale.code);
+
     if (missingKeys.length > 0) {
-      const missingRequiredKeys = missingKeys.filter((key) =>
-        MUST_TRANSLATE_KEY_SET.has(key as MustTranslateKey),
-      );
-      const missingOptionalKeyCount =
-        missingKeys.length - missingRequiredKeys.length;
-
-      for (const key of missingRequiredKeys) {
-        errors.push(
-          `Missing required translation in ${locale.code}.js: "${key}"`,
+      if (requiresStrictKeyParity) {
+        for (const key of missingKeys) {
+          errors.push(`Missing translation in ${locale.code}.js: "${key}"`);
+        }
+      } else {
+        const missingRequiredKeys = missingKeys.filter((key) =>
+          MUST_TRANSLATE_KEY_SET.has(key as MustTranslateKey),
         );
-      }
+        const missingOptionalKeyCount =
+          missingKeys.length - missingRequiredKeys.length;
 
-      if (missingOptionalKeyCount > 0) {
+        for (const key of missingRequiredKeys) {
+          errors.push(
+            `Missing required translation in ${locale.code}.js: "${key}"`,
+          );
+        }
+
+        if (missingOptionalKeyCount > 0) {
+          warnings.push(
+            `${locale.code}.js is missing ${missingOptionalKeyCount} non-required translation keys`,
+          );
+        }
+      }
+    }
+
+    if (extraKeys.length > 0) {
+      if (requiresStrictKeyParity) {
+        for (const key of extraKeys) {
+          errors.push(
+            `Extra key in ${locale.code}.js (not in en.js): "${key}"`,
+          );
+        }
+      } else {
         warnings.push(
-          `${locale.code}.js is missing ${missingOptionalKeyCount} non-required translation keys`,
+          `${locale.code}.js has ${extraKeys.length} keys not present in en.js`,
         );
       }
     }

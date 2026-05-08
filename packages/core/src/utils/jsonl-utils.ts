@@ -24,6 +24,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
 import { createDebugLogger } from './debugLogger.js';
 
@@ -151,12 +152,11 @@ async function closeLineReader(
     return;
   }
 
-  await new Promise<void>((resolve) => {
-    fileStream.once('close', resolve);
-    if (!fileStream.destroyed) {
-      fileStream.destroy();
-    }
-  });
+  const closed = finished(fileStream, { cleanup: true }).catch(() => undefined);
+  if (!fileStream.destroyed) {
+    fileStream.destroy();
+  }
+  await closed;
 }
 
 /**
