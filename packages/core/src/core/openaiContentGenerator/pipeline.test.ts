@@ -782,7 +782,7 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('should retry on model not loaded error', async () => {
+    it('should not retry on model not loaded error (too broad, matches permanent errors)', async () => {
       // Arrange
       const request: GenerateContentParameters = {
         model: 'test-model',
@@ -792,25 +792,21 @@ describe('ContentGenerationPipeline', () => {
       const notLoadedError = new Error('model not loaded');
 
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        new GenerateContentResponse(),
+      (mockClient.chat.completions.create as Mock).mockRejectedValue(
+        notLoadedError,
       );
-      (mockClient.chat.completions.create as Mock)
-        .mockRejectedValueOnce(notLoadedError)
-        .mockResolvedValueOnce({
-          id: 'response-id',
-          choices: [
-            { message: { content: 'response' }, finish_reason: 'stop' },
-          ],
-        });
 
-      // Act
-      const result = await pipeline.execute(request, userPromptId);
-
-      // Assert
-      expect(result).toBeDefined();
-      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(2);
-      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+      // Act & Assert
+      await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
+        'model not loaded',
+      );
+      // Should only call once — 'model not loaded' is no longer retried
+      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(1);
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        notLoadedError,
+        expect.any(Object),
+        request,
+      );
     });
 
     it('should pass abort signal to OpenAI client when provided', async () => {
@@ -2060,5 +2056,244 @@ describe('ContentGenerationPipeline', () => {
       expect(responses).toHaveLength(1);
       expect(responses[0]).toBe(finalGeminiResponse);
     });
+
+
+  describe('stream retry on model-unloaded error', () => {
+    it('should retry stream when model-unloaded error occurs during iteration', async () => {
+      // Arrange
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const unloadedError = new Error('Model is unloaded');
+
+      // First stream: yields one chunk then throws model-unloaded
+      const firstStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [{ delta: { content: 'Hello' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw unloadedError;
+        },
+      };
+
+      // Second stream (retry): yields remaining chunks
+      const retryChunk = {
+        id: 'chunk-2',
+        choices: [
+          { delta: { content: ' response' }, finish_reason: 'stop' },
+        ],
+      } as OpenAI.Chat.ChatCompletionChunk;
+
+      const retryStream = {
+        async *[Symbol.asyncIterator]() {
+          yield retryChunk;
+        },
+      };
+
+      const mockGeminiResponse1 = new GenerateContentResponse();
+      mockGeminiResponse1.candidates = [
+        { content: { parts: [{ text: 'Hello' }], role: 'model' } },
+      ];
+      const mockGeminiResponse2 = new GenerateContentResponse();
+      mockGeminiResponse2.candidates = [
+        {
+          content: { parts: [{ text: ' response' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock)
+        .mockReturnValueOnce(mockGeminiResponse1)
+        .mockReturnValueOnce(mockGeminiResponse2);
+
+      // First call returns the failing stream, second call (retry) returns the good stream
+      (mockClient.chat.completions.create as Mock)
+        .mockResolvedValueOnce(firstStream)
+        .mockResolvedValueOnce(retryStream);
+
+      // Act
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+      const results = [];
+      for await (const result of resultGenerator) {
+        results.push(result);
+      }
+
+      // Assert
+      expect(results).toHaveLength(2);
+      expect(results[0]).toBe(mockGeminiResponse1);
+      expect(results[1]).toBe(mockGeminiResponse2);
+      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(2);
+      // buildRequest should be called twice (initial + retry)
+      expect(mockProvider.buildRequest).toHaveBeenCalledTimes(2);
+      // Error handler should NOT be called since retry succeeded
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('should call error handler when stream retry fails', async () => {
+      // Arrange
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const unloadedError = new Error('Model is unloaded');
+      const retryError = new Error('Model failed to load');
+
+      const firstStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [{ delta: { content: 'Hello' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw unloadedError;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      // First call returns the failing stream, second call (retry) also fails
+      (mockClient.chat.completions.create as Mock)
+        .mockResolvedValueOnce(firstStream)
+        .mockRejectedValueOnce(retryError);
+
+      // Act
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+      const results = [];
+      try {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      } catch {
+        // Expected to throw
+      }
+
+      // Assert
+      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(2);
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        retryError,
+        expect.any(Object),
+        request,
+      );
+    });
+
+    it('should not retry non-model-unloaded errors during stream iteration', async () => {
+      // Arrange
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const authError = new Error('Unauthorized');
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [{ delta: { content: 'Hello' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw authError;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      // Act & Assert
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+      const results = [];
+      try {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      } catch (error) {
+        expect(error).toBe(authError);
+      }
+
+      // Should only call once — no retry for non-model-unloaded errors
+      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(1);
+      // Error handler should NOT be called — error propagates directly
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('should retry on model unloaded error (short form)', async () => {
+      // Arrange
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const unloadedError = new Error('model unloaded');
+
+      const firstStream = {
+        [Symbol.asyncIterator]() {
+          return { next: () => Promise.reject(unloadedError) };
+        },
+      };
+
+      const retryStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [
+              { delta: { content: 'response' }, finish_reason: 'stop' },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      const mockGeminiResponse = new GenerateContentResponse();
+      mockGeminiResponse.candidates = [
+        {
+          content: { parts: [{ text: 'response' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+
+      (mockClient.chat.completions.create as Mock)
+        .mockResolvedValueOnce(firstStream)
+        .mockResolvedValueOnce(retryStream);
+
+      // Act
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+      const results = [];
+      for await (const result of resultGenerator) {
+        results.push(result);
+      }
+
+      // Assert
+      expect(results).toHaveLength(1);
+      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(2);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+  });
   });
 });

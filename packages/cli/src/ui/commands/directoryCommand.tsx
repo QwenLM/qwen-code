@@ -372,7 +372,7 @@ export const directoryCommand: SlashCommand = {
         }
 
         if (
-          workspaceContext.isInitialDirectory?.(expandedDir) ??
+          workspaceContext.isInitialDirectory(expandedDir) ??
           workspaceContext.getInitialDirectories().includes(expandedDir)
         ) {
           addItem(

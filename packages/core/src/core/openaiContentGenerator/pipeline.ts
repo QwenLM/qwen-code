@@ -21,6 +21,9 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('PIPELINE');
 
+/** Delay in ms before retrying after a model-unloaded error, to allow JIT loading. */
+const MODEL_UNLOADED_RETRY_DELAY_MS = 2000;
+
 /**
  * The OpenAI SDK adds an abort listener for every `chat.completions.create`
  * call, and several layers (retryWithBackoff, LoggingContentGenerator, the
@@ -126,7 +129,7 @@ export class ContentGenerationPipeline {
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
-    request: GenerateContentParameters,
+    _request: GenerateContentParameters,
   ): AsyncGenerator<GenerateContentResponse> {
     const collectedGeminiResponses: GenerateContentResponse[] = [];
 
@@ -480,7 +483,7 @@ export class ContentGenerationPipeline {
     //
     // Given this inconsistency, we avoid mapping values and only pass through the
     // configured reasoning object when explicitly enabled. This keeps provider- and
-    // model-specific semantics intact while honoring request-level opt-out.
+    // model-specific semantics intact while honors request-level opt-out.
 
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return {};
@@ -531,7 +534,7 @@ export class ContentGenerationPipeline {
           result as unknown as AsyncGenerator<GenerateContentResponse>,
           request,
           context,
-          openaiRequest,
+          userPromptId,
         ) as unknown as T;
       }
       return result;
@@ -548,7 +551,9 @@ export class ContentGenerationPipeline {
           error instanceof Error ? error.message : String(error),
         );
         // Give the model server a moment to complete JIT loading.
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await new Promise((resolve) =>
+          setTimeout(resolve, MODEL_UNLOADED_RETRY_DELAY_MS),
+        );
         try {
           const openaiRequest = await this.buildRequest(
             request,
@@ -581,7 +586,7 @@ export class ContentGenerationPipeline {
     generator: AsyncGenerator<GenerateContentResponse>,
     request: GenerateContentParameters,
     context: RequestContext,
-    openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
+    userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
     const iterator = generator[Symbol.asyncIterator]();
     while (true) {
@@ -596,10 +601,20 @@ export class ContentGenerationPipeline {
             error instanceof Error ? error.message : String(error),
           );
           // Give the model server a moment to complete JIT loading.
-          await new Promise((resolve) => setTimeout(resolve, 2000));
+          await new Promise((resolve) =>
+            setTimeout(resolve, MODEL_UNLOADED_RETRY_DELAY_MS),
+          );
           try {
+            // Build a fresh request instead of reusing the stale one,
+            // matching the non-streaming retry path.
+            const freshRequest = await this.buildRequest(
+              request,
+              userPromptId,
+              context,
+              true,
+            );
             const retryResult = await this.client.chat.completions.create(
-              openaiRequest,
+              freshRequest,
               { signal: request.config?.abortSignal },
             ) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
             const retryGenerator = this.processStreamWithLogging(
@@ -643,11 +658,10 @@ export class ContentGenerationPipeline {
 
     // Only match known JIT-loading error patterns from local model servers
     // (LM Studio, llama.cpp). Avoid matching permanent errors like
-    // "model not found" which indicate misconfiguration, not a transient
-    // unloaded state.
+    // "model not found" or "model not loaded" which can indicate
+    // misconfiguration, not a transient unloaded state.
     return (
       errorMessage.includes('model is unloaded') ||
-      errorMessage.includes('model not loaded') ||
       errorMessage.includes('model unloaded')
     );
   }
