@@ -65,6 +65,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `blockStreaming`         | No       | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                |
 | `blockStreamingChunk`    | No       | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                            |
 | `blockStreamingCoalesce` | No       | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                      |
+| `businessAutomation`     | Telegram | Telegram Chat Automation settings: `{ "enabled": true, "markRead": false }`. See [Telegram Chat Automation](./telegram#chat-automation)        |
 
 ### Sender Policy
 
@@ -126,6 +127,17 @@ qwen channel pairing approve my-channel <CODE>
 - Maximum 3 pending requests per channel at a time — additional requests are ignored until one expires or is approved
 - Users listed in `allowedUsers` in `settings.json` always skip pairing
 - Approved users are stored in `~/.qwen/channels/<name>-allowlist.json` — treat this file as sensitive
+
+## Persistent Channel Data
+
+Channels store runtime data under `~/.qwen/channels`:
+
+- `service.pid` tracks the foreground channel service.
+- `sessions.json` is used for crash recovery while the service is running.
+- `<name>-allowlist.json` stores approved pairing users.
+- `<name>-business-connections.json` stores Telegram Chat Automation
+  connection metadata. Treat this file as sensitive because connection IDs are
+  used to send replies on behalf of connected Telegram accounts.
 
 ## Group Chats
 

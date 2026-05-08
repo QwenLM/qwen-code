@@ -48,6 +48,14 @@ export interface ChannelConfig {
   blockStreamingChunk?: BlockStreamingChunkConfig;
   /** Idle coalescing for block streaming. */
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
+
+  /** Telegram Business / Chat Automation support. */
+  businessAutomation?: {
+    /** Enable Telegram Chat Automation handling for this channel. */
+    enabled?: boolean;
+    /** Mark incoming business messages as read when rights allow it. */
+    markRead?: boolean;
+  };
 }
 
 export interface Attachment {

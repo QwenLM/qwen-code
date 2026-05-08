@@ -121,6 +121,18 @@ export abstract class ChannelBase {
   ): void {}
 
   /**
+   * Called when block streaming emits a complete response block.
+   * Default: sends the block as a normal channel message.
+   */
+  protected async onResponseBlock(
+    chatId: string,
+    text: string,
+    _sessionId: string,
+  ): Promise<void> {
+    await this.sendMessage(chatId, text);
+  }
+
+  /**
    * Called when the agent's full response is ready.
    * Override to customize delivery (e.g., finalize an AI card).
    * Default: calls sendMessage() with the full response text.
@@ -367,7 +379,8 @@ export abstract class ChannelBase {
             minChars: this.config.blockStreamingChunk?.minChars ?? 400,
             maxChars: this.config.blockStreamingChunk?.maxChars ?? 1000,
             idleMs: this.config.blockStreamingCoalesce?.idleMs ?? 1500,
-            send: (text) => this.sendMessage(envelope.chatId, text),
+            send: (text) =>
+              this.onResponseBlock(envelope.chatId, text, sessionId),
           })
         : null;
 

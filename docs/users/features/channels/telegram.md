@@ -37,6 +37,10 @@ Add the channel to `~/.qwen/settings.json`:
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
       "instructions": "You are a concise coding assistant responding via Telegram. Keep responses short.",
+      "businessAutomation": {
+        "enabled": false,
+        "markRead": false
+      },
       "groupPolicy": "disabled",
       "groups": {
         "*": { "requireMention": true }
@@ -65,6 +69,60 @@ qwen channel start
 ```
 
 Then open your bot in Telegram and send a message. You should see "Working..." appear immediately, followed by the agent's response.
+
+## Chat Automation
+
+Telegram Chat Automation lets a user connect a bot to their profile and allow
+it to answer selected private chats on the user's behalf. In Qwen Code this is
+available through Telegram Business Bot updates.
+
+### Requirements
+
+1. In BotFather, enable Business Mode for the bot.
+2. In Telegram, connect the bot from **Settings > Chat Automation**.
+3. Choose which chats the bot can access in the Telegram client.
+4. Enable the Qwen Code channel setting:
+
+```json
+{
+  "channels": {
+    "my-telegram": {
+      "type": "telegram",
+      "token": "$TELEGRAM_BOT_TOKEN",
+      "senderPolicy": "allowlist",
+      "allowedUsers": ["YOUR_USER_ID"],
+      "sessionScope": "user",
+      "cwd": "/path/to/your/project",
+      "businessAutomation": {
+        "enabled": true,
+        "markRead": false
+      }
+    }
+  }
+}
+```
+
+When `businessAutomation.enabled` is true, Qwen Code listens for Telegram
+`business_connection` and `business_message` updates. Replies to business
+messages are sent with Telegram's `business_connection_id`, so they appear from
+the connected user account rather than from the bot.
+
+With `senderPolicy: "allowlist"`, put the connected profile owner's Telegram
+user ID in `allowedUsers`. Telegram still decides which external chats are
+forwarded to the bot based on the user's Chat Automation settings.
+
+`markRead` defaults to false. When set to true, Qwen Code marks incoming
+business messages as read only if Telegram granted the bot the
+`can_read_messages` business right.
+
+Business connection metadata is stored in
+`~/.qwen/channels/<channel-name>-business-connections.json`. Treat this file as
+sensitive because connection IDs are used by Telegram to send replies on behalf
+of connected accounts.
+
+Qwen Code does not configure Telegram's chat filters. The user chooses those
+filters in the Telegram app, and Telegram only sends allowed messages to the
+bot.
 
 ## Group Chats
 
