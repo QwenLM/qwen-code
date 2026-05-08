@@ -22,10 +22,13 @@ const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
 import type { ContentGenerator } from './contentGenerator.js';
-import type { ResolvedModelConfig } from '../models/types.js';
-import { AuthType, createContentGenerator } from './contentGenerator.js';
+import { AuthType } from './contentGenerator.js';
+import {
+  createContentGeneratorForModelResolver,
+  createRetryAuthTypeForModel,
+  type ContentGeneratorForModel,
+} from './contentGeneratorCache.js';
 import { GeminiChat } from './geminiChat.js';
-import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import {
   getArenaSystemReminder,
   getCoreSystemPrompt,
@@ -48,9 +51,6 @@ import {
 } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
-
-// Models
-import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -131,39 +131,28 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
   strategy: 'none',
 };
 
-/**
- * Resolve the auto-memory recall promise with a hard deadline.
- * If the recall (model-driven selection + heuristic fallback) does not complete
- * within the deadline, return an empty result so the main request is not delayed.
- *
- * The deadline is set slightly above the model-driven selector's own
- * AbortSignal.timeout (2s) to give the heuristic fallback time to complete,
- * but low enough that the user does not perceive a delay on every turn.
- */
-async function resolveAutoMemoryWithDeadline(
-  promise: Promise<RelevantAutoMemoryPromptResult> | undefined,
-  onDeadline: () => void,
-): Promise<RelevantAutoMemoryPromptResult> {
+const AUTO_MEMORY_RECALL_BUDGET_MS = 200;
+
+async function resolveWithBudget<T>(
+  promise: Promise<T> | undefined,
+  fallback: T,
+  budgetMs: number,
+): Promise<T> {
   if (!promise) {
-    return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+    return fallback;
   }
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<RelevantAutoMemoryPromptResult>((resolve) => {
-    timer = setTimeout(() => {
-      try {
-        onDeadline();
-      } finally {
-        resolve(EMPTY_RELEVANT_AUTO_MEMORY_RESULT);
-      }
-    }, 2_500);
-  });
-
+  let timeout: NodeJS.Timeout | undefined;
   try {
-    return await Promise.race([promise, deadline]);
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timeout = setTimeout(() => resolve(fallback), budgetMs);
+      }),
+    ]);
   } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
+    if (timeout) {
+      clearTimeout(timeout);
     }
   }
 }
@@ -172,24 +161,13 @@ export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
-  private readonly contentGeneratorsByModel = new Map<
-    string,
-    ContentGenerator
-  >();
+  private readonly getContentGeneratorForModel: ContentGeneratorForModel;
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
   private pendingRecallAbortController: AbortController | undefined;
-
-  /**
-   * Cache of per-model ContentGenerators keyed by model ID.
-   * Avoids rebuilding the generator (SDK instantiation, config resolution)
-   * on every side query (recap, title, tool summary).
-   * Cleared on session reset (resetChat) to pick up config changes.
-   */
-  private perModelGeneratorCache = new Map<string, Promise<ContentGenerator>>();
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -208,6 +186,10 @@ export class GeminiClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
+    this.getContentGeneratorForModel = createContentGeneratorForModelResolver(
+      config,
+      () => this.getContentGeneratorOrFail(),
+    );
   }
 
   async initialize() {
@@ -269,31 +251,6 @@ export class GeminiClient {
       throw new Error('Content generator not initialized');
     }
     return this.config.getContentGenerator();
-  }
-
-  private async getContentGeneratorForModel(
-    model: string,
-  ): Promise<ContentGenerator> {
-    if (model === this.config.getModel()) {
-      return this.getContentGeneratorOrFail();
-    }
-
-    const cached = this.contentGeneratorsByModel.get(model);
-    if (cached) {
-      return cached;
-    }
-
-    const generatorConfig = buildAgentContentGeneratorConfig(
-      this.config,
-      model,
-      { authType: this.config.getContentGeneratorConfig().authType! },
-    );
-    const generator = await createContentGenerator(
-      generatorConfig,
-      this.config,
-    );
-    this.contentGeneratorsByModel.set(model, generator);
-    return generator;
   }
 
   async addHistory(content: Content) {
@@ -382,7 +339,6 @@ export class GeminiClient {
     // pointing at content the model can no longer retrieve.
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
-    this.perModelGeneratorCache.clear();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
     if (this.pendingRecallAbortController) {
@@ -837,13 +793,7 @@ export class GeminiClient {
             return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
           });
         this.pendingRecallAbortController = recallAbortController;
-        // Race the recall against the deadline at initiation time so the 2.5s
-        // budget is not consumed by intermediate work (microcompact, compression,
-        // token checks, IDE context) between initiation and consumption.
-        relevantAutoMemoryPromise = resolveAutoMemoryWithDeadline(
-          rawRecallPromise,
-          () => recallAbortController.abort(),
-        );
+        relevantAutoMemoryPromise = rawRecallPromise;
       }
 
       // Track prompt count for commit attribution. Only the user typing a
@@ -1007,21 +957,6 @@ export class GeminiClient {
       messageType === SendMessageType.Cron
     ) {
       const systemReminders = [];
-      // The recall promise was already raced against the 2.5s deadline at
-      // initiation time; this await just collects the result.
-      this.pendingRecallAbortController = undefined;
-      const relevantAutoMemory = relevantAutoMemoryPromise
-        ? await relevantAutoMemoryPromise
-        : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-      const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
-
-      if (relevantAutoMemoryPrompt) {
-        systemReminders.push(relevantAutoMemoryPrompt);
-        for (const doc of relevantAutoMemory.selectedDocs) {
-          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
-        }
-      }
-
       // add subagent system reminder if there are subagents
       const hasAgentTool = await this.config
         .getToolRegistry()
@@ -1053,24 +988,23 @@ export class GeminiClient {
         }
       }
 
+      const resolvedRelevantAutoMemory = await resolveWithBudget(
+        relevantAutoMemoryPromise,
+        EMPTY_RELEVANT_AUTO_MEMORY_RESULT,
+        AUTO_MEMORY_RECALL_BUDGET_MS,
+      );
+      this.pendingRecallAbortController = undefined;
+      if (resolvedRelevantAutoMemory.prompt) {
+        systemReminders.push(resolvedRelevantAutoMemory.prompt);
+        for (const doc of resolvedRelevantAutoMemory.selectedDocs) {
+          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        }
+      }
+
       requestToSent = [...systemReminders, ...requestToSent];
     }
 
     const resultStream = turn.run(model, requestToSent, signal);
-    const resolvedRelevantAutoMemory = await Promise.race([
-      relevantAutoMemoryPromise ??
-        Promise.resolve(EMPTY_RELEVANT_AUTO_MEMORY_RESULT),
-      Promise.resolve(EMPTY_RELEVANT_AUTO_MEMORY_RESULT),
-    ]);
-    if (resolvedRelevantAutoMemory.prompt) {
-      this.getChat().insertBeforeLastUserMessage({
-        role: 'user',
-        parts: [{ text: resolvedRelevantAutoMemory.prompt }],
-      });
-      for (const doc of resolvedRelevantAutoMemory.selectedDocs) {
-        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
-      }
-    }
 
     for await (const event of resultStream) {
       if (!this.config.getSkipLoopDetection()) {
@@ -1335,7 +1269,7 @@ export class GeminiClient {
       // the target model's provider, not the main session's provider. This
       // ensures QWEN_OAUTH quota detection checks against the right provider.
       const retryAuthType = isPerModel
-        ? (this.createRetryAuthTypeForModel(model) ??
+        ? (createRetryAuthTypeForModel(this.config, model) ??
           this.config.getContentGeneratorConfig()?.authType ??
           AuthType.USE_OPENAI)
         : this.config.getContentGeneratorConfig()?.authType;
@@ -1382,111 +1316,6 @@ export class GeminiClient {
         `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
       );
     }
-  }
-
-  /**
-   * Resolve a model across all authTypes. Handles the case where the target
-   * model is registered under a different authType than the main model
-   * (e.g. main=QWEN_OAUTH, fast=USE_ANTHROPIC).
-   *
-   * TODO: Move cross-authType resolution to ModelRegistry for a cleaner
-   * data-layer solution. Follow-up PR.
-   */
-
-  private resolveModelAcrossAuthTypes(
-    model: string,
-  ): ResolvedModelConfig | undefined {
-    const modelsConfig = this.config.getModelsConfig();
-    const allAuthTypes: AuthType[] = [
-      AuthType.QWEN_OAUTH,
-      AuthType.USE_OPENAI,
-      AuthType.USE_VERTEX_AI,
-      AuthType.USE_ANTHROPIC,
-      AuthType.USE_GEMINI,
-    ];
-
-    // Try the main authType first for early exit
-    const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
-    if (mainAuthType) {
-      const resolved = modelsConfig.getResolvedModel(mainAuthType, model);
-      if (resolved) return resolved;
-    }
-
-    for (const authType of allAuthTypes) {
-      if (authType === mainAuthType) continue;
-      const resolved = modelsConfig.getResolvedModel(authType, model);
-      if (resolved) return resolved;
-    }
-
-    return undefined;
-  }
-
-  /**
-   * Resolve the authType for a given model without creating a full generator.
-   * Used by retry logic to ensure provider-specific checks (e.g. QWEN_OAUTH
-   * quota detection) reference the correct provider.
-   */
-  private createRetryAuthTypeForModel(model: string): string | undefined {
-    return this.resolveModelAcrossAuthTypes(model)?.authType;
-  }
-
-  /**
-   * Return a ContentGenerator for a specific model (e.g. the fast model) with
-   * its own per-model settings from modelProviders.  This prevents the main
-   * model's extra_body / samplingParams / reasoning from leaking into side
-   * queries that target a different model.
-   *
-   * Falls back to the main content generator when the target model is not in
-   * the registry or when creating a dedicated generator fails (e.g. in test
-   * environments without full auth setup).
-   *
-   * Results are cached by model ID to avoid rebuilding the generator
-   * (SDK instantiation, config resolution) on every side query.
-   */
-  private async createContentGeneratorForModel(
-    model: string,
-  ): Promise<ContentGenerator> {
-    // Check cache first (Promise coalescing to prevent redundant SDK instantiations)
-    const cached = this.perModelGeneratorCache.get(model);
-    if (cached) return cached;
-
-    const generatorPromise = (async () => {
-      try {
-        const resolvedModel = this.resolveModelAcrossAuthTypes(model);
-
-        if (!resolvedModel) {
-          debugLogger.warn(
-            `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
-          );
-          return this.getContentGeneratorOrFail();
-        }
-
-        const targetConfig = buildAgentContentGeneratorConfig(
-          this.config,
-          model,
-          {
-            authType: resolvedModel.authType,
-            apiKey: resolvedModel.envKey
-              ? (process.env[resolvedModel.envKey] ?? undefined)
-              : undefined,
-            baseUrl: resolvedModel.baseUrl,
-          },
-        );
-
-        return await createContentGenerator(targetConfig, this.config);
-      } catch (err: unknown) {
-        debugLogger.warn(
-          `Failed to create content generator for model "${model}", falling back to main generator.`,
-          err instanceof Error ? err.message : String(err),
-        );
-        // On failure, delete from cache so subsequent attempts can retry.
-        this.perModelGeneratorCache.delete(model);
-        return this.getContentGeneratorOrFail();
-      }
-    })();
-
-    this.perModelGeneratorCache.set(model, generatorPromise);
-    return generatorPromise;
   }
 
   /**

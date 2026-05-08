@@ -19,10 +19,19 @@ import { BaseLlmClient, type GenerateJsonOptions } from './baseLlmClient.js';
 import type { ContentGenerator } from './contentGenerator.js';
 import type { Config } from '../config/config.js';
 import { AuthType } from './contentGenerator.js';
+import { createContentGenerator } from './contentGenerator.js';
 import { reportError } from '../utils/errorReporting.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
+
+vi.mock('./contentGenerator.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./contentGenerator.js')>();
+  return {
+    ...actual,
+    createContentGenerator: vi.fn(),
+  };
+});
 
 vi.mock('../utils/errorReporting.js');
 vi.mock('../utils/errors.js', async (importOriginal) => {
@@ -57,6 +66,9 @@ const mockConfig = {
     .mockReturnValue({ authType: AuthType.USE_GEMINI }),
   getModel: vi.fn().mockReturnValue('test-model'),
   getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
+  getModelsConfig: vi.fn().mockReturnValue({
+    getResolvedModel: vi.fn().mockReturnValue(undefined),
+  }),
 } as unknown as Mocked<Config>;
 
 // Helper to create a mock GenerateContentResponse with function call
@@ -123,6 +135,30 @@ describe('BaseLlmClient', () => {
   });
 
   describe('generateJson - Success Scenarios', () => {
+    it('should use a dedicated generator for non-main models', async () => {
+      const sideGenerateContent = vi
+        .fn()
+        .mockResolvedValue(
+          createMockResponseWithFunctionCall({ color: 'violet' }),
+        );
+      const sideGenerator = {
+        generateContent: sideGenerateContent,
+      } as unknown as ContentGenerator;
+      vi.mocked(createContentGenerator).mockResolvedValue(sideGenerator);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { color: 'violet' } },
+      ]);
+
+      await client.generateJson({ ...defaultOptions, model: 'qwen-fast' });
+
+      expect(createContentGenerator).toHaveBeenCalledTimes(1);
+      expect(mockGenerateContent).not.toHaveBeenCalled();
+      expect(sideGenerateContent).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'qwen-fast' }),
+        'test-prompt-id',
+      );
+    });
+
     it('should call generateContent with correct parameters using function declarations', async () => {
       const mockResponse = createMockResponseWithFunctionCall({
         color: 'blue',

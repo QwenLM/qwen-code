@@ -962,15 +962,6 @@ export class GeminiChat {
     this.history.push(content);
   }
 
-  insertBeforeLastUserMessage(content: Content): void {
-    const last = this.history[this.history.length - 1];
-    if (last?.role === 'user') {
-      this.history.splice(this.history.length - 1, 0, content);
-      return;
-    }
-    this.history.push(content);
-  }
-
   setHistory(history: Content[]): void {
     this.history = history;
   }

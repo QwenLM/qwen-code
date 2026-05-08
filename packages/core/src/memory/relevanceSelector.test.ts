@@ -152,12 +152,12 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       expect.objectContaining({
         purpose: 'auto-memory-recall',
         model: 'fast-flash-model',
-        config: { temperature: 0 },
+        config: { temperature: 0, thinkingConfig: { includeThoughts: false } },
       }),
     );
   });
 
-  it('passes undefined model when no fast model is configured', async () => {
+  it('falls back to the configured model name when no fast model is configured', async () => {
     vi.mocked(mockConfig.getFastModel).mockReturnValue(undefined);
     vi.mocked(runSideQuery).mockResolvedValue({
       selected_memories: ['reference.md'],
@@ -174,8 +174,8 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        model: undefined,
-        config: { temperature: 0 },
+        model: 'qwen-main',
+        config: { temperature: 0, thinkingConfig: { includeThoughts: false } },
       }),
     );
   });
@@ -199,5 +199,18 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
         2,
       ),
     ).rejects.toThrow('Recall selector returned unknown relative path');
+  });
+
+  it('throws side-query errors so recall callers can isolate them from the main flow', async () => {
+    vi.mocked(runSideQuery).mockRejectedValue(new Error('fast model broken'));
+
+    await expect(
+      selectRelevantAutoMemoryDocumentsByModel(
+        mockConfig,
+        'check memory',
+        docs,
+        2,
+      ),
+    ).rejects.toThrow('fast model broken');
   });
 });

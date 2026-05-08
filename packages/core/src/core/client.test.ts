@@ -459,6 +459,7 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -1155,7 +1156,6 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        insertBeforeLastUserMessage: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1178,15 +1178,50 @@ hello
       );
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
+        expect.arrayContaining([
+          '## Relevant memory\n\nUser prefers terse responses.',
+          'Please answer tersely',
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should skip relevant managed auto-memory prompt when recall misses the budget', async () => {
+      vi.useFakeTimers();
+      mockMemoryManager.recall.mockImplementation(() => new Promise(() => {}));
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Please answer tersely' }],
+        new AbortController().signal,
+        'prompt-id-memory-timeout',
+      );
+      const consumePromise = fromAsync(stream);
+      await vi.advanceTimersByTimeAsync(200);
+      await consumePromise;
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
         expect.arrayContaining(['Please answer tersely']),
         expect.any(AbortSignal),
       );
-      expect(mockChat.insertBeforeLastUserMessage).toHaveBeenCalledWith({
-        role: 'user',
-        parts: [
-          { text: '## Relevant memory\n\nUser prefers terse responses.' },
-        ],
-      });
+      expect(mockTurnRunFn).not.toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          '## Relevant memory\n\nUser prefers terse responses.',
+        ]),
+        expect.any(AbortSignal),
+      );
     });
 
     it('should track surfaced managed memory paths across user queries', async () => {
@@ -1221,7 +1256,6 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        insertBeforeLastUserMessage: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2975,13 +3009,13 @@ Other open files:
   });
 
   describe('generateContent with fast model', () => {
-    it('should resolve per-model config and fall back when createContentGenerator fails', async () => {
+    it('should reject when per-model content generator creation fails', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
 
-      // Set up a resolved model for the fast model, but createContentGenerator
-      // will fail in the test env (no auth), so it falls back to the main
-      // content generator. Verify the resolution was attempted.
+      // Set up a resolved model for the fast model, but keep createContentGenerator
+      // failing to verify the error stays in the side-query path rather than
+      // falling back to the main generator.
       const mockResolvedModel = {
         id: 'fast-model',
         authType: 'openai' as const,
@@ -2999,12 +3033,14 @@ Other open files:
         getResolvedModel,
       } as unknown as ModelsConfig);
 
-      await client.generateContent(
-        contents,
-        { temperature: 0.5 },
-        abortSignal,
-        'fast-model',
-      );
+      await expect(
+        client.generateContent(
+          contents,
+          { temperature: 0.5 },
+          abortSignal,
+          'fast-model',
+        ),
+      ).rejects.toThrow('no auth in test env');
 
       // Verify that getResolvedModel was called with the fast model ID
       expect(getResolvedModel).toHaveBeenCalledWith(
@@ -3012,15 +3048,7 @@ Other open files:
         'fast-model',
       );
 
-      // The main content generator is used as fallback (since creating a new
-      // one fails in test env without auth). In production, a dedicated
-      // content generator with the fast model's settings would be created.
-      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          model: 'fast-model',
-        }),
-        expect.any(String),
-      );
+      expect(mockContentGenerator.generateContent).not.toHaveBeenCalled();
     });
 
     it('should use a dedicated content generator for the fast model on success', async () => {
@@ -3114,7 +3142,7 @@ Other open files:
       );
     });
 
-    it('should fall back to main generator when model is not in registry', async () => {
+    it('should reject when a side model is not in registry and generator creation fails', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
 
@@ -3124,7 +3152,6 @@ Other open files:
         getResolvedModel,
       } as unknown as ModelsConfig);
 
-      // Should not throw — falls back to main generator
       await expect(
         client.generateContent(
           contents,
@@ -3132,7 +3159,7 @@ Other open files:
           abortSignal,
           'unknown-model',
         ),
-      ).resolves.toBeDefined();
+      ).rejects.toThrow('no auth in test env');
 
       // getResolvedModel was called to look up the model
       expect(getResolvedModel).toHaveBeenCalledWith(
@@ -3140,17 +3167,8 @@ Other open files:
         'unknown-model',
       );
 
-      // The main content generator is used as fallback
-      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          model: 'unknown-model',
-        }),
-        expect.any(String),
-      );
-
-      // buildAgentContentGeneratorConfig must NOT be called when the model is
-      // not in the registry — the fallback path skips config construction.
-      expect(buildAgentContentGeneratorConfig).not.toHaveBeenCalled();
+      expect(mockContentGenerator.generateContent).not.toHaveBeenCalled();
+      expect(buildAgentContentGeneratorConfig).toHaveBeenCalled();
     });
 
     it('should use fast model authType for retry, not main model authType', async () => {
@@ -3297,7 +3315,7 @@ Other open files:
       expect(createContentGenerator).toHaveBeenCalled();
     });
 
-    it('should clear per-model generator cache on resetChat', async () => {
+    it('should keep the shared per-model generator cache across resetChat', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortController = new AbortController();
       const mockResolvedModel = {
@@ -3324,17 +3342,17 @@ Other open files:
       );
       expect(createContentGenerator).toHaveBeenCalledTimes(1);
 
-      // Reset chat should clear the cache
+      // resetChat resets conversation state but keeps the shared side-query generator cache
       await client.resetChat();
 
-      // Second call after reset — cache should be cleared, generator recreated
+      // Second call after reset — cached side-query generator is reused
       await client.generateContent(
         contents,
         {},
         abortController.signal,
         'fast-model',
       );
-      expect(createContentGenerator).toHaveBeenCalledTimes(2);
+      expect(createContentGenerator).toHaveBeenCalledTimes(1);
     });
   });
 });
