@@ -78,6 +78,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'new',
   'resume',
   'delete',
+  'branch',
   'btw',
 ]);
 
@@ -95,6 +96,7 @@ export interface SlashCommandProcessorActions {
   openApprovalModeDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => void;
+  handleBranch: (name?: string) => Promise<void>;
   openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
@@ -632,6 +634,15 @@ export const useSlashCommandProcessor = (
                       } else {
                         actions.openResumeDialog(result.matchedSessions);
                       }
+                      return { type: 'handled' };
+                    case 'branch':
+                      // Must be awaited: `/branch` swaps core + UI session
+                      // state asynchronously, and a non-awaited call lets
+                      // this dispatcher return `handled` while the swap is
+                      // still in flight. A fast follow-up prompt could then
+                      // interleave with the swap and be recorded against
+                      // the wrong session.
+                      await actions.handleBranch(result.name);
                       return { type: 'handled' };
                     case 'delete':
                       actions.openDeleteDialog();

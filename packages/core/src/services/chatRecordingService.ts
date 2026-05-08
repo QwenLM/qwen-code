@@ -278,6 +278,24 @@ export interface ChatRecord {
   agentColor?: string;
   /** True for records produced by a subagent (a sidechain off the parent session). */
   isSidechain?: boolean;
+
+  /**
+   * Set on every record of a forked session to record its lineage.
+   * `sessionId` is the parent (source) session id; `messageUuid` is the
+   * uuid of the equivalent message in the parent — the same value as
+   * this record's `uuid`, since /branch copies each message verbatim
+   * except for rewriting `sessionId` and rebuilding `parentUuid` by
+   * write order.
+   *
+   * Written by /branch on every copied record; never consumed by any
+   * feature at read time — it exists purely as per-message audit trail
+   * so that when a record is inspected in isolation its origin is
+   * self-contained (mirrors Claude Code's /branch behavior).
+   */
+  forkedFrom?: {
+    sessionId: string;
+    messageUuid: string;
+  };
 }
 
 export interface NotificationRecordPayload {
