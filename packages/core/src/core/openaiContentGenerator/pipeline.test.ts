@@ -2056,7 +2056,7 @@ describe('ContentGenerationPipeline', () => {
       expect(responses).toHaveLength(1);
       expect(responses[0]).toBe(finalGeminiResponse);
     });
-
+  });
 
   describe('stream retry on model-unloaded error', () => {
     it('should retry stream when model-unloaded error occurs during iteration', async () => {
@@ -2082,9 +2082,7 @@ describe('ContentGenerationPipeline', () => {
       // Second stream (retry): yields remaining chunks
       const retryChunk = {
         id: 'chunk-2',
-        choices: [
-          { delta: { content: ' response' }, finish_reason: 'stop' },
-        ],
+        choices: [{ delta: { content: ' response' }, finish_reason: 'stop' }],
       } as OpenAI.Chat.ChatCompletionChunk;
 
       const retryStream = {
@@ -2294,6 +2292,5 @@ describe('ContentGenerationPipeline', () => {
       expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(2);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
-  });
   });
 });
