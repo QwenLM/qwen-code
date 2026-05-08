@@ -547,6 +547,11 @@ export class BackgroundTaskRegistry {
       }
       waiters.add(onWake);
       signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) {
+        cleanup();
+        resolve([]);
+        return;
+      }
     });
   }
 

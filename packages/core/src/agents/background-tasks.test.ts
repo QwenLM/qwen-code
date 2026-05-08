@@ -893,6 +893,31 @@ describe('BackgroundTaskRegistry', () => {
 
       await expect(waitPromise).resolves.toEqual([]);
     });
+
+    it('resolves empty if the signal aborts immediately after listener registration', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      let aborted = false;
+      const signal = {
+        get aborted() {
+          return aborted;
+        },
+        addEventListener: vi.fn(() => {
+          aborted = true;
+        }),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+
+      await expect(registry.waitForMessages('test-1', signal)).resolves.toEqual(
+        [],
+      );
+      expect(signal.removeEventListener).toHaveBeenCalled();
+    });
   });
 
   describe('session switch helpers', () => {

@@ -102,6 +102,17 @@ describe('MonitorRegistry', () => {
     expect(parentCallback).not.toHaveBeenCalled();
   });
 
+  it('reset clears stale owner callbacks even when there are no entries', () => {
+    const ownerCallback = vi.fn();
+    registry.setAgentNotificationCallback('agent-1', ownerCallback);
+
+    registry.reset();
+    registry.register(createEntry({ ownerAgentId: 'agent-1' }));
+    registry.emitEvent('mon-1', 'line after reset');
+
+    expect(ownerCallback).not.toHaveBeenCalled();
+  });
+
   it('routes owner monitor terminal notifications to the owning agent callback', () => {
     const parentCallback = vi.fn();
     const ownerCallback = vi.fn();
@@ -797,6 +808,25 @@ describe('MonitorRegistry', () => {
       registry.reset();
       expect(cb).toHaveBeenCalledTimes(1);
       expect(registry.getAll()).toEqual([]);
+    });
+
+    it('reset() clears owner callbacks while firing one reset statusChange', () => {
+      const ownerCallback = vi.fn();
+      registry.setAgentNotificationCallback('agent-1', ownerCallback);
+      registry.register(createEntry({ monitorId: 'a' }));
+      const cb = vi.fn();
+      registry.setStatusChangeCallback(cb);
+
+      registry.reset();
+      expect(cb).toHaveBeenCalledTimes(1);
+
+      registry.register(
+        createEntry({ monitorId: 'after-reset', ownerAgentId: 'agent-1' }),
+      );
+      registry.emitEvent('after-reset', 'line after reset');
+
+      expect(cb).toHaveBeenCalledTimes(2);
+      expect(ownerCallback).not.toHaveBeenCalled();
     });
 
     it('reset() on an empty registry does not fire statusChange', () => {

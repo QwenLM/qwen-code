@@ -118,6 +118,11 @@ function createLocalExternalInputQueue(): {
         };
         wake = onWake;
         signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) {
+          cleanup();
+          resolve([]);
+          return;
+        }
       });
     },
   };

@@ -256,10 +256,12 @@ export class MonitorRegistry {
   }
 
   hasRunningForOwner(ownerAgentId: string): boolean {
-    return Array.from(this.monitors.values()).some(
-      (entry) =>
-        entry.ownerAgentId === ownerAgentId && entry.status === 'running',
-    );
+    for (const entry of this.monitors.values()) {
+      if (entry.ownerAgentId === ownerAgentId && entry.status === 'running') {
+        return true;
+      }
+    }
+    return false;
   }
 
   setNotificationCallback(cb: MonitorNotificationCallback | undefined): void {
@@ -302,7 +304,7 @@ export class MonitorRegistry {
     ownerAgentId: string,
     options: MonitorCancelOptions = {},
   ): void {
-    for (const entry of Array.from(this.monitors.values())) {
+    for (const entry of this.monitors.values()) {
       if (entry.ownerAgentId === ownerAgentId && entry.status === 'running') {
         this.cancel(entry.monitorId, options);
       }
@@ -310,6 +312,7 @@ export class MonitorRegistry {
   }
 
   reset(): void {
+    this.agentNotificationCallbacks.clear();
     if (this.monitors.size === 0) return;
     for (const entry of this.monitors.values()) {
       this.clearIdleTimer(entry);
