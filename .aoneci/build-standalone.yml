@@ -3,7 +3,6 @@ name: 构建 Qwen Code Standalone 包
 triggers:
   push:
     branches:
-      - main
       - feat/bindary-build
     paths:
       - "packages/**"

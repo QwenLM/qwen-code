@@ -12,14 +12,16 @@
  * hooks (including prepublishOnly for the CLI bundle).
  *
  * Usage:
- *   node scripts/publish-packages.js --token <anpm_token> [--tag beta] [--dry-run] [--auto-version]
+ *   node scripts/publish-packages.js --token <anpm_token> [--tag latest] [--pre-id dataworks] [--dry-run] [--auto-version]
  *
  * Options:
- *   --token <token>   anpm auth token (required unless --dry-run)
- *   --tag <tag>       npm dist-tag (default: "latest")
- *   --dry-run         simulate publish without actually publishing
- *   --auto-version    auto-increment prerelease version based on registry
- *                     e.g. 0.14.6 → 0.14.6-beta.11 (if beta.10 exists)
+ *   --token <token>     anpm auth token (required unless --dry-run)
+ *   --tag <tag>         npm dist-tag (default: "latest")
+ *   --pre-id <id>       prerelease identifier for version suffix (default: "dataworks")
+ *                       e.g. --pre-id dataworks → 0.14.7-dataworks.3
+ *   --dry-run           simulate publish without actually publishing
+ *   --auto-version      auto-increment prerelease version based on registry
+ *                       e.g. 0.14.7 → 0.14.7-dataworks.3 (if dataworks.2 exists)
  */
 
 import { execSync } from 'node:child_process';
@@ -39,6 +41,9 @@ const dryRun = args.includes('--dry-run');
 const autoVersion = args.includes('--auto-version');
 const tagIdx = args.indexOf('--tag');
 const tag = tagIdx !== -1 && args[tagIdx + 1] ? args[tagIdx + 1] : 'latest';
+const preIdIdx = args.indexOf('--pre-id');
+const preId =
+  preIdIdx !== -1 && args[preIdIdx + 1] ? args[preIdIdx + 1] : 'dataworks';
 const tokenIdx = args.indexOf('--token');
 const token = tokenIdx !== -1 ? args[tokenIdx + 1] : '';
 
@@ -77,15 +82,17 @@ if (token) {
 // Auto-version: resolve next prerelease
 // -------------------------------------------------------------------------
 
-if (autoVersion && tag !== 'latest') {
-  console.log(`Auto-versioning enabled (prerelease identifier: ${tag})\n`);
+if (autoVersion) {
+  console.log(
+    `Auto-versioning enabled (prerelease identifier: ${preId}, dist-tag: ${tag})\n`,
+  );
 
   const rootPkg = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
   const baseVersion = rootPkg.version.replace(/-.*$/, '');
 
-  const nextVersion = resolveNextVersion(rootPkg.name, baseVersion, tag);
+  const nextVersion = resolveNextVersion(rootPkg.name, baseVersion, preId);
   console.log(`\nResolved next version: ${nextVersion}`);
   console.log('Applying to all workspace packages...\n');
 
@@ -168,9 +175,9 @@ console.log();
 /**
  * Query the registry for existing versions and compute the next prerelease.
  *
- * Given base version "0.14.6" and tag "beta":
- *   - If no 0.14.6-beta.* exists → 0.14.6-beta.0
- *   - If 0.14.6-beta.10 is the highest → 0.14.6-beta.11
+ * Given base version "0.14.7" and preId "dataworks":
+ *   - If no 0.14.7-dataworks.* exists → 0.14.7-dataworks.0
+ *   - If 0.14.7-dataworks.2 is the highest → 0.14.7-dataworks.3
  */
 function resolveNextVersion(pkgName, baseVersion, preId) {
   console.log(

@@ -30,7 +30,7 @@ esac
 
 VERSION=$(cat "${WORKSPACE_DIR}/.resolved_version")
 BUILD_DIR="${WORKSPACE_DIR}/build"
-STANDALONE_DIR="${BUILD_DIR}/qwen-code-standalone"
+STANDALONE_DIR="${BUILD_DIR}/qwen-code"
 TARBALL_NAME="qwen-code-${VERSION}-${TARGET_PLATFORM}-${ARCH}.tar.gz"
 
 echo "=== VERSION: ${VERSION} ==="
