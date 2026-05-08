@@ -454,17 +454,18 @@ export class LoadedSettings {
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    // Bypass applyUpdates merge — write originalSettings directly as
-    // the full file content to ensure removed keys are actually deleted.
-    // Must deep-clone because commentJson.stringify mutates its input.
+    // Write originalSettings directly as the full file content.
+    // updateSettingsFilePreservingFormat → applyUpdates is a pure merge
+    // that only touches keys present in the updates object, so it can
+    // never delete keys that were removed from originalSettings.  Writing
+    // the full object ensures removed keys (e.g. deleted MCP servers)
+    // actually disappear from disk.
     const dirPath = path.dirname(settingsFile.path);
     if (!fs.existsSync(dirPath)) {
       fs.mkdirSync(dirPath, { recursive: true });
     }
-    updateSettingsFilePreservingFormat(
-      settingsFile.path,
-      JSON.parse(JSON.stringify(settingsFile.originalSettings)),
-    );
+    const fileContent = JSON.stringify(settingsFile.originalSettings, null, 2);
+    writeWithBackupSync(settingsFile.path, fileContent);
   }
 
   /**

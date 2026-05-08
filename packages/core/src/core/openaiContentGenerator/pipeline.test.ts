@@ -1021,11 +1021,10 @@ describe('ContentGenerationPipeline', () => {
       }
 
       expect(results).toHaveLength(0); // No results due to error
-      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
-        testError,
-        expect.any(Object),
-        request,
-      );
+      // processStreamWithLogging no longer calls handleError directly — it
+      // re-throws so the caller (wrapStreamWithRetry) can decide whether to
+      // retry or propagate.  For non-model-unloaded errors the error
+      // propagates to the caller without handleError being called.
     });
 
     it('should throw StreamContentError when stream chunk contains error_finish', async () => {

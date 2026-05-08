@@ -224,8 +224,12 @@ export class ContentGenerationPipeline {
         throw error;
       }
 
-      // Use shared error handling logic
-      await this.handleError(error, context, request);
+      // Re-throw other errors without calling handleError here.
+      // The caller (wrapStreamWithRetry) may retry for model-unloaded
+      // errors and only calls handleError as a last resort.  Calling
+      // handleError here would emit error telemetry/log noise for
+      // errors that are about to be retried successfully.
+      throw error;
     }
   }
 
@@ -526,7 +530,6 @@ export class ContentGenerationPipeline {
         return this.wrapStreamWithRetry(
           result as unknown as AsyncGenerator<GenerateContentResponse>,
           request,
-          userPromptId,
           context,
           openaiRequest,
         ) as unknown as T;
@@ -577,7 +580,6 @@ export class ContentGenerationPipeline {
   private async *wrapStreamWithRetry(
     generator: AsyncGenerator<GenerateContentResponse>,
     request: GenerateContentParameters,
-    userPromptId: string,
     context: RequestContext,
     openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
   ): AsyncGenerator<GenerateContentResponse> {
