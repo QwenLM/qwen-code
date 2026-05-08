@@ -5,7 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { AgentCore } from './agent-core.js';
+import { AgentCore, EXCLUDED_TOOLS_FOR_SUBAGENTS } from './agent-core.js';
+import { ToolNames } from '../../tools/tool-names.js';
 import {
   getRuntimeContentGenerator,
   runWithRuntimeContentGenerator,
@@ -175,6 +176,21 @@ describe('AgentCore.runInAgentFrames', () => {
 
     expect(observedView).toBe(parentView);
     expect(observedName).toBe('inherit-agent');
+  });
+
+  it('hides team coordination tools from non-team subagents', () => {
+    // Regression: a leader with an active team launching a regular Agent
+    // subagent inherits the leader's TeamManager via the prototype-cloned
+    // Config. Without these tools in the exclusion set, the subagent —
+    // which has no teammate identity, so isTeammate() is false — was
+    // treated as the leader by team_delete / task_update and could nuke
+    // the team or rewrite the task board.
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.TEAM_CREATE)).toBe(true);
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.TEAM_DELETE)).toBe(true);
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.TASK_CREATE)).toBe(true);
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.TASK_UPDATE)).toBe(true);
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.TASK_LIST)).toBe(true);
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SEND_MESSAGE)).toBe(true);
   });
 
   it("prefers the agent's own view over inheritedView when both are present", async () => {

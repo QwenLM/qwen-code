@@ -194,9 +194,40 @@ export async function getTask(
 }
 
 /**
+ * Thrown by `updateTask` when a teammate caller's ownership-restricted
+ * update would mutate a task already owned by a different teammate.
+ *
+ * The check is performed inside the per-task lock so two teammates
+ * racing to claim the same pending task can't both succeed: the second
+ * write sees the first one's owner and rejects rather than silently
+ * overwriting it.
+ */
+export class TaskOwnershipError extends Error {
+  constructor(
+    readonly taskId: string,
+    readonly callerName: string,
+    readonly actualOwner: string,
+  ) {
+    super(
+      `Task #${taskId} is owned by "${actualOwner}". ` +
+        `Only the leader or the owner can change ` +
+        `status / owner / subject / description / blocks.`,
+    );
+    this.name = 'TaskOwnershipError';
+  }
+}
+
+/**
  * Update fields on an existing task.
  * Uses file locking for safe concurrent updates.
  * Returns the updated task, or undefined if not found.
+ *
+ * `opts.callerName`, when set, identifies a teammate caller. The
+ * update is then rejected with `TaskOwnershipError` if the task's
+ * existing owner is set to a different teammate. The check happens
+ * inside the lock — without that, two teammates can both pass a
+ * pre-lock guard on an unowned task and have the second writer
+ * silently overwrite the first one's claim.
  */
 export async function updateTask(
   teamName: string,
@@ -211,6 +242,7 @@ export async function updateTask(
     addBlocks?: string[];
     addBlockedBy?: string[];
   },
+  opts?: { callerName?: string },
 ): Promise<SwarmTask | undefined> {
   const taskPath = getTaskPath(teamName, taskId);
 
@@ -224,6 +256,19 @@ export async function updateTask(
   try {
     const raw = await fs.readFile(taskPath, 'utf-8');
     const task = JSON.parse(raw) as SwarmTask;
+
+    if (opts?.callerName !== undefined) {
+      const restrictsOwnership =
+        updates.status !== undefined ||
+        updates.owner !== undefined ||
+        updates.subject !== undefined ||
+        updates.description !== undefined ||
+        (updates.addBlocks?.length ?? 0) > 0 ||
+        (updates.addBlockedBy?.length ?? 0) > 0;
+      if (restrictsOwnership && task.owner && task.owner !== opts.callerName) {
+        throw new TaskOwnershipError(taskId, opts.callerName, task.owner);
+      }
+    }
 
     // Merge dependency edges first so the completion-unblock below
     // sees the post-update `task.blocks`. Without this, a single
@@ -310,6 +355,13 @@ export async function updateTask(
 /**
  * Delete a task file.
  *
+ * Cleans up reciprocal dependency edges first so dependents don't end
+ * up permanently blocked by a phantom id. Without this, deleting a
+ * task X that appears in another task's `blockedBy` (or whose own
+ * `blocks` list points to other tasks) would leave the deleted id in
+ * those neighbors — and `tryAutoClaimTask` skips any task with a
+ * non-empty `blockedBy`, so a dependent becomes unclaimable forever.
+ *
  * Acquires the same per-task lock that `updateTask` uses so a
  * concurrent read-modify-write cycle can't write back to a path
  * we just unlinked (which would resurrect the task with stale
@@ -320,6 +372,24 @@ export async function deleteTask(
   teamName: string,
   taskId: string,
 ): Promise<boolean> {
+  // Read the task's edges first so we can clean up reciprocal references
+  // before unlinking the file. This is intentionally outside the file
+  // lock to avoid holding multiple per-task locks simultaneously (which
+  // would risk deadlock against any concurrent multi-task update).
+  const existing = await getTask(teamName, taskId);
+  if (existing) {
+    const dependentIds = new Set<string>([
+      ...existing.blocks,
+      ...existing.blockedBy,
+    ]);
+    dependentIds.delete(taskId);
+    await Promise.all(
+      Array.from(dependentIds).map((depId) =>
+        removeEdgesReferencing(teamName, depId, taskId),
+      ),
+    );
+  }
+
   const taskPath = getTaskPath(teamName, taskId);
 
   let release: (() => Promise<void>) | undefined;
@@ -338,6 +408,46 @@ export async function deleteTask(
     throw err;
   } finally {
     await release();
+  }
+}
+
+/**
+ * Remove `referencedId` from the `blocks` and `blockedBy` arrays of
+ * the task at `targetId`. ENOENT (the dependent was deleted in the
+ * same window) is ignored.
+ */
+async function removeEdgesReferencing(
+  teamName: string,
+  targetId: string,
+  referencedId: string,
+): Promise<void> {
+  const depPath = getTaskPath(teamName, targetId);
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await lockfile.lock(depPath, LOCK_OPTIONS);
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') return;
+    throw err;
+  }
+  try {
+    const raw = await fs.readFile(depPath, 'utf-8');
+    const task = JSON.parse(raw) as SwarmTask;
+    const beforeBlocks = task.blocks.length;
+    const beforeBlockedBy = task.blockedBy.length;
+    task.blocks = task.blocks.filter((id) => id !== referencedId);
+    task.blockedBy = task.blockedBy.filter((id) => id !== referencedId);
+    if (
+      task.blocks.length === beforeBlocks &&
+      task.blockedBy.length === beforeBlockedBy
+    ) {
+      return;
+    }
+    await fs.writeFile(depPath, JSON.stringify(task, null, 2) + '\n', 'utf-8');
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') return;
+    throw err;
+  } finally {
+    await release?.();
   }
 }
 

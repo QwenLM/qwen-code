@@ -22,6 +22,7 @@ import {
   deleteTask,
   assertValidTaskId,
   getTask,
+  TaskOwnershipError,
 } from '../agents/team/tasks.js';
 
 export interface TaskUpdateParams {
@@ -97,38 +98,13 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       };
     }
 
-    // Ownership guard for non-leader callers.
-    //
-    // Mutations to status / owner / subject / description / blocks
-    // are restricted: a teammate can only touch tasks it owns or
-    // tasks that are still unowned. The leader (and the current
-    // owner) keeps full authority — leader for override, owner for
-    // its own work. Open mutations like `metadata` are still allowed
-    // so any teammate can leave a note.
-    if (isTeammate()) {
-      const callerName = getAgentName();
-      const restrictsOwnership =
-        this.params.status !== undefined ||
-        this.params.owner !== undefined ||
-        this.params.subject !== undefined ||
-        this.params.description !== undefined ||
-        (this.params.addBlocks?.length ?? 0) > 0 ||
-        (this.params.addBlockedBy?.length ?? 0) > 0;
-      if (restrictsOwnership) {
-        const existing = await getTask(teamName, taskId);
-        if (existing?.owner && existing.owner !== callerName) {
-          const msg =
-            `Task #${taskId} is owned by "${existing.owner}". ` +
-            `Only the leader or the owner can change ` +
-            `status / owner / subject / description / blocks.`;
-          return {
-            llmContent: msg,
-            returnDisplay: msg,
-            error: { message: msg },
-          };
-        }
-      }
-    }
+    // Ownership guard for non-leader callers is now enforced inside
+    // `updateTask` under the per-task lock. Doing it pre-lock used to
+    // race: two teammates could both observe an unowned task and pass,
+    // then the second writer would silently overwrite the first one's
+    // claim. We compute the caller name here and pass it through so
+    // the in-lock check has the identity it needs.
+    const teammateCallerName = isTeammate() ? getAgentName() : undefined;
 
     // status: 'deleted' → delete the task file.
     if (this.params.status === 'deleted') {
@@ -208,16 +184,35 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       };
     }
 
-    const task = await updateTask(teamName, taskId, {
-      status: this.params.status,
-      owner: this.params.owner ?? autoOwner,
-      subject: this.params.subject,
-      description: this.params.description,
-      activeForm: this.params.activeForm,
-      metadata: this.params.metadata,
-      addBlocks: this.params.addBlocks,
-      addBlockedBy: this.params.addBlockedBy,
-    });
+    let task;
+    try {
+      task = await updateTask(
+        teamName,
+        taskId,
+        {
+          status: this.params.status,
+          owner: this.params.owner ?? autoOwner,
+          subject: this.params.subject,
+          description: this.params.description,
+          activeForm: this.params.activeForm,
+          metadata: this.params.metadata,
+          addBlocks: this.params.addBlocks,
+          addBlockedBy: this.params.addBlockedBy,
+        },
+        teammateCallerName !== undefined
+          ? { callerName: teammateCallerName }
+          : undefined,
+      );
+    } catch (err) {
+      if (err instanceof TaskOwnershipError) {
+        return {
+          llmContent: err.message,
+          returnDisplay: err.message,
+          error: { message: err.message },
+        };
+      }
+      throw err;
+    }
 
     if (!task) {
       const msg = `Task #${taskId} not found.`;

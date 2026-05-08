@@ -21,6 +21,7 @@ import {
   getAgentStatuses,
   onTasksUpdated,
   notifyTasksUpdated,
+  TaskOwnershipError,
 } from './tasks.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
@@ -243,6 +244,101 @@ describe('tasks', () => {
         }),
       ).toBeUndefined();
     });
+
+    it('rejects a teammate caller from clobbering a different owner', async () => {
+      // Regression: when a task is already claimed, a second teammate
+      // calling task_update used to silently overwrite `owner` (last
+      // writer wins) because the ownership check was outside the
+      // file lock. The check now lives inside `updateTask` and throws.
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+      });
+      await updateTask('team', task.id, {
+        status: 'in_progress',
+        owner: 'alice',
+      });
+
+      await expect(
+        updateTask(
+          'team',
+          task.id,
+          { status: 'in_progress', owner: 'bob' },
+          { callerName: 'bob' },
+        ),
+      ).rejects.toBeInstanceOf(TaskOwnershipError);
+
+      // Alice's claim still stands.
+      const after = await getTask('team', task.id);
+      expect(after?.owner).toBe('alice');
+    });
+
+    it('serializes concurrent teammate claims under the lock', async () => {
+      // Two teammates race to claim the same pending task. The lock
+      // serializes the writes; the first claim wins, the second sees
+      // the first's owner inside the same lock and throws.
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+      });
+
+      const aliceClaim = updateTask(
+        'team',
+        task.id,
+        { status: 'in_progress', owner: 'alice' },
+        { callerName: 'alice' },
+      );
+      const bobClaim = updateTask(
+        'team',
+        task.id,
+        { status: 'in_progress', owner: 'bob' },
+        { callerName: 'bob' },
+      );
+      const results = await Promise.allSettled([aliceClaim, bobClaim]);
+
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r) => r.status === 'rejected');
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+        TaskOwnershipError,
+      );
+
+      const final = await getTask('team', task.id);
+      expect(['alice', 'bob']).toContain(final?.owner);
+    });
+
+    it('lets the leader (no callerName) override an existing owner', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+        owner: 'alice',
+      });
+      const updated = await updateTask('team', task.id, {
+        owner: 'bob',
+      });
+      expect(updated?.owner).toBe('bob');
+    });
+
+    it('lets the existing owner change their own task', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+      });
+      await updateTask(
+        'team',
+        task.id,
+        { status: 'in_progress', owner: 'alice' },
+        { callerName: 'alice' },
+      );
+      const updated = await updateTask(
+        'team',
+        task.id,
+        { status: 'completed' },
+        { callerName: 'alice' },
+      );
+      expect(updated?.status).toBe('completed');
+    });
   });
 
   // ─── deleteTask ────────────────────────────────────────────
@@ -259,6 +355,51 @@ describe('tasks', () => {
 
     it('returns false for nonexistent task', async () => {
       expect(await deleteTask('team', '999')).toBe(false);
+    });
+
+    it('removes the deleted id from dependents blockedBy / blocks', async () => {
+      // Regression: deleting a task that appears in another task's
+      // `blockedBy` used to leave the dead id behind, and auto-claim
+      // skips any task with a non-empty `blockedBy` — so the dependent
+      // became unclaimable forever.
+      const blocker = await createTask('team', {
+        subject: 'Blocker',
+        description: '',
+      });
+      const dependent = await createTask('team', {
+        subject: 'Dependent',
+        description: '',
+      });
+      await blockTask('team', blocker.id, dependent.id);
+
+      const before = await getTask('team', dependent.id);
+      expect(before?.blockedBy).toEqual([blocker.id]);
+
+      expect(await deleteTask('team', blocker.id)).toBe(true);
+
+      const after = await getTask('team', dependent.id);
+      expect(after?.blockedBy).toEqual([]);
+    });
+
+    it('removes the deleted id from neighbors blocks list too', async () => {
+      const upstream = await createTask('team', {
+        subject: 'Upstream',
+        description: '',
+      });
+      const target = await createTask('team', {
+        subject: 'Target',
+        description: '',
+      });
+      await blockTask('team', upstream.id, target.id);
+
+      // Sanity: upstream now lists `target.id` in its `blocks`.
+      const upstreamBefore = await getTask('team', upstream.id);
+      expect(upstreamBefore?.blocks).toEqual([target.id]);
+
+      expect(await deleteTask('team', target.id)).toBe(true);
+
+      const upstreamAfter = await getTask('team', upstream.id);
+      expect(upstreamAfter?.blocks).toEqual([]);
     });
   });
 

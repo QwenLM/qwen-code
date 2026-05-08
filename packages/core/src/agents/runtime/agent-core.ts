@@ -77,13 +77,19 @@ import { isTeammate } from '../team/identity.js';
  * Result of a single reasoning loop invocation.
  */
 /**
- * Tools that must never be available to subagents (including forked agents).
+ * Tools that must never be available to non-team subagents (including
+ * forked agents spawned via the Agent tool).
  * - AgentTool prevents recursive subagent spawning.
  * - Cron tools are session-scoped and should only run from the main session.
  * - TaskStop and SendMessage are parent-side control-plane tools for managing
  *   background subagents; subagents have no agent IDs to manage natively, so
  *   exposing them only widens the surface for cross-agent interference if an
  *   ID leaks via prompt or transcript.
+ * - Team management (team_create/team_delete) and task coordination
+ *   (task_create/task_update/task_list) are leader/teammate tools. A
+ *   non-team Agent subagent has no teammate identity, so isTeammate()
+ *   returns false and these tools would treat it as the leader — letting
+ *   it delete or rewrite the active team.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
@@ -92,19 +98,27 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_DELETE,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+  ToolNames.TASK_CREATE,
+  ToolNames.TASK_UPDATE,
+  ToolNames.TASK_LIST,
 ]);
 
 /**
- * Same as EXCLUDED_TOOLS_FOR_SUBAGENTS but allows SendMessage. Teammates
- * coordinate with the leader and peers exclusively through send_message —
- * their final text never reaches the leader otherwise — so it must be
- * available even though they remain subagents in every other respect.
+ * Tools excluded from teammates. Teammates need send_message and the
+ * task_* coordination tools to do their job, but they must not be able
+ * to create or destroy the team itself — only the leader can do that.
  */
-const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set(
-  [...EXCLUDED_TOOLS_FOR_SUBAGENTS].filter(
-    (name) => name !== ToolNames.SEND_MESSAGE,
-  ),
-);
+const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ToolNames.CRON_CREATE,
+  ToolNames.CRON_LIST,
+  ToolNames.CRON_DELETE,
+  ToolNames.TASK_STOP,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+]);
 
 /**
  * Prefix applied to each external message injected into a background agent's
