@@ -138,6 +138,7 @@ describe('useSlashCommandProcessor', () => {
     openApprovalModeDialog: vi.fn(),
     openResumeDialog: vi.fn(),
     handleResume: vi.fn(),
+    handleBranch: vi.fn().mockResolvedValue(undefined),
     openDeleteDialog: vi.fn(),
     quit: mockSetQuittingMessages,
     setDebugMessage: vi.fn(),
@@ -503,7 +504,6 @@ describe('useSlashCommandProcessor', () => {
     it('should handle "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-        stripThoughtsFromHistory: vi.fn(),
       } as unknown as GeminiClient;
       vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
 
@@ -532,7 +532,6 @@ describe('useSlashCommandProcessor', () => {
     it('should preserve thoughts when handling "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-        stripThoughtsFromHistory: vi.fn(),
       } as unknown as GeminiClient;
       vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
 
@@ -559,7 +558,7 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockClient.setHistory).toHaveBeenCalledTimes(1);
-      expect(mockClient.stripThoughtsFromHistory).not.toHaveBeenCalled();
+      expect(mockClient.setHistory).toHaveBeenCalledWith(historyWithThoughts);
     });
 
     it('should handle a "quit" action', async () => {
@@ -1204,7 +1203,7 @@ describe('useSlashCommandProcessor', () => {
       const result = setupProcessorHook([branchCmd]);
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
-      const recorder = mockConfig.getChatRecordingService() as {
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
         recordSlashCommand: ReturnType<typeof vi.fn>;
       };
       recorder.recordSlashCommand.mockClear();
@@ -1224,7 +1223,7 @@ describe('useSlashCommandProcessor', () => {
       const result = setupProcessorHook([testCmd]);
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
-      const recorder = mockConfig.getChatRecordingService() as {
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
         recordSlashCommand: ReturnType<typeof vi.fn>;
       };
       recorder.recordSlashCommand.mockClear();
