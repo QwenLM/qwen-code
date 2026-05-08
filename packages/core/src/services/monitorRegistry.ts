@@ -98,6 +98,8 @@ export type MonitorNotificationCallback = (
   meta: MonitorNotificationMeta,
 ) => void;
 
+export type MonitorOwnerLifecycleCallback = () => void;
+
 export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
 
 /**
@@ -128,6 +130,10 @@ export class MonitorRegistry {
   private readonly agentNotificationCallbacks = new Map<
     string,
     MonitorNotificationCallback
+  >();
+  private readonly agentLifecycleCallbacks = new Map<
+    string,
+    MonitorOwnerLifecycleCallback
   >();
   private notificationCallback?: MonitorNotificationCallback;
   private registerCallback?: MonitorRegisterCallback;
@@ -238,6 +244,8 @@ export class MonitorRegistry {
     debugLogger.info(`Monitor cancelled: ${monitorId}`);
     if (options.notify !== false) {
       this.emitTerminalNotification(entry);
+    } else {
+      this.dispatchOwnerLifecycleWake(entry);
     }
   }
 
@@ -276,6 +284,17 @@ export class MonitorRegistry {
       this.agentNotificationCallbacks.set(agentId, cb);
     } else {
       this.agentNotificationCallbacks.delete(agentId);
+    }
+  }
+
+  setAgentLifecycleCallback(
+    agentId: string,
+    cb: MonitorOwnerLifecycleCallback | undefined,
+  ): void {
+    if (cb) {
+      this.agentLifecycleCallbacks.set(agentId, cb);
+    } else {
+      this.agentLifecycleCallbacks.delete(agentId);
     }
   }
 
@@ -318,6 +337,7 @@ export class MonitorRegistry {
 
   reset(): void {
     this.agentNotificationCallbacks.clear();
+    this.agentLifecycleCallbacks.clear();
     if (this.monitors.size === 0) return;
     for (const entry of this.monitors.values()) {
       this.clearIdleTimer(entry);
@@ -353,6 +373,17 @@ export class MonitorRegistry {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('statusChange callback failed:', error);
+    }
+  }
+
+  private dispatchOwnerLifecycleWake(entry: MonitorEntry): void {
+    if (!entry.ownerAgentId) return;
+    const callback = this.agentLifecycleCallbacks.get(entry.ownerAgentId);
+    if (!callback) return;
+    try {
+      callback();
+    } catch (error) {
+      debugLogger.error('owner lifecycle callback failed:', error);
     }
   }
 

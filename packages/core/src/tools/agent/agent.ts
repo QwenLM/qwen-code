@@ -85,6 +85,7 @@ function createLocalExternalInputQueue(): {
   enqueue: (input: AgentExternalInput) => boolean;
   drain: () => AgentExternalInput[];
   wait: (signal: AbortSignal) => Promise<AgentExternalInput[]>;
+  wake: () => void;
 } {
   const inputs: AgentExternalInput[] = [];
   let wake: (() => void) | undefined;
@@ -98,6 +99,9 @@ function createLocalExternalInputQueue(): {
       return true;
     },
     drain,
+    wake(): void {
+      wake?.();
+    },
     wait(signal: AbortSignal): Promise<AgentExternalInput[]> {
       const immediate = drain();
       if (immediate.length > 0 || signal.aborted) {
@@ -572,6 +576,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private registerOwnedMonitorNotifications(
     agentId: string,
     enqueue: (input: AgentExternalInput) => boolean,
+    wake: () => void,
   ): () => void {
     const monitorRegistry = this.config.getMonitorRegistry();
     monitorRegistry.setAgentNotificationCallback(
@@ -579,9 +584,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       (_displayText, modelText) =>
         void enqueue({ kind: 'notification', text: modelText }),
     );
+    monitorRegistry.setAgentLifecycleCallback(agentId, wake);
 
     return () => {
       monitorRegistry.setAgentNotificationCallback(agentId, undefined);
+      monitorRegistry.setAgentLifecycleCallback(agentId, undefined);
       monitorRegistry.cancelRunningForOwner(agentId, { notify: false });
     };
   }
@@ -1360,8 +1367,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
 
         const cleanupOwnedMonitorNotifications =
-          this.registerOwnedMonitorNotifications(hookOpts.agentId, (input) =>
-            registry.queueExternalInput(hookOpts.agentId, input),
+          this.registerOwnedMonitorNotifications(
+            hookOpts.agentId,
+            (input) => registry.queueExternalInput(hookOpts.agentId, input),
+            () => registry.wakeExternalInputWaiters(hookOpts.agentId),
           );
 
         // Wire external message drain so SendMessage and owned Monitor
@@ -1526,6 +1535,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           this.registerOwnedMonitorNotifications(
             hookOpts.agentId,
             forkMonitorInputs.enqueue,
+            forkMonitorInputs.wake,
           );
 
         // Background fork execution. Run under an AsyncLocalStorage frame so
@@ -1593,8 +1603,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       });
 
       const cleanupOwnedMonitorNotifications =
-        this.registerOwnedMonitorNotifications(hookOpts.agentId, (input) =>
-          registry.queueExternalInput(hookOpts.agentId, input),
+        this.registerOwnedMonitorNotifications(
+          hookOpts.agentId,
+          (input) => registry.queueExternalInput(hookOpts.agentId, input),
+          () => registry.wakeExternalInputWaiters(hookOpts.agentId),
         );
       subagent.setExternalMessageProvider?.(() =>
         registry.drainMessages(hookOpts.agentId),

@@ -102,15 +102,45 @@ describe('MonitorRegistry', () => {
     expect(parentCallback).not.toHaveBeenCalled();
   });
 
+  it('wakes owner lifecycle callback for silent owner cancellation only', () => {
+    const ownerCallback = vi.fn();
+    const lifecycleCallback = vi.fn();
+    registry.setAgentNotificationCallback('agent-1', ownerCallback);
+    registry.setAgentLifecycleCallback('agent-1', lifecycleCallback);
+    registry.register(createEntry({ ownerAgentId: 'agent-1' }));
+
+    registry.cancel('mon-1', { notify: false });
+
+    expect(ownerCallback).not.toHaveBeenCalled();
+    expect(lifecycleCallback).toHaveBeenCalledOnce();
+  });
+
+  it('does not lifecycle-wake owner monitors that emit terminal notifications', () => {
+    const ownerCallback = vi.fn();
+    const lifecycleCallback = vi.fn();
+    registry.setAgentNotificationCallback('agent-1', ownerCallback);
+    registry.setAgentLifecycleCallback('agent-1', lifecycleCallback);
+    registry.register(createEntry({ ownerAgentId: 'agent-1' }));
+
+    registry.complete('mon-1', 0);
+
+    expect(ownerCallback).toHaveBeenCalledOnce();
+    expect(lifecycleCallback).not.toHaveBeenCalled();
+  });
+
   it('reset clears stale owner callbacks even when there are no entries', () => {
     const ownerCallback = vi.fn();
+    const lifecycleCallback = vi.fn();
     registry.setAgentNotificationCallback('agent-1', ownerCallback);
+    registry.setAgentLifecycleCallback('agent-1', lifecycleCallback);
 
     registry.reset();
     registry.register(createEntry({ ownerAgentId: 'agent-1' }));
     registry.emitEvent('mon-1', 'line after reset');
+    registry.cancel('mon-1', { notify: false });
 
     expect(ownerCallback).not.toHaveBeenCalled();
+    expect(lifecycleCallback).not.toHaveBeenCalled();
   });
 
   it('routes owner monitor terminal notifications to the owning agent callback', () => {
@@ -843,7 +873,9 @@ describe('MonitorRegistry', () => {
 
     it('reset() clears owner callbacks while firing one reset statusChange', () => {
       const ownerCallback = vi.fn();
+      const lifecycleCallback = vi.fn();
       registry.setAgentNotificationCallback('agent-1', ownerCallback);
+      registry.setAgentLifecycleCallback('agent-1', lifecycleCallback);
       registry.register(createEntry({ monitorId: 'a' }));
       const cb = vi.fn();
       registry.setStatusChangeCallback(cb);
@@ -855,9 +887,11 @@ describe('MonitorRegistry', () => {
         createEntry({ monitorId: 'after-reset', ownerAgentId: 'agent-1' }),
       );
       registry.emitEvent('after-reset', 'line after reset');
+      registry.cancel('after-reset', { notify: false });
 
-      expect(cb).toHaveBeenCalledTimes(2);
+      expect(cb).toHaveBeenCalledTimes(3);
       expect(ownerCallback).not.toHaveBeenCalled();
+      expect(lifecycleCallback).not.toHaveBeenCalled();
     });
 
     it('reset() on an empty registry does not fire statusChange', () => {

@@ -786,6 +786,78 @@ describe('subagent.ts', () => {
         ]);
       });
 
+      it('should finalize after an empty wake when no owner monitor remains running', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        let shouldWait = true;
+        const waitForExternalMessages = vi.fn(async () => {
+          shouldWait = false;
+          return [];
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => shouldWait);
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('Done.');
+        expect(waitForExternalMessages).toHaveBeenCalledTimes(1);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('should keep waiting after an empty wake while an owner monitor is still running', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        let shouldWait = true;
+        let waitCalls = 0;
+        const waitForExternalMessages = vi.fn(async () => {
+          waitCalls += 1;
+          if (waitCalls === 1) {
+            return [];
+          }
+          shouldWait = false;
+          return [
+            {
+              kind: 'notification' as const,
+              text: '<task-notification>event</task-notification>',
+            },
+          ];
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => shouldWait);
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(waitForExternalMessages).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '<task-notification>event</task-notification>' },
+        ]);
+      });
+
       it('should drain queued external notification before finalizing', async () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockImplementation(

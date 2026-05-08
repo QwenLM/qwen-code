@@ -555,6 +555,10 @@ export class BackgroundTaskRegistry {
     });
   }
 
+  wakeExternalInputWaiters(agentId: string): void {
+    this.wakeMessageWaiters(agentId);
+  }
+
   setNotificationCallback(
     cb: BackgroundNotificationCallback | undefined,
   ): void {

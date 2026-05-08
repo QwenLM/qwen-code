@@ -879,59 +879,73 @@ export class AgentCore {
     inputs: AgentExternalInput[];
     terminateMode?: AgentTerminateMode;
   }> {
-    const immediate = this.drainExternalInputs(options);
-    if (immediate.length > 0) {
-      return { inputs: immediate };
-    }
+    while (true) {
+      const immediate = this.drainExternalInputs(options);
+      if (immediate.length > 0) {
+        return { inputs: immediate };
+      }
 
-    if (!this.hasTurnBudgetForAnotherRound(options, turnCounter)) {
-      return { inputs: [], terminateMode: AgentTerminateMode.MAX_TURNS };
-    }
+      if (abortController.signal.aborted) {
+        return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+      }
 
-    const remainingTimeMs = this.getRemainingTimeMs(options, startTime);
-    if (remainingTimeMs !== undefined && remainingTimeMs <= 0) {
-      return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
-    }
+      if (!this.hasTurnBudgetForAnotherRound(options, turnCounter)) {
+        return { inputs: [], terminateMode: AgentTerminateMode.MAX_TURNS };
+      }
 
-    if (!options.waitForExternalMessages) {
-      return { inputs: [] };
-    }
+      const remainingTimeMs = this.getRemainingTimeMs(options, startTime);
+      if (remainingTimeMs !== undefined && remainingTimeMs <= 0) {
+        return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
+      }
 
-    const waitAbortController = new AbortController();
-    const onAbort = () => waitAbortController.abort();
-    abortController.signal.addEventListener('abort', onAbort, { once: true });
-    let timedOut = false;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    if (remainingTimeMs !== undefined) {
-      timeout = setTimeout(() => {
-        timedOut = true;
+      if (!options.waitForExternalMessages) {
+        return { inputs: [] };
+      }
+
+      const waitAbortController = new AbortController();
+      const onAbort = () => waitAbortController.abort();
+      abortController.signal.addEventListener('abort', onAbort, { once: true });
+      if (abortController.signal.aborted) {
         waitAbortController.abort();
-      }, remainingTimeMs);
-      timeout.unref?.();
-    }
+      }
+      let timedOut = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      if (remainingTimeMs !== undefined) {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          waitAbortController.abort();
+        }, remainingTimeMs);
+        timeout.unref?.();
+      }
 
-    try {
-      const inputs = await options.waitForExternalMessages(
-        waitAbortController.signal,
-      );
-      if (abortController.signal.aborted) {
-        return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+      try {
+        const inputs = await options.waitForExternalMessages(
+          waitAbortController.signal,
+        );
+        if (abortController.signal.aborted) {
+          return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+        }
+        if (timedOut) {
+          return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
+        }
+        if (inputs.length > 0) {
+          return { inputs };
+        }
+        if (!options.shouldWaitForExternalMessages?.()) {
+          return { inputs: [] };
+        }
+      } catch (error) {
+        if (abortController.signal.aborted) {
+          return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+        }
+        if (timedOut) {
+          return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
+        }
+        throw error;
+      } finally {
+        if (timeout) clearTimeout(timeout);
+        abortController.signal.removeEventListener('abort', onAbort);
       }
-      if (timedOut) {
-        return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
-      }
-      return { inputs };
-    } catch (error) {
-      if (abortController.signal.aborted) {
-        return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
-      }
-      if (timedOut) {
-        return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
-      }
-      throw error;
-    } finally {
-      if (timeout) clearTimeout(timeout);
-      abortController.signal.removeEventListener('abort', onAbort);
     }
   }
 

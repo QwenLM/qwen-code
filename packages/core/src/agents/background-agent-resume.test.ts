@@ -71,6 +71,7 @@ describe('BackgroundAgentResumeService', () => {
     };
     const monitorRegistry = {
       setAgentNotificationCallback: vi.fn(),
+      setAgentLifecycleCallback: vi.fn(),
       cancelRunningForOwner: vi.fn(),
     };
     const config = {
@@ -759,8 +760,35 @@ describe('BackgroundAgentResumeService', () => {
     });
     expect(subagent.setExternalMessageWaiter).toHaveBeenCalled();
     expect(subagent.setExternalMessageWaitPredicate).toHaveBeenCalled();
+    const lifecycleCallback = monitorRegistry.setAgentLifecycleCallback.mock
+      .calls[0][1] as () => void;
+    registry.drainMessages(agentId);
+    const waitPromise = registry.waitForMessages(
+      agentId,
+      new AbortController().signal,
+    );
+
+    lifecycleCallback();
+
+    await expect(waitPromise).resolves.toEqual([]);
     releaseExecute?.();
     await resume;
+    await vi.waitFor(() => {
+      expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+        agentId,
+        undefined,
+      );
+      expect(monitorRegistry.setAgentLifecycleCallback).toHaveBeenCalledWith(
+        agentId,
+        undefined,
+      );
+      expect(monitorRegistry.cancelRunningForOwner).toHaveBeenCalledWith(
+        agentId,
+        {
+          notify: false,
+        },
+      );
+    });
   });
 
   it('resumes fork agents from transcript bootstrap instead of current parent config', async () => {

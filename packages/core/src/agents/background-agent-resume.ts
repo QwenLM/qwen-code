@@ -677,6 +677,9 @@ export class BackgroundAgentResumeService {
             text: modelText,
           }),
       );
+      monitorRegistry.setAgentLifecycleCallback(meta.agentId, () =>
+        registry.wakeExternalInputWaiters(meta.agentId),
+      );
 
       const hookSystem = this.config.getHookSystem();
       const contextState = new ContextState();
@@ -786,6 +789,7 @@ export class BackgroundAgentResumeService {
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
           monitorRegistry.setAgentNotificationCallback(meta.agentId, undefined);
+          monitorRegistry.setAgentLifecycleCallback(meta.agentId, undefined);
           monitorRegistry.cancelRunningForOwner(meta.agentId, {
             notify: false,
           });

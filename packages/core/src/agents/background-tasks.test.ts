@@ -918,6 +918,26 @@ describe('BackgroundTaskRegistry', () => {
       );
       expect(signal.removeEventListener).toHaveBeenCalled();
     });
+
+    it('wakes external input waiters without queueing input', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      const waitPromise = registry.waitForMessages(
+        'test-1',
+        new AbortController().signal,
+      );
+
+      registry.wakeExternalInputWaiters('test-1');
+
+      await expect(waitPromise).resolves.toEqual([]);
+      expect(registry.drainMessages('test-1')).toEqual([]);
+    });
   });
 
   describe('session switch helpers', () => {

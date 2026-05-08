@@ -110,10 +110,12 @@ describe('AgentTool', () => {
       drainMessages: vi.fn().mockReturnValue([]),
       queueMessage: vi.fn(),
       queueExternalInput: vi.fn(),
+      wakeExternalInputWaiters: vi.fn(),
       appendActivity: vi.fn(),
     };
     const stubMonitorRegistry = {
       setAgentNotificationCallback: vi.fn(),
+      setAgentLifecycleCallback: vi.fn(),
       cancelRunningForOwner: vi.fn(),
     };
     // Stub registry exposed on both `parent.getToolRegistry()` and the
@@ -749,6 +751,88 @@ describe('AgentTool', () => {
       await vi.runAllTimersAsync();
 
       expect(stopSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('routes owned monitor notifications and cleanup for implicit forks', async () => {
+      let releaseExecute: (() => void) | undefined;
+      vi.mocked(mockAgent.execute).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseExecute = resolve;
+          }),
+      );
+      (mockAgent as unknown as Record<string, unknown>)[
+        'setExternalMessageProvider'
+      ] = vi.fn();
+      (mockAgent as unknown as Record<string, unknown>)[
+        'setExternalMessageWaiter'
+      ] = vi.fn();
+      (mockAgent as unknown as Record<string, unknown>)[
+        'setExternalMessageWaitPredicate'
+      ] = vi.fn();
+
+      const params: AgentParams = {
+        description: 'fork task',
+        prompt: 'do the thing',
+      };
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+
+      await invocation.execute();
+      await vi.waitFor(() => expect(mockAgent.execute).toHaveBeenCalled());
+
+      const monitorRegistry = config.getMonitorRegistry() as unknown as {
+        setAgentNotificationCallback: ReturnType<typeof vi.fn>;
+        setAgentLifecycleCallback: ReturnType<typeof vi.fn>;
+        cancelRunningForOwner: ReturnType<typeof vi.fn>;
+      };
+      const agentId = monitorRegistry.setAgentNotificationCallback.mock
+        .calls[0][0] as string;
+      const callback = monitorRegistry.setAgentNotificationCallback.mock
+        .calls[0][1] as (displayText: string, modelText: string) => void;
+      const provider = (
+        mockAgent as unknown as {
+          setExternalMessageProvider: ReturnType<typeof vi.fn>;
+        }
+      ).setExternalMessageProvider.mock.calls[0][0] as () => unknown[];
+      const waiter = (
+        mockAgent as unknown as {
+          setExternalMessageWaiter: ReturnType<typeof vi.fn>;
+        }
+      ).setExternalMessageWaiter.mock.calls[0][0] as (
+        signal: AbortSignal,
+      ) => Promise<unknown[]>;
+
+      callback('Monitor "logs" event #1: ready', '<task-notification />');
+
+      expect(provider()).toEqual([
+        { kind: 'notification', text: '<task-notification />' },
+      ]);
+
+      const lifecycleCallback = monitorRegistry.setAgentLifecycleCallback.mock
+        .calls[0][1] as () => void;
+      const waitPromise = waiter(new AbortController().signal);
+
+      lifecycleCallback();
+
+      await expect(waitPromise).resolves.toEqual([]);
+
+      releaseExecute?.();
+      await vi.runAllTimersAsync();
+
+      expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+        agentId,
+        undefined,
+      );
+      expect(monitorRegistry.setAgentLifecycleCallback).toHaveBeenCalledWith(
+        agentId,
+        undefined,
+      );
+      expect(monitorRegistry.cancelRunningForOwner).toHaveBeenCalledWith(
+        agentId,
+        { notify: false },
+      );
     });
   });
 
@@ -1523,6 +1607,7 @@ describe('AgentTool', () => {
       drainMessages: ReturnType<typeof vi.fn>;
       waitForMessages: ReturnType<typeof vi.fn>;
       queueExternalInput: ReturnType<typeof vi.fn>;
+      wakeExternalInputWaiters: ReturnType<typeof vi.fn>;
       appendActivity: ReturnType<typeof vi.fn>;
     };
 
@@ -1562,6 +1647,7 @@ describe('AgentTool', () => {
         drainMessages: vi.fn().mockReturnValue([]),
         waitForMessages: vi.fn().mockResolvedValue([]),
         queueExternalInput: vi.fn(),
+        wakeExternalInputWaiters: vi.fn(),
         appendActivity: vi.fn(),
       };
 
@@ -1651,6 +1737,7 @@ describe('AgentTool', () => {
       const agentId = mockRegistry.register.mock.calls[0][0].agentId as string;
       const monitorRegistry = config.getMonitorRegistry() as unknown as {
         setAgentNotificationCallback: ReturnType<typeof vi.fn>;
+        setAgentLifecycleCallback: ReturnType<typeof vi.fn>;
       };
       const callback =
         monitorRegistry.setAgentNotificationCallback.mock.calls.find(
@@ -1666,6 +1753,18 @@ describe('AgentTool', () => {
         kind: 'notification',
         text: '<task-notification />',
       });
+
+      const lifecycleCallback =
+        monitorRegistry.setAgentLifecycleCallback.mock.calls.find(
+          ([id, cb]) => id === agentId && typeof cb === 'function',
+        )?.[1] as (() => void) | undefined;
+      expect(lifecycleCallback).toBeDefined();
+
+      lifecycleCallback?.();
+
+      expect(mockRegistry.wakeExternalInputWaiters).toHaveBeenCalledWith(
+        agentId,
+      );
     });
 
     it('cleans up owned monitor routing when a background agent finishes', async () => {
@@ -1683,6 +1782,7 @@ describe('AgentTool', () => {
       const agentId = mockRegistry.register.mock.calls[0][0].agentId as string;
       const monitorRegistry = config.getMonitorRegistry() as unknown as {
         setAgentNotificationCallback: ReturnType<typeof vi.fn>;
+        setAgentLifecycleCallback: ReturnType<typeof vi.fn>;
         cancelRunningForOwner: ReturnType<typeof vi.fn>;
       };
 
@@ -1690,6 +1790,10 @@ describe('AgentTool', () => {
         expect(
           monitorRegistry.setAgentNotificationCallback,
         ).toHaveBeenCalledWith(agentId, undefined);
+        expect(monitorRegistry.setAgentLifecycleCallback).toHaveBeenCalledWith(
+          agentId,
+          undefined,
+        );
         expect(monitorRegistry.cancelRunningForOwner).toHaveBeenCalledWith(
           agentId,
           { notify: false },
@@ -1820,6 +1924,83 @@ describe('AgentTool', () => {
           }
         ).setExternalMessageWaitPredicate,
       ).toHaveBeenCalled();
+    });
+
+    it('routes owned monitor notifications and cleanup for foreground agents', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      let releaseExecute: (() => void) | undefined;
+      vi.mocked(mockAgent.execute).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseExecute = resolve;
+          }),
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const executePromise = invocation.execute();
+
+      await vi.waitFor(() => expect(mockRegistry.register).toHaveBeenCalled());
+      const agentId = mockRegistry.register.mock.calls[0][0].agentId as string;
+      const monitorRegistry = config.getMonitorRegistry() as unknown as {
+        setAgentNotificationCallback: ReturnType<typeof vi.fn>;
+        setAgentLifecycleCallback: ReturnType<typeof vi.fn>;
+        cancelRunningForOwner: ReturnType<typeof vi.fn>;
+      };
+      const callback =
+        monitorRegistry.setAgentNotificationCallback.mock.calls.find(
+          ([id, cb]) => id === agentId && typeof cb === 'function',
+        )?.[1] as
+          | ((displayText: string, modelText: string) => void)
+          | undefined;
+      expect(callback).toBeDefined();
+
+      callback?.('Monitor "logs" event #1: ready', '<task-notification />');
+
+      expect(mockRegistry.queueExternalInput).toHaveBeenCalledWith(agentId, {
+        kind: 'notification',
+        text: '<task-notification />',
+      });
+
+      const lifecycleCallback =
+        monitorRegistry.setAgentLifecycleCallback.mock.calls.find(
+          ([id, cb]) => id === agentId && typeof cb === 'function',
+        )?.[1] as (() => void) | undefined;
+      expect(lifecycleCallback).toBeDefined();
+
+      lifecycleCallback?.();
+
+      expect(mockRegistry.wakeExternalInputWaiters).toHaveBeenCalledWith(
+        agentId,
+      );
+
+      releaseExecute?.();
+      await executePromise;
+
+      expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+        agentId,
+        undefined,
+      );
+      expect(monitorRegistry.setAgentLifecycleCallback).toHaveBeenCalledWith(
+        agentId,
+        undefined,
+      );
+      expect(monitorRegistry.cancelRunningForOwner).toHaveBeenCalledWith(
+        agentId,
+        { notify: false },
+      );
     });
 
     it('foreground CANCELLED prefixes the partial result so the parent sees the cancel', async () => {
