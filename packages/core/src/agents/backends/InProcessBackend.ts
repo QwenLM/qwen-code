@@ -13,16 +13,12 @@
 
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { Config } from '../../config/config.js';
-import {
-  type AuthType,
-  type ContentGenerator,
-  type ContentGeneratorConfig,
-  createContentGenerator,
-} from '../../core/contentGenerator.js';
+import { type ContentGenerator } from '../../core/contentGenerator.js';
+import type { RuntimeContentGeneratorView } from '../runtime/agent-context.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
-import { buildAgentContentGeneratorConfig } from '../../models/content-generator-config.js';
+import { createRuntimeContentGeneratorView } from '../../models/content-generator-config.js';
 import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
 import { AgentCore } from '../runtime/agent-core.js';
 import { AgentEventEmitter } from '../runtime/agent-events.js';
@@ -52,7 +48,16 @@ export class InProcessBackend implements Backend {
   private readonly runtimeContext: Config;
   private readonly agents = new Map<string, AgentInteractive>();
   private readonly agentContentGenerators = new Map<string, ContentGenerator>();
-  private readonly agentRegistries: ToolRegistry[] = [];
+  // Per-agent tool registries keyed by agentId so `stopAgent` can
+  // dispose just that agent's registry (releasing tool listeners on
+  // shared managers like SkillManager / SubagentManager) without
+  // waiting for backend shutdown. The previous flat-array form leaked
+  // listeners — every spawn-then-stop cycle accumulated another stale
+  // SkillTool listener on the parent SkillManager, and
+  // `notifyChangeListeners` (now parallel via Promise.allSettled)
+  // still pays a per-listener round trip even when the underlying
+  // subagent no longer exists.
+  private readonly agentRegistries: Map<string, ToolRegistry> = new Map();
   private readonly agentOrder: string[] = [];
   private activeAgentId: string | null = null;
   private exitCallback: AgentExitCallback | null = null;
@@ -103,7 +108,7 @@ export class InProcessBackend implements Backend {
       );
     }
 
-    this.agentRegistries.push(agentContext.getToolRegistry());
+    this.agentRegistries.set(config.agentId, agentContext.getToolRegistry());
 
     const core = new AgentCore(
       inProcessConfig.agentName,
@@ -113,6 +118,8 @@ export class InProcessBackend implements Backend {
       runConfig,
       toolConfig,
       eventEmitter,
+      undefined,
+      perAgent.runtimeView,
     );
 
     const interactive = new AgentInteractive(
@@ -172,6 +179,21 @@ export class InProcessBackend implements Backend {
       agent.abort();
       debugLogger.info(`Stopped agent: ${agentId}`);
     }
+    // Release this agent's per-agent tool registry — including its
+    // SkillTool's listener registration on the shared SkillManager —
+    // immediately, instead of accumulating until backend cleanup() at
+    // process exit. Fire-and-forget the async stop(); errors are
+    // already logged inside.
+    const registry = this.agentRegistries.get(agentId);
+    if (registry) {
+      this.agentRegistries.delete(agentId);
+      void registry.stop().catch((error) => {
+        debugLogger.error(
+          `Failed to stop tool registry for agent "${agentId}":`,
+          error,
+        );
+      });
+    }
   }
 
   stopAll(): void {
@@ -200,12 +222,15 @@ export class InProcessBackend implements Backend {
     await Promise.race([Promise.allSettled(promises), timeout]);
     clearTimeout(timerId!);
 
-    // Stop per-agent tool registries so tools like AgentTool can release
-    // listeners registered on shared managers (e.g. SubagentManager).
-    for (const registry of this.agentRegistries) {
+    // Stop any still-attached per-agent tool registries so tools like
+    // AgentTool / SkillTool release listeners registered on shared
+    // managers (SubagentManager / SkillManager). `stopAgent` already
+    // releases registries for cleanly stopped agents; this loop covers
+    // the fast-path shutdown case where agents are still in flight.
+    for (const registry of this.agentRegistries.values()) {
       await registry.stop().catch(() => {});
     }
-    this.agentRegistries.length = 0;
+    this.agentRegistries.clear();
 
     this.agents.clear();
     this.agentContentGenerators.clear();
@@ -355,19 +380,26 @@ export class InProcessBackend implements Backend {
  * - `getFileService()` → FileDiscoveryService rooted at agent's cwd
  * - `getToolRegistry()` → per-agent tool registry with core tools bound to
  *   the agent Config
- * - `getContentGenerator()` / `getContentGeneratorConfig()` / `getAuthType()`
- *   → per-agent ContentGenerator when `authOverrides` is provided
- * - returned `contentGenerator` → the generator safe to use for summaries
+ *
+ * When `authOverrides` is provided, also returns a `runtimeView` describing
+ * the per-agent ContentGenerator. The agent runtime publishes the view via
+ * AsyncLocalStorage so the CG-related Config getters resolve to the
+ * agent's values during the run.
  */
 async function createPerAgentConfig(
   base: Config,
   cwd: string,
   modelId?: string,
   authOverrides?: InProcessSpawnConfig['authOverrides'],
-): Promise<{ config: Config; contentGenerator?: ContentGenerator }> {
+): Promise<{
+  config: Config;
+  contentGenerator?: ContentGenerator;
+  runtimeView?: RuntimeContentGeneratorView;
+}> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   let dedicatedContentGenerator: ContentGenerator | undefined;
+  let runtimeView: RuntimeContentGeneratorView | undefined;
 
   override.getWorkingDir = () => cwd;
   override.getTargetDir = () => cwd;
@@ -388,25 +420,16 @@ async function createPerAgentConfig(
 
   if (authOverrides?.authType) {
     try {
-      const agentGeneratorConfig = buildAgentContentGeneratorConfig(
+      runtimeView = await createRuntimeContentGeneratorView(
         base,
+        override as Config,
         modelId,
         authOverrides,
       );
-      const agentGenerator = await createContentGenerator(
-        agentGeneratorConfig,
-        override as Config,
-      );
-      dedicatedContentGenerator = agentGenerator;
-      override.getContentGenerator = (): ContentGenerator => agentGenerator;
-      override.getContentGeneratorConfig = (): ContentGeneratorConfig =>
-        agentGeneratorConfig;
-      override.getAuthType = (): AuthType | undefined =>
-        agentGeneratorConfig.authType;
-      override.getModel = (): string => agentGeneratorConfig.model;
+      dedicatedContentGenerator = runtimeView.contentGenerator;
 
       debugLogger.info(
-        `Created per-agent ContentGenerator: authType=${authOverrides.authType}, model=${agentGeneratorConfig.model}`,
+        `Created per-agent ContentGenerator: authType=${authOverrides.authType}, model=${runtimeView.contentGeneratorConfig.model}`,
       );
     } catch (error) {
       debugLogger.error(
@@ -421,5 +444,6 @@ async function createPerAgentConfig(
     contentGenerator:
       dedicatedContentGenerator ??
       (authOverrides?.authType ? undefined : base.getContentGenerator()),
+    runtimeView,
   };
 }

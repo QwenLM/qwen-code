@@ -7,6 +7,7 @@
 import type { HistoryItem } from '../types.js';
 import type { Content } from '@google/genai';
 import { STARTUP_CONTEXT_MODEL_ACK } from '@qwen-code/qwen-code-core';
+import { isSlashCommand } from './commandUtils.js';
 
 /**
  * Returns true when the history item represents a real user prompt that was
@@ -16,7 +17,7 @@ import { STARTUP_CONTEXT_MODEL_ACK } from '@qwen-code/qwen-code-core';
  */
 export function isRealUserTurn(item: HistoryItem): boolean {
   if (item.type !== 'user' || !item.text) return false;
-  return !item.text.startsWith('/') && !item.text.startsWith('?');
+  return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }
 
 /**

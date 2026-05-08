@@ -263,7 +263,7 @@ IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks t
 - **File Paths:** Always use absolute paths when referring to files with tools like '${ToolNames.READ_FILE}' or '${ToolNames.WRITE_FILE}'. Relative paths are not supported. You must provide an absolute path.
 - **Parallelism:** Execute multiple independent tool calls in parallel when feasible (i.e. searching the codebase).
 - **Command Execution:** Use the '${ToolNames.SHELL}' tool for running shell commands, remembering the safety rule to explain modifying commands first.
-- **Background Processes:** Use background processes (via \`&\`) for commands that are unlikely to stop on their own, e.g. \`node server.js &\`. If unsure, ask the user.
+- **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, ask the user.
 - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
 - **Task Management:** Use the '${ToolNames.TODO_WRITE}' tool proactively for complex, multi-step tasks to track progress and provide visibility to users. This tool helps organize work systematically and ensures no requirements are missed.
 - **Subagent Delegation:** When doing file search, prefer to use the '${ToolNames.AGENT}' tool in order to reduce context usage. You should proactively use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description.
@@ -481,7 +481,7 @@ model: true
 
 <example>
 user: start the server implemented in server.js
-model: [tool_call: ${ToolNames.SHELL} for 'node server.js &' with is_background: true because it must run in the background]
+model: [tool_call: ${ToolNames.SHELL} for 'node server.js' with is_background: true because it must run in the background]
 </example>
 
 <example>
@@ -561,7 +561,7 @@ model:
 <tool_call>
 <function=${ToolNames.SHELL}>
 <parameter=command>
-node server.js &
+node server.js
 </parameter>
 <parameter=is_background>
 true
@@ -716,7 +716,7 @@ model: true
 user: start the server implemented in server.js
 model: 
 <tool_call>
-{"name": "${ToolNames.SHELL}", "arguments": {"command": "node server.js &", "is_background": true}}
+{"name": "${ToolNames.SHELL}", "arguments": {"command": "node server.js", "is_background": true}}
 </tool_call>
 </example>
 

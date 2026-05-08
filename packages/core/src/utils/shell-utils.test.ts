@@ -11,8 +11,12 @@ import {
   escapeShellArg,
   getCommandRoots,
   getShellConfiguration,
+  hasNonFinalTopLevelBackgroundOperator,
+  hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
+  normalizeMonitorCommand,
+  stripTrailingBackgroundAmp,
   stripShellWrapper,
 } from './shell-utils.js';
 import type { Config } from '../config/config.js';
@@ -494,7 +498,7 @@ describe('stripShellWrapper', () => {
   });
 
   it('should strip zsh -c without quotes', async () => {
-    expect(stripShellWrapper('zsh -c ls -l')).toEqual('ls -l');
+    expect(stripShellWrapper('zsh -c ls -l')).toEqual('ls');
   });
 
   it('should strip cmd.exe /c', async () => {
@@ -503,6 +507,219 @@ describe('stripShellWrapper', () => {
 
   it('should not strip anything if no wrapper is present', async () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
+  });
+
+  it('should strip absolute-path wrapper /bin/bash -c', async () => {
+    expect(stripShellWrapper("/bin/bash -c 'sleep 5'")).toEqual('sleep 5');
+    expect(stripShellWrapper('/usr/bin/zsh -c "ls -l"')).toEqual('ls -l');
+  });
+
+  it('should strip combined flags like -lc', async () => {
+    expect(stripShellWrapper("bash -lc 'sleep 5'")).toEqual('sleep 5');
+    expect(stripShellWrapper("bash -ec 'sleep 5'")).toEqual('sleep 5');
+  });
+
+  it('should strip env-prefixed wrapper', async () => {
+    expect(stripShellWrapper("FOO=bar bash -c 'sleep 5'")).toEqual('sleep 5');
+    expect(stripShellWrapper("A=1 B=2 /bin/bash -c 'sleep 5'")).toEqual(
+      'sleep 5',
+    );
+  });
+
+  it('should strip single-dash wrapper flags before -c', async () => {
+    expect(stripShellWrapper("bash -e -c 'sleep 5'")).toEqual('sleep 5');
+  });
+
+  it('should consume shell options with separate operands before -c', async () => {
+    expect(stripShellWrapper("bash -o pipefail -c 'sleep 5'")).toEqual(
+      'sleep 5',
+    );
+    expect(stripShellWrapper("bash +o posix -c 'sleep 5'")).toEqual('sleep 5');
+  });
+
+  it('does not append bash -c positional argv to the executable command', async () => {
+    expect(stripShellWrapper("bash -c 'echo ok' 'sleep 5'")).toEqual('echo ok');
+  });
+});
+
+describe('stripTrailingBackgroundAmp', () => {
+  it('strips a single bare trailing ampersand', () => {
+    expect(stripTrailingBackgroundAmp('tail -f app.log &')).toBe(
+      'tail -f app.log',
+    );
+    expect(stripTrailingBackgroundAmp('tail -f app.log &   ')).toBe(
+      'tail -f app.log',
+    );
+  });
+
+  it('does not strip trailing logical-and or escaped ampersands', () => {
+    expect(stripTrailingBackgroundAmp('echo hi &&')).toBe('echo hi &&');
+    expect(stripTrailingBackgroundAmp('echo hi \\&')).toBe('echo hi \\&');
+  });
+
+  it('does not strip non-trailing background operators', () => {
+    expect(stripTrailingBackgroundAmp('sleep 5 & echo done')).toBe(
+      'sleep 5 & echo done',
+    );
+  });
+});
+
+describe('hasNonFinalTopLevelBackgroundOperator', () => {
+  it('detects top-level background operators followed by more syntax', () => {
+    expect(
+      hasNonFinalTopLevelBackgroundOperator('tail -f app.log & echo ok'),
+    ).toBe(true);
+    expect(
+      hasNonFinalTopLevelBackgroundOperator('tail -f app.log & # watch'),
+    ).toBe(true);
+  });
+
+  it('ignores final, logical, escaped, quoted, and redirection ampersands', () => {
+    expect(hasNonFinalTopLevelBackgroundOperator('tail -f app.log &')).toBe(
+      false,
+    );
+    expect(hasNonFinalTopLevelBackgroundOperator('echo hi && echo ok')).toBe(
+      false,
+    );
+    expect(hasNonFinalTopLevelBackgroundOperator('echo foo \\& echo ok')).toBe(
+      false,
+    );
+    expect(hasNonFinalTopLevelBackgroundOperator(`printf '&' && echo ok`)).toBe(
+      false,
+    );
+    expect(hasNonFinalTopLevelBackgroundOperator('echo hi &> out')).toBe(false);
+    expect(hasNonFinalTopLevelBackgroundOperator('echo hi 2>&1')).toBe(false);
+  });
+});
+
+describe('hasUnsafeMonitorBackgroundOperator', () => {
+  it('detects unsafe backgrounding inside shell wrapper scripts and suffixes', () => {
+    expect(
+      hasUnsafeMonitorBackgroundOperator(
+        "bash -c 'tail -f app.log & echo ready'",
+      ),
+    ).toBe(true);
+    expect(
+      hasUnsafeMonitorBackgroundOperator(
+        "bash -c 'tail -f app.log' & echo ready",
+      ),
+    ).toBe(true);
+  });
+
+  it('allows final trailing ampersands that normalization strips', () => {
+    expect(hasUnsafeMonitorBackgroundOperator('tail -f app.log &')).toBe(false);
+    expect(
+      hasUnsafeMonitorBackgroundOperator("bash -c 'tail -f app.log &'"),
+    ).toBe(false);
+  });
+});
+
+describe('normalizeMonitorCommand', () => {
+  it('unwraps quoted env-prefixed shell wrappers for analysis', () => {
+    expect(
+      normalizeMonitorCommand(
+        `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
+      ),
+    ).toEqual({
+      analysisCommand: 'echo $(cat secret.txt)',
+      safetyCommand: `FOO="bar baz" echo $(cat secret.txt)`,
+      spawnCommand: `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
+      strippedTrailingAmp: false,
+    });
+  });
+
+  it('preserves wrapper flags while stripping trailing ampersands', () => {
+    expect(
+      normalizeMonitorCommand(
+        `/bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,
+      ),
+    ).toEqual({
+      analysisCommand: 'tail -f /tmp/app.log',
+      safetyCommand: 'tail -f /tmp/app.log',
+      spawnCommand: `/bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
+      strippedTrailingAmp: true,
+    });
+  });
+
+  it('unwraps shell wrappers with option operands for safety analysis', () => {
+    expect(
+      normalizeMonitorCommand(
+        `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
+      ),
+    ).toEqual({
+      analysisCommand: 'echo $(cat secret.txt)',
+      safetyCommand: 'echo $(cat secret.txt)',
+      spawnCommand: `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
+      strippedTrailingAmp: false,
+    });
+  });
+
+  it('analyzes only the script word after -c while preserving later argv', () => {
+    expect(
+      normalizeMonitorCommand(`/bin/bash -c 'echo $(cat secret.txt)' ignored`),
+    ).toEqual({
+      analysisCommand: 'echo $(cat secret.txt)',
+      safetyCommand: 'echo $(cat secret.txt) ignored',
+      spawnCommand: `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
+      strippedTrailingAmp: false,
+    });
+  });
+
+  it('strips trailing ampersands from the -c script without dropping later argv', () => {
+    expect(
+      normalizeMonitorCommand(`/bin/bash -c 'tail -f /tmp/app.log &' ignored`),
+    ).toEqual({
+      analysisCommand: 'tail -f /tmp/app.log',
+      safetyCommand: 'tail -f /tmp/app.log ignored',
+      spawnCommand: `/bin/bash -c 'tail -f /tmp/app.log' ignored`,
+      strippedTrailingAmp: true,
+    });
+  });
+
+  it('keeps substitutions in wrapper argv suffix in the safety command', () => {
+    expect(
+      normalizeMonitorCommand(`/bin/bash -c 'echo ok' $(cat secret.txt)`),
+    ).toEqual({
+      analysisCommand: 'echo ok',
+      safetyCommand: 'echo ok $(cat secret.txt)',
+      spawnCommand: `/bin/bash -c 'echo ok' $(cat secret.txt)`,
+      strippedTrailingAmp: false,
+    });
+  });
+
+  it('handles escaped whitespace in env-prefixed wrappers', () => {
+    expect(
+      normalizeMonitorCommand(
+        String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,
+      ),
+    ).toEqual({
+      analysisCommand: 'tail -f /tmp/app.log',
+      safetyCommand: String.raw`FOO=bar\ baz tail -f /tmp/app.log`,
+      spawnCommand: String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
+      strippedTrailingAmp: true,
+    });
+  });
+
+  it('falls back to the original command when no wrapper is detected', () => {
+    expect(
+      normalizeMonitorCommand(`FOO="bar baz" tail -f /tmp/app.log`),
+    ).toEqual({
+      analysisCommand: `FOO="bar baz" tail -f /tmp/app.log`,
+      safetyCommand: `FOO="bar baz" tail -f /tmp/app.log`,
+      spawnCommand: `FOO="bar baz" tail -f /tmp/app.log`,
+      strippedTrailingAmp: false,
+    });
+  });
+
+  it('keeps env-prefix substitutions in the safety command', () => {
+    expect(
+      normalizeMonitorCommand(`FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`),
+    ).toEqual({
+      analysisCommand: 'echo ok',
+      safetyCommand: 'FOO=$(cat secret.txt) echo ok',
+      spawnCommand: `FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`,
+      strippedTrailingAmp: false,
+    });
   });
 });
 
