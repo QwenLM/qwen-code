@@ -42,9 +42,9 @@ import type {
   UsageUpdateEvent,
   AvailableCommandsUpdateEvent,
   Effect,
-} from '../types'
-import type { Message } from '../../../shared/types'
-import { generateMessageId, appendMessage } from '../helpers'
+} from '../types';
+import type { Message } from '../../../shared/types';
+import { generateMessageId, appendMessage } from '../helpers';
 
 /**
  * Handle complete - agent loop finished
@@ -54,34 +54,50 @@ import { generateMessageId, appendMessage } from '../helpers'
  */
 export function handleComplete(
   state: SessionState,
-  event: CompleteEvent
+  event: CompleteEvent,
 ): ProcessResult {
-  const { session } = state
+  const { session } = state;
 
   // Fail-safe: mark any non-terminal tools as complete.
   // Catches 'executing' (normal) and 'backgrounded' (spurious — e.g. foreground Agent
   // whose result contained agentId:). Genuinely backgrounded tasks have isBackground=true
   // AND a taskId, so they're excluded — task_completed will finalize them.
-  const TERMINAL_TOOL_STATUSES = new Set(['completed', 'error'])
-  let updatedMessages = session.messages
+  const TERMINAL_TOOL_STATUSES = new Set(['completed', 'error']);
+  let updatedMessages = session.messages;
   const hasRunningTools = session.messages.some(
-    m => m.role === 'tool'
-      && !TERMINAL_TOOL_STATUSES.has(m.toolStatus ?? '')
-      && !(m.isBackground && m.taskId)  // Don't force-complete genuine background tasks
-  )
+    (m) =>
+      m.role === 'tool' &&
+      !TERMINAL_TOOL_STATUSES.has(m.toolStatus ?? '') &&
+      !(m.isBackground && m.taskId), // Don't force-complete genuine background tasks
+  );
 
   if (hasRunningTools) {
-    updatedMessages = session.messages.map(m => {
+    updatedMessages = session.messages.map((m) => {
       if (
-        m.role === 'tool'
-        && !TERMINAL_TOOL_STATUSES.has(m.toolStatus ?? '')
-        && !(m.isBackground && m.taskId)
+        m.role === 'tool' &&
+        !TERMINAL_TOOL_STATUSES.has(m.toolStatus ?? '') &&
+        !(m.isBackground && m.taskId)
       ) {
-        return { ...m, toolStatus: 'completed' as const, toolResult: m.toolResult ?? '' }
+        return {
+          ...m,
+          toolStatus: 'completed' as const,
+          toolResult: m.toolResult ?? '',
+        };
       }
-      return m
-    })
+      return m;
+    });
   }
+
+  // Clear transient streaming state on assistant messages.
+  // After a stop, text_delta events from generator drain can arrive after the
+  // interrupted event, creating new assistant messages with isPending/isStreaming
+  // still set. The complete event is the final signal that no more events will
+  // arrive, so it's the right place to guarantee these flags are cleared.
+  updatedMessages = updatedMessages.map((m) =>
+    m.role === 'assistant' && (m.isPending || m.isStreaming)
+      ? { ...m, isPending: false, isStreaming: false }
+      : m,
+  );
 
   return {
     state: {
@@ -89,7 +105,7 @@ export function handleComplete(
         ...session,
         messages: updatedMessages,
         isProcessing: false,
-        currentStatus: undefined,  // Clear any lingering status
+        currentStatus: undefined, // Clear any lingering status
         // Update tokenUsage from complete event (for real-time context counter updates)
         tokenUsage: event.tokenUsage ?? session.tokenUsage,
         // Update hasUnread flag from main process (state machine for NEW badge)
@@ -99,7 +115,7 @@ export function handleComplete(
       streaming: null,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -107,23 +123,37 @@ export function handleComplete(
  */
 export function handleError(
   state: SessionState,
-  event: ErrorEvent
+  event: ErrorEvent,
 ): ProcessResult {
-  const { session } = state
+  const { session } = state;
 
-  // Fail-safe: Mark any running tools as failed
-  const messagesWithFailedTools = session.messages.map(m =>
-    m.role === 'tool' && m.toolResult === undefined && m.toolStatus !== 'completed' && m.toolStatus !== 'error'
-      ? { ...m, toolStatus: 'error' as const, toolResult: 'Error occurred', isError: true }
-      : m
-  )
+  // Fail-safe: Mark any running tools as failed and clear transient streaming state
+  const messagesWithFailedTools = session.messages.map((m) => {
+    if (
+      m.role === 'tool' &&
+      m.toolResult === undefined &&
+      m.toolStatus !== 'completed' &&
+      m.toolStatus !== 'error'
+    ) {
+      return {
+        ...m,
+        toolStatus: 'error' as const,
+        toolResult: 'Error occurred',
+        isError: true,
+      };
+    }
+    if (m.role === 'assistant' && (m.isPending || m.isStreaming)) {
+      return { ...m, isPending: false, isStreaming: false };
+    }
+    return m;
+  });
 
   const errorMessage: Message = {
     id: generateMessageId(),
     role: 'error',
     content: event.error,
     timestamp: event.timestamp ?? Date.now(),
-  }
+  };
 
   return {
     state: {
@@ -131,12 +161,12 @@ export function handleError(
         ...session,
         messages: [...messagesWithFailedTools, errorMessage],
         isProcessing: false,
-        currentStatus: undefined,  // Clear any lingering status
+        currentStatus: undefined, // Clear any lingering status
       },
       streaming: null,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -144,16 +174,30 @@ export function handleError(
  */
 export function handleTypedError(
   state: SessionState,
-  event: TypedErrorEvent
+  event: TypedErrorEvent,
 ): ProcessResult {
-  const { session } = state
+  const { session } = state;
 
-  // Fail-safe: Mark any running tools as failed
-  const messagesWithFailedTools = session.messages.map(m =>
-    m.role === 'tool' && m.toolResult === undefined && m.toolStatus !== 'completed' && m.toolStatus !== 'error'
-      ? { ...m, toolStatus: 'error' as const, toolResult: 'Error occurred', isError: true }
-      : m
-  )
+  // Fail-safe: Mark any running tools as failed and clear transient streaming state
+  const messagesWithFailedTools = session.messages.map((m) => {
+    if (
+      m.role === 'tool' &&
+      m.toolResult === undefined &&
+      m.toolStatus !== 'completed' &&
+      m.toolStatus !== 'error'
+    ) {
+      return {
+        ...m,
+        toolStatus: 'error' as const,
+        toolResult: 'Error occurred',
+        isError: true,
+      };
+    }
+    if (m.role === 'assistant' && (m.isPending || m.isStreaming)) {
+      return { ...m, isPending: false, isStreaming: false };
+    }
+    return m;
+  });
 
   const errorMessage: Message = {
     id: generateMessageId(),
@@ -167,14 +211,14 @@ export function handleTypedError(
     errorDetails: event.error.details,
     errorOriginal: event.error.originalError,
     errorCanRetry: event.error.canRetry,
-    errorActions: event.error.actions?.map(a => ({
+    errorActions: event.error.actions?.map((a) => ({
       key: a.key,
       label: a.label,
       action: a.action,
       url: a.url,
       sourceSlug: a.sourceSlug,
     })),
-  }
+  };
 
   return {
     state: {
@@ -182,12 +226,12 @@ export function handleTypedError(
         ...session,
         messages: [...messagesWithFailedTools, errorMessage],
         isProcessing: false,
-        currentStatus: undefined,  // Clear any lingering status
+        currentStatus: undefined, // Clear any lingering status
       },
       streaming: null,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -196,9 +240,9 @@ export function handleTypedError(
  */
 export function handleStatus(
   state: SessionState,
-  event: StatusEvent
+  event: StatusEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   const statusMessage: Message = {
     id: generateMessageId(),
@@ -206,9 +250,9 @@ export function handleStatus(
     content: event.message,
     timestamp: event.timestamp ?? Date.now(),
     statusType: event.statusType,
-  }
+  };
 
-  const updatedSession = appendMessage(session, statusMessage)
+  const updatedSession = appendMessage(session, statusMessage);
 
   return {
     state: {
@@ -223,7 +267,7 @@ export function handleStatus(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -231,28 +275,34 @@ export function handleStatus(
  */
 export function handleInfo(
   state: SessionState,
-  event: InfoEvent
+  event: InfoEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   // If this is a compaction complete, update the existing compacting message and clear currentStatus
   if (event.statusType === 'compaction_complete') {
-    const updatedMessages = session.messages.map(m =>
+    const updatedMessages = session.messages.map((m) =>
       m.role === 'status' && m.statusType === 'compacting'
-        ? { ...m, role: 'info' as const, content: event.message, statusType: 'compaction_complete' as const, infoLevel: event.level }
-        : m
-    )
+        ? {
+            ...m,
+            role: 'info' as const,
+            content: event.message,
+            statusType: 'compaction_complete' as const,
+            infoLevel: event.level,
+          }
+        : m,
+    );
     return {
       state: {
         session: {
           ...session,
           messages: updatedMessages,
-          currentStatus: undefined,  // Clear status from ProcessingIndicator
+          currentStatus: undefined, // Clear status from ProcessingIndicator
         },
         streaming,
       },
       effects: [],
-    }
+    };
   }
 
   // Otherwise, add as new info message
@@ -262,7 +312,7 @@ export function handleInfo(
     content: event.message,
     timestamp: event.timestamp ?? Date.now(),
     infoLevel: event.level,
-  }
+  };
 
   return {
     state: {
@@ -270,7 +320,7 @@ export function handleInfo(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -282,10 +332,10 @@ export function handleInfo(
  */
 export function handleInterrupted(
   state: SessionState,
-  event: InterruptedEvent
+  event: InterruptedEvent,
 ): ProcessResult {
-  const { session } = state
-  const effects: Effect[] = []
+  const { session } = state;
+  const effects: Effect[] = [];
 
   // Clear transient streaming state (isPending, isStreaming) and mark running tools as interrupted
   // These fields are not persisted, so this matches the state after a reload
@@ -293,31 +343,41 @@ export function handleInterrupted(
   // (similar to isPending/isStreaming, and they're not persisted to disk anyway)
   // Also remove queued user messages — they are being restored to the input field
   const updatedMessages = session.messages
-    .filter(m => m.role !== 'status')  // Remove transient status messages
-    .filter(m => !m.isQueued)          // Remove queued user messages (restored to input)
-    .map(m => {
+    .filter((m) => m.role !== 'status') // Remove transient status messages
+    .filter((m) => !m.isQueued) // Remove queued user messages (restored to input)
+    .map((m) => {
       // Mark running tools as interrupted
-      if (m.role === 'tool' && m.toolResult === undefined && m.toolStatus !== 'completed' && m.toolStatus !== 'error') {
-        return { ...m, toolStatus: 'error' as const, toolResult: 'Interrupted', isError: true }
+      if (
+        m.role === 'tool' &&
+        m.toolResult === undefined &&
+        m.toolStatus !== 'completed' &&
+        m.toolStatus !== 'error'
+      ) {
+        return {
+          ...m,
+          toolStatus: 'error' as const,
+          toolResult: 'Interrupted',
+          isError: true,
+        };
       }
       // Clear pending state on assistant messages (transient streaming state)
       if (m.role === 'assistant' && m.isPending) {
-        return { ...m, isPending: false, isStreaming: false }
+        return { ...m, isPending: false, isStreaming: false };
       }
-      return m
-    })
+      return m;
+    });
 
   // Only add the "Response interrupted" message if provided (not a silent redirect)
   const messages = event.message
     ? [...updatedMessages, event.message]
-    : updatedMessages
+    : updatedMessages;
 
   // Restore queued message text to the input field
   if (event.queuedMessages && event.queuedMessages.length > 0) {
     effects.push({
       type: 'restore_input',
       text: event.queuedMessages.join('\n\n'),
-    })
+    });
   }
 
   return {
@@ -326,12 +386,12 @@ export function handleInterrupted(
         ...session,
         isProcessing: false,
         messages,
-        currentStatus: undefined,  // Clear any lingering status
+        currentStatus: undefined, // Clear any lingering status
       },
       streaming: null,
     },
     effects,
-  }
+  };
 }
 
 /**
@@ -339,9 +399,9 @@ export function handleInterrupted(
  */
 export function handleTitleGenerated(
   state: SessionState,
-  event: TitleGeneratedEvent
+  event: TitleGeneratedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -354,7 +414,7 @@ export function handleTitleGenerated(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -363,9 +423,9 @@ export function handleTitleGenerated(
  */
 export function handleTitleRegenerating(
   state: SessionState,
-  event: TitleRegeneratingEvent
+  event: TitleRegeneratingEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -376,7 +436,7 @@ export function handleTitleRegenerating(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -385,9 +445,9 @@ export function handleTitleRegenerating(
  */
 export function handleAsyncOperation(
   state: SessionState,
-  event: AsyncOperationEvent
+  event: AsyncOperationEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -398,7 +458,7 @@ export function handleAsyncOperation(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -406,9 +466,9 @@ export function handleAsyncOperation(
  */
 export function handleWorkingDirectoryChanged(
   state: SessionState,
-  event: WorkingDirectoryChangedEvent
+  event: WorkingDirectoryChangedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -416,7 +476,7 @@ export function handleWorkingDirectoryChanged(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -424,21 +484,23 @@ export function handleWorkingDirectoryChanged(
  */
 export function handlePermissionModeChanged(
   state: SessionState,
-  event: PermissionModeChangedEvent
+  event: PermissionModeChangedEvent,
 ): ProcessResult {
   return {
     state,
-    effects: [{
-      type: 'permission_mode_changed',
-      sessionId: event.sessionId,
-      permissionMode: event.permissionMode,
-      previousPermissionMode: event.previousPermissionMode,
-      transitionDisplay: event.transitionDisplay,
-      modeVersion: event.modeVersion,
-      changedAt: event.changedAt,
-      changedBy: event.changedBy,
-    }],
-  }
+    effects: [
+      {
+        type: 'permission_mode_changed',
+        sessionId: event.sessionId,
+        permissionMode: event.permissionMode,
+        previousPermissionMode: event.previousPermissionMode,
+        transitionDisplay: event.transitionDisplay,
+        modeVersion: event.modeVersion,
+        changedAt: event.changedAt,
+        changedBy: event.changedBy,
+      },
+    ],
+  };
 }
 
 /**
@@ -446,9 +508,9 @@ export function handlePermissionModeChanged(
  */
 export function handleSessionModelChanged(
   state: SessionState,
-  event: SessionModelChangedEvent
+  event: SessionModelChangedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -456,7 +518,7 @@ export function handleSessionModelChanged(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -464,21 +526,23 @@ export function handleSessionModelChanged(
  */
 export function handleConnectionChanged(
   state: SessionState,
-  event: LLMConnectionChangedEvent
+  event: LLMConnectionChangedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
       session: {
         ...session,
         llmConnection: event.connectionSlug,
-        ...(event.supportsBranching !== undefined && { supportsBranching: event.supportsBranching }),
+        ...(event.supportsBranching !== undefined && {
+          supportsBranching: event.supportsBranching,
+        }),
       },
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -486,9 +550,9 @@ export function handleConnectionChanged(
  */
 export function handleAvailableCommandsUpdate(
   state: SessionState,
-  event: AvailableCommandsUpdateEvent
+  event: AvailableCommandsUpdateEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -500,7 +564,7 @@ export function handleAvailableCommandsUpdate(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -513,27 +577,29 @@ export function handleAvailableCommandsUpdate(
  */
 export function handleUserMessage(
   state: SessionState,
-  event: UserMessageEvent
+  event: UserMessageEvent,
 ): ProcessResult {
-  const { session, streaming } = state
-  const { message, status } = event
+  const { session, streaming } = state;
+  const { message, status } = event;
 
   // Find existing message by ID match (backend ID, optimistic ID, or content+timestamp fallback)
-  const existingIndex = session.messages.findIndex(m =>
-    m.role === 'user' && (
-      m.id === message.id ||
-      (event.optimisticMessageId && m.id === event.optimisticMessageId) ||
-      (m.content === message.content && Math.abs(m.timestamp - message.timestamp) < 5000)
-    )
-  )
+  const existingIndex = session.messages.findIndex(
+    (m) =>
+      m.role === 'user' &&
+      (m.id === message.id ||
+        (event.optimisticMessageId && m.id === event.optimisticMessageId) ||
+        (m.content === message.content &&
+          Math.abs(m.timestamp - message.timestamp) < 5000)),
+  );
 
-  let updatedMessages: Message[]
-  let preserveProcessingForLateQueuedEvent = false
+  let updatedMessages: Message[];
+  let preserveProcessingForLateQueuedEvent = false;
 
   if (existingIndex >= 0) {
-    const existingMessage = session.messages[existingIndex]
-    const isLateQueuedEvent = status === 'queued' && existingMessage.isQueued === false
-    preserveProcessingForLateQueuedEvent = isLateQueuedEvent
+    const existingMessage = session.messages[existingIndex];
+    const isLateQueuedEvent =
+      status === 'queued' && existingMessage.isQueued === false;
+    preserveProcessingForLateQueuedEvent = isLateQueuedEvent;
 
     // Update existing message with the backend-authoritative payload.
     // This matters for providers that expand slash commands before persistence:
@@ -544,25 +610,25 @@ export function handleUserMessage(
         return {
           ...m,
           ...message,
-          id: message.id,  // Use backend's ID as canonical
+          id: message.id, // Use backend's ID as canonical
           attachments: message.attachments ?? existingMessage.attachments,
           textElements: message.textElements ?? existingMessage.textElements,
           isPending: false,
           // Event sequence protection: don't regress from processing back to queued.
           // This handles out-of-order events (e.g., 'processing' arrives before 'queued').
           isQueued: isLateQueuedEvent ? false : status === 'queued',
-        }
+        };
       }
-      return m
-    })
+      return m;
+    });
   } else {
     // Message not found (e.g., queued message from backend) - add it
     const newMessage: Message = {
       ...message,
       isPending: false,
       isQueued: status === 'queued',
-    }
-    updatedMessages = [...session.messages, newMessage]
+    };
+    updatedMessages = [...session.messages, newMessage];
   }
 
   return {
@@ -571,7 +637,7 @@ export function handleUserMessage(
         ...session,
         messages: updatedMessages,
         lastMessageAt: Date.now(),
-        lastMessageRole: 'user',  // Clear plan badge when user responds
+        lastMessageRole: 'user', // Clear plan badge when user responds
         // Set isProcessing when message is accepted/processing (enables multi-window sync)
         isProcessing: preserveProcessingForLateQueuedEvent
           ? session.isProcessing
@@ -580,7 +646,7 @@ export function handleUserMessage(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -588,28 +654,28 @@ export function handleUserMessage(
  */
 export function handleMessageContentUpdated(
   state: SessionState,
-  event: MessageContentUpdatedEvent
+  event: MessageContentUpdatedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
       session: {
         ...session,
-        messages: session.messages.map(m =>
+        messages: session.messages.map((m) =>
           m.id === event.message.id
             ? {
                 ...event.message,
                 isPending: event.message.isPending ?? m.isPending,
                 isQueued: event.message.isQueued ?? m.isQueued,
               }
-            : m
+            : m,
         ),
       },
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -617,24 +683,24 @@ export function handleMessageContentUpdated(
  */
 export function handleMessageAnnotationsUpdated(
   state: SessionState,
-  event: MessageAnnotationsUpdatedEvent
+  event: MessageAnnotationsUpdatedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
       session: {
         ...session,
-        messages: session.messages.map(m =>
+        messages: session.messages.map((m) =>
           m.id === event.messageId
             ? { ...m, annotations: event.annotations }
-            : m
+            : m,
         ),
       },
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -642,9 +708,9 @@ export function handleMessageAnnotationsUpdated(
  */
 export function handleSourcesChanged(
   state: SessionState,
-  event: SourcesChangedEvent
+  event: SourcesChangedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -655,7 +721,7 @@ export function handleSourcesChanged(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -663,9 +729,9 @@ export function handleSourcesChanged(
  */
 export function handleLabelsChanged(
   state: SessionState,
-  event: LabelsChangedEvent
+  event: LabelsChangedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -676,7 +742,7 @@ export function handleLabelsChanged(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -684,16 +750,16 @@ export function handleLabelsChanged(
  */
 export function handleSessionStatusChanged(
   state: SessionState,
-  event: SessionStatusChangedEvent
+  event: SessionStatusChangedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
   return {
     state: {
       session: { ...session, sessionStatus: event.sessionStatus },
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -701,16 +767,16 @@ export function handleSessionStatusChanged(
  */
 export function handleSessionFlagged(
   state: SessionState,
-  _event: SessionFlaggedEvent
+  _event: SessionFlaggedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
   return {
     state: {
       session: { ...session, isFlagged: true },
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -718,16 +784,16 @@ export function handleSessionFlagged(
  */
 export function handleSessionUnflagged(
   state: SessionState,
-  _event: SessionUnflaggedEvent
+  _event: SessionUnflaggedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
   return {
     state: {
       session: { ...session, isFlagged: false },
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -735,16 +801,16 @@ export function handleSessionUnflagged(
  */
 export function handleSessionArchived(
   state: SessionState,
-  _event: SessionArchivedEvent
+  _event: SessionArchivedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
   return {
     state: {
       session: { ...session, isArchived: true, archivedAt: Date.now() },
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -752,16 +818,16 @@ export function handleSessionArchived(
  */
 export function handleSessionUnarchived(
   state: SessionState,
-  _event: SessionUnarchivedEvent
+  _event: SessionUnarchivedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
   return {
     state: {
       session: { ...session, isArchived: false, archivedAt: undefined },
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -769,16 +835,16 @@ export function handleSessionUnarchived(
  */
 export function handleNameChanged(
   state: SessionState,
-  event: NameChangedEvent
+  event: NameChangedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
   return {
     state: {
       session: { ...session, name: event.name },
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -786,15 +852,17 @@ export function handleNameChanged(
  */
 export function handlePermissionRequest(
   state: SessionState,
-  event: PermissionRequestEvent
+  event: PermissionRequestEvent,
 ): ProcessResult {
   return {
     state,
-    effects: [{
-      type: 'permission_request',
-      request: event.request,
-    }]
-  }
+    effects: [
+      {
+        type: 'permission_request',
+        request: event.request,
+      },
+    ],
+  };
 }
 
 /**
@@ -802,15 +870,17 @@ export function handlePermissionRequest(
  */
 export function handleCredentialRequest(
   state: SessionState,
-  event: CredentialRequestEvent
+  event: CredentialRequestEvent,
 ): ProcessResult {
   return {
     state,
-    effects: [{
-      type: 'credential_request',
-      request: event.request,
-    }]
-  }
+    effects: [
+      {
+        type: 'credential_request',
+        request: event.request,
+      },
+    ],
+  };
 }
 
 /**
@@ -818,9 +888,9 @@ export function handleCredentialRequest(
  */
 export function handlePlanSubmitted(
   state: SessionState,
-  event: PlanSubmittedEvent
+  event: PlanSubmittedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -828,7 +898,7 @@ export function handlePlanSubmitted(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -836,9 +906,9 @@ export function handlePlanSubmitted(
  */
 export function handleSessionShared(
   state: SessionState,
-  event: SessionSharedEvent
+  event: SessionSharedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -849,7 +919,7 @@ export function handleSessionShared(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -857,9 +927,9 @@ export function handleSessionShared(
  */
 export function handleSessionUnshared(
   state: SessionState,
-  _event: SessionUnsharedEvent
+  _event: SessionUnsharedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   return {
     state: {
@@ -871,7 +941,7 @@ export function handleSessionUnshared(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -880,21 +950,21 @@ export function handleSessionUnshared(
  */
 export function handleAuthRequest(
   state: SessionState,
-  event: AuthRequestEvent
+  event: AuthRequestEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming: _streaming } = state;
 
   // Add auth-request message to session
   return {
     state: {
       session: {
         ...appendMessage(session, event.message),
-        isProcessing: false,  // Agent execution is paused
+        isProcessing: false, // Agent execution is paused
       },
-      streaming: null,  // Clear any streaming state
+      streaming: null, // Clear any streaming state
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -903,12 +973,12 @@ export function handleAuthRequest(
  */
 export function handleAuthCompleted(
   state: SessionState,
-  event: AuthCompletedEvent
+  event: AuthCompletedEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming: _streaming } = state;
 
   // Update the auth-request message status
-  const updatedMessages = session.messages.map(m => {
+  const updatedMessages = session.messages.map((m) => {
     if (
       m.role === 'auth-request' &&
       m.authRequestId === event.requestId &&
@@ -922,10 +992,10 @@ export function handleAuthCompleted(
             ? ('cancelled' as const)
             : ('failed' as const),
         authError: event.error,
-      }
+      };
     }
-    return m
-  })
+    return m;
+  });
 
   return {
     state: {
@@ -936,7 +1006,7 @@ export function handleAuthCompleted(
       streaming,
     },
     effects: [],
-  }
+  };
 }
 
 /**
@@ -945,9 +1015,9 @@ export function handleAuthCompleted(
  */
 export function handleUsageUpdate(
   state: SessionState,
-  event: UsageUpdateEvent
+  event: UsageUpdateEvent,
 ): ProcessResult {
-  const { session, streaming } = state
+  const { session, streaming } = state;
 
   // Merge usage update into existing tokenUsage, providing defaults for required fields
   const updatedTokenUsage = {
@@ -956,10 +1026,16 @@ export function handleUsageUpdate(
     totalTokens: session.tokenUsage?.totalTokens ?? 0,
     contextTokens: session.tokenUsage?.contextTokens ?? 0,
     costUsd: session.tokenUsage?.costUsd ?? 0,
-    ...(session.tokenUsage?.cacheReadTokens !== undefined && { cacheReadTokens: session.tokenUsage.cacheReadTokens }),
-    ...(session.tokenUsage?.cacheCreationTokens !== undefined && { cacheCreationTokens: session.tokenUsage.cacheCreationTokens }),
-    ...(event.tokenUsage.contextWindow && { contextWindow: event.tokenUsage.contextWindow }),
-  }
+    ...(session.tokenUsage?.cacheReadTokens !== undefined && {
+      cacheReadTokens: session.tokenUsage.cacheReadTokens,
+    }),
+    ...(session.tokenUsage?.cacheCreationTokens !== undefined && {
+      cacheCreationTokens: session.tokenUsage.cacheCreationTokens,
+    }),
+    ...(event.tokenUsage.contextWindow && {
+      contextWindow: event.tokenUsage.contextWindow,
+    }),
+  };
 
   return {
     state: {
@@ -970,5 +1046,5 @@ export function handleUsageUpdate(
       streaming,
     },
     effects: [],
-  }
+  };
 }
