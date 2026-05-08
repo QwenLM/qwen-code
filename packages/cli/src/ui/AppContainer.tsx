@@ -1567,6 +1567,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
+  const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -2369,6 +2370,7 @@ export const AppContainer = (props: AppContainerProps) => {
       currentModel,
       contextFileNames,
       availableTerminalHeight,
+      useTerminalBuffer,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,
@@ -2489,6 +2491,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showAutoAcceptIndicator,
       contextFileNames,
       availableTerminalHeight,
+      useTerminalBuffer,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,

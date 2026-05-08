@@ -108,6 +108,7 @@ export interface UIState {
   currentModel: string;
   contextFileNames: string[];
   availableTerminalHeight: number | undefined;
+  useTerminalBuffer: boolean;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;
   staticExtraHeight: number;

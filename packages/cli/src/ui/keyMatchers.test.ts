@@ -70,6 +70,12 @@ describe('keyMatchers', () => {
       key.ctrl && key.name === 'f',
     [Command.EXPAND_SUGGESTION]: (key: Key) => key.name === 'right',
     [Command.COLLAPSE_SUGGESTION]: (key: Key) => key.name === 'left',
+    [Command.SCROLL_UP]: (key: Key) => key.shift && key.name === 'up',
+    [Command.SCROLL_DOWN]: (key: Key) => key.shift && key.name === 'down',
+    [Command.PAGE_UP]: (key: Key) => key.name === 'pageup',
+    [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
+    [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
+    [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
   };
 
   // Test data for each command with positive and negative test cases
