@@ -501,5 +501,22 @@ describe('SchemaValidator', () => {
       expect(err).not.toBeNull();
       expect(err).toMatch(/propert/i);
     });
+
+    it('accepts type-union arrays under allowUnionTypes', () => {
+      // Strict mode rejects `type: ["a","b"]` by default; we opt in via
+      // allowUnionTypes because spec-valid type unions are common in
+      // real-world schemas (e.g. nullable fields). Without this, a
+      // schema like `{type:["object","null"]}` would have failed at
+      // CLI parse time even though it's valid JSON Schema.
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          properties: { x: { type: ['string', 'number'] } },
+        }),
+      ).toBeNull();
+      expect(
+        SchemaValidator.compileStrict({ type: ['object', 'null'] }),
+      ).toBeNull();
+    });
   });
 });

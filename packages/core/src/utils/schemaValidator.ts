@@ -81,12 +81,19 @@ export class SchemaValidator {
     // don't break runtime validation — that leniency is wrong for
     // explicit user-supplied schemas where `compileStrict` is exactly
     // the surface meant to surface mistakes.
+    //
+    // `allowUnionTypes: true` keeps spec-valid type unions like
+    // `{"type":["string","number"]}` and `{"type":["object","null"]}`
+    // accepted — strict mode rejects those by default, but they're
+    // common in real-world schemas and rejecting them at parse time
+    // breaks otherwise-valid `--json-schema` payloads.
     const isDraft2020 =
       '$schema' in schema &&
       (schema as { $schema?: string }).$schema === DRAFT_2020_12_SCHEMA;
+    const strictOptions = { strict: true, allowUnionTypes: true };
     const strictAjv: Ajv = isDraft2020
-      ? new Ajv2020Class({ strict: true })
-      : new AjvClass({ strict: true });
+      ? new Ajv2020Class(strictOptions)
+      : new AjvClass(strictOptions);
     addFormatsFunc(strictAjv);
     try {
       strictAjv.compile(schema as AnySchema);

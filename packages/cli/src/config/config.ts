@@ -236,10 +236,21 @@ export function resolveJsonSchemaArg(
   // A schema like `{"type":"string"}` would compile fine but be
   // unsatisfiable as a tool-call argument — fail at parse time so the
   // user sees the contract violation immediately instead of at runtime.
+  //
+  // We only check the direct `type` field (or array of types). Deeper
+  // analysis of `anyOf`/`oneOf`/`not` is intentionally not done here:
+  // the strict-Ajv compile is the right place for full structural
+  // validation, and a partial check would either give false reassurance
+  // or wrongly reject valid composed schemas. Schemas with no top-level
+  // `type` are allowed through (covers `{}`, plain `properties`, etc).
   const schemaType = (parsed as { type?: unknown }).type;
-  if (schemaType !== undefined && schemaType !== 'object') {
+  const isObjectAllowed =
+    schemaType === undefined ||
+    schemaType === 'object' ||
+    (Array.isArray(schemaType) && schemaType.includes('object'));
+  if (!isObjectAllowed) {
     throw new FatalConfigError(
-      `--json-schema top-level type must be "object" (got "${String(schemaType)}"); ` +
+      `--json-schema top-level type must include "object" (got ${JSON.stringify(schemaType)}); ` +
         'wrap your value under an object property if you need a non-object payload.',
     );
   }

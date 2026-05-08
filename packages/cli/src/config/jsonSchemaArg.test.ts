@@ -81,10 +81,30 @@ describe('resolveJsonSchemaArg', () => {
     // The schema becomes structured_output's parameter schema; tool args
     // are object-shaped, so non-object roots can never be satisfied.
     expect(() => resolveJsonSchemaArg('{"type":"string"}')).toThrow(
-      /top-level type must be "object"/,
+      /top-level type must include "object"/,
     );
     expect(() => resolveJsonSchemaArg('{"type":"array"}')).toThrow(
-      /top-level type must be "object"/,
+      /top-level type must include "object"/,
+    );
+  });
+
+  it('accepts type-arrays that include "object"', () => {
+    // `{"type":["object","null"]}` is a common nullable-object pattern.
+    // The earlier guard rejected anything that wasn't exactly the string
+    // "object", which broke this idiom.
+    expect(
+      resolveJsonSchemaArg(
+        '{"type":["object","null"],"properties":{"x":{"type":"string"}}}',
+      ),
+    ).toEqual({
+      type: ['object', 'null'],
+      properties: { x: { type: 'string' } },
+    });
+  });
+
+  it('rejects type-arrays that do not include "object"', () => {
+    expect(() => resolveJsonSchemaArg('{"type":["string","number"]}')).toThrow(
+      /top-level type must include "object"/,
     );
   });
 });
