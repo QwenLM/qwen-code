@@ -614,6 +614,7 @@ export class QwenAgent extends BaseAgent {
   private sourceMcpServers: Record<string, SdkMcpServerConfig> = {};
   private currentTurnId: string | undefined;
   private currentAssistantText = '';
+  private currentThoughtText = '';
   private currentIsSlashCommand = false;
   private toolNames = new Map<string, string>();
   private toolInputs = new Map<string, Record<string, unknown>>();
@@ -715,6 +716,7 @@ export class QwenAgent extends BaseAgent {
     this.abortReason = undefined;
     this.eventQueue.reset();
     this.currentAssistantText = '';
+    this.currentThoughtText = '';
     this.currentIsSlashCommand = isSlashCommandPrompt(message, attachments);
     this.currentTurnId = `qwen-turn-${promptRunId}`;
     this.toolNames.clear();
@@ -767,6 +769,7 @@ export class QwenAgent extends BaseAgent {
           if (this.activePromptRunId !== promptRunId) return;
           const stopReason = asString(toRecord(result).stopReason);
           persistTranscriptTextElements();
+          this.flushThoughtText();
           this.flushAssistantText();
           this.eventQueue.enqueue({ type: 'complete' });
           this.eventQueue.complete();
@@ -812,6 +815,7 @@ export class QwenAgent extends BaseAgent {
       this._isProcessing = false;
       this.currentTurnId = undefined;
       this.currentAssistantText = '';
+      this.currentThoughtText = '';
       this.currentIsSlashCommand = false;
     }
   }
@@ -1814,17 +1818,23 @@ export class QwenAgent extends BaseAgent {
 
     switch (update.sessionUpdate) {
       case 'agent_message_chunk':
+        this.flushThoughtText();
         this.handleAgentMessageChunk(update);
         break;
       case 'agent_thought_chunk':
+        this.flushAssistantText(true);
+        this.handleAgentThoughtChunk(update);
         break;
       case 'tool_call':
+        this.flushPendingTextAsIntermediate();
         this.handleToolCall(update);
         break;
       case 'tool_call_update':
+        this.flushPendingTextAsIntermediate();
         this.handleToolCallUpdate(update);
         break;
       case 'plan':
+        this.flushPendingTextAsIntermediate();
         this.handlePlanUpdate(update);
         break;
       case 'current_mode_update':
@@ -2114,7 +2124,36 @@ export class QwenAgent extends BaseAgent {
     });
   }
 
-  private flushAssistantText(): void {
+  private handleAgentThoughtChunk(update: JsonRecord): void {
+    const content = toRecord(update.content);
+    if (content.type !== 'text') return;
+    const text = asString(content.text);
+    if (!text) return;
+    this.currentThoughtText += text;
+    this.eventQueue.enqueue({
+      type: 'text_delta',
+      text,
+      turnId: this.currentTurnId,
+    });
+  }
+
+  private flushPendingTextAsIntermediate(): void {
+    this.flushThoughtText();
+    this.flushAssistantText(true);
+  }
+
+  private flushThoughtText(): void {
+    if (!this.currentThoughtText) return;
+    this.eventQueue.enqueue({
+      type: 'text_complete',
+      text: this.currentThoughtText,
+      isIntermediate: true,
+      turnId: this.currentTurnId,
+    });
+    this.currentThoughtText = '';
+  }
+
+  private flushAssistantText(isIntermediate?: boolean): void {
     if (!this.currentAssistantText) return;
     const text = normalizeQwenAssistantText(this.currentAssistantText, {
       forceJsonFence: this.currentIsSlashCommand,
@@ -2122,6 +2161,7 @@ export class QwenAgent extends BaseAgent {
     this.eventQueue.enqueue({
       type: 'text_complete',
       text,
+      ...(isIntermediate !== undefined ? { isIntermediate } : {}),
       turnId: this.currentTurnId,
     });
     this.currentAssistantText = '';

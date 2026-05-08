@@ -35,6 +35,7 @@ type QwenPromptInternals = {
 type QwenAvailableCommandsInternals = {
   qwenSessionId: string | null;
   _isProcessing: boolean;
+  currentTurnId?: string;
   suppressedSessionUpdates: Set<string>;
   eventQueue: {
     hasPending: boolean;
@@ -578,6 +579,107 @@ describe('QwenAgent slash command history', () => {
       type: 'available_commands_update',
       availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
       availableSkills: undefined,
+    });
+  });
+
+  it('streams ACP thought chunks as intermediate assistant text before the final answer', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'qwen-session';
+    internals._isProcessing = true;
+    internals.currentTurnId = 'qwen-turn-test';
+
+    internals.handleSessionUpdate({
+      sessionId: 'qwen-session',
+      update: {
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: 'I should inspect the project.' },
+      },
+    });
+    internals.handleSessionUpdate({
+      sessionId: 'qwen-session',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Here is the answer.' },
+      },
+    });
+
+    const first = await readNextQueuedEvent(agent);
+    const second = await readNextQueuedEvent(agent);
+    const third = await readNextQueuedEvent(agent);
+    agent.destroy();
+
+    expect(first).toEqual({
+      type: 'text_delta',
+      text: 'I should inspect the project.',
+      turnId: 'qwen-turn-test',
+    });
+    expect(second).toEqual({
+      type: 'text_complete',
+      text: 'I should inspect the project.',
+      isIntermediate: true,
+      turnId: 'qwen-turn-test',
+    });
+    expect(third).toEqual({
+      type: 'text_delta',
+      text: 'Here is the answer.',
+      turnId: 'qwen-turn-test',
+    });
+  });
+
+  it('flushes ACP text before tool calls so desktop can render progress live', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'qwen-session';
+    internals._isProcessing = true;
+    internals.currentTurnId = 'qwen-turn-tool';
+
+    internals.handleSessionUpdate({
+      sessionId: 'qwen-session',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'I will read the file first.' },
+      },
+    });
+    internals.handleSessionUpdate({
+      sessionId: 'qwen-session',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-read-1',
+        kind: 'read',
+        title: 'Read',
+        rawInput: { file_path: 'README.md' },
+        _meta: { toolName: 'Read' },
+      },
+    });
+
+    const first = await readNextQueuedEvent(agent);
+    const second = await readNextQueuedEvent(agent);
+    const third = await readNextQueuedEvent(agent);
+    agent.destroy();
+
+    expect(first).toEqual({
+      type: 'text_delta',
+      text: 'I will read the file first.',
+      turnId: 'qwen-turn-tool',
+    });
+    expect(second).toEqual({
+      type: 'text_complete',
+      text: 'I will read the file first.',
+      isIntermediate: true,
+      turnId: 'qwen-turn-tool',
+    });
+    expect(third).toMatchObject({
+      type: 'tool_start',
+      toolName: 'Read',
+      toolUseId: 'tool-read-1',
+      turnId: 'qwen-turn-tool',
     });
   });
 
