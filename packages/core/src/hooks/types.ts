@@ -688,6 +688,7 @@ export enum SessionStartSource {
   Resume = 'resume',
   Clear = 'clear',
   Compact = 'compact',
+  Branch = 'branch',
 }
 
 export enum PermissionMode {

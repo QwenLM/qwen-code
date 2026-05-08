@@ -23,6 +23,7 @@ vi.mock('vscode', () => ({
   window: {
     showWarningMessage: vi.fn(),
     showErrorMessage: mockShowErrorMessage,
+    showInformationMessage: vi.fn(),
   },
   commands: {
     executeCommand: mockExecuteCommand,
@@ -499,6 +500,94 @@ describe('SessionMessageHandler', () => {
         content:
           'Session exported to HTML: [export (#1).html](file:///workspace/export%20(%231).html)',
       }),
+    });
+  });
+
+  describe('handleSetModel — discontinued model defensive validation (Issue #3745)', () => {
+    it('rejects a non-runtime Qwen OAuth model and surfaces an error', async () => {
+      const setModelFromUi = vi.fn();
+      const agentManager = {
+        isConnected: true,
+        currentSessionId: 'session-1',
+        setModelFromUi,
+      };
+      const sendToWebView = vi.fn();
+      const handler = new SessionMessageHandler(
+        agentManager as never,
+        {} as never,
+        null,
+        sendToWebView,
+      );
+
+      await handler.handle({
+        type: 'setModel',
+        data: { modelId: 'qwen3-coder-plus(qwen-oauth)' },
+      });
+
+      expect(setModelFromUi).not.toHaveBeenCalled();
+      expect(mockShowErrorMessage).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Qwen OAuth free tier was discontinued on 2026-04-15',
+        ),
+      );
+      expect(sendToWebView).toHaveBeenCalledWith({
+        type: 'error',
+        data: expect.objectContaining({
+          message: expect.stringContaining('discontinued'),
+        }),
+      });
+    });
+
+    it('allows a runtime Qwen OAuth snapshot to pass through', async () => {
+      const setModelFromUi = vi.fn().mockResolvedValue(undefined);
+      const agentManager = {
+        isConnected: true,
+        currentSessionId: 'session-1',
+        setModelFromUi,
+      };
+      const sendToWebView = vi.fn();
+      const handler = new SessionMessageHandler(
+        agentManager as never,
+        {} as never,
+        null,
+        sendToWebView,
+      );
+
+      await handler.handle({
+        type: 'setModel',
+        data: {
+          modelId: '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+        },
+      });
+
+      expect(setModelFromUi).toHaveBeenCalledWith(
+        '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+      );
+      expect(mockShowErrorMessage).not.toHaveBeenCalled();
+    });
+
+    it('passes through other-provider models (regression — no false positives)', async () => {
+      const setModelFromUi = vi.fn().mockResolvedValue(undefined);
+      const agentManager = {
+        isConnected: true,
+        currentSessionId: 'session-1',
+        setModelFromUi,
+      };
+      const sendToWebView = vi.fn();
+      const handler = new SessionMessageHandler(
+        agentManager as never,
+        {} as never,
+        null,
+        sendToWebView,
+      );
+
+      await handler.handle({
+        type: 'setModel',
+        data: { modelId: 'gpt-4(openai)' },
+      });
+
+      expect(setModelFromUi).toHaveBeenCalledWith('gpt-4(openai)');
+      expect(mockShowErrorMessage).not.toHaveBeenCalled();
     });
   });
 });

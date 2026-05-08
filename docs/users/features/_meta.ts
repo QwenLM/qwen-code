@@ -3,6 +3,7 @@ export default {
   'code-review': 'Code Review',
   'followup-suggestions': 'Followup Suggestions',
   'tool-use-summaries': 'Tool-Use Summaries',
+  'markdown-rendering': 'Markdown Rendering',
   'sub-agents': 'SubAgents',
   arena: 'Agent Arena',
   skills: 'Skills',

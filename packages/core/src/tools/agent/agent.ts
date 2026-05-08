@@ -39,7 +39,10 @@ import {
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
-import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
+import {
+  getCurrentAgentId,
+  runWithAgentContext,
+} from '../../agents/runtime/agent-context.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -168,13 +171,81 @@ function permissionModeToApprovalMode(mode: PermissionMode): ApprovalMode {
 }
 
 /**
- * Creates a Config override with a different approval mode.
- * Uses prototype delegation to avoid mutating the parent config.
+ * Marker that signals "this Config wrapper has rebuilt its own tool
+ * registry so bound EditTool / WriteFileTool / ReadFileTool resolve to
+ * the wrapper instead of the parent". Stored as a Symbol-keyed property
+ * so that JavaScript's normal property lookup (which walks the
+ * prototype chain) lets a downstream wrapper detect a rebuild that
+ * happened on any ancestor without manually walking the chain.
+ *
+ * `Symbol.for` is used so the marker survives bundle-deduping; two
+ * independent imports of this module observe the same Symbol identity.
  */
-function createApprovalModeOverride(base: Config, mode: ApprovalMode): Config {
+export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
+  'qwen-code:tool-registry-rebuilt',
+);
+
+/**
+ * `true` if any Config in this wrapper's prototype chain has already
+ * rebuilt its tool registry via {@link rebuildToolRegistryOnOverride}.
+ *
+ * Used by spawn sites that may be called with a wrapper-on-wrapper
+ * argument (e.g. `subagent-manager.ts:buildSubagentContextOverride`
+ * receiving `bgConfig = Object.create(agentConfig)` from the
+ * background-agent path) to skip a redundant rebuild.
+ */
+export function hasRebuiltToolRegistry(config: Config): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (config as any)[TOOL_REGISTRY_REBUILT] === true;
+}
+
+/**
+ * Rebuilds the tool registry on `override` so core tools resolve
+ * `this.config` to `override` instead of `base`. Used by both
+ * {@link createApprovalModeOverride} and
+ * `subagent-manager.ts:buildSubagentContextOverride` to avoid
+ * duplicated rebuild logic.
+ *
+ * - `override.createToolRegistry(...)` runs on the override (so the
+ *   lazy factories close over `this = override`).
+ * - Discovered tools (MCP / command-discovered) are copied from `base`
+ *   rather than re-discovered, since discovery is expensive.
+ * - The {@link TOOL_REGISTRY_REBUILT} marker is set so wrapper-of-wrapper
+ *   layers downstream skip the rebuild via {@link hasRebuiltToolRegistry}.
+ */
+export async function rebuildToolRegistryOnOverride(
+  override: Config,
+  base: Config,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ov = override as any;
+  const agentRegistry = await ov.createToolRegistry(undefined, {
+    skipDiscovery: true,
+  });
+  agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
+  ov.getToolRegistry = () => agentRegistry;
+  ov[TOOL_REGISTRY_REBUILT] = true;
+}
+
+/**
+ * Creates a Config override with a different approval mode.
+ *
+ * Uses prototype delegation (Object.create) to avoid mutating the parent
+ * config, then delegates to {@link rebuildToolRegistryOnOverride} so the
+ * override's tool registry has core tools bound to the override rather
+ * than to the parent. Without that rebuild, the parent's cached tool
+ * instances continue to resolve `this.config` to the parent, defeating
+ * per-Config isolation of FileReadCache / approval mode for any code
+ * path that goes through the bound tool.
+ */
+export async function createApprovalModeOverride(
+  base: Config,
+  mode: ApprovalMode,
+): Promise<Config> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   override.getApprovalMode = (): ApprovalMode => mode;
+  await rebuildToolRegistryOnOverride(override as Config, base);
   return override as Config;
 }
 
@@ -996,21 +1067,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // `this.config` directly here would short-circuit that
       // isolation for the same-mode path, which is the common case.
       //
-      // Known partial fix: `Config.createToolRegistry` (called once at
-      // initialise time on the parent) bound `EditTool` / `WriteFileTool`
-      // instances against the parent. The subagent's
-      // `runtimeContext.getToolRegistry()` walks the prototype chain
-      // back to that parent registry, so tool invocations resolve
-      // `this.config` to the parent and reach the parent's
-      // FileReadCache rather than the wrapper's lazy-init one.
-      // `InProcessBackend.createPerAgentConfig` already does the right
-      // thing (`override.createToolRegistry()` + `copyDiscoveredToolsFrom`);
-      // bringing that here is a follow-up. Pre-PR there was no
-      // enforcement on subagent mutations at all, so the wrapper here
-      // is still strictly an improvement (the cache lazy-init does
-      // shield code that *consumes the Config directly* rather than
-      // through a parent-bound tool).
-      const agentConfig = createApprovalModeOverride(
+      // The override also rebuilds its own tool registry so core
+      // tools (`EditTool` / `WriteFileTool` / `ReadFileTool`) are
+      // bound to the override Config rather than the parent. Without
+      // that rebuild, the parent's cached tool instances continue to
+      // resolve `this.config` to the parent, reaching the parent's
+      // FileReadCache rather than the subagent's. See
+      // `createApprovalModeOverride` above for details.
+      const agentConfig = await createApprovalModeOverride(
         this.config,
         resolvedApprovalMode,
       );
@@ -1332,13 +1396,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
             bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
             cleanupJsonl?.();
+            // Release the per-subagent ToolRegistry now that the
+            // background agent has finished — see the matching call in
+            // the foreground finally for why. Stopping here, after
+            // bgSubagent.execute resolves, is safe: by this point the
+            // detached body cannot invoke any more tool factories on
+            // this registry.
+            void agentConfig
+              .getToolRegistry()
+              .stop()
+              .catch(() => {});
           }
         };
         // Wrap in the agent-identity frame so nested `agent` tool calls
         // from this subagent's model record this agent's id as their
         // `parentAgentId` in the sidecar meta.
         const framedBgBody = () =>
-          runWithAgentContext({ agentId: hookOpts.agentId }, bgBody);
+          runWithAgentContext(hookOpts.agentId, bgBody);
         void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
@@ -1363,10 +1437,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Background fork execution. Run under an AsyncLocalStorage frame so
         // nested `agent` tool calls by the fork's model can be detected.
         // Forks run async (return a placeholder); skip foreground registration.
+        // Wrap the fork body in try/finally so the per-subagent ToolRegistry
+        // is stopped after the fork finishes — the other three spawn paths
+        // (foreground non-fork, background fork, background non-fork) already
+        // do this in their finally blocks. Without it, every AgentTool /
+        // SkillTool the fork's model instantiates from this registry leaks
+        // its change-listener on shared SubagentManager / SkillManager.
         const runFramedFork = () =>
-          runWithAgentContext({ agentId: hookOpts.agentId }, () =>
-            this.runSubagentWithHooks(subagent, contextState, hookOpts),
-          );
+          runWithAgentContext(hookOpts.agentId, async () => {
+            try {
+              await this.runSubagentWithHooks(subagent, contextState, hookOpts);
+            } finally {
+              void agentConfig
+                .getToolRegistry()
+                .stop()
+                .catch(() => {});
+            }
+          });
         void runInForkContext(runFramedFork);
         return {
           llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
@@ -1389,7 +1476,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const fgHookOpts = { ...hookOpts, signal: fgAbortController.signal };
       const runFramed = () =>
-        runWithAgentContext({ agentId: hookOpts.agentId }, () =>
+        runWithAgentContext(hookOpts.agentId, () =>
           this.runSubagentWithHooks(subagent, contextState, fgHookOpts),
         );
 
@@ -1492,6 +1579,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // this in finally guarantees we clean up on success, failure,
         // cancel, AND any unexpected throw inside runFramed.
         registry.unregisterForeground(hookOpts.agentId);
+        // Release the per-subagent ToolRegistry so any AgentTool /
+        // SkillTool the model instantiated during execution disposes
+        // its change-listeners on shared SubagentManager / SkillManager.
+        // Without this, repeated foreground subagent runs accumulate
+        // listeners for the rest of the session. Fire-and-forget; the
+        // subagent has already returned its result, and stop() logs its
+        // own errors.
+        void agentConfig
+          .getToolRegistry()
+          .stop()
+          .catch(() => {});
       }
     } catch (error) {
       const errorMessage =

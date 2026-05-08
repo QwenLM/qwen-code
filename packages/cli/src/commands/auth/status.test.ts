@@ -7,7 +7,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { showAuthStatus } from './handler.js';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import { CODING_PLAN_ENV_KEY } from '../../constants/codingPlan.js';
+import {
+  CODING_PLAN_ENV_KEY,
+  CODING_PLAN_CHINA_BASE_URL,
+  CODING_PLAN_GLOBAL_BASE_URL,
+  codingPlanProvider,
+} from '../../auth/providers/alibaba/codingPlan.js';
+import { buildProviderTemplate } from '../../auth/providerConfig.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../../config/settings.js', () => ({
@@ -21,6 +27,10 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 import { loadSettings } from '../../config/settings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+
+const codingPlanProviders = (baseUrl: string = CODING_PLAN_CHINA_BASE_URL) => ({
+  [AuthType.USE_OPENAI]: buildProviderTemplate(codingPlanProvider, baseUrl),
+});
 
 describe('showAuthStatus', () => {
   beforeEach(() => {
@@ -107,20 +117,23 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          region: 'china',
-          version: 'abc123def456',
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_CHINA_BASE_URL,
+            version: 'abc123def456',
+          },
         },
         model: {
           name: 'qwen3.5-plus',
         },
+        modelProviders: codingPlanProviders(),
       }),
     );
 
     await showAuthStatus();
 
     expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('Alibaba Cloud Coding Plan'),
+      expect.stringContaining('Coding Plan'),
     );
     expect(writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('API key configured'),
@@ -207,9 +220,12 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          region: 'global',
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+          },
         },
+        modelProviders: codingPlanProviders(CODING_PLAN_GLOBAL_BASE_URL),
       }),
     );
 
@@ -223,7 +239,7 @@ describe('showAuthStatus', () => {
     );
   });
 
-  it('should show Coding Plan when detected via modelProviders entry (no codingPlan.region)', async () => {
+  it('should show Coding Plan base URL for China endpoint', async () => {
     process.env[CODING_PLAN_ENV_KEY] = 'test-api-key';
 
     vi.mocked(loadSettings).mockReturnValue(
@@ -231,71 +247,28 @@ describe('showAuthStatus', () => {
         security: {
           auth: {
             selectedType: AuthType.USE_OPENAI,
+          },
+        },
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_CHINA_BASE_URL,
           },
         },
         model: {
           name: 'qwen3.5-plus',
         },
-        modelProviders: {
-          openai: [
-            {
-              id: 'qwen3.5-plus',
-              envKey: 'BAILIAN_CODING_PLAN_API_KEY',
-              baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
-            },
-          ],
-        },
+        modelProviders: codingPlanProviders(),
       }),
     );
 
     await showAuthStatus();
 
     expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('Alibaba Cloud Coding Plan'),
-    );
-    expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('API key configured'),
-    );
-    expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('中国 (China)'),
-    );
-    expect(writeStdoutLine).not.toHaveBeenCalledWith(
-      expect.stringContaining('OpenAI-compatible Provider'),
-    );
-    expect(process.exit).toHaveBeenCalledWith(0);
-  });
-
-  it('should not fall back to stale Coding Plan metadata when model selection is unmatched', async () => {
-    process.env['OPENAI_API_KEY'] = 'test-openai-key';
-
-    vi.mocked(loadSettings).mockReturnValue(
-      createMockSettings({
-        security: {
-          auth: {
-            selectedType: AuthType.USE_OPENAI,
-          },
-        },
-        codingPlan: {
-          region: 'global',
-          version: 'abc123def456',
-        },
-        model: {
-          name: 'manual-provider-model',
-        },
-      }),
-    );
-
-    await showAuthStatus();
-
-    expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('OpenAI-compatible Provider'),
-    );
-    expect(writeStdoutLine).not.toHaveBeenCalledWith(
-      expect.stringContaining('Alibaba Cloud Coding Plan'),
+      expect.stringContaining(CODING_PLAN_CHINA_BASE_URL),
     );
   });
 
-  it('should show Coding Plan region for china', async () => {
+  it('should show Coding Plan base URL for global endpoint', async () => {
     process.env[CODING_PLAN_ENV_KEY] = 'test-api-key';
 
     vi.mocked(loadSettings).mockReturnValue(
@@ -305,45 +278,22 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          region: 'china',
-        },
-        model: {
-          name: 'qwen3.5-plus',
-        },
-      }),
-    );
-
-    await showAuthStatus();
-
-    expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('中国 (China)'),
-    );
-  });
-
-  it('should show Coding Plan region for global', async () => {
-    process.env[CODING_PLAN_ENV_KEY] = 'test-api-key';
-
-    vi.mocked(loadSettings).mockReturnValue(
-      createMockSettings({
-        security: {
-          auth: {
-            selectedType: AuthType.USE_OPENAI,
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
           },
-        },
-        codingPlan: {
-          region: 'global',
         },
         model: {
           name: 'qwen3-coder-plus',
         },
+        modelProviders: codingPlanProviders(CODING_PLAN_GLOBAL_BASE_URL),
       }),
     );
 
     await showAuthStatus();
 
     expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('Global'),
+      expect.stringContaining(CODING_PLAN_GLOBAL_BASE_URL),
     );
   });
 
@@ -357,12 +307,15 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          region: 'china',
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          },
         },
         model: {
           name: 'qwen3.5-plus',
         },
+        modelProviders: codingPlanProviders(),
       }),
     );
 
@@ -383,13 +336,16 @@ describe('showAuthStatus', () => {
             selectedType: AuthType.USE_OPENAI,
           },
         },
-        codingPlan: {
-          region: 'china',
-          version: 'abc123def456789',
+        providerMetadata: {
+          'coding-plan': {
+            baseUrl: CODING_PLAN_CHINA_BASE_URL,
+            version: 'abc123def456789',
+          },
         },
         model: {
           name: 'qwen3.5-plus',
         },
+        modelProviders: codingPlanProviders(),
       }),
     );
 
