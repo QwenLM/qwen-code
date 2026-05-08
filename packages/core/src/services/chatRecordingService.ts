@@ -672,6 +672,13 @@ export class ChatRecordingService {
    * write path (`jsonl.writeLine` serializes the same way). It's an
    * extra serialize per record, but appendRecord is already gated by
    * an async I/O write whose cost dominates by orders of magnitude.
+   *
+   * Byte count uses `Buffer.byteLength(..., 'utf8')`, not `String.length`:
+   * `String.length` counts UTF-16 code units, but `jsonl.writeLine`
+   * emits UTF-8 — multi-byte characters (CJK, emoji) are 2–3× larger
+   * on disk than `.length` reports, and undercounting would let the
+   * actual on-disk distance from the last anchor blow past the 64KB
+   * tail window before the threshold fires.
    */
   private updateTitleAnchorTracking(record: ChatRecord): void {
     if (record.type === 'system' && record.subtype === 'custom_title') {
@@ -680,7 +687,8 @@ export class ChatRecordingService {
     }
     if (!this.currentCustomTitle) return;
     // +1 for the trailing newline jsonl.writeLine appends.
-    this.bytesSinceTitleAnchor += JSON.stringify(record).length + 1;
+    this.bytesSinceTitleAnchor +=
+      Buffer.byteLength(JSON.stringify(record), 'utf8') + 1;
     if (this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES) {
       this.reanchorTitle();
     }
@@ -709,6 +717,12 @@ export class ChatRecordingService {
       };
       this.appendRecord(record);
     } catch (error) {
+      // Reset the counter even on failure: otherwise every subsequent
+      // appendRecord re-fires reanchorTitle (counter still ≥ threshold)
+      // and turns a transient I/O issue into an unbounded retry storm.
+      // Skipping a single anchor write is the right tradeoff — finalize()
+      // will re-emit one on the next lifecycle event.
+      this.bytesSinceTitleAnchor = 0;
       debugLogger.error('Error re-anchoring custom title:', error);
     }
   }

@@ -288,6 +288,79 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       ).toBe(false);
     });
 
+    it('counts UTF-8 bytes, not UTF-16 code units, when measuring bulk writes', async () => {
+      // CJK characters are 1 UTF-16 code unit but 3 UTF-8 bytes. The wire
+      // format is UTF-8 (jsonl.writeLine emits utf8), so a per-record
+      // `String.length` undercounts a multi-byte payload by ~3×. A naive
+      // length-based counter would let ~96KB of CJK content land on disk
+      // before the 32KB threshold thinks it has — pushing the title past
+      // the 64KB tail window the picker scans.
+      //
+      // Twelve 1500-char CJK messages ≈ 21K UTF-16 units (under threshold)
+      // but ≈ 57K UTF-8 bytes (over). Anchor fires only when the counter
+      // measures bytes, not chars.
+      chatRecordingService.recordCustomTitle('cjk-session');
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      const cjkText = '汉'.repeat(1500);
+      for (let i = 0; i < 12; i++) {
+        chatRecordingService.recordUserMessage([{ text: cjkText }]);
+      }
+      await chatRecordingService.flush();
+
+      const titleAppends = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.filter(([, record]) => {
+          const r = record as ChatRecord;
+          return r.type === 'system' && r.subtype === 'custom_title';
+        });
+      expect(titleAppends.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('resets the byte counter when re-anchor fails — no retry storm', async () => {
+      // If reanchorTitle throws (disk full, permission revoked) and we
+      // leave the byte counter pinned at the threshold, every subsequent
+      // appendRecord will re-fire the failing reanchor — an unbounded
+      // retry storm that amplifies I/O pressure on an already-degraded
+      // system. Resetting on failure trades one missed anchor for
+      // bounded recovery; finalize() will re-emit on the next lifecycle
+      // event.
+      chatRecordingService.recordCustomTitle('long-running-task');
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      // Wrap the private appendRecord so any custom_title append (i.e.
+      // a re-anchor — the initial title write already happened) throws.
+      // Bulk records pass through to the real implementation so the
+      // byte counter still accumulates exactly as production would.
+      let reanchorAttempts = 0;
+      const svc = chatRecordingService as unknown as {
+        appendRecord(record: ChatRecord): void;
+      };
+      const originalAppendRecord = svc.appendRecord.bind(chatRecordingService);
+      svc.appendRecord = (record: ChatRecord) => {
+        if (record.type === 'system' && record.subtype === 'custom_title') {
+          reanchorAttempts++;
+          throw new Error('simulated disk-full');
+        }
+        return originalAppendRecord(record);
+      };
+
+      // 25 × 2KB ≈ 50KB > 32KB → first re-anchor fires (and throws).
+      // With the counter-reset fix, it stays reset; without it, every
+      // subsequent message would re-trigger reanchor.
+      const bulkText = 'x'.repeat(2000);
+      for (let i = 0; i < 25; i++) {
+        chatRecordingService.recordUserMessage([{ text: bulkText }]);
+      }
+      await chatRecordingService.flush();
+
+      // One failed attempt is acceptable; multiple means the counter was
+      // pinned and turned a single fault into a per-record loop.
+      expect(reanchorAttempts).toBe(1);
+    });
+
     it('does not re-anchor on small write bursts under threshold', async () => {
       // A handful of small messages must not trigger a re-anchor —
       // the cost would defeat the whole point. Threshold is 32KB;
