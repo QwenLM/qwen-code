@@ -1246,26 +1246,25 @@ export default {
   'Directory does not exist.': '目录不存在。',
   'Path is not a directory.': '路径不是目录。',
   'This directory is already in the workspace.': '此目录已在工作区中。',
-  // Status Bar
-  // ============================================================================
-=======
-  'Already covered by existing directory: {{dir}}': '已被现有目录覆盖：{{dir}}',
 
   // ============================================================================
   // /directory remove command
   // ============================================================================
   'Remove a directory from the workspace': '从工作区中移除目录',
   'Please provide a directory path to remove.': '请提供要移除的目录路径。',
-  'Cannot remove initial workspace directory: {{directory}}': '无法移除初始工作区目录：{{directory}}',
-  'Directory not found in workspace: {{directory}}': '在工作区中找不到目录：{{directory}}',
-  'Directory removed from workspace but error updating settings: {{error}}': '目录已从工作区移除，但更新设置时出错：{{error}}',
+  'Cannot remove initial workspace directory: {{directory}}':
+    '无法移除初始工作区目录：{{directory}}',
+  'Directory not found in workspace: {{directory}}':
+    '在工作区中找不到目录：{{directory}}',
+  'Directory removed from workspace but error updating settings: {{error}}':
+    '目录已从工作区移除，但更新设置时出错：{{error}}',
   'Removed directory: {{directory}}': '已移除目录：{{directory}}',
-  'The /directory remove command is not supported in restrictive sandbox profiles.': '限制性沙箱配置不支持 /directory remove 命令。',
-  'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.': '目录已从工作区内存中移除，但未找到匹配的持久化条目。如果以不同路径格式存储，可能会在重启后重新出现。',
+  'The /directory remove command is not supported in restrictive sandbox profiles.':
+    '限制性沙箱配置不支持 /directory remove 命令。',
+  'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.':
+    '目录已从工作区内存中移除，但未找到匹配的持久化条目。如果以不同路径格式存储，可能会在重启后重新出现。',
 
   // ============================================================================
-  // Status Bar
-  // ========================================================================================================================================================
   // Status Bar
   // ============================================================================
   'Using:': '已加载: ',

@@ -1310,11 +1310,6 @@ export default {
   'Path is not a directory.': 'Path is not a directory.',
   'This directory is already in the workspace.':
     'This directory is already in the workspace.',
-  // Status Bar
-  // ============================================================================
-=======
-  'Already covered by existing directory: {{dir}}':
-    'Already covered by existing directory: {{dir}}',
 
   // ============================================================================
   // /directory remove command
@@ -1336,8 +1331,6 @@ export default {
     'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.',
 
   // ============================================================================
-  // Status Bar
-  // ========================================================================================================================================================
   // Status Bar
   // ============================================================================
   'Using:': 'Using:',
