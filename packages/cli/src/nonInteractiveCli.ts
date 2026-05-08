@@ -485,8 +485,12 @@ export async function runNonInteractive(
           const toolResponseParts: Part[] = [];
           // When --json-schema is active, the first successful call to the
           // synthetic structured_output tool terminates the session with the
-          // submitted args as the structured result.
+          // submitted args as the structured result. A separate boolean
+          // tracks whether a submission happened, since `args` itself may
+          // legitimately be undefined or any falsy value (an empty schema
+          // `{}` accepts any payload, including no fields at all).
           let structuredSubmission: unknown = undefined;
+          let hasStructuredSubmission = false;
 
           for (const requestInfo of toolCallRequests) {
             const finalRequestInfo = requestInfo;
@@ -546,9 +550,10 @@ export async function runNonInteractive(
             if (
               finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
               !toolResponse.error &&
-              structuredSubmission === undefined
+              !hasStructuredSubmission
             ) {
               structuredSubmission = finalRequestInfo.args;
+              hasStructuredSubmission = true;
             }
 
             if (toolResponse.responseParts) {
@@ -562,7 +567,7 @@ export async function runNonInteractive(
               modelOverride = toolResponse.modelOverride;
             }
           }
-          if (structuredSubmission !== undefined) {
+          if (hasStructuredSubmission) {
             // Abort any in-flight background agents so they don't race the
             // terminal emitResult; structured-output mode is a single-shot
             // contract and the caller expects a deterministic shutdown.

@@ -2519,6 +2519,59 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('terminates even when structured_output args are undefined under an empty schema', async () => {
+    // Pin the boolean-sentinel contract: the previous
+    // `structuredSubmission !== undefined` check broke if the model
+    // called structured_output with args missing/undefined (which can
+    // happen under a permissive `{}` schema, since validateToolParams
+    // would have already accepted the call). The run must still
+    // terminate on the first successful structured_output call.
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({});
+
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'so-undef',
+            name: ToolNames.STRUCTURED_OUTPUT,
+            args: undefined as unknown as Record<string, unknown>,
+            isClientInitiated: false,
+            prompt_id: 'p-structured-undef',
+          },
+        },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Structured output accepted.' }],
+    });
+
+    const adapter = makeMockAdapter();
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'go',
+      'p-structured-undef',
+      { adapter },
+    );
+
+    // Single turn — boolean sentinel kicked us out even though the args
+    // value itself is undefined.
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    expect(adapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(adapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: false,
+        structuredResult: undefined,
+      }),
+    );
+  });
+
   it('sets process.exitCode=1 and writes stderr when model emits text under --json-schema', async () => {
     setupMetricsMock();
     vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
