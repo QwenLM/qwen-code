@@ -144,13 +144,16 @@ export function createConfigFromConnection(
   connection: LlmConnection,
   baseConfig: Omit<BackendConfig, 'provider' | 'authType' | 'providerType'>,
 ): BackendConfig {
+  const { model: baseModel, ...restConfig } = baseConfig;
+  const model = baseModel || connection.defaultModel;
+
   return {
-    ...baseConfig,
+    ...restConfig,
     provider: 'qwen',
     providerType: 'qwen',
     authType: 'none',
     connectionSlug: connection.slug,
-    model: baseConfig.model || connection.defaultModel || DEFAULT_MODEL,
+    ...(model ? { model } : {}),
   };
 }
 
@@ -177,7 +180,7 @@ export function createBackendFromConnection(
 
   return createBackend(createConfigFromConnection(connection, {
     ...baseConfig,
-    model: context.resolvedModel,
+    ...(context.resolvedModel ? { model: context.resolvedModel } : {}),
   }));
 }
 
@@ -201,7 +204,7 @@ export function createBackendFromResolvedContext(args: {
     provider: 'qwen',
     providerType: 'qwen',
     authType: 'none',
-    model: args.context.resolvedModel,
+    ...(args.context.resolvedModel ? { model: args.context.resolvedModel } : {}),
     runtime,
   });
 }
@@ -218,7 +221,7 @@ export function resolveModelForProvider(
   managedModel?: string,
   connection?: LlmConnection | null,
 ): string {
-  return managedModel || connection?.defaultModel || DEFAULT_MODEL;
+  return managedModel || connection?.defaultModel || '';
 }
 
 export function getDefaultAuthType(_provider: AgentProvider): LlmAuthType {

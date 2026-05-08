@@ -407,6 +407,7 @@ function headerToMetadata(header: SessionHeader, workspaceRootPath: string): Ses
     const {
       enabledSourceSlugs: _es, pendingPlanExecution: _pp,
       sessionStatus: _ss, workingDirectory: _wd, sdkCwd: _sc,
+      model: _model,
       workspaceRootPath: _wrp, ...headerFields
     } = header;
 

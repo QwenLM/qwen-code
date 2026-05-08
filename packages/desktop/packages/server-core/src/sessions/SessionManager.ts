@@ -1671,7 +1671,7 @@ export class SessionManager implements ISessionManager {
         workspace,
         info,
         connectionSlug: backendContext.connection.slug,
-        model: backendContext.resolvedModel,
+        model: backendContext.resolvedModel || undefined,
         defaultPermissionMode,
         defaultThinkingLevel: normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ?? getDefaultThinkingLevel(),
         loadMessages: agent.loadSessionMessages
@@ -2007,7 +2007,7 @@ export class SessionManager implements ISessionManager {
     workspace: Workspace
     info: BackendSessionInfo
     connectionSlug: string
-    model: string
+    model?: string
     defaultPermissionMode: PermissionMode
     defaultThinkingLevel: ThinkingLevel
     loadMessages?: (info: BackendSessionInfo) => Promise<BackendSessionMessagesPayload | undefined>
@@ -2073,7 +2073,7 @@ export class SessionManager implements ISessionManager {
       permissionMode: defaultPermissionMode,
       llmConnection: connectionSlug,
       connectionLocked: true,
-      model,
+      ...(model ? { model } : {}),
       thinkingLevel: defaultThinkingLevel,
       messages: shouldPersistInspectedMessages ? inspectedMessages?.map(messageToStored) ?? [] : [],
       tokenUsage: { ...DEFAULT_TOKEN_USAGE },
@@ -3004,7 +3004,7 @@ export class SessionManager implements ISessionManager {
     const managed = createManagedSession(storedSession, workspace, {
       permissionMode: sessionPermissionMode,
       workingDirectory: resolvedWorkingDir,
-      model: resolvedModel,
+      model: resolvedModel || undefined,
       llmConnection: options?.llmConnection,
       thinkingLevel: defaultThinkingLevel,
       systemPromptPreset: options?.systemPromptPreset,
@@ -7862,7 +7862,6 @@ export class SessionManager implements ISessionManager {
       labels: header.labels,
       enabledSourceSlugs: header.enabledSourceSlugs,
       workingDirectory: header.workingDirectory,
-      model: header.model,
       llmConnection: header.llmConnection,
       connectionLocked: header.connectionLocked,
       thinkingLevel: header.thinkingLevel,

@@ -34,8 +34,8 @@ export const SESSION_PERSISTENT_FIELDS = [
   'lastReadMessageId', 'hasUnread',
   // Config
   'enabledSourceSlugs', 'permissionMode', 'previousPermissionMode', 'workingDirectory',
-  // Model/Connection
-  'model', 'llmConnection', 'connectionLocked', 'thinkingLevel',
+  // Connection/runtime
+  'llmConnection', 'connectionLocked', 'thinkingLevel',
   // Sharing
   'sharedUrl', 'sharedId',
   // Plan execution
@@ -137,7 +137,7 @@ export interface SessionConfig {
   sharedUrl?: string;
   /** Shared session ID in viewer (for revoke) */
   sharedId?: string;
-  /** Model to use for this session (overrides global config if set) */
+  /** Runtime-only model override for this session. Provider-managed ACP sessions do not persist this field. */
   model?: string;
   /** LLM connection slug for this session (locked after first message) */
   llmConnection?: string;
@@ -250,7 +250,7 @@ export interface SessionHeader {
   sharedUrl?: string;
   /** Shared session ID in viewer (for revoke) */
   sharedId?: string;
-  /** Model to use for this session (overrides global config if set) */
+  /** Legacy/runtime-only model override. New JSONL headers do not persist this field. */
   model?: string;
   /** LLM connection slug for this session (locked after first message) */
   llmConnection?: string;
@@ -335,7 +335,7 @@ export interface SessionMetadata {
   sdkCwd?: string;
   /** Role/type of the last message (for badge display without loading messages) */
   lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error';
-  /** Model to use for this session (overrides global config if set) */
+  /** Legacy/runtime-only model override. New session metadata does not persist this field. */
   model?: string;
   /** LLM connection slug for this session (locked after first message) */
   llmConnection?: string;
