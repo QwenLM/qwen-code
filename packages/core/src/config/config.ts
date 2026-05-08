@@ -49,7 +49,6 @@ import { CronScheduler } from '../services/cronScheduler.js';
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
 import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { expandHomeDir } from '../utils/paths.js';
 
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -906,9 +905,9 @@ export class Config {
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // Warn about skipped directories (visible in TUI via getWarnings()).
-    const skippedDirs = this.workspaceContext.getSkippedDirectories().filter(
-      (d) => path.resolve(d) !== this.targetDir,
-    );
+    const skippedDirs = this.workspaceContext
+      .getSkippedDirectories()
+      .filter((d) => path.resolve(d) !== this.targetDir);
     if (skippedDirs.length > 0) {
       const lines = skippedDirs.map((d) => {
         const reason = this.workspaceContext.getSkippedDirectoryReason(d);
@@ -920,7 +919,7 @@ export class Config {
         } else {
           cause = 'is not readable';
         }
-        return `  - ${expandHomeDir(d)} (${cause})`;
+        return `  - ${d} (${cause})`;
       });
       const msg =
         'The following workspace directories were skipped:\n' +

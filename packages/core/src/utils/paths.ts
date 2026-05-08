@@ -87,7 +87,7 @@ export function tildeifyPath(path: string): string {
  */
 export function expandHomeDir(p: string): string {
   if (!p) {
-    return '';
+    return p;
   }
 
   let homeDir: string;
@@ -112,10 +112,14 @@ export function expandHomeDir(p: string): string {
 
   // Guard against path traversal via .. segments (e.g. ~/../../etc/passwd).
   // If normalization escaped the home directory, return the unexpanded input.
-  if (
-    (p === '~' || p.startsWith('~/') || p.toLowerCase().startsWith('%userprofile%')) &&
-    !isSubpath(homeDir, normalized)
-  ) {
+  const wouldExpand =
+    p === '~' ||
+    p.startsWith('~/') ||
+    (process.platform === 'win32' &&
+      (p.toLowerCase() === '%userprofile%' ||
+        p.toLowerCase().startsWith('%userprofile%\\') ||
+        p.toLowerCase().startsWith('%userprofile%/')));
+  if (wouldExpand && !isSubpath(homeDir, normalized)) {
     return p;
   }
 
