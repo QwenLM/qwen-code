@@ -10,6 +10,7 @@ import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
 import { getCachedStringWidth } from './textUtils.js';
 import { theme } from '../semantic-colors.js';
+import { renderInlineLatex } from './latexRenderer.js';
 
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
@@ -20,6 +21,17 @@ const MAX_ROW_LINES = 4;
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
 
+const INLINE_MATH_MAX_CHARS = 1024;
+
+const INLINE_MATH_PATTERN = String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`;
+const INLINE_MARKDOWN_REGEX =
+  /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|` +
+    String.raw`\`+.+?\`+|${INLINE_MATH_PATTERN}|<u>.*?<\/u>|https?:\/\/\S+)`,
+  'g',
+);
+
 export type ColumnAlign = 'left' | 'center' | 'right';
 
 interface TableRendererProps {
@@ -28,6 +40,7 @@ interface TableRendererProps {
   contentWidth: number;
   /** Per-column alignment parsed from markdown separator line */
   aligns?: ColumnAlign[];
+  enableInlineMath?: boolean;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -106,9 +119,11 @@ const ansiFmt = {
  * Convert inline markdown to ANSI-styled text.
  * Mirrors RenderInline's behavior but outputs strings instead of React nodes.
  */
-function renderMarkdownToAnsi(text: string): string {
-  const inlineRegex =
-    /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
+  const inlineRegex = enableInlineMath
+    ? INLINE_MARKDOWN_WITH_MATH_REGEX
+    : INLINE_MARKDOWN_REGEX;
+  inlineRegex.lastIndex = 0;
 
   let result = '';
   let lastIndex = 0;
@@ -163,6 +178,16 @@ function renderMarkdownToAnsi(text: string): string {
       if (linkMatch) {
         rendered = `${linkMatch[1]} ${applyColor(`(${linkMatch[2]})`, theme.text.link)}`;
       }
+    } else if (
+      enableInlineMath &&
+      fullMatch.startsWith('$') &&
+      fullMatch.endsWith('$') &&
+      fullMatch.length > 2
+    ) {
+      rendered = applyColor(
+        renderInlineLatex(fullMatch.slice(1, -1)),
+        theme.text.accent,
+      );
     } else if (
       fullMatch.startsWith('<u>') &&
       fullMatch.endsWith('</u>') &&
@@ -246,6 +271,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   rows,
   contentWidth,
   aligns,
+  enableInlineMath = false,
 }) => {
   const colCount = headers.length;
 
@@ -256,7 +282,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
 
   // ── Precompute per-cell metrics to avoid repeated renderMarkdownToAnsi calls ──
   const computeMetrics = (text: string) => {
-    const rendered = renderMarkdownToAnsi(text);
+    const rendered = renderMarkdownToAnsi(text, enableInlineMath);
     const visible = stripAnsi(rendered);
     const words = visible.split(/\s+/).filter((w) => w.length > 0);
     return {
@@ -465,7 +491,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
       }
       for (let colIndex = 0; colIndex < colCount; colIndex++) {
         const rawLabel = headers[colIndex] ?? `Column ${colIndex + 1}`;
-        const label = renderMarkdownToAnsi(rawLabel);
+        const label = renderMarkdownToAnsi(rawLabel, enableInlineMath);
         const value = row[colIndex]!.rendered.trim()
           .replace(/\n+/g, ' ')
           .replace(/\s+/g, ' ')

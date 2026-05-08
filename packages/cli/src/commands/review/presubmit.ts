@@ -201,9 +201,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   if (newFindingsPath) {
     newFindings = JSON.parse(readFileSync(newFindingsPath, 'utf8'));
   }
-  const newFindingKeys = new Set(
-    newFindings.map((f) => `${f.path}:${f.line}`),
-  );
+  const newFindingKeys = new Set(newFindings.map((f) => `${f.path}:${f.line}`));
 
   const buckets = classifyExistingComments(
     qwenComments,
@@ -216,7 +214,9 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const downgradeReasons: string[] = [];
   if (isSelfPr) downgradeReasons.push('self-PR');
   if (ciStatus.class === 'any_failure') {
-    downgradeReasons.push(`CI failing: ${ciStatus.failedCheckNames.join(', ')}`);
+    downgradeReasons.push(
+      `CI failing: ${ciStatus.failedCheckNames.join(', ')}`,
+    );
   }
   if (ciStatus.class === 'all_pending') {
     downgradeReasons.push('CI still running');

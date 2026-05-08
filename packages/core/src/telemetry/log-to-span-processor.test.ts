@@ -155,6 +155,35 @@ describe('LogToSpanProcessor', () => {
     expect(attrs['log.bridge']).toBe(true);
   });
 
+  it('keeps sensitive attributes when explicitly enabled', async () => {
+    await processor.shutdown();
+    exportedSpans = [];
+    processor = new LogToSpanProcessor(mockExporter, {
+      flushIntervalMs: 60000,
+      includeSensitiveSpanAttributes: true,
+    });
+    const logRecord = {
+      body: 'event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        prompt: 'secret prompt',
+        function_args: '{"token":"secret"}',
+        response_text: 'secret response',
+        safe: 'visible',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    const attrs = exportedSpans[0].attributes;
+    expect(attrs['prompt']).toBe('secret prompt');
+    expect(attrs['function_args']).toBe('{"token":"secret"}');
+    expect(attrs['response_text']).toBe('secret response');
+    expect(attrs['safe']).toBe('visible');
+    expect(attrs['log.bridge']).toBe(true);
+  });
+
   it('skips null and undefined attributes', async () => {
     const logRecord = {
       body: 'event',

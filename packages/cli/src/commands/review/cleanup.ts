@@ -84,9 +84,7 @@ function runCleanup(target: string): void {
       writeStdoutLine(`Removed temp file: ${full}`);
       removedAny = true;
     } catch (err) {
-      writeStderrLine(
-        `Failed to remove ${full}: ${(err as Error).message}`,
-      );
+      writeStderrLine(`Failed to remove ${full}: ${(err as Error).message}`);
     }
   }
 

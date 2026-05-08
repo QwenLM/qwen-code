@@ -25,7 +25,6 @@ const MAX_DESCRIPTION_LENGTH = 80;
 export const MAX_CONCURRENT_MONITORS = 16;
 export const MAX_RETAINED_TERMINAL_MONITORS = 128;
 
-
 /**
  * Strip C0 control characters (except tab) and C1 control characters from a
  * string destined for terminal/UI display. The Monitor tool pre-sanitizes

@@ -1121,8 +1121,9 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should apply updatedInput from canUseTool callback',
       async () => {
-        await helper.createFile('test.txt', 'original');
-
+        // Don't pre-create test.txt: prior-read enforcement requires
+        // existing files to have been read via read_file first, but
+        // this test restricts coreTools to write_file only.
         let capturedInput: Record<string, unknown> = {};
 
         const q = query({
@@ -1171,8 +1172,9 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'canUseTool should not be called for allowedTools even if it would modify input',
       async () => {
-        await helper.createFile('test.txt', 'original');
-
+        // Don't pre-create test.txt: prior-read enforcement requires
+        // existing files to have been read via read_file first, but
+        // this test restricts coreTools to write_file only.
         let canUseToolCalled = false;
 
         const q = query({
@@ -1433,7 +1435,10 @@ describe('Tool Control Parameters (E2E)', () => {
             session_id: crypto.randomUUID(),
             message: {
               role: 'user',
-              content: 'Write "modified" to test.txt.',
+              // Read-first instruction satisfies prior-read enforcement
+              // so the deny path is exercised by canUseTool, not by the
+              // write tool's pre-write guard.
+              content: 'Read test.txt and then write "modified" to it.',
             },
             parent_tool_use_id: null,
           };
@@ -1447,14 +1452,16 @@ describe('Tool Control Parameters (E2E)', () => {
             cwd: testDir,
             permissionMode: 'default',
             coreTools: ['read_file', 'write_file'],
-            canUseTool: async (toolName) => {
+            canUseTool: async (toolName, input) => {
               if (toolName === 'write_file') {
                 return {
                   behavior: 'deny',
                   message: 'Write operations are not allowed',
                 };
               }
-              return { behavior: 'allow', updatedInput: {} };
+              // Pass-through: empty `updatedInput` would erase
+              // file_path and break the read_file call.
+              return { behavior: 'allow', updatedInput: input };
             },
             debug: false,
           },
@@ -1469,6 +1476,15 @@ describe('Tool Control Parameters (E2E)', () => {
               resultWaiter.notifyResult();
             }
           }
+
+          // Make the read-first dependency explicit: if the model
+          // skipped read_file, prior-read enforcement would surface
+          // EDIT_REQUIRES_PRIOR_READ instead of the canUseTool deny
+          // message we are asserting on below — fail fast with a
+          // clear signal instead of a confusing toContain mismatch.
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+          expect(toolNames).toContain('read_file');
 
           // write_file should have been attempted but stream was closed
           const writeFileResults = findToolResults(messages, 'write_file');
@@ -1533,9 +1549,12 @@ describe('Tool Control Parameters (E2E)', () => {
             cwd: testDir,
             permissionMode: 'default',
             coreTools: ['read_file', 'write_file'],
-            canUseTool: async (toolName) => {
+            canUseTool: async (toolName, input) => {
               canUseToolCalls.push(toolName);
-              return { behavior: 'allow', updatedInput: {} };
+              // Pass-through: empty `updatedInput` would erase
+              // file_path on the SDK→CLI boundary
+              // (permissionController.ts:444 truthy-replaces args).
+              return { behavior: 'allow', updatedInput: input };
             },
             debug: false,
           },

@@ -43,22 +43,24 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
   } as unknown as Config;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it('returns documents chosen by the side-query selector', async () => {
     vi.mocked(runSideQuery).mockResolvedValue({
-      selected_memories: ['reference.md'],
+      selected_memories: ['user.md'],
     });
 
-    const selected = await selectRelevantAutoMemoryDocumentsByModel(
+    const result = await selectRelevantAutoMemoryDocumentsByModel(
       mockConfig,
-      'check the latency dashboard',
+      'check preferences',
       docs,
       2,
+      [],
     );
 
-    expect(selected).toEqual([docs[1]]);
+    expect(result).toEqual([docs[0]]);
+
     expect(runSideQuery).toHaveBeenCalledWith(
       mockConfig,
       expect.objectContaining({
