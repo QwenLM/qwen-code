@@ -253,9 +253,23 @@ export class SessionService {
 
       const fd = fs.openSync(filePath, 'r');
       let buffer: Buffer;
+      let firstSegmentIsPartial = false;
       try {
         buffer = Buffer.alloc(readLength);
         fs.readSync(fd, buffer, 0, readLength, readStart);
+
+        // The first split segment is partial only when the tail window
+        // truly starts in the middle of a JSONL record. If the byte right
+        // before `readStart` is `\n`, the window started on a record
+        // boundary and the first segment is a complete line — the
+        // 64-KiB-aligned case where `prev\n<exactly-64KiB-record>\n`
+        // would otherwise drop the only readable record. Peek that byte
+        // before deciding to shift.
+        if (readStart > 0) {
+          const peek = Buffer.alloc(1);
+          fs.readSync(fd, peek, 0, 1, readStart - 1);
+          firstSegmentIsPartial = peek[0] !== 0x0a; // 0x0a = '\n'
+        }
       } finally {
         fs.closeSync(fd);
       }
@@ -263,14 +277,14 @@ export class SessionService {
       const tail = buffer.toString('utf-8');
       const lines = tail.split('\n');
 
-      // When tail-reading from mid-file, the first split segment is a partial
-      // fragment of a record that started before our window. Running tolerant
-      // recovery on it can surface a balanced inner `{ "uuid": ... }` object
-      // from inside the record's payload as if it were a top-level uuid —
-      // `renameSession` would then anchor `custom_title.parentUuid` at payload
-      // data and break the parent chain. Discard that first segment; complete
-      // physical lines after the first `\n` are safe to recover.
-      if (readStart > 0) {
+      // Discard the first segment ONLY when it's a true partial fragment.
+      // Running tolerant recovery on a partial would surface a balanced
+      // inner `{ "uuid": ... }` object from inside the record's payload as
+      // if it were a top-level uuid — `renameSession` would then anchor
+      // `custom_title.parentUuid` at payload data and break the parent
+      // chain. Complete physical lines (including a boundary-aligned
+      // first segment) are safe to recover.
+      if (firstSegmentIsPartial) {
         lines.shift();
       }
 

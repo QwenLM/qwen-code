@@ -173,4 +173,60 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     // function must not surface the payload's nested uuid.
     expect(svc.readLastRecordUuid(file)).not.toBe('fake-from-payload');
   });
+
+  it('returns the final complete record uuid when a giant partial precedes it in the tail', () => {
+    // Positive twin of the partial-tail test above: after a giant line
+    // whose head is past the tail window, append one normal complete
+    // record. The partial first segment must be discarded, but the
+    // complete record after the in-window `\n` must be recovered. Pins
+    // the desired behaviour — the bare-negative assertion above would
+    // still pass if the function silently skipped every line in the
+    // window and returned `null`.
+    const filler = new Array(80000).fill(0).join(',');
+    const giantLine =
+      `{"uuid":"too-early-to-see","filler":[${filler}],` +
+      `"trojan":{"uuid":"fake-from-payload"}}`;
+    const finalRecord = JSON.stringify(recordFor('actual-last', 'user', null));
+    const file = writeJsonl(
+      'big-tail-then-final.jsonl',
+      `${giantLine}\n${finalRecord}\n`,
+    );
+
+    expect(svc.readLastRecordUuid(file)).toBe('actual-last');
+  });
+
+  it('returns the only record when the tail window starts exactly on a newline boundary', () => {
+    // Boundary case: file is `prev\n<final>\n` where `final\n` is
+    // exactly TAIL_READ_SIZE bytes, so the tail read covers `final\n`
+    // and `readStart - 1` lands on the separating `\n`. The first
+    // split segment is a complete record — not a partial fragment.
+    // An unconditional `lines.shift()` drops the only readable uuid
+    // and `renameSession` writes `custom_title.parentUuid` as `null`,
+    // truncating history on resume. The fix peeks the byte before
+    // `readStart` to distinguish boundary-aligned from mid-line reads.
+    const TAIL_READ_SIZE = 64 * 1024;
+    // Build `final` so that `final + '\n'` is exactly TAIL_READ_SIZE.
+    // `recordFor` produces a stable JSON shape; pad it via an extra
+    // `filler` field tuned so the stringified record + 1 (for the
+    // trailing newline we'll join with) hits the target length.
+    const baseFinal = recordFor('boundary-final', 'user', null);
+    const baseFinalLen = Buffer.byteLength(JSON.stringify(baseFinal), 'utf8');
+    // The added field looks like `,"filler":"x...x"` — fixed overhead
+    // (everything except the x-run) is 12 bytes: ` , " f i l l e r " : " " ` .
+    const fillerLen = TAIL_READ_SIZE - 1 - baseFinalLen - 12;
+    expect(fillerLen).toBeGreaterThan(0);
+    const finalRecord = JSON.stringify({
+      ...baseFinal,
+      filler: 'x'.repeat(fillerLen),
+    });
+    expect(Buffer.byteLength(finalRecord + '\n', 'utf8')).toBe(TAIL_READ_SIZE);
+
+    const prevRecord = JSON.stringify(recordFor('older', 'user', null));
+    const file = writeJsonl(
+      'tail-aligned.jsonl',
+      `${prevRecord}\n${finalRecord}\n`,
+    );
+
+    expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
+  });
 });
