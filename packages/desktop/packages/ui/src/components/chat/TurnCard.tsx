@@ -242,6 +242,7 @@ export interface ActivityItem {
   toolInput?: Record<string, unknown>
   content?: string
   intent?: string
+  intermediateKind?: 'commentary' | 'thought'
   /** Optional backing message id (used by plan activities for branching/annotations) */
   messageId?: string
   /** Optional persisted annotations (used by plan activities) */
@@ -890,12 +891,19 @@ function TreeViewConnector({ depth }: { depth: number; isLastChild?: boolean }) 
   )
 }
 
+function isVisibleCommentaryActivity(activity: ActivityItem): boolean {
+  return activity.type === 'intermediate'
+    && activity.intermediateKind === 'commentary'
+    && activity.status === 'completed'
+    && !!activity.content?.trim()
+}
+
 /** Single activity row in expanded view */
 function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, displayMode = 'detailed' }: ActivityRowProps) {
   const depth = activity.depth || 0
 
-  // Intermediate messages (LLM commentary) - render with dashed circle icon
-  // Show "Thinking" while streaming, stripped markdown content when complete
+  // Intermediate messages in the expanded activity list keep the compact row
+  // treatment used by the rest of the activity timeline.
   if (activity.type === 'intermediate') {
     const isThinking = activity.status === 'running'
     const displayContent = isThinking ? 'Thinking...' : stripMarkdown(activity.content || '')
@@ -1407,6 +1415,8 @@ export interface ResponseCardProps {
   showAcceptPlan?: boolean
   /** Hide footer for compact embedding (EditPopover) */
   compactMode?: boolean
+  /** Whether to show copy/fullscreen/branch actions for final response messages */
+  showResponseActions?: boolean
   /** Callback to branch the session from this response */
   onBranch?: (options?: { newPanel?: boolean }) => void
   /** Callback to add annotation from selected text */
@@ -1693,6 +1703,7 @@ export function ResponseCard({
   isLastResponse = true,
   showAcceptPlan = true,
   compactMode = false,
+  showResponseActions = false,
   onBranch,
   onAddAnnotation,
   onRemoveAnnotation,
@@ -2596,7 +2607,7 @@ export function ResponseCard({
             </div>
           )}
 
-          {!compactMode && !isPlan && (
+          {!compactMode && !isPlan && showResponseActions && (
             <div className="flex h-5 items-center justify-start gap-1.5 pl-[22px] pr-0.5 text-[11px] font-medium text-muted-foreground/70 opacity-0 pointer-events-none transition-opacity duration-150 select-none group-hover/response:pointer-events-auto group-hover/response:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
               <ResponseActionButton
                 label={copied ? t('common.copied') : t('common.copy')}
@@ -2910,6 +2921,11 @@ export const TurnCard = React.memo(function TurnCard({
     [activities]
   )
 
+  const visibleCommentaryActivities = useMemo(
+    () => allSortedActivities.filter(isVisibleCommentaryActivity),
+    [allSortedActivities]
+  )
+
   // Separate plan activities from regular activities
   // Plans are rendered as full ResponseCards, not in the collapsible activities section
   const planActivities = useMemo(
@@ -2917,7 +2933,7 @@ export const TurnCard = React.memo(function TurnCard({
     [allSortedActivities]
   )
   const sortedActivities = useMemo(
-    () => allSortedActivities.filter(a => a.type !== 'plan'),
+    () => allSortedActivities.filter(a => a.type !== 'plan' && !isVisibleCommentaryActivity(a)),
     [allSortedActivities]
   )
 
@@ -2979,6 +2995,19 @@ export const TurnCard = React.memo(function TurnCard({
 
   return (
     <div className="space-y-1">
+      {visibleCommentaryActivities.length > 0 && (
+        <div className="space-y-1 select-text">
+          {visibleCommentaryActivities.map(activity => (
+            <ResponseCard
+              key={activity.id}
+              text={activity.content || ''}
+              isStreaming={false}
+              showResponseActions={false}
+            />
+          ))}
+        </div>
+      )}
+
       {/* Activity Section - excluded from search highlighting (matches ripgrep behavior) */}
       {hasActivities && (
         <div className="group select-none" data-search-exclude="true">
@@ -3217,6 +3246,7 @@ export const TurnCard = React.memo(function TurnCard({
                 onAcceptWithCompact={onAcceptPlanWithCompact}
                 isLastResponse={isLastResponse}
                 compactMode={compactMode}
+                showResponseActions
                 onBranch={onBranch && response.messageId ? (options?: { newPanel?: boolean }) => onBranch(response.messageId!, options) : undefined}
                 sendMessageKey={sendMessageKey}
                 hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
@@ -3249,6 +3279,7 @@ export const TurnCard = React.memo(function TurnCard({
             onAcceptWithCompact={onAcceptPlanWithCompact}
             isLastResponse={isLastResponse}
             compactMode={compactMode}
+            showResponseActions
             onBranch={onBranch && response.messageId ? (options?: { newPanel?: boolean }) => onBranch(response.messageId!, options) : undefined}
             sendMessageKey={sendMessageKey}
             hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}

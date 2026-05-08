@@ -22,7 +22,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type { AgentEvent, AvailableSlashCommand, Message, MessageTextElement } from '@craft-agent/core/types';
+import type { AgentEvent, AvailableSlashCommand, IntermediateMessageKind, Message, MessageTextElement } from '@craft-agent/core/types';
 import { utf16IndexToByteOffset } from '@craft-agent/core/utils';
 import type { FileAttachment } from '../utils/files.ts';
 import type { ModelDefinition } from '../config/models.ts';
@@ -1880,6 +1880,7 @@ export class QwenAgent extends BaseAgent {
       text: string,
       timestamp: number,
       isIntermediate?: boolean,
+      intermediateKind?: IntermediateMessageKind,
     ) => {
       if (!text) return;
       const messageText = role === 'assistant' ? normalizeQwenAssistantText(text) : text;
@@ -1890,6 +1891,7 @@ export class QwenAgent extends BaseAgent {
         && previous.timestamp === timestamp
         && !previous.toolUseId
         && previous.isIntermediate === isIntermediate
+        && previous.intermediateKind === intermediateKind
       ) {
         const nextContent = previous.content + text;
         previous.content = role === 'assistant'
@@ -1905,7 +1907,21 @@ export class QwenAgent extends BaseAgent {
         content,
         timestamp,
         isIntermediate,
+        intermediateKind,
       });
+    };
+
+    const markTrailingAssistantAsCommentary = () => {
+      const previous = messages[messages.length - 1];
+      if (
+        previous
+        && previous.role === 'assistant'
+        && !previous.toolUseId
+        && !previous.isIntermediate
+      ) {
+        previous.isIntermediate = true;
+        previous.intermediateKind = 'commentary';
+      }
     };
 
     for (const update of updates) {
@@ -1923,10 +1939,11 @@ export class QwenAgent extends BaseAgent {
           break;
 
         case 'agent_thought_chunk':
-          appendTextMessage('assistant', text || '', timestamp, true);
+          appendTextMessage('assistant', text || '', timestamp, true, 'thought');
           break;
 
         case 'tool_call': {
+          markTrailingAssistantAsCommentary();
           const toolUseId = asString(update.toolCallId) || `qwen-history-tool-${++idCounter}`;
           const rawInput = toRecord(update.rawInput);
           const meta = toRecord(update._meta);
@@ -1950,6 +1967,7 @@ export class QwenAgent extends BaseAgent {
         }
 
         case 'tool_call_update': {
+          markTrailingAssistantAsCommentary();
           const toolUseId = asString(update.toolCallId) || `qwen-history-tool-${++idCounter}`;
           const meta = toRecord(update._meta);
           const toolName = normalizeToolName(asString(meta.toolName), asString(update.kind));
@@ -1981,6 +1999,7 @@ export class QwenAgent extends BaseAgent {
         }
 
         case 'plan': {
+          markTrailingAssistantAsCommentary();
           const entries = Array.isArray(update.entries) ? update.entries : [];
           const todos = entries
             .filter(isRecord)
@@ -2154,6 +2173,7 @@ export class QwenAgent extends BaseAgent {
       type: 'text_complete',
       text: this.currentThoughtText,
       isIntermediate: true,
+      intermediateKind: 'thought',
       turnId: this.currentTurnId,
     });
     this.currentThoughtText = '';
@@ -2168,6 +2188,7 @@ export class QwenAgent extends BaseAgent {
       type: 'text_complete',
       text,
       ...(isIntermediate !== undefined ? { isIntermediate } : {}),
+      ...(isIntermediate ? { intermediateKind: 'commentary' as const } : {}),
       turnId: this.currentTurnId,
     });
     this.currentAssistantText = '';
