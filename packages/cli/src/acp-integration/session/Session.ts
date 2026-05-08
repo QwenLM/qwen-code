@@ -85,6 +85,7 @@ import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
 // Import modular session components
 import type {
@@ -1065,6 +1066,7 @@ export class Session implements SessionContext {
    */
   async setModel(
     params: SetSessionModelRequest,
+    options: { persistDefault?: boolean } = {},
   ): Promise<SetSessionModelResponse | void> {
     const rawModelId = params.modelId.trim();
 
@@ -1091,6 +1093,16 @@ export class Session implements SessionContext {
         ? { requireCachedCredentials: true }
         : undefined,
     );
+
+    if (options.persistDefault ?? true) {
+      const persistScope = getPersistScopeForModelSelection(this.settings);
+      this.settings.setValue(persistScope, 'model.name', parsed.modelId);
+      this.settings.setValue(
+        persistScope,
+        'security.auth.selectedType',
+        selectedAuthType,
+      );
+    }
   }
 
   /**

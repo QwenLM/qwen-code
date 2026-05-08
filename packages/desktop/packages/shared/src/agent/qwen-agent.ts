@@ -1436,7 +1436,11 @@ export class QwenAgent extends BaseAgent {
     this.applyAcpPermissionMode(mode);
   }
 
-  private async forwardModel(model: string, sessionId = this.qwenSessionId): Promise<void> {
+  private async forwardModel(
+    model: string,
+    sessionId = this.qwenSessionId,
+    options: { persistDefault?: boolean } = {},
+  ): Promise<void> {
     if (!model || !sessionId) return;
     if (!this.isKnownAvailableModel(model)) {
       this.debug(`Skipping Qwen model forward for unavailable model: ${model}`);
@@ -1444,10 +1448,18 @@ export class QwenAgent extends BaseAgent {
     }
 
     try {
-      await this.callAcp('session/set_model', (connection) => connection.unstable_setSessionModel({
-        sessionId,
-        modelId: model,
-      }), 10_000);
+      if (options.persistDefault ?? true) {
+        await this.callAcp('session/set_model', (connection) => connection.unstable_setSessionModel({
+          sessionId,
+          modelId: model,
+        }), 10_000);
+      } else {
+        await this.callAcp('session/set_config_option', (connection) => connection.setSessionConfigOption({
+          sessionId,
+          configId: 'model',
+          value: model,
+        }), 10_000);
+      }
     } catch (error) {
       this.debug(`Qwen session/set_model failed: ${error instanceof Error ? error.message : String(error)}`);
       await this.callAcp('session/set_config_option', (connection) => connection.setSessionConfigOption({
@@ -1466,7 +1478,7 @@ export class QwenAgent extends BaseAgent {
     }
 
     if (this._model) {
-      await this.forwardModel(this._model, sessionId);
+      await this.forwardModel(this._model, sessionId, { persistDefault: false });
     }
   }
 
