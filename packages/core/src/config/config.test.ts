@@ -938,10 +938,10 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('should warn when includeDirectories paths are skipped', () => {
-    const nonExistentDir = path.join(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'config-skip-test-')),
-      'nonexistent',
+    const tmpDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'config-skip-test-'),
     );
+    const nonExistentDir = path.join(tmpDir, 'nonexistent');
 
     // Override existsSync to return false only for the non-existent dir,
     // while keeping the default true for everything else.
@@ -962,16 +962,22 @@ describe('Server Config (config.ts)', () => {
       includeDirectories: [nonExistentDir],
     };
 
-    new Config(paramsWithInvalidDir);
+    try {
+      new Config(paramsWithInvalidDir);
 
-    expect(mockWarn).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'The following workspace directories were skipped',
-      ),
-    );
-    expect(mockWarn).toHaveBeenCalledWith(
-      expect.stringContaining(nonExistentDir),
-    );
+      expect(mockWarn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'The following workspace directories were skipped',
+        ),
+      );
+      expect(mockWarn).toHaveBeenCalledWith(
+        expect.stringContaining(nonExistentDir),
+      );
+    } finally {
+      // Restore the mock to avoid leaking into subsequent tests.
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('Config constructor should set telemetry to true when provided as true', () => {

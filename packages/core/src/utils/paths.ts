@@ -77,8 +77,13 @@ export function tildeifyPath(path: string): string {
 
 /**
  * Expands tilde (~) and Windows-style %userprofile% to the full home directory path.
+ *
  * @param p - The path to expand.
- * @returns The expanded path.
+ * @returns The expanded path, or the original path if expansion fails.
+ * @note The result is normalized via {@link path.normalize}, which resolves `..`
+ *   segments. If the result is used for file operations (not just display), the
+ *   caller MUST validate the expanded path is still within the expected root
+ *   (e.g. via {@link isSubpath}).
  */
 export function expandHomeDir(p: string): string {
   if (!p) {
@@ -103,7 +108,18 @@ export function expandHomeDir(p: string): string {
   } else if (p === '~' || p.startsWith('~/')) {
     expandedPath = homeDir + p.substring(1);
   }
-  return path.normalize(expandedPath);
+  const normalized = path.normalize(expandedPath);
+
+  // Guard against path traversal via .. segments (e.g. ~/../../etc/passwd).
+  // If normalization escaped the home directory, return the unexpanded input.
+  if (
+    (p === '~' || p.startsWith('~/') || p.toLowerCase().startsWith('%userprofile%')) &&
+    !isSubpath(homeDir, normalized)
+  ) {
+    return p;
+  }
+
+  return normalized;
 }
 
 /**

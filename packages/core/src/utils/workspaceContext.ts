@@ -22,7 +22,7 @@ export type Unsubscribe = () => void;
 export class WorkspaceContext {
   private directories = new Set<string>();
   private initialDirectories: Set<string>;
-  private readonly skippedDirectories = new Set<string>();
+  private readonly skippedDirectories = new Map<string, string>();
   private onDirectoriesChangedListeners = new Set<() => void>();
 
   /**
@@ -57,7 +57,11 @@ export class WorkspaceContext {
    * did not exist or were not readable.
    */
   getSkippedDirectories(): readonly string[] {
-    return Array.from(this.skippedDirectories);
+    return Array.from(this.skippedDirectories.keys());
+  }
+
+  getSkippedDirectoryReason(directory: string): string | undefined {
+    return this.skippedDirectories.get(directory);
   }
 
   /**
@@ -100,10 +104,8 @@ export class WorkspaceContext {
       this.skippedDirectories.delete(directory);
       this.notifyDirectoriesChanged();
     } catch (err) {
-      this.skippedDirectories.add(directory);
-      debugLogger.warn(
-        `Skipping unreadable directory: ${directory} (${err instanceof Error ? err.message : String(err)})`,
-      );
+      const reason = err instanceof Error ? err.message : String(err);
+      this.skippedDirectories.set(directory, reason);
     }
   }
 

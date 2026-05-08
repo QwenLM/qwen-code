@@ -992,4 +992,10 @@ describe('expandHomeDir', () => {
       homedirSpy.mockRestore();
     }
   });
+
+  it('should not allow path traversal via .. segments', () => {
+    // ~/../../etc/passwd should not resolve to /etc/passwd
+    const result = expandHomeDir('~/../../etc/passwd');
+    expect(result).toBe('~/../../etc/passwd');
+  });
 });

@@ -737,9 +737,23 @@ export class Config {
       (d) => path.resolve(d) !== this.targetDir,
     );
     if (skippedDirs.length > 0) {
-      this.debugLogger.warn(
-        `The following workspace directories were skipped because they do not exist or are not readable:\n${skippedDirs.map((d) => `  - ${expandHomeDir(d)}`).join('\n')}`,
-      );
+      const lines = skippedDirs.map((d) => {
+        const reason = this.workspaceContext.getSkippedDirectoryReason(d);
+        let cause: string;
+        if (reason?.startsWith('Directory does not exist')) {
+          cause = 'does not exist';
+        } else if (reason?.startsWith('Path is not a directory')) {
+          cause = 'is not a directory';
+        } else {
+          cause = 'is not readable';
+        }
+        return `  - ${expandHomeDir(d)} (${cause})`;
+      });
+      const msg =
+        'The following workspace directories were skipped:\n' +
+        lines.join('\n');
+      this.debugLogger.warn(msg);
+      process.stderr.write(`Warning: ${msg}\n`);
     }
     this.debugMode = params.debugMode;
 

@@ -589,4 +589,12 @@ describe('WorkspaceContext getSkippedDirectories', () => {
     expect(skipped).toContain(invalid2);
     expect(skipped).not.toContain(validDir);
   });
+
+  it('should provide the reason a directory was skipped', () => {
+    const nonExistent = path.join(tempDir, 'non-existent');
+    const ctx = new WorkspaceContext(cwd, [nonExistent]);
+    const reason = ctx.getSkippedDirectoryReason(nonExistent);
+    expect(reason).toBeDefined();
+    expect(reason).toContain('Directory does not exist');
+  });
 });
