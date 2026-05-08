@@ -2782,6 +2782,25 @@ export class Config {
       }
     };
 
+    // The synthetic structured_output tool is the terminal contract for
+    // --json-schema runs. It must be registered in BOTH the bare-mode
+    // branch and the regular branch — without it the model can't finish
+    // a structured run, so omitting either branch causes
+    // `qwen [--bare] --json-schema X -p "..."` to loop until
+    // maxSessionTurns and exit via the "plain text" failure path. Hoisted
+    // out of the two branches so the dynamic-import factory shape stays
+    // in sync between them.
+    const registerStructuredOutputIfRequested = async (): Promise<void> => {
+      if (!this.jsonSchema) return;
+      const schema = this.jsonSchema;
+      await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
+        const { SyntheticOutputTool } = await import(
+          '../tools/syntheticOutput.js'
+        );
+        return new SyntheticOutputTool(schema);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -2795,21 +2814,7 @@ export class Config {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
       });
-      // The synthetic structured_output tool is the terminal contract for
-      // --json-schema runs. Without it the model can't finish a structured
-      // run, so it must be registered in bare mode too — otherwise
-      // `qwen --bare --json-schema X -p "..."` would loop until
-      // maxSessionTurns and exit with the "plain text" failure path,
-      // burning tokens for no reason.
-      if (this.jsonSchema) {
-        const schema = this.jsonSchema;
-        await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
-          const { SyntheticOutputTool } = await import(
-            '../tools/syntheticOutput.js'
-          );
-          return new SyntheticOutputTool(schema);
-        });
-      }
+      await registerStructuredOutputIfRequested();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );
@@ -2923,15 +2928,9 @@ export class Config {
     // Register synthetic structured-output tool when --json-schema is set.
     // The tool's parameter schema IS the user-supplied JSON Schema, so the
     // model's arguments must match it (Ajv-validated in BaseDeclarativeTool).
-    if (this.jsonSchema) {
-      const schema = this.jsonSchema;
-      await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
-        const { SyntheticOutputTool } = await import(
-          '../tools/syntheticOutput.js'
-        );
-        return new SyntheticOutputTool(schema);
-      });
-    }
+    // Same helper as the bare-mode branch above to keep the registration
+    // shape and permission gating in sync between the two paths.
+    await registerStructuredOutputIfRequested();
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {

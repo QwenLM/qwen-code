@@ -3193,5 +3193,149 @@ describe('runNonInteractive', () => {
       expect(result.is_error).toBe(false);
       expect(result.structured_result).toEqual(drainStructuredArgs);
     });
+
+    it('holds back for in-flight background tasks before emitting structured success', async () => {
+      // The structured-success terminal block has a bounded holdback:
+      // `while (Date.now() < holdbackDeadline && registry.hasUnfinalizedTasks())`
+      // sleeping 50 ms between polls. All other success-path tests pin
+      // `hasUnfinalizedTasks: () => false`, so the loop body never
+      // enters and the cap, polling, and ordering of flush + finalize
+      // are unverified. This test flips `hasUnfinalizedTasks` true →
+      // false mid-run so the body executes at least once, and asserts
+      // (a) the structured success result still emits, (b) the
+      // suppressed in-flight task's `task_notification` is flushed
+      // BEFORE the result event in the SDK output stream.
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      setupMetricsMock();
+
+      const abortAllSpy = vi.fn();
+      // Returns true once, then false. After abortAll() is called the
+      // holdback's `while` body executes one iteration of `setTimeout(50)`
+      // and re-checks; on the second call we report tasks finalized.
+      let unfinalizedCalls = 0;
+      const hasUnfinalizedTasksSpy = vi.fn(() => {
+        unfinalizedCalls++;
+        return unfinalizedCalls === 1;
+      });
+      // Capture the notification callback so we can fire a
+      // `task_notification` from "the agent's natural handler" during
+      // the holdback. Without flushing localQueue before emitResult,
+      // this notification would be silently dropped.
+      let notificationCallback:
+        | ((
+            displayText: string,
+            modelText: string,
+            meta: {
+              agentId: string;
+              toolUseId?: string;
+              status: string;
+              stats?: unknown;
+            },
+          ) => void)
+        | null = null;
+      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
+        setNotificationCallback: vi.fn((cb) => {
+          notificationCallback = cb;
+        }),
+        setRegisterCallback: vi.fn(),
+        getAll: vi.fn().mockReturnValue([]),
+        hasUnfinalizedTasks: hasUnfinalizedTasksSpy,
+        abortAll: vi.fn(() => {
+          abortAllSpy();
+          // The natural cancel-handler enqueues the terminal
+          // task_notification synchronously when abortAll is invoked.
+          // Fire the captured callback immediately so it lands in
+          // localQueue before the holdback flush runs.
+          notificationCallback?.(
+            'Agent cancelled: bg-task-1',
+            'Agent bg-task-1 was cancelled',
+            {
+              agentId: 'bg-task-1',
+              toolUseId: 'tool-bg-1',
+              status: 'cancelled' as never,
+            },
+          );
+        }),
+      });
+
+      const writes: string[] = [];
+      processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+        writes.push(
+          typeof chunk === 'string'
+            ? chunk
+            : Buffer.from(chunk).toString('utf8'),
+        );
+        return true;
+      });
+
+      const structuredArgs = { summary: 'done' };
+      const structuredCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured',
+          name: 'structured_output',
+          args: structuredArgs,
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-holdback',
+        },
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'ok' }],
+      });
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([structuredCall]),
+      );
+
+      const startedAt = Date.now();
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output',
+        'prompt-id-holdback',
+      );
+      const elapsed = Date.now() - startedAt;
+
+      expect(exitCode).toBe(0);
+      expect(abortAllSpy).toHaveBeenCalledTimes(1);
+      // The holdback while-body must have executed at least one poll.
+      expect(unfinalizedCalls).toBeGreaterThanOrEqual(2);
+      // …but it must NOT exceed the 500 ms cap by a meaningful margin.
+      // 1000 ms is generous (test env CI noise) while still proving the
+      // cap exists; without the cap, an infinitely-true
+      // hasUnfinalizedTasks would never return.
+      expect(elapsed).toBeLessThan(1000);
+
+      // Find the result event and the simulated cancellation
+      // task_notification. The notification must appear BEFORE the
+      // result event in the JSONL output, proving
+      // flushQueuedNotificationsToSdk(localQueue) ran before emitResult.
+      const lines = writes
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0);
+      const events = lines.map((line) => JSON.parse(line));
+      const resultIdx = events.findIndex(
+        (m: unknown) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { type?: string }).type === 'result',
+      );
+      const taskNotificationIdx = events.findIndex(
+        (m: unknown) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { type?: string; subtype?: string }).type === 'system' &&
+          (m as { subtype?: string }).subtype === 'task_notification',
+      );
+      expect(resultIdx).toBeGreaterThan(-1);
+      expect(taskNotificationIdx).toBeGreaterThan(-1);
+      expect(taskNotificationIdx).toBeLessThan(resultIdx);
+    });
   });
 });

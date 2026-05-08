@@ -326,12 +326,38 @@ export function resolveJsonSchemaArg(
     throw new FatalConfigError('--json-schema cannot be empty.');
   }
 
+  // Cap on `@path` schema files. Larger than any realistic JSON Schema
+  // (a deeply-typed OpenAPI schema is in the tens of KiB at most), and
+  // bounded enough that an attacker who can influence the path argument
+  // through a wrapping process can't OOM the run by pointing at a giant
+  // file or a character device that streams forever (`/dev/zero` etc.).
+  const JSON_SCHEMA_FILE_MAX_BYTES = 1024 * 1024; // 1 MiB
+
   let payload: string;
+  let payloadSource: 'inline' | 'file' = 'inline';
+  let payloadSourcePath: string | undefined;
   if (trimmed.startsWith('@')) {
     const resolvedPath = resolvePath(trimmed.slice(1));
+    payloadSource = 'file';
+    payloadSourcePath = resolvedPath;
     try {
+      // Stat first so we can refuse non-regular files (directories,
+      // character devices like `/dev/zero`, FIFOs that would block
+      // synchronously) and cap by size before pulling bytes into memory.
+      const stat = fs.statSync(resolvedPath);
+      if (!stat.isFile()) {
+        throw new FatalConfigError(
+          `--json-schema "@${resolvedPath}" must be a regular file.`,
+        );
+      }
+      if (stat.size > JSON_SCHEMA_FILE_MAX_BYTES) {
+        throw new FatalConfigError(
+          `--json-schema "@${resolvedPath}" exceeds ${JSON_SCHEMA_FILE_MAX_BYTES} bytes (got ${stat.size}).`,
+        );
+      }
       payload = fs.readFileSync(resolvedPath, 'utf8');
     } catch (err) {
+      if (err instanceof FatalConfigError) throw err;
       throw new FatalConfigError(
         `--json-schema could not read "${resolvedPath}": ${
           err instanceof Error ? err.message : String(err)
@@ -346,6 +372,16 @@ export function resolveJsonSchemaArg(
   try {
     parsed = JSON.parse(payload);
   } catch (err) {
+    // For inline JSON the user IS the source — echoing the SyntaxError
+    // (which on Node ≥18 embeds a 10-char input snippet) is fine. For
+    // @path, the error message would leak a prefix of the file's bytes
+    // through stderr to whatever wrapping process surfaces it; emit a
+    // generic message instead.
+    if (payloadSource === 'file') {
+      throw new FatalConfigError(
+        `--json-schema content of "${payloadSourcePath}" is not valid JSON.`,
+      );
+    }
     throw new FatalConfigError(
       `--json-schema is not valid JSON: ${
         err instanceof Error ? err.message : String(err)

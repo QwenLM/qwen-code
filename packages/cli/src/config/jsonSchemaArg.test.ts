@@ -58,6 +58,81 @@ describe('resolveJsonSchemaArg', () => {
     ).toThrow(/could not read/);
   });
 
+  it('rejects @path that resolves to a directory', () => {
+    // stat-based "must be a regular file" guard. Without this, a path
+    // pointing at a directory would surface a less-specific Node EISDIR
+    // error from the readFileSync call (or worse, on systems where
+    // readFileSync on a directory does not error).
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-schema-dir-'));
+    try {
+      expect(() => resolveJsonSchemaArg(`@${tmp}`)).toThrow(
+        /must be a regular file/,
+      );
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects @path schema files larger than 1 MiB', () => {
+    // Defence against a wrapper that forwards a user-supplied path into
+    // `qwen --json-schema "$X"` where X is e.g. `@/dev/zero` or any
+    // pathologically large file. We pre-check size via fs.statSync so the
+    // huge buffer never gets allocated.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-schema-big-'));
+    const file = path.join(tmp, 'huge.json');
+    // 1 MiB + 1 byte
+    fs.writeFileSync(file, Buffer.alloc(1024 * 1024 + 1, 0x20));
+    try {
+      expect(() => resolveJsonSchemaArg(`@${file}`)).toThrow(/exceeds/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('does not echo the JSON parse error message for @path source', () => {
+    // The Node ≥18 SyntaxError message for `JSON.parse('hello world…')`
+    // embeds a ~10-char prefix of the input. For inline JSON that's
+    // fine — the user typed it themselves — but for @path it would leak
+    // a prefix of the referenced file through stderr to any wrapper
+    // that surfaces qwen's error output. Sanitise by emitting a generic
+    // "content of <path> is not valid JSON" instead.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-schema-bad-'));
+    const file = path.join(tmp, 'leaky.txt');
+    const secretContent = 'SECRET_TOKEN_PREFIX hello world';
+    fs.writeFileSync(file, secretContent);
+    try {
+      let caught: Error | undefined;
+      try {
+        resolveJsonSchemaArg(`@${file}`);
+      } catch (err) {
+        caught = err as Error;
+      }
+      expect(caught).toBeDefined();
+      expect(caught!.message).toMatch(/is not valid JSON/);
+      // The file's contents must NOT appear in the error message.
+      expect(caught!.message).not.toContain('SECRET_TOKEN_PREFIX');
+      expect(caught!.message).not.toContain('hello worl');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('still echoes JSON parse error detail for inline (non-@path) source', () => {
+    // Inline JSON is the user's own input — keeping the SyntaxError detail
+    // is helpful for debugging typos, and there's no third-party file
+    // content to leak.
+    let caught: Error | undefined;
+    try {
+      resolveJsonSchemaArg('{"foo":}');
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/--json-schema is not valid JSON/);
+    // Should mention the JSON parser detail (echoes SyntaxError text).
+    expect(caught!.message).not.toBe('--json-schema is not valid JSON: ');
+  });
+
   it('throws when schema is syntactically JSON but invalid as a JSON Schema', () => {
     // The root-type check fires first for an integer `type`; drop type
     // entirely to exercise the Ajv compile-path rejection instead.

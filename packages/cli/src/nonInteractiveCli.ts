@@ -56,6 +56,30 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
  * slow agent can't block exit indefinitely.
  */
 const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
+
+/**
+ * Body of the synthesised `tool_result` for a `tool_use` block that was
+ * suppressed because a sibling `structured_output` call took precedence
+ * as the terminal output for the same turn.
+ *
+ * Two variants — the success-path body drops the trailing "Re-issue this
+ * call in a separate turn if needed." sentence because the session
+ * terminates immediately after synthesis (no model or SDK consumer can
+ * act on the advice). The retry-path body keeps it: when the structured
+ * call failed validation, the model is about to receive these parts in
+ * the next turn and may legitimately re-issue the suppressed call.
+ *
+ * Shared between the main-turn and drain-turn synthesis sites so a
+ * future wording change can't desync them.
+ */
+const SUPPRESSED_OUTPUT_SUCCESS =
+  "Skipped: this turn's structured_output contract took precedence as the terminal output.";
+const SUPPRESSED_OUTPUT_RETRY = `${SUPPRESSED_OUTPUT_SUCCESS} Re-issue this call in a separate turn if needed.`;
+function suppressedOutputBody(structuredCaptured: boolean): string {
+  return structuredCaptured
+    ? SUPPRESSED_OUTPUT_SUCCESS
+    : SUPPRESSED_OUTPUT_RETRY;
+}
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -433,6 +457,53 @@ export async function runNonInteractive(
       // first wins, and both paths need to surface the same structured
       // result envelope.
       let structuredSubmission: unknown = undefined;
+
+      // Shared terminal block for the structured-output success
+      // contract. Both the main-turn loop and the drain-turn post-loop
+      // previously reproduced this block verbatim
+      // (`registry.abortAll()` → bounded holdback for in-flight
+      // background-task `task_notification` events → flush localQueue →
+      // finalize one-shot monitors → `adapter.emitResult` → return 0).
+      // `finalizeOneShotMonitors` is idempotent (the
+      // `oneShotMonitorsFinalized` guard makes the second call a
+      // no-op), so unconditional invocation is safe even when the drain
+      // path already finalized monitors before reaching here.
+      const emitStructuredSuccess = async (): Promise<0> => {
+        registry.abortAll();
+        // `abortAll()` marks each task `cancelled` synchronously, but
+        // the matching `task_notification` is emitted later by the
+        // task's natural handler. Hold back briefly (capped at
+        // STRUCTURED_SHUTDOWN_HOLDBACK_MS) so consumers see every
+        // `task_started` paired with its terminal notification, without
+        // blocking exit on a slow agent that the user has already
+        // declared done.
+        const holdbackDeadline = Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
+        while (
+          Date.now() < holdbackDeadline &&
+          registry.hasUnfinalizedTasks()
+        ) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        flushQueuedNotificationsToSdk(localQueue);
+        finalizeOneShotMonitors();
+        const metrics = uiTelemetryService.getMetrics();
+        const usage = computeUsageFromMetrics(metrics);
+        const stats =
+          outputFormat === OutputFormat.JSON
+            ? uiTelemetryService.getMetrics()
+            : undefined;
+        adapter.emitResult({
+          isError: false,
+          durationMs: Date.now() - startTime,
+          apiDurationMs: totalApiDurationMs,
+          numTurns: turnCount,
+          usage,
+          stats,
+          structuredResult: structuredSubmission,
+        });
+        return 0;
+      };
+
       while (true) {
         turnCount++;
         if (
@@ -624,14 +695,9 @@ export async function runNonInteractive(
             (r) => !executedCallIds.has(r.callId),
           );
           if (unexecutedCalls.length > 0) {
-            // The trailing "Re-issue this call in a separate turn if needed"
-            // is advice TO the model on the retry path — drop it on the
-            // success path, where the session terminates immediately after
-            // synthesis and no consumer (model or SDK) will act on it.
-            const skippedOutput =
-              structuredSubmission !== undefined
-                ? "Skipped: this turn's structured_output contract took precedence as the terminal output."
-                : "Skipped: this turn's structured_output contract took precedence as the terminal output. Re-issue this call in a separate turn if needed.";
+            const skippedOutput = suppressedOutputBody(
+              structuredSubmission !== undefined,
+            );
             for (const call of unexecutedCalls) {
               const responseParts: Part[] = [
                 {
@@ -654,50 +720,12 @@ export async function runNonInteractive(
           }
 
           if (structuredSubmission !== undefined) {
-            // Abort any in-flight background agents so they don't race the
-            // terminal emitResult; structured-output mode is a single-shot
-            // contract and the caller expects a deterministic shutdown.
-            registry.abortAll();
-            // `abortAll()` marks each task `cancelled` synchronously, but
-            // the matching `task_notification` is emitted later by the
-            // task's natural handler. Hold back briefly (capped at
-            // STRUCTURED_SHUTDOWN_HOLDBACK_MS) so consumers see every
-            // `task_started` paired with its terminal notification — the
-            // same pairing the regular terminal path guarantees via the
-            // hasUnfinalizedTasks loop below — without blocking exit on
-            // a slow agent that the user has already declared done.
-            const holdbackDeadline =
-              Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
-            while (
-              Date.now() < holdbackDeadline &&
-              registry.hasUnfinalizedTasks()
-            ) {
-              await new Promise((r) => setTimeout(r, 50));
-            }
-            // Match the regular terminal path's holdback: drain queued
-            // task notifications to the SDK and finalise one-shot
-            // monitors before emitResult, so consumers always see a
-            // task_notification paired with every task_started and don't
-            // lose monitor lifecycle events when structured-output mode
-            // exits early.
-            flushQueuedNotificationsToSdk(localQueue);
-            finalizeOneShotMonitors();
-            const metrics = uiTelemetryService.getMetrics();
-            const usage = computeUsageFromMetrics(metrics);
-            const stats =
-              outputFormat === OutputFormat.JSON
-                ? uiTelemetryService.getMetrics()
-                : undefined;
-            adapter.emitResult({
-              isError: false,
-              durationMs: Date.now() - startTime,
-              apiDurationMs: totalApiDurationMs,
-              numTurns: turnCount,
-              usage,
-              stats,
-              structuredResult: structuredSubmission,
-            });
-            return 0;
+            // Single-shot terminal contract; aborts in-flight background
+            // agents, holds back briefly for their terminal
+            // task_notification events to land, then emits the
+            // structured success envelope. Same helper as the drain-turn
+            // post-loop branch — see emitStructuredSuccess above.
+            return emitStructuredSuccess();
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
@@ -875,14 +903,9 @@ export async function runNonInteractive(
                   (r) => !itemExecutedCallIds.has(r.callId),
                 );
                 if (itemUnexecuted.length > 0) {
-                  // Same success/retry split as the main-turn path: the
-                  // "Re-issue" advice has no consumer when the drain
-                  // captured the terminal contract and the run is about
-                  // to exit.
-                  const itemSkippedOutput =
-                    structuredSubmission !== undefined
-                      ? "Skipped: this turn's structured_output contract took precedence as the terminal output."
-                      : "Skipped: this turn's structured_output contract took precedence as the terminal output. Re-issue this call in a separate turn if needed.";
+                  const itemSkippedOutput = suppressedOutputBody(
+                    structuredSubmission !== undefined,
+                  );
                   for (const call of itemUnexecuted) {
                     const responseParts: Part[] = [
                       {
@@ -1055,36 +1078,11 @@ export async function runNonInteractive(
           // A drain-turn structured_output captured the terminal contract
           // — emit the structured success envelope rather than falling
           // through to the "Model produced plain text..." failure path.
+          // Same helper as the main-turn path; recomputes its own
+          // metrics snapshot after the holdback so any task notifications
+          // that landed during shutdown contribute to the totals.
           if (structuredSubmission !== undefined) {
-            registry.abortAll();
-            // Hold back briefly so any in-flight background agent's
-            // terminal `task_notification` can land in the queue, then
-            // flush whatever's left. Without this, items the drain loop
-            // didn't have time to process before structuredSubmission
-            // was set (cron firings, notifications, agent completions
-            // emitted right after registry.abortAll()) would be silently
-            // dropped — leaving stream-json consumers staring at a
-            // `task_started` with no matching `task_notification`. Same
-            // 500ms cap as the main-turn structured success path.
-            const holdbackDeadline =
-              Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
-            while (
-              Date.now() < holdbackDeadline &&
-              registry.hasUnfinalizedTasks()
-            ) {
-              await new Promise((r) => setTimeout(r, 50));
-            }
-            flushQueuedNotificationsToSdk(localQueue);
-            adapter.emitResult({
-              isError: false,
-              durationMs: Date.now() - startTime,
-              apiDurationMs: totalApiDurationMs,
-              numTurns: turnCount,
-              usage,
-              stats,
-              structuredResult: structuredSubmission,
-            });
-            return 0;
+            return emitStructuredSuccess();
           }
 
           // --json-schema contract: the model MUST terminate via the

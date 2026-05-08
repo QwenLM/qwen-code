@@ -307,6 +307,70 @@ describe('parseArguments', () => {
     mockExit.mockRestore();
   });
 
+  it('rejects --json-schema combined with --prompt-interactive (-i)', async () => {
+    // The interactive flow doesn't honour the synthetic-tool terminal
+    // contract — `structured_output` would just print "accepted" and
+    // leave the chat alive. The yargs check must reject this at parse
+    // time so users get an actionable message instead of a silently
+    // misbehaving run.
+    process.argv = [
+      'node',
+      'script.js',
+      '-i',
+      'do work then submit',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'structured output only terminates the non-interactive flow',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --input-format stream-json', async () => {
+    // The "first valid structured_output call ends the session"
+    // contract is incompatible with the long-lived stream-json input
+    // protocol. Also load-bearing: gemini.tsx's
+    // `process.exit(process.exitCode ?? 0)` plumbing in the stream-json
+    // branch explicitly relies on this rejection holding. Pair with
+    // --output-format stream-json because input/output formats must
+    // match (a separate yargs check fires first otherwise).
+    process.argv = [
+      'node',
+      'script.js',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('first structured_output call ends the session'),
+    );
+
+    mockExit.mockRestore();
+  });
+
   it('should parse --system-prompt', async () => {
     process.argv = [
       'node',
