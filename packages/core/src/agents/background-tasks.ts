@@ -105,13 +105,6 @@ export interface BackgroundActivity {
 }
 
 /**
- * @deprecated Use `boolean` directly via `AgentTask.isBackgrounded`. Kept as
- * a one-release shim for external SDK consumers that imported the string
- * union; will be removed in the release after PR 2 lands.
- */
-export type BackgroundTaskFlavor = 'foreground' | 'background';
-
-/**
  * Agent kind of `TaskState`. Tracks one running subagent — either a
  * synchronous foreground run (`isBackgrounded: false`, awaited by the
  * parent's tool-call) or an async background run (`isBackgrounded: true`,
