@@ -29,6 +29,8 @@ import {
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
+import { StructuredToolError } from '../tools/priorReadEnforcement.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
 import {
@@ -49,6 +51,9 @@ import { type NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
 import { WriteFileTool } from '../tools/write-file.js';
+import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
+import type { ShellToolParams } from '../tools/shell.js';
+import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
@@ -197,6 +202,67 @@ class AbortDuringConfirmationTool extends BaseDeclarativeTool<
       this.abortError,
       params,
     );
+  }
+}
+
+/**
+ * Test fixture: a tool whose getConfirmationDetails always throws a
+ * StructuredToolError carrying a configurable ToolErrorType. Used to
+ * pin the scheduler's behaviour of propagating error.errorType
+ * instead of collapsing every confirmation-time throw into
+ * UNHANDLED_EXCEPTION.
+ */
+class StructuredErrorOnConfirmationInvocation extends BaseToolInvocation<
+  Record<string, unknown>,
+  ToolResult
+> {
+  constructor(
+    private readonly errorType: ToolErrorType,
+    params: Record<string, unknown>,
+  ) {
+    super(params);
+  }
+
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  override async getConfirmationDetails(
+    _signal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    throw new StructuredToolError(
+      'enforcement-rejected-during-confirmation',
+      this.errorType,
+    );
+  }
+
+  async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
+    throw new Error('execute should not run when confirmation rejects');
+  }
+
+  getDescription(): string {
+    return 'Structured error on confirmation';
+  }
+}
+
+class StructuredErrorOnConfirmationTool extends BaseDeclarativeTool<
+  Record<string, unknown>,
+  ToolResult
+> {
+  constructor(private readonly errorType: ToolErrorType) {
+    super(
+      'structuredErrorOnConfirmationTool',
+      'Structured Error On Confirmation Tool',
+      'A tool that throws StructuredToolError from getConfirmationDetails.',
+      Kind.Other,
+      { type: 'object', properties: {} },
+    );
+  }
+
+  protected createInvocation(
+    params: Record<string, unknown>,
+  ): ToolInvocation<Record<string, unknown>, ToolResult> {
+    return new StructuredErrorOnConfirmationInvocation(this.errorType, params);
   }
 }
 
@@ -395,6 +461,98 @@ describe('CoreToolScheduler', () => {
       (call[0] as ToolCall[]).map((toolCall) => toolCall.status),
     );
     expect(statuses).not.toContain('error');
+  });
+
+  it('surfaces error.errorType from a confirmation throw instead of UNHANDLED_EXCEPTION', async () => {
+    // Without the explicitErrorType extraction in the scheduler's
+    // catch block, every getConfirmationDetails throw (including
+    // structured prior-read enforcement rejections) would collapse
+    // into UNHANDLED_EXCEPTION — losing the new
+    // EDIT_REQUIRES_PRIOR_READ / FILE_CHANGED_SINCE_READ /
+    // PRIOR_READ_VERIFICATION_FAILED / EDIT_NO_OCCURRENCE_FOUND /
+    // ... contracts that StructuredToolError exists to carry. Pin
+    // the propagation here.
+    const declarativeTool = new StructuredErrorOnConfirmationTool(
+      ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+    );
+
+    const mockToolRegistry = {
+      getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => declarativeTool,
+      getToolByDisplayName: () => declarativeTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'structured-1',
+      name: 'structuredErrorOnConfirmationTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-id-structured',
+    };
+
+    await scheduler.schedule([request], new AbortController().signal);
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+    const errored = completedCalls[0] as ToolCall & {
+      response: { errorType?: ToolErrorType };
+    };
+    expect(errored.response.errorType).toBe(
+      ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+    );
+    expect(errored.response.errorType).not.toBe(
+      ToolErrorType.UNHANDLED_EXCEPTION,
+    );
   });
 
   describe('getToolSuggestion', () => {
@@ -5222,5 +5380,131 @@ describe('CoreToolScheduler activation wiring', () => {
     );
 
     expect(matchAndActivateByPaths).not.toHaveBeenCalled();
+  });
+});
+
+describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => {
+  it('stashes promoteAbortController on the executing tool call when shell.ts fires the callback', async () => {
+    // Pin the scheduler-side wiring for the promote-AbortController
+    // callback. PR-3's Ctrl+B keybind will look up the
+    // currently-executing shell tool call by callId and abort
+    // `tc.promoteAbortController`; if the scheduler stops populating
+    // that field, the keybind silently breaks. Direct
+    // ShellToolInvocation tests can't see this — they don't go
+    // through the scheduler.
+    let exposedAc: AbortController | undefined;
+    class TestShellInvocation extends ShellToolInvocation {
+      override async execute(
+        _signal: AbortSignal,
+        _updateOutput?: (output: ToolResultDisplay) => void,
+        _shellExecutionConfig?: ShellExecutionConfig,
+        _setPidCallback?: (pid: number) => void,
+        setPromoteAbortControllerCallback?: (ac: AbortController) => void,
+      ): Promise<ToolResult> {
+        // Mirror the production flow: foreground shell.ts spawns,
+        // calls setPromoteAbortControllerCallback right after spawn,
+        // then waits for the result. We synthesize the callback fire
+        // and immediately complete with a benign success result.
+        const ac = new AbortController();
+        exposedAc = ac;
+        setPromoteAbortControllerCallback?.(ac);
+        return { llmContent: 'ok', returnDisplay: 'ok' };
+      }
+    }
+
+    class TestShellTool extends ShellTool {
+      protected override createInvocation(params: ShellToolParams) {
+        // Cast through unknown — the test invocation extends the real
+        // ShellToolInvocation prototype so the scheduler's `instanceof
+        // ShellToolInvocation` check still routes the call through
+        // the shell-tool-specific branch (which is the branch that
+        // wires setPromoteAbortControllerCallback).
+        return new TestShellInvocation(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (this as any).config,
+          params,
+        ) as unknown as ToolInvocation<ShellToolParams, ToolResult>;
+      }
+    }
+
+    const tool = new TestShellTool({} as Config);
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getToolRegistry: () => mockToolRegistry,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 80,
+        terminalHeight: 24,
+      }),
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'shell-1',
+          name: 'run_shell_command',
+          args: { command: 'echo hi' },
+          isClientInitiated: true,
+          prompt_id: 'p-shell',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    // Find a tool-calls-update emitted while the call was 'executing'
+    // that carries the promoteAbortController. The exact ordering of
+    // updates depends on the scheduler's internal flow, but at SOME
+    // point during the executing window the field must be populated —
+    // otherwise PR-3's Ctrl+B keybind has nothing to abort.
+    const updateBatches = onToolCallsUpdate.mock.calls;
+    const sawPromoteAcWhileExecuting = updateBatches.some((batch) => {
+      const tcs = batch[0] as ToolCall[];
+      return tcs.some(
+        (tc) =>
+          tc.request.callId === 'shell-1' &&
+          tc.status === 'executing' &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (tc as any).promoteAbortController === exposedAc,
+      );
+    });
+    expect(sawPromoteAcWhileExecuting).toBe(true);
   });
 });

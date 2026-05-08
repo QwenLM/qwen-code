@@ -117,12 +117,12 @@ Extract the list of changed files from the diff output. For local uncommitted re
 
    Tools currently covered:
 
-   | Language | Tools |
-   |---|---|
-   | TypeScript / JavaScript | `tsc --noEmit --incremental` (typecheck), `eslint --format=json` (linter, changed files only) |
-   | Python | `ruff check --output-format=json` (linter, changed files only) |
-   | Rust | `cargo clippy --message-format=json` (typecheck — clippy includes compile checks; Agent 7 can skip `cargo build`) |
-   | Go | `go vet ./...` (typecheck — vet includes compile checks; Agent 7 can skip `go build`), `golangci-lint run --out-format=json ./...` (linter) |
+   | Language                | Tools                                                                                                                                       |
+   | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+   | TypeScript / JavaScript | `tsc --noEmit --incremental` (typecheck), `eslint --format=json` (linter, changed files only)                                               |
+   | Python                  | `ruff check --output-format=json` (linter, changed files only)                                                                              |
+   | Rust                    | `cargo clippy --message-format=json` (typecheck — clippy includes compile checks; Agent 7 can skip `cargo build`)                           |
+   | Go                      | `go vet ./...` (typecheck — vet includes compile checks; Agent 7 can skip `go build`), `golangci-lint run --out-format=json ./...` (linter) |
 
    Read the output JSON. `findings[]` entries are already pre-confirmed (Source: `[typecheck]` for tsc / cargo-clippy / go-vet, `[linter]` for eslint / ruff / golangci-lint, with `severity` mapped to Critical / Nice to have); pass them straight through to Step 5. `toolsRun[]` records exit codes / durations / timeout flags; `toolsSkipped[]` records why a tool didn't run (no config, missing runtime, etc.) — include the skipped tool names in the Step 7 summary.
 

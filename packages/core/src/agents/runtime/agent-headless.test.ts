@@ -280,6 +280,7 @@ describe('subagent.ts', () => {
         () =>
           ({
             sendMessageStream: mockSendMessageStream,
+            setLastPromptTokenCount: vi.fn(),
           }) as unknown as GeminiChat,
       );
 
@@ -958,6 +959,7 @@ describe('subagent.ts', () => {
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
+              setLastPromptTokenCount: vi.fn(),
             }) as unknown as GeminiChat,
         );
 
@@ -997,6 +999,7 @@ describe('subagent.ts', () => {
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
+              setLastPromptTokenCount: vi.fn(),
             }) as unknown as GeminiChat,
         );
 
@@ -1061,6 +1064,7 @@ describe('subagent.ts', () => {
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
+              setLastPromptTokenCount: vi.fn(),
             }) as unknown as GeminiChat,
         );
 

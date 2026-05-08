@@ -10,9 +10,9 @@ Use `modelProviders` to declare curated model lists per auth type that the `/mod
 >
 > Only the `/model` command exposes non-default auth types. Anthropic, Gemini, etc., must be defined via `modelProviders`. The `/auth` command lists Qwen OAuth, Alibaba Cloud Coding Plan, and API Key as the built-in authentication options.
 
-> [!warning]
+> [!note]
 >
-> **Duplicate model IDs within the same authType:** Defining multiple models with the same `id` under a single `authType` (e.g., two entries with `"id": "gpt-4o"` in `openai`) is currently not supported. If duplicates exist, **the first occurrence wins** and subsequent duplicates are skipped with a warning. Note that the `id` field is used both as the configuration identifier and as the actual model name sent to the API, so using unique IDs (e.g., `gpt-4o-creative`, `gpt-4o-balanced`) is not a viable workaround. This is a known limitation that we plan to address in a future release.
+> **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
 
 ## Configuration Examples by Auth Type
 
@@ -416,6 +416,13 @@ The configuration resolution follows a strict layering model with one crucial ru
    - All fields defined in `modelProviders[].generationConfig` use the provider's values
    - All fields **not defined** by the provider are set to `undefined` (not inherited from settings)
    - This ensures provider configurations act as a complete, self-contained "sealed package"
+
+   If a model is listed in `modelProviders`, put all model-specific
+   generation settings for that model in the matching provider entry. Top-level
+   `model.generationConfig` values, including `contextWindowSize`,
+   `modalities`, `customHeaders`, and `extra_body`, are ignored for provider
+   models. Configure those fields under
+   `modelProviders[authType][].generationConfig` for them to apply.
 
 2. **When NO modelProvider model is selected** (e.g., using `--model` with a raw model ID, or using CLI/env/settings directly):
    - The resolution falls through to lower layers

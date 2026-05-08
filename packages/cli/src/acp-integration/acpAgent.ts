@@ -408,10 +408,13 @@ class QwenAgent implements Agent {
         break;
       }
       case 'model': {
-        await this.unstable_setSessionModel({
-          sessionId,
-          modelId: value as string,
-        });
+        await session.setModel(
+          {
+            sessionId,
+            modelId: value as string,
+          },
+          { persistDefault: false },
+        );
         break;
       }
       default:

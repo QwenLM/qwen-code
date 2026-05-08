@@ -123,7 +123,9 @@ async function runLoadRules(args: LoadRulesArgs): Promise<void> {
   writeFileSync(out, combined, 'utf8');
 
   if (loaded.length === 0) {
-    writeStdoutLine(`No review rules found on ${baseRef}; wrote empty file to ${out}`);
+    writeStdoutLine(
+      `No review rules found on ${baseRef}; wrote empty file to ${out}`,
+    );
   } else {
     writeStdoutLine(
       `Loaded ${loaded.length} rule source(s) from ${baseRef} → ${out}: ${loaded.join(', ')}`,
@@ -134,7 +136,7 @@ async function runLoadRules(args: LoadRulesArgs): Promise<void> {
 export const loadRulesCommand: CommandModule = {
   command: 'load-rules <base_ref>',
   describe:
-    "Read project review rules from the base branch (.qwen/review-rules.md, .github/copilot-instructions.md, AGENTS.md, QWEN.md) and write a combined Markdown file",
+    'Read project review rules from the base branch (.qwen/review-rules.md, .github/copilot-instructions.md, AGENTS.md, QWEN.md) and write a combined Markdown file',
   builder: (yargs) =>
     yargs
       .positional('base_ref', {
@@ -146,7 +148,8 @@ export const loadRulesCommand: CommandModule = {
       .option('out', {
         type: 'string',
         demandOption: true,
-        describe: 'Output Markdown path (will be overwritten — empty if no rules found)',
+        describe:
+          'Output Markdown path (will be overwritten — empty if no rules found)',
       }),
   handler: async (argv) => {
     await runLoadRules(argv as unknown as LoadRulesArgs);

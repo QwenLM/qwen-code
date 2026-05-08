@@ -46,7 +46,10 @@ import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
-import { isBtwCommand } from '../utils/commandUtils.js';
+import {
+  hasSlashCommandPathSeparator,
+  isBtwCommand,
+} from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import {
@@ -75,10 +78,11 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'new',
   'resume',
   'delete',
+  'branch',
   'btw',
 ]);
 
-interface SlashCommandProcessorActions {
+export interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
   openArenaDialog?: (type: Exclude<ArenaDialogType, null>) => void;
   openThemeDialog: () => void;
@@ -92,6 +96,7 @@ interface SlashCommandProcessorActions {
   openApprovalModeDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => void;
+  handleBranch: (name?: string) => Promise<void>;
   openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
@@ -354,6 +359,26 @@ export const useSlashCommandProcessor = (
     };
   }, [config, reloadCommands]);
 
+  // SkillManager already rebuilds its own cache and notifies SkillTool
+  // (which re-runs `setTools()` so `<available_skills>` is fresh). The
+  // slash-command list is a separate consumer: SkillCommandLoader reads
+  // `listSkills()` once during CommandService.create(), so without this
+  // bridge a newly added SKILL.md never produces a `/<skill-name>` entry
+  // until restart. Bumping reloadTrigger re-runs the loader effect below
+  // and CommandService picks up the fresh skill list.
+  useEffect(() => {
+    if (!isConfigInitialized) {
+      return;
+    }
+    const skillManager = config?.getSkillManager();
+    if (!skillManager) {
+      return;
+    }
+    return skillManager.addChangeListener(() => {
+      reloadCommands();
+    });
+  }, [config, isConfigInitialized, reloadCommands]);
+
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
@@ -371,6 +396,10 @@ export const useSlashCommandProcessor = (
           controller.signal,
           disabled.length > 0 ? new Set(disabled) : undefined,
         );
+        // Avoid overwriting newer results from a subsequent effect run
+        if (controller.signal.aborted) {
+          return;
+        }
         // Register model-invocable commands provider so SkillTool can include
         // bundled skills, file commands, and MCP prompts in its description.
         if (config) {
@@ -418,10 +447,7 @@ export const useSlashCommandProcessor = (
             },
           );
         }
-        // Avoid overwriting newer results from a subsequent effect run
-        if (!controller.signal.aborted) {
-          setCommands(commandService.getCommandsForMode('interactive'));
-        }
+        setCommands(commandService.getCommandsForMode('interactive'));
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
       }
@@ -446,6 +472,9 @@ export const useSlashCommandProcessor = (
 
       const trimmed = rawQuery.trim();
       if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
+        return false;
+      }
+      if (trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)) {
         return false;
       }
 
@@ -626,6 +655,15 @@ export const useSlashCommandProcessor = (
                       } else {
                         actions.openResumeDialog(result.matchedSessions);
                       }
+                      return { type: 'handled' };
+                    case 'branch':
+                      // Must be awaited: `/branch` swaps core + UI session
+                      // state asynchronously, and a non-awaited call lets
+                      // this dispatcher return `handled` while the swap is
+                      // still in flight. A fast follow-up prompt could then
+                      // interleave with the swap and be recorded against
+                      // the wrong session.
+                      await actions.handleBranch(result.name);
                       return { type: 'handled' };
                     case 'delete':
                       actions.openDeleteDialog();

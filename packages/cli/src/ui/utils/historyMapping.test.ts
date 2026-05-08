@@ -208,6 +208,27 @@ describe('computeApiTruncationIndex', () => {
       // Slash '/help' (id=3) should not be counted
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(2);
     });
+
+    it('counts path-like slash prompts that were sent to the model', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, '/api/apiFunction/接口的实现'),
+        geminiItem(4),
+        userItem(5, 'world'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('hello'),
+        modelContent('response 1'),
+        userContent('/api/apiFunction/接口的实现'),
+        modelContent('response 2'),
+        userContent('world'),
+        modelContent('response 3'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
   });
 
   describe('single turn', () => {
@@ -231,6 +252,15 @@ describe('isRealUserTurn', () => {
     expect(isRealUserTurn(userItem(1, '/help'))).toBe(false);
     expect(isRealUserTurn(userItem(1, '/rewind'))).toBe(false);
     expect(isRealUserTurn(userItem(1, '/stats'))).toBe(false);
+  });
+
+  it('returns true for path-like slash prompts', () => {
+    expect(isRealUserTurn(userItem(1, '/api/apiFunction/接口的实现'))).toBe(
+      true,
+    );
+    expect(isRealUserTurn(userItem(1, '/Users/name/project 帮我安装'))).toBe(
+      true,
+    );
   });
 
   it('returns false for ? commands', () => {
