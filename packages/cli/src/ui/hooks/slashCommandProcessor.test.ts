@@ -1127,6 +1127,73 @@ describe('useSlashCommandProcessor', () => {
         skillManagerSpy.mockRestore();
       }
     });
+
+    it('should not publish model-invocable commands from an aborted reload', async () => {
+      const staleCommand = createTestCommand({
+        name: 'stale',
+        modelInvocable: true,
+      });
+      const freshCommand = createTestCommand({
+        name: 'fresh',
+        modelInvocable: true,
+      });
+      let resolveStaleLoad!: (commands: SlashCommand[]) => void;
+
+      mockBuiltinLoadCommands
+        .mockImplementationOnce(
+          () =>
+            new Promise<SlashCommand[]>((resolve) => {
+              resolveStaleLoad = resolve;
+            }),
+        )
+        .mockResolvedValueOnce([freshCommand]);
+      mockFileLoadCommands.mockResolvedValue([]);
+      mockMcpLoadCommands.mockResolvedValue([]);
+
+      const { rerender } = renderHook(
+        ({ isConfigInitialized }) =>
+          useSlashCommandProcessor(
+            mockConfig,
+            mockSettings,
+            mockAddItem,
+            mockClearItems,
+            mockLoadHistory,
+            vi.fn(),
+            vi.fn(),
+            false,
+            vi.fn(),
+            { current: true },
+            vi.fn(),
+            createMockActions(),
+            new Map(),
+            isConfigInitialized,
+            null,
+          ),
+        { initialProps: { isConfigInitialized: false } },
+      );
+
+      rerender({ isConfigInitialized: true });
+
+      await waitFor(() =>
+        expect(
+          mockConfig
+            .getModelInvocableCommandsProvider?.()?.()
+            .map((c) => c.name),
+        ).toEqual(['fresh']),
+      );
+
+      await act(async () => {
+        resolveStaleLoad([staleCommand]);
+      });
+
+      await waitFor(() =>
+        expect(
+          mockConfig
+            .getModelInvocableCommandsProvider?.()?.()
+            .map((c) => c.name),
+        ).toEqual(['fresh']),
+      );
+    });
   });
 
   describe('Slash Command Logging', () => {

@@ -394,6 +394,10 @@ export const useSlashCommandProcessor = (
           controller.signal,
           disabled.length > 0 ? new Set(disabled) : undefined,
         );
+        // Avoid overwriting newer results from a subsequent effect run
+        if (controller.signal.aborted) {
+          return;
+        }
         // Register model-invocable commands provider so SkillTool can include
         // bundled skills, file commands, and MCP prompts in its description.
         if (config) {
@@ -441,10 +445,7 @@ export const useSlashCommandProcessor = (
             },
           );
         }
-        // Avoid overwriting newer results from a subsequent effect run
-        if (!controller.signal.aborted) {
-          setCommands(commandService.getCommandsForMode('interactive'));
-        }
+        setCommands(commandService.getCommandsForMode('interactive'));
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
       }
