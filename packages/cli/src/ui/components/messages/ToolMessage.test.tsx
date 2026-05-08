@@ -101,23 +101,10 @@ vi.mock('../../utils/MarkdownDisplay.js', () => ({
     return <Text>MockMarkdown:{text}</Text>;
   },
 }));
-vi.mock('../subagents/index.js', () => ({
-  AgentExecutionDisplay: function MockAgentExecutionDisplay({
-    data,
-  }: {
-    data: { subagentName: string; taskDescription: string };
-  }) {
-    return (
-      <Text>
-        🤖 {data.subagentName} • Task: {data.taskDescription}
-      </Text>
-    );
-  },
-}));
 vi.mock('./ToolConfirmationMessage.js', () => ({
   ToolConfirmationMessage: function MockToolConfirmationMessage() {
-    // Sentinel string lets `isPending && pendingConfirmation` tests
-    // assert the banner renders (instead of being suppressed).
+    // Sentinel string lets the focus-routed approval tests assert
+    // the banner renders (instead of being suppressed).
     return <Text>MockApprovalPrompt</Text>;
   },
 }));
@@ -313,58 +300,24 @@ describe('<ToolMessage />', () => {
     expect(lowEmphasisFrame()).not.toContain('←');
   });
 
-  it('shows subagent execution display for task tool with proper result display', () => {
-    const subagentResultDisplay = {
-      type: 'task_execution' as const,
-      subagentName: 'file-search',
-      taskDescription: 'Search for files matching pattern',
-      taskPrompt: 'Search for files matching pattern',
-      status: 'running' as const,
-    };
-
-    const props: ToolMessageProps = {
-      name: 'task',
-      description: 'Delegate task to subagent',
-      resultDisplay: subagentResultDisplay,
-      status: ToolCallStatus.Executing,
-      contentWidth: 80,
-      callId: 'test-call-id-2',
-      confirmationDetails: undefined,
-      config: mockConfig,
-    };
-
-    const { lastFrame } = renderWithContext(
-      <ToolMessage {...props} />,
-      StreamingState.Responding,
-    );
-
-    const output = lastFrame();
-    expect(output).toContain('🤖'); // Subagent execution display should show
-    expect(output).toContain('file-search'); // Actual subagent name
-    expect(output).toContain('Search for files matching pattern'); // Actual task description
-  });
-
-  describe('subagent live-render gating (isPending)', () => {
-    // The redesign hides the inline AgentExecutionDisplay while a
-    // foreground subagent runs (the pill+dialog handle drill-down).
-    // Only an active, focused approval prompt renders inline.
+  describe('subagent inline rendering (approval-only surface)', () => {
+    // The verbose inline AgentExecutionDisplay frame has been retired in
+    // favour of the always-on LiveAgentPanel (live progress) and
+    // BackgroundTasksDialog (history / detail). ToolMessage's only
+    // remaining inline subagent surface is the focus-routed approval
+    // prompt — both running and committed agent states render nothing
+    // inline now.
     const buildProps = (overrides: {
       data: {
         subagentName: string;
         taskDescription: string;
         taskPrompt: string;
-        status: 'running' | 'completed';
+        status: 'running' | 'completed' | 'failed' | 'cancelled';
         pendingConfirmation?: object;
+        terminateReason?: string;
       };
-      isPending?: boolean;
       isFocused?: boolean;
-      isWaitingForOtherApproval?: boolean;
     }): ToolMessageProps => {
-      // Spread the existing typed defaults so any future required field
-      // on `ToolMessageProps` becomes a compile-time miss instead of
-      // silently defaulting to undefined. Only the agent-specific
-      // `resultDisplay` shape uses a cast — its `pendingConfirmation`
-      // intentionally accepts a loose `object` fixture for these tests.
       const resultDisplay = {
         type: 'task_execution' as const,
         ...overrides.data,
@@ -377,13 +330,11 @@ describe('<ToolMessage />', () => {
         status: ToolCallStatus.Executing,
         callId: 'gated-task-call',
         forceShowResult: true, // mirror ToolGroupMessage's forceShowResult
-        isPending: overrides.isPending,
         isFocused: overrides.isFocused,
-        isWaitingForOtherApproval: overrides.isWaitingForOtherApproval,
       };
     };
 
-    it('isPending && no pendingConfirmation → no inline frame', () => {
+    it('running subagent without confirmation → no inline frame', () => {
       const { lastFrame } = renderWithContext(
         <ToolMessage
           {...buildProps({
@@ -393,19 +344,69 @@ describe('<ToolMessage />', () => {
               taskPrompt: 'Search',
               status: 'running',
             },
-            isPending: true,
           })}
         />,
         StreamingState.Responding,
       );
       const output = lastFrame() ?? '';
-      // The mocked AgentExecutionDisplay tags itself with '🤖' — its
-      // absence proves the inline frame was suppressed.
-      expect(output).not.toContain('🤖');
+      // No approval surface; LiveAgentPanel + dialog handle the run.
+      expect(output).not.toContain('MockApprovalPrompt');
+      expect(output).not.toContain('Approval requested by');
+      expect(output).not.toContain('Queued approval:');
+    });
+
+    it('completed subagent → renders a one-line scrollback summary', () => {
+      // The verbose 15-row inline frame is retired (it caused
+      // scrollback flicker), but the conversation history needs to
+      // keep a permanent record after the panel's 8s window expires
+      // and the dialog closes. A single line preserves the history
+      // without re-introducing the flicker.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'committed-agent',
+              taskDescription: 'Already done',
+              taskPrompt: 'Already done',
+              status: 'completed',
+            },
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      // One-line summary: success glyph + agent name + description.
+      expect(output).toContain('✔');
+      expect(output).toContain('committed-agent');
+      expect(output).toContain('Already done');
+      // No approval prompt — completed subagents don't sit on the
+      // focus lock.
       expect(output).not.toContain('MockApprovalPrompt');
     });
 
-    it('isPending && pendingConfirmation && isFocused → renders banner with agent label', () => {
+    it('failed subagent → renders summary with terminate reason', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'failed-agent',
+              taskDescription: 'Crashed early',
+              taskPrompt: 'Crashed early',
+              status: 'failed',
+              terminateReason: 'Network timeout',
+            },
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('✖');
+      expect(output).toContain('failed-agent');
+      expect(output).toContain('Crashed early');
+      expect(output).toContain('Network timeout');
+    });
+
+    it('pendingConfirmation && isFocused → renders banner with agent label', () => {
       const { lastFrame } = renderWithContext(
         <ToolMessage
           {...buildProps({
@@ -416,23 +417,18 @@ describe('<ToolMessage />', () => {
               status: 'running',
               pendingConfirmation: {} as object,
             },
-            isPending: true,
             isFocused: true,
           })}
         />,
         StreamingState.Responding,
       );
       const output = lastFrame() ?? '';
-      // Banner shows up with the originating agent identified, and the
-      // approval prompt itself renders.
       expect(output).toContain('Approval requested by');
       expect(output).toContain('fg-agent');
       expect(output).toContain('MockApprovalPrompt');
-      // The full agent frame (header / tool-call list) stays suppressed.
-      expect(output).not.toContain('🤖');
     });
 
-    it('isPending && pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {
+    it('pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {
       // Without this marker, a subagent waiting on another subagent's
       // approval would be invisible in the main view — the user would
       // have no inline signal that an approval is queued and would have
@@ -447,7 +443,6 @@ describe('<ToolMessage />', () => {
               status: 'running',
               pendingConfirmation: {} as object,
             },
-            isPending: true,
             isFocused: false,
           })}
         />,
@@ -456,32 +451,8 @@ describe('<ToolMessage />', () => {
       const output = lastFrame() ?? '';
       expect(output).toContain('Queued approval:');
       expect(output).toContain('queued-agent');
-      // The full prompt + frame stay suppressed — only the focus-holder
-      // renders the active prompt above this row.
       expect(output).not.toContain('Approval requested by');
       expect(output).not.toContain('MockApprovalPrompt');
-      expect(output).not.toContain('🤖');
-    });
-
-    it('!isPending → committed render shows full inline frame', () => {
-      const { lastFrame } = renderWithContext(
-        <ToolMessage
-          {...buildProps({
-            data: {
-              subagentName: 'committed-agent',
-              taskDescription: 'Already done',
-              taskPrompt: 'Already done',
-              status: 'completed',
-            },
-            isPending: false,
-          })}
-        />,
-        StreamingState.Idle,
-      );
-      const output = lastFrame() ?? '';
-      // <Static>-rendered scrollback: full frame, no flicker concern.
-      expect(output).toContain('🤖');
-      expect(output).toContain('committed-agent');
     });
   });
 

@@ -48,6 +48,28 @@ vi.mock('../agents/runtime/agent-headless.js', () => ({
   ContextState: class {},
 }));
 
+// Mirrors the positional AgentHeadless.create parameters so tests can
+// destructure by name instead of indexing — adding new parameters can't
+// silently shift assertions onto the wrong slot.
+function destructureAgentHeadlessCall(call: unknown[]) {
+  return {
+    name: call[0] as string,
+    runtimeContext: call[1],
+    promptConfig: call[2],
+    modelConfig: call[3],
+    runConfig: call[4],
+    toolConfig: call[5],
+    eventEmitter: call[6],
+    hooks: call[7],
+    runtimeView: call[8] as
+      | {
+          contentGenerator: unknown;
+          contentGeneratorConfig: { authType?: string; model?: string };
+        }
+      | undefined,
+  };
+}
+
 // Mock createContentGenerator for model override tests
 const mockCreateContentGenerator = vi.hoisted(() => vi.fn());
 vi.mock('../core/contentGenerator.js', async (importOriginal) => {
@@ -72,7 +94,7 @@ describe('SubagentManager', () => {
         { name: 'write_file', displayName: 'Write File' },
         { name: 'grep', displayName: 'Search Files' },
       ]),
-      // `maybeOverrideContentGenerator` now rebuilds the tool registry on
+      // `buildSubagentContextOverride` now rebuilds the tool registry on
       // its override and copies discovered tools from this parent
       // registry. The real implementation iterates `source.tools.values()`,
       // so the stub needs a `tools` Map to avoid a TypeError.
@@ -1446,9 +1468,12 @@ System prompt 3`);
 
         await manager.createAgentHeadless(config, mockConfig);
 
+        // Owner is the runtimeContext passed to createAgentHeadless — assert
+        // the exact instance so a regression that swaps in a different Config
+        // (e.g. the override) gets caught.
         expect(mockCreateContentGenerator).toHaveBeenCalledWith(
           expect.objectContaining({ model: 'custom-model' }),
-          expect.anything(),
+          mockConfig,
         );
       });
 
@@ -1462,7 +1487,7 @@ System prompt 3`);
             model: 'claude-sonnet',
             authType: 'anthropic',
           }),
-          expect.anything(),
+          mockConfig,
         );
       });
 
@@ -1480,16 +1505,23 @@ System prompt 3`);
         expect(mockCreateContentGenerator).not.toHaveBeenCalled();
       });
 
-      it('should pass the overridden Config to AgentHeadless.create', async () => {
+      it('should pass the agent runtimeView to AgentHeadless.create', async () => {
         const config = { ...agentConfig, model: 'custom-model' };
         const fakeGenerator = { generateContentStream: vi.fn() };
         mockCreateContentGenerator.mockResolvedValue(fakeGenerator);
 
         await manager.createAgentHeadless(config, mockConfig);
 
-        const passedConfig = mockAgentHeadlessCreate.mock.calls[0][1];
-        expect(passedConfig.getContentGenerator()).toBe(fakeGenerator);
-        expect(passedConfig.getModel()).toBe('custom-model');
+        const { runtimeContext, runtimeView } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        // Subagents always get an `Object.create(parent)` wrapper for
+        // FileReadCache isolation — distinct instance, prototype === parent.
+        expect(runtimeContext).not.toBe(mockConfig);
+        expect(Object.getPrototypeOf(runtimeContext)).toBe(mockConfig);
+        expect(runtimeView).toBeDefined();
+        expect(runtimeView!.contentGenerator).toBe(fakeGenerator);
+        expect(runtimeView!.contentGeneratorConfig.model).toBe('custom-model');
       });
     });
   });

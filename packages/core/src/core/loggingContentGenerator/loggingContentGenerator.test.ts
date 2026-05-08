@@ -109,6 +109,9 @@ const createResponse = (
   return response;
 };
 
+const MAX_RESPONSE_TEXT_LENGTH = 4096;
+const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
+
 describe('LoggingContentGenerator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -126,7 +129,7 @@ describe('LoggingContentGenerator', () => {
         createResponse(
           'resp-1',
           'model-v2',
-          [{ text: 'ok' }],
+          [{ text: 'ok' }, { text: 'hidden thought', thought: true }],
           {
             promptTokenCount: 3,
             candidatesTokenCount: 5,
@@ -200,6 +203,7 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.model).toBe('model-v2');
     expect(responseEvent.prompt_id).toBe('prompt-1');
     expect(responseEvent.input_token_count).toBe(3);
+    expect(responseEvent.response_text).toBe('ok');
 
     expect(convertGeminiRequestToOpenAISpy).toHaveBeenCalledTimes(1);
     expect(convertGeminiToolsToOpenAISpy).toHaveBeenCalledTimes(1);
@@ -230,6 +234,69 @@ describe('LoggingContentGenerator', () => {
       choices: [],
     });
     expect(openaiError).toBeUndefined();
+  });
+
+  it('truncates long response text in API response telemetry', async () => {
+    const longText = 'x'.repeat(MAX_RESPONSE_TEXT_LENGTH + 100);
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-long', 'test-model', [{ text: longText }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-long');
+
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toHaveLength(MAX_RESPONSE_TEXT_LENGTH);
+    expect(responseEvent.response_text).toBe(
+      `${longText.slice(
+        0,
+        MAX_RESPONSE_TEXT_LENGTH - RESPONSE_TEXT_TRUNCATION_SUFFIX.length,
+      )}${RESPONSE_TEXT_TRUNCATION_SUFFIX}`,
+    );
+  });
+
+  it.each([
+    ['thought-only', [{ text: 'hidden thought', thought: true }]],
+    [
+      'functionCall-only',
+      [{ functionCall: { id: 'call-1', name: 'tool', args: '{}' } }],
+    ],
+  ])('omits response_text for %s API responses', async (_name, parts) => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(createResponse('resp-empty', 'test-model', parts)),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-empty');
+
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toBeUndefined();
   });
 
   it('logs errors with status code and request id, then rethrows', async () => {
@@ -343,6 +410,7 @@ describe('LoggingContentGenerator', () => {
     const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
     expect(responseEvent.response_id).toBe('resp-1');
     expect(responseEvent.input_token_count).toBe(2);
+    expect(responseEvent.response_text).toBe('Hello world');
 
     expect(convertGeminiResponseToOpenAISpy).toHaveBeenCalledTimes(1);
     const [consolidatedResponse] =
@@ -796,6 +864,8 @@ describe('LoggingContentGenerator', () => {
       expect(logApiRequest).not.toHaveBeenCalled();
       // logApiResponse SHOULD be called (for /stats token tracking)
       expect(logApiResponse).toHaveBeenCalled();
+      const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+      expect(responseEvent.response_text).toBeUndefined();
       // OpenAI logger should be constructed, but no interaction should be logged
       expect(OpenAILogger).toHaveBeenCalled();
       const loggerInstance = (
@@ -843,6 +913,8 @@ describe('LoggingContentGenerator', () => {
 
       expect(logApiRequest).not.toHaveBeenCalled();
       expect(logApiResponse).toHaveBeenCalled();
+      const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+      expect(responseEvent.response_text).toBeUndefined();
       expect(OpenAILogger).toHaveBeenCalled();
       const loggerInstance = (
         OpenAILogger as unknown as ReturnType<typeof vi.fn>

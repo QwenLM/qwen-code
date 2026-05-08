@@ -49,6 +49,7 @@ import {
   fileExists as isFilefileExists,
 } from '../utils/fileUtils.js';
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
@@ -425,6 +426,17 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           lineEnding: detectedLineEnding,
         },
       });
+
+      // Track AI contribution for commit attribution.
+      // Pass null only when the file truly did not exist before this write;
+      // an empty string means the file existed but was empty.
+      if (!modified_by_user) {
+        CommitAttributionService.getInstance().recordEdit(
+          file_path,
+          fileExists ? originalContent : null,
+          content,
+        );
+      }
 
       // Mark the cache entry written, capturing the post-write stats
       // so a follow-up Read sees `lastReadAt < lastWriteAt` and falls
