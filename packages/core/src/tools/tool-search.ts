@@ -100,6 +100,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
 
     // Mode 1: exact lookup via `select:Name1,Name2`. Dedupe so the same tool
     // isn't returned multiple times when the model writes the same name twice.
+    // Cap at maxResults — without a cap, `select:a,b,c,...` would return
+    // an unbounded number of full schemas (token bloat). Truncation is
+    // silent + deterministic (first N after dedupe) so the model can
+    // re-issue another ToolSearch for the rest if needed.
     if (query.toLowerCase().startsWith('select:')) {
       const seen = new Set<string>();
       const names: string[] = [];
@@ -110,6 +114,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
         if (seen.has(key)) continue;
         seen.add(key);
         names.push(trimmed);
+        if (names.length >= maxResults) break;
       }
       return this.loadAndReturnSchemas(names);
     }

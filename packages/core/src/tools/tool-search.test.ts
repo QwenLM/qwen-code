@@ -244,6 +244,30 @@ describe('ToolSearchTool', () => {
     expect(matches).toBeGreaterThan(0);
   });
 
+  it('caps select: mode by max_results', async () => {
+    // Without a cap, `select:a,b,c,...` would unbound the result size:
+    // the public schema advertises max_results but only the keyword
+    // path used to honor it. With the cap, repeated/long select lists
+    // get truncated to the first N after dedup so the model can re-issue
+    // another call for the rest if it actually needs them.
+    for (let i = 0; i < 10; i++) {
+      registry.registerTool(
+        new MockTool({ name: `tool_${i}`, shouldDefer: true }),
+      );
+    }
+
+    const tool = new ToolSearchTool(config);
+    const invocation = tool.build({
+      query: 'select:tool_0,tool_1,tool_2,tool_3,tool_4,tool_5,tool_6',
+      max_results: 3,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+
+    const blocks = (String(result.llmContent).match(/<function>/g) ?? [])
+      .length;
+    expect(blocks).toBe(3);
+  });
+
   it('revealed tools show up in subsequent getFunctionDeclarations', async () => {
     registry.registerTool(new MockTool({ name: 'visible' }));
     registry.registerTool(new MockTool({ name: 'hidden', shouldDefer: true }));
