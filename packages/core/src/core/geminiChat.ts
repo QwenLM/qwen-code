@@ -113,6 +113,176 @@ const OUTPUT_RECOVERY_MESSAGE =
   'you were doing. Pick up mid-thought if that is where the cut happened. ' +
   'Break remaining work into smaller pieces.';
 
+const OUTPUT_RECOVERY_TAIL_CHARS = 1200;
+const RECOVERY_OVERLAP_MAX_SCAN_CHARS = 4000;
+const RECOVERY_OVERLAP_MIN_BYTES = 6;
+const RECOVERY_STRUCTURAL_OVERLAP_MIN_BYTES = 4;
+
+function byteLength(text: string): number {
+  return Buffer.byteLength(text, 'utf8');
+}
+
+function isSignificantRecoveryOverlap(overlap: string): boolean {
+  const overlapBytes = byteLength(overlap);
+  const hasMarkdownStructure = /[#|`\n]/.test(overlap);
+  return (
+    overlapBytes >= RECOVERY_OVERLAP_MIN_BYTES ||
+    (hasMarkdownStructure &&
+      overlapBytes >= RECOVERY_STRUCTURAL_OVERLAP_MIN_BYTES)
+  );
+}
+
+function findContainedRecoveryPrefixReplayLength(
+  previousText: string,
+  continuationText: string,
+): number {
+  const previousTail =
+    previousText.length > RECOVERY_OVERLAP_MAX_SCAN_CHARS
+      ? previousText.slice(-RECOVERY_OVERLAP_MAX_SCAN_CHARS)
+      : previousText;
+  const maxPrefix = Math.min(
+    previousTail.length,
+    continuationText.length,
+    RECOVERY_OVERLAP_MAX_SCAN_CHARS,
+  );
+
+  for (let length = maxPrefix; length > 0; length -= 1) {
+    const prefix = continuationText.slice(0, length);
+    if (isSignificantRecoveryOverlap(prefix) && previousTail.includes(prefix)) {
+      return length;
+    }
+  }
+
+  return 0;
+}
+
+function getRecoveryContinuationSuffix(
+  previousText: string,
+  continuationText: string,
+): string {
+  if (previousText.length === 0 || continuationText.length === 0) {
+    return continuationText;
+  }
+
+  if (
+    previousText.endsWith(continuationText) &&
+    isSignificantRecoveryOverlap(continuationText)
+  ) {
+    return '';
+  }
+
+  const maxOverlap = Math.min(
+    previousText.length,
+    continuationText.length,
+    RECOVERY_OVERLAP_MAX_SCAN_CHARS,
+  );
+
+  for (let length = maxOverlap; length > 0; length -= 1) {
+    const overlap = continuationText.slice(0, length);
+    if (
+      isSignificantRecoveryOverlap(overlap) &&
+      previousText.endsWith(overlap)
+    ) {
+      return continuationText.slice(length);
+    }
+  }
+
+  // Providers/models frequently resume a MAX_TOKENS recovery from an anchor
+  // that appears near the tail of the previous response, rather than from the
+  // exact last byte. Drop that replayed leading prefix before coalescing the
+  // recovery model turn into durable history; otherwise later turns inherit
+  // duplicated Markdown tables/prose even if the live UI suppresses them.
+  const containedPrefixLength = findContainedRecoveryPrefixReplayLength(
+    previousText,
+    continuationText,
+  );
+  if (containedPrefixLength > 0) {
+    const replayedPrefix = continuationText.slice(0, containedPrefixLength);
+    let suffix = continuationText.slice(containedPrefixLength);
+    if (
+      suffix.length > 0 &&
+      replayedPrefix.endsWith('\n') &&
+      !previousText.endsWith('\n') &&
+      !suffix.startsWith('\n')
+    ) {
+      suffix = `\n${suffix}`;
+    }
+    return suffix;
+  }
+
+  return continuationText;
+}
+
+function isPlainTextPart(part: Part | undefined): part is Part & {
+  text: string;
+} {
+  return (
+    part !== undefined &&
+    typeof part.text === 'string' &&
+    part.thought !== true &&
+    part.functionCall === undefined &&
+    part.functionResponse === undefined
+  );
+}
+
+function getPlainTextFromParts(parts: Part[] | undefined): string {
+  return (parts ?? [])
+    .filter(isPlainTextPart)
+    .map((part) => part.text)
+    .join('');
+}
+
+function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
+  const previousText =
+    previousModelTurn?.role === 'model'
+      ? getPlainTextFromParts(previousModelTurn.parts)
+      : '';
+  if (previousText.trim().length === 0) {
+    return OUTPUT_RECOVERY_MESSAGE;
+  }
+
+  const tail =
+    previousText.length > OUTPUT_RECOVERY_TAIL_CHARS
+      ? previousText.slice(-OUTPUT_RECOVERY_TAIL_CHARS)
+      : previousText;
+
+  return (
+    `${OUTPUT_RECOVERY_MESSAGE}\n\n` +
+    'The previous assistant response ended with this exact suffix. ' +
+    'Do not repeat any line, table row, code line, or prose that already ' +
+    'appears in it; output only text that comes after this suffix:\n\n' +
+    '<previous_response_suffix>\n' +
+    tail +
+    '\n</previous_response_suffix>'
+  );
+}
+
+function appendRecoveryContinuationParts(
+  previousParts: Part[] | undefined,
+  continuationParts: Part[] | undefined,
+): Part[] {
+  const mergedParts = [...(previousParts ?? [])];
+  const nextParts = [...(continuationParts ?? [])];
+  const previousLastPart = mergedParts[mergedParts.length - 1];
+  const continuationFirstPart = nextParts[0];
+
+  if (
+    isPlainTextPart(previousLastPart) &&
+    isPlainTextPart(continuationFirstPart)
+  ) {
+    const suffix = getRecoveryContinuationSuffix(
+      previousLastPart.text,
+      continuationFirstPart.text,
+    );
+    if (suffix.length > 0) {
+      previousLastPart.text += suffix;
+    }
+    nextParts.shift();
+  }
+
+  return [...mergedParts, ...nextParts];
+}
+
 /**
  * Options for retrying on rate-limit throttling errors returned as stream content.
  * Starts at 60s to match DashScope's per-minute quota window, then backs off
@@ -777,7 +947,9 @@ export class GeminiChat {
             // (pushed by processStreamResponse). Push a recovery user
             // message so the model sees its partial output and continues.
             self.history.push(
-              createUserContent([{ text: OUTPUT_RECOVERY_MESSAGE }]),
+              createUserContent([
+                { text: buildOutputRecoveryMessage(lastEntry) },
+              ]),
             );
             // Signal UI/turn to clear pending (incomplete) tool calls.
             // isContinuation tells the UI to keep the text buffer so the
@@ -1204,10 +1376,10 @@ export class GeminiChat {
         return;
       }
 
-      precedingModel.parts = [
-        ...(precedingModel.parts ?? []),
-        ...(modelContinuation.parts ?? []),
-      ];
+      precedingModel.parts = appendRecoveryContinuationParts(
+        precedingModel.parts,
+        modelContinuation.parts,
+      );
       // Drop the (userRecovery, modelContinuation) pair.
       this.history.splice(len - 2, 2);
     }
