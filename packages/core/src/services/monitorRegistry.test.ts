@@ -192,6 +192,37 @@ describe('MonitorRegistry', () => {
     expect(ownerCallback).not.toHaveBeenCalled();
   });
 
+  it('cancels all running owner monitors even when cancellation prunes entries', () => {
+    for (let i = 0; i < MAX_RETAINED_TERMINAL_MONITORS; i++) {
+      registry.register(createEntry({ monitorId: `old-${i}` }));
+      registry.complete(`old-${i}`, 0);
+      vi.advanceTimersByTime(1);
+    }
+
+    const ownerControllers = [new AbortController(), new AbortController()];
+    registry.register(
+      createEntry({
+        monitorId: 'owned-1',
+        ownerAgentId: 'agent-1',
+        abortController: ownerControllers[0],
+      }),
+    );
+    registry.register(
+      createEntry({
+        monitorId: 'owned-2',
+        ownerAgentId: 'agent-1',
+        abortController: ownerControllers[1],
+      }),
+    );
+
+    registry.cancelRunningForOwner('agent-1', { notify: false });
+
+    expect(ownerControllers.every(({ signal }) => signal.aborted)).toBe(true);
+    expect(registry.get('owned-1')!.status).toBe('cancelled');
+    expect(registry.get('owned-2')!.status).toBe('cancelled');
+    expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_MONITORS);
+  });
+
   it('increments eventCount on each emitEvent', () => {
     registry.register(createEntry());
     registry.emitEvent('mon-1', 'line 1');

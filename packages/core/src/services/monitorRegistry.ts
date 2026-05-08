@@ -304,10 +304,15 @@ export class MonitorRegistry {
     ownerAgentId: string,
     options: MonitorCancelOptions = {},
   ): void {
+    const monitorIds: string[] = [];
     for (const entry of this.monitors.values()) {
       if (entry.ownerAgentId === ownerAgentId && entry.status === 'running') {
-        this.cancel(entry.monitorId, options);
+        monitorIds.push(entry.monitorId);
       }
+    }
+
+    for (const monitorId of monitorIds) {
+      this.cancel(monitorId, options);
     }
   }
 
