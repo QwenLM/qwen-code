@@ -492,7 +492,35 @@ export async function runNonInteractive(
           let structuredSubmission: unknown = undefined;
           let hasStructuredSubmission = false;
 
-          for (const requestInfo of toolCallRequests) {
+          // Pre-scan: when --json-schema is active and the model emitted
+          // structured_output alongside other tools in the same turn,
+          // execute structured_output FIRST so its terminal-flag wins
+          // before sibling tools' side effects (write_file, shell, …)
+          // get a chance to persist. If structured_output succeeds the
+          // siblings receive a synthesized "skipped" tool_result instead
+          // of running. If structured_output fails (validation), the
+          // siblings still run via the normal loop body — same behavior
+          // as a turn that didn't issue structured_output at all.
+          //
+          // Without this, [write_file, structured_output] runs write_file
+          // first (irreversible), THEN structured_output sets the flag,
+          // and the user gets back a "successful" structured result with
+          // unrelated side-effects already on disk.
+          let orderedToolCallRequests = toolCallRequests;
+          if (config.getJsonSchema()) {
+            const structIdx = orderedToolCallRequests.findIndex(
+              (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+            );
+            if (structIdx > 0) {
+              orderedToolCallRequests = [
+                orderedToolCallRequests[structIdx],
+                ...orderedToolCallRequests.slice(0, structIdx),
+                ...orderedToolCallRequests.slice(structIdx + 1),
+              ];
+            }
+          }
+
+          for (const requestInfo of orderedToolCallRequests) {
             const finalRequestInfo = requestInfo;
 
             const inputFormat =
@@ -567,14 +595,14 @@ export async function runNonInteractive(
               modelOverride = toolResponse.modelOverride;
             }
 
-            // Single-shot contract: once structured_output has succeeded
-            // we terminate immediately, so any *remaining* tool calls in
-            // this same model batch must not run (a model that emits
-            // `[structured_output, write_file]` should not see write_file
-            // execute). Tool calls that came BEFORE structured_output in
-            // the batch have already executed; preventing those requires
-            // a pre-scan of toolCallRequests and is tracked as a
-            // follow-up (overlap with #3598).
+            // Single-shot contract: structured_output is terminal.
+            // The pre-scan above hoists it to the front of the batch,
+            // so once it succeeds the remaining (now reordered)
+            // entries are guaranteed to be siblings the model
+            // intended for THIS turn — break and let the terminal
+            // emitResult fire below. Unpaired tool_use entries in
+            // the model's record are harmless because no next API
+            // call happens (the session is over).
             if (hasStructuredSubmission) {
               break;
             }

@@ -169,6 +169,11 @@ export interface CliArgs {
   inputFile?: string | undefined;
 }
 
+/** 4 MiB — well above any real schema, well below an accidental
+ * gigabyte-sized file that would OOM `fs.readFileSync` + `JSON.parse`.
+ */
+const MAX_JSON_SCHEMA_FILE_BYTES = 4 * 1024 * 1024;
+
 /**
  * Resolves the `--json-schema` argument into a parsed JSON Schema object.
  *
@@ -191,8 +196,25 @@ export function resolveJsonSchemaArg(
   if (trimmed.startsWith('@')) {
     const resolvedPath = resolvePath(trimmed.slice(1));
     try {
+      // Cap the read size at 4 MiB. Real-world JSON schemas are well
+      // under this (the spec encourages decomposition via `$ref`); any
+      // multi-MiB file is almost certainly a wrong-path mistake or a
+      // typo'd argument. Without a cap, a multi-GB file (e.g. accidental
+      // `--json-schema @./node_modules/.cache/*.json`) loads into memory
+      // before `JSON.parse` even runs and OOMs the CLI.
+      const stat = fs.statSync(resolvedPath);
+      if (stat.size > MAX_JSON_SCHEMA_FILE_BYTES) {
+        throw new FatalConfigError(
+          `--json-schema file "${resolvedPath}" is ${stat.size} bytes ` +
+            `(>${MAX_JSON_SCHEMA_FILE_BYTES}). Refusing to read; this is ` +
+            'almost certainly a wrong-path argument. Schemas should be ' +
+            'small enough to fit in a few KiB; decompose with `$ref` if ' +
+            'you need a large family of types.',
+        );
+      }
       payload = fs.readFileSync(resolvedPath, 'utf8');
     } catch (err) {
+      if (err instanceof FatalConfigError) throw err;
       throw new FatalConfigError(
         `--json-schema could not read "${resolvedPath}": ${
           err instanceof Error ? err.message : String(err)

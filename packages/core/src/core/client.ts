@@ -442,14 +442,29 @@ export class GeminiClient {
           }
         }
       }
-      // Only surface the deferred list if ToolSearch is actually registered.
-      // It may be filtered out by the permission manager (allow/deny rules),
-      // in which case telling the model to call ToolSearch would be
-      // misleading — we'd just be instructing it to invoke an unknown tool.
-      // Exclude any tools revealed by the resume scan above: their schemas
-      // are already in the declaration list, so advertising them as
-      // "reachable via ToolSearch" would invite redundant lookup calls.
+      // ToolSearch availability gates two things:
+      //   (a) Whether the deferred-tools discovery section appears in the
+      //       prompt (otherwise we'd be telling the model to call a tool
+      //       that isn't registered).
+      //   (b) Whether deferral itself makes sense at all — if the model
+      //       has no way to reveal a deferred tool, the tool is effectively
+      //       hidden + uncallable. Silent disappearance is the worst
+      //       failure mode (user sees no error, just thinks the tool
+      //       doesn't exist), so when ToolSearch is filtered out (e.g. via
+      //       `--exclude-tools tool_search` or a deny rule), reveal every
+      //       deferred tool eagerly so they all land in the declaration
+      //       list. The token-saving rationale of deferral was predicated
+      //       on the discovery surface being available.
       const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
+      if (!toolSearchAvailable && deferredSummary.length > 0) {
+        for (const t of deferredSummary) {
+          toolRegistry.revealDeferredTool(t.name);
+        }
+      }
+      // Exclude any tools revealed by the resume scan (or the no-ToolSearch
+      // eager-reveal above): their schemas are already in the declaration
+      // list, so advertising them as "reachable via ToolSearch" would
+      // invite redundant lookup calls.
       const deferredTools = toolSearchAvailable
         ? deferredSummary.filter(
             (t) => !toolRegistry.isDeferredToolRevealed(t.name),

@@ -310,6 +310,10 @@ export class ToolRegistry {
     for (const tool of this.tools.values()) {
       if (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) {
         this.tools.delete(tool.name);
+        // Drop reveal state too — see `removeMcpToolsByServer`. Without
+        // this a re-discovered tool of the same name would inherit
+        // stale "revealed" state across the disconnect/reconnect.
+        this.revealedDeferred.delete(tool.name);
       }
     }
   }
@@ -322,6 +326,13 @@ export class ToolRegistry {
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
+        // Drop reveal state for the removed tool. Otherwise a server
+        // disconnect → reconnect cycle that re-registers a tool of
+        // the same name would inherit `revealed: true` from the prior
+        // session — `getFunctionDeclarations` would emit it (since it
+        // checks reveal state) before the model has any way to know
+        // the tool exists this session.
+        this.revealedDeferred.delete(name);
       }
     }
   }
@@ -412,6 +423,11 @@ export class ToolRegistry {
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
+        // Drop reveal state too so a re-discovered tool of the same
+        // name doesn't inherit a `revealed: true` from before the
+        // disconnect (would surface in declarations before any
+        // ToolSearch call this session).
+        this.revealedDeferred.delete(name);
       }
     }
 

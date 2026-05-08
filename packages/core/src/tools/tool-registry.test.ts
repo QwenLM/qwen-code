@@ -282,6 +282,31 @@ describe('ToolRegistry', () => {
         { name: 'bravo', description: 'bravo desc' },
       ]);
     });
+
+    it('removeMcpToolsByServer also drops revealedDeferred entries', async () => {
+      // Pin the regression: a server-disconnect-then-reconnect cycle that
+      // re-registers a tool of the same name must NOT inherit
+      // `revealed: true` from before the disconnect — that would leak
+      // into `getFunctionDeclarations` before the model has any way to
+      // know the tool exists this session.
+      const mcpCallable = {} as CallableTool;
+      const tool = new DiscoveredMCPTool(
+        mcpCallable,
+        'slack',
+        'send_message',
+        'send a message',
+        {},
+      );
+      toolRegistry.registerTool(tool);
+      // Use the actual generated tool name (mcp__slack__send_message) — the
+      // reveal-state map is keyed by that, not the server-tool-name alone.
+      const toolName = tool.name;
+      toolRegistry.revealDeferredTool(toolName);
+      expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(true);
+
+      toolRegistry.removeMcpToolsByServer('slack');
+      expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
+    });
   });
 
   describe('getToolsByServer', () => {
