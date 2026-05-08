@@ -367,6 +367,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
+  const previousTerminalWidthRef = useRef(terminalWidth);
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
 
@@ -560,6 +561,13 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const refreshStatic = useCallback(() => {
     stdout.write(ansiEscapes.clearTerminal);
+    remountStaticHistory();
+  }, [remountStaticHistory, stdout]);
+
+  // Targeted repaint for resize events: move cursor to top-left and erase
+  // downward instead of a full clearTerminal, avoiding the full-screen flash.
+  const repaintStaticViewport = useCallback(() => {
+    stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
 
@@ -1746,6 +1754,14 @@ export const AppContainer = (props: AppContainerProps) => {
       );
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
+
+  useEffect(() => {
+    if (previousTerminalWidthRef.current === terminalWidth) {
+      return;
+    }
+    previousTerminalWidthRef.current = terminalWidth;
+    repaintStaticViewport();
+  }, [terminalWidth, repaintStaticViewport]);
 
   useEffect(() => {
     if (ideNeedsRestart) {
