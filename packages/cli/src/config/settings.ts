@@ -450,7 +450,12 @@ export class LoadedSettings {
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    saveSettings(settingsFile);
+    // Write the full originalSettings directly to disk instead of using
+    // the merge-based updateSettingsFilePreservingFormat. The merge approach
+    // only touches keys present in the updates object, so keys that were
+    // removed (e.g., deleted MCP servers) would persist on disk.
+    const content = JSON.stringify(settingsFile.originalSettings, null, 2);
+    writeWithBackupSync(settingsFile.path, content);
   }
 
   /**

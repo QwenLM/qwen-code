@@ -342,24 +342,20 @@ export const directoryCommand: SlashCommand = {
           return;
         }
 
-        const workspaceContext = config.getWorkspaceContext();
-
-        if (
-          workspaceContext.isInitialDirectory?.(directory) ??
-          workspaceContext.getInitialDirectories().includes(directory)
-        ) {
+        if (config.isRestrictiveSandbox()) {
           addItem(
             {
               type: MessageType.ERROR,
               text: t(
-                'Cannot remove initial workspace directory: {{directory}}',
-                { directory },
+                'The /directory remove command is not supported in restrictive sandbox profiles.',
               ),
             },
             Date.now(),
           );
           return;
         }
+
+        const workspaceContext = config.getWorkspaceContext();
 
         // Resolve to the same canonical (realpath) form that
         // WorkspaceContext stores internally, so the persistence filter
@@ -375,7 +371,24 @@ export const directoryCommand: SlashCommand = {
             : path.resolve(expandedDir);
         }
 
-        const removed = workspaceContext.removeDirectory(directory);
+        if (
+          workspaceContext.isInitialDirectory?.(expandedDir) ??
+          workspaceContext.getInitialDirectories().includes(expandedDir)
+        ) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Cannot remove initial workspace directory: {{directory}}',
+                { directory },
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const removed = workspaceContext.removeDirectory(expandedDir);
         if (!removed) {
           addItem(
             {
