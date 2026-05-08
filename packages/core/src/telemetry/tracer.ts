@@ -149,8 +149,29 @@ export async function withSpan<T>(
 
 /**
  * Start a span manually, returning the span and a function to run code
- * within that span's context. Unlike withSpan, the caller is responsible
- * for ending the span (e.g. in a finally block of an async generator).
+ * within that span's context.
+ *
+ * Unlike withSpan, this helper does not automatically set a terminal status
+ * or end the span. Callers must set the final status themselves and call
+ * span.end() from a finally block. Use runInContext around any eager work
+ * that should be parented to this span, and around async-generator iteration
+ * when the span must remain active while the consumer pulls values.
+ *
+ * Example:
+ *
+ *   const { span, runInContext } = startSpanWithContext('stream', attrs);
+ *   try {
+ *     return await runInContext(() => doWork());
+ *   } catch (error) {
+ *     span.setStatus({ code: SpanStatusCode.ERROR, message: 'failed' });
+ *     throw error;
+ *   } finally {
+ *     span.end();
+ *   }
+ *
+ * For a returned stream, put the try/catch/finally in the returned generator
+ * wrapper so the span ends when iteration completes, not when the stream is
+ * created.
  */
 export function startSpanWithContext(
   name: string,

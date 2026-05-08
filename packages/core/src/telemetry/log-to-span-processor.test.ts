@@ -379,6 +379,46 @@ describe('LogToSpanProcessor', () => {
     }
   });
 
+  it('emits pending dropped-span count during shutdown', async () => {
+    await processor.shutdown();
+    processor = new LogToSpanProcessor(mockExporter, 60000, 2);
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+    try {
+      for (const body of ['event1', 'event2', 'event3', 'event4']) {
+        processor.onEmit({
+          body,
+          hrTime: [1000, 0] as [number, number],
+          attributes: {},
+        } as unknown as ReadableLogRecord);
+      }
+
+      expect(stderrWrite).toHaveBeenCalledTimes(1);
+      expect(stderrWrite).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining(
+          'dropped 1 oldest span(s) since last warning, 1 total',
+        ),
+      );
+
+      await processor.shutdown();
+
+      expect(stderrWrite).toHaveBeenCalledTimes(2);
+      expect(stderrWrite).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining(
+          'dropped 1 oldest span(s) since last warning, 2 total',
+        ),
+      );
+    } finally {
+      dateNow.mockRestore();
+      stderrWrite.mockRestore();
+    }
+  });
+
   it('sets ERROR status for truthy error attributes', async () => {
     const logRecord = {
       body: 'api error',

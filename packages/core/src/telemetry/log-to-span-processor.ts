@@ -203,6 +203,14 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       return;
     }
 
+    this.emitBufferOverflowWarning(now);
+  }
+
+  private emitBufferOverflowWarning(now = Date.now()): void {
+    if (this.droppedSpansSinceLastBufferWarning === 0) {
+      return;
+    }
+
     const droppedSinceLastWarning = this.droppedSpansSinceLastBufferWarning;
     this.droppedSpansSinceLastBufferWarning = 0;
     this.lastBufferOverflowWarningMs = now;
@@ -265,6 +273,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       await this.inFlightExport;
     }
     await this.flush();
+    this.emitBufferOverflowWarning();
     await this.spanExporter.shutdown();
   }
 

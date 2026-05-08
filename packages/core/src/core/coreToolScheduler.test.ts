@@ -66,6 +66,7 @@ type ToolSpanRecord = {
 
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
 const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
+const shouldThrowToolSpanSetStatus = vi.hoisted(() => ({ value: false }));
 
 vi.mock('../telemetry/tracer.js', () => ({
   withSpan: vi.fn(
@@ -86,8 +87,13 @@ vi.mock('../telemetry/tracer.js', () => ({
         ended: false,
       };
       toolSpanRecords.push(record);
+      let statusSet = false;
       const span = {
         setStatus(status: { code: number; message?: string }) {
+          statusSet = true;
+          if (shouldThrowToolSpanSetStatus.value) {
+            throw new Error('setStatus failed');
+          }
           record.statusCalls.push(status);
         },
         setAttribute(key: string, value: string | number | boolean) {
@@ -103,12 +109,12 @@ vi.mock('../telemetry/tracer.js', () => ({
 
       try {
         const result = await fn(span);
-        if (record.statusCalls.length === 0) {
+        if (!statusSet) {
           record.statusCalls.push({ code: 1 });
         }
         return result;
       } catch (error) {
-        if (record.statusCalls.length === 0) {
+        if (!statusSet) {
           record.statusCalls.push({
             code: 2,
             message: error instanceof Error ? error.message : String(error),
@@ -2918,6 +2924,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
 describe('CoreToolScheduler telemetry spans', () => {
   afterEach(() => {
     shouldThrowToolSpanSetAttribute.value = false;
+    shouldThrowToolSpanSetStatus.value = false;
   });
 
   function getLastToolSpan(): ToolSpanRecord {
@@ -3004,6 +3011,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       disableHooks?: boolean;
       abortController?: AbortController;
       throwSpanSetAttribute?: boolean;
+      throwSpanSetStatus?: boolean;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
@@ -3012,6 +3020,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     toolSpanRecords.length = 0;
     shouldThrowToolSpanSetAttribute.value =
       options.throwSpanSetAttribute ?? false;
+    shouldThrowToolSpanSetStatus.value = options.throwSpanSetStatus ?? false;
     const { scheduler, onAllToolCallsComplete } = buildScheduler(options);
     const abortController = options.abortController ?? new AbortController();
     await scheduler.schedule(
@@ -3153,6 +3162,25 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.ended).toBe(true);
   });
 
+  it('preserves tool failures when span status recording fails', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      throwSpanSetStatus: true,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'sensitive /secret/path',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expect(spanRecord.statusCalls).toEqual([]);
+    expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('tool_error');
+    expect(spanRecord.ended).toBe(true);
+  });
+
   it('preserves original tool errors when the failure hook rejects', async () => {
     const messageBus = {
       request: vi
@@ -3271,6 +3299,26 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCalls[0].status).toBe('cancelled');
     expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
     expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('preserves cancellation when span status recording fails', async () => {
+    const abortController = new AbortController();
+    const { spanRecord, completedCalls } = await runSingleTool({
+      abortController,
+      throwSpanSetStatus: true,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'cancelled',
+          returnDisplay: 'cancelled',
+        };
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('cancelled');
+    expect(spanRecord.statusCalls).toEqual([]);
+    expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('cancelled');
     expect(spanRecord.ended).toBe(true);
   });
 

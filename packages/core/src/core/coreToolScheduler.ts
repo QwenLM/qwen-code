@@ -119,10 +119,14 @@ function setToolSpanFailure(
   } catch {
     // OTel errors must not block the failure status update.
   }
-  span.setStatus({
-    code: SpanStatusCode.ERROR,
-    message,
-  });
+  try {
+    span.setStatus({
+      code: SpanStatusCode.ERROR,
+      message,
+    });
+  } catch {
+    // OTel errors must not block tool failure handling.
+  }
 }
 
 function setToolSpanCancelled(span: Span): void {
@@ -131,9 +135,13 @@ function setToolSpanCancelled(span: Span): void {
   } catch {
     // OTel errors must not block the cancellation status update.
   }
-  span.setStatus({
-    code: SpanStatusCode.UNSET,
-  });
+  try {
+    span.setStatus({
+      code: SpanStatusCode.UNSET,
+    });
+  } catch {
+    // OTel errors must not block tool cancellation handling.
+  }
 }
 
 async function safelyFirePostToolUseFailureHook(

@@ -609,6 +609,40 @@ describe('LoggingContentGenerator', () => {
     expect(spanRecord.ended).toBe(true);
   });
 
+  it('sanitizes non-stream request logging preparation errors in span status', async () => {
+    const generateContent = vi.fn();
+    const conversionError = new Error('request-conversion-secret');
+    convertGeminiRequestToOpenAISpy.mockImplementationOnce(() => {
+      throw conversionError;
+    });
+    const wrapped = createWrappedGenerator(generateContent, vi.fn());
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-log-prep'),
+    ).rejects.toThrow('request-conversion-secret');
+
+    expect(generateContent).not.toHaveBeenCalled();
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
+    ]);
+    expect(JSON.stringify(spanRecord.statuses)).not.toContain(
+      'request-conversion-secret',
+    );
+    expect(spanRecord.ended).toBe(true);
+  });
+
   it('logs streaming responses and consolidates tool calls', async () => {
     const usage1 = {
       promptTokenCount: 1,
@@ -953,6 +987,48 @@ describe('LoggingContentGenerator', () => {
     expect(spanRecord.statuses).toEqual([
       { code: SpanStatusCode.ERROR, message: 'API call failed' },
     ]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('preserves stream errors when the error status update fails', async () => {
+    loggingSpanNamesWithSetStatusFailure.add('api.generateContentStream');
+    const response1 = createResponse('resp-1', 'model-stream', [
+      { text: 'partial' },
+    ]);
+    const streamError = new Error('stream-fail');
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response1;
+          throw streamError;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-error-status',
+    );
+    await expect(async () => {
+      for await (const _item of stream) {
+        // Consume stream to trigger error.
+      }
+    }).rejects.toThrow('stream-fail');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([]);
     expect(spanRecord.ended).toBe(true);
   });
 

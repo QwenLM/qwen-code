@@ -211,17 +211,16 @@ export class LoggingContentGenerator implements ContentGenerator {
       async (span) => {
         const startTime = Date.now();
         const isInternal = isInternalPromptId(userPromptId);
-        if (!isInternal) {
-          this.logApiRequest(
-            this.toContents(req.contents),
-            req.model,
-            userPromptId,
-          );
-        }
-        const openaiRequest = isInternal
-          ? undefined
-          : await this.buildOpenAIRequestForLogging(req);
+        let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
         try {
+          if (!isInternal) {
+            this.logApiRequest(
+              this.toContents(req.contents),
+              req.model,
+              userPromptId,
+            );
+            openaiRequest = await this.buildOpenAIRequestForLogging(req);
+          }
           const response = await this.wrapped.generateContent(
             req,
             userPromptId,
