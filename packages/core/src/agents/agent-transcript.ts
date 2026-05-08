@@ -384,7 +384,7 @@ export function attachJsonlTranscriptWriter(
   };
 
   const onExternalMessage = (event: AgentExternalMessageEvent) => {
-    recordUserMessage(event.text, event.kind);
+    recordUserMessage(event.text, event.kind ?? 'message');
   };
 
   const hasBootstrapPayload =

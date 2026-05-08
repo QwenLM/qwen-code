@@ -20,7 +20,9 @@ import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
 import {
+  getCurrentAgentId,
   getRuntimeContentGenerator,
+  runWithAgentContext,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
@@ -481,6 +483,8 @@ export class AgentCore {
    *    `Config.getContentGenerator{,Config}()` calls inside resolve to
    *    the agent rather than to the parent Config tools captured at
    *    construction time.
+   * 3. The logical owner agent id (when captured) so approved tools that
+   *    consult agent context, such as Monitor, keep subagent ownership.
    *
    * Used both around the reasoning loop and around the deferred-approval
    * `onConfirm` continuation — the latter runs from the parent UI's input
@@ -496,16 +500,25 @@ export class AgentCore {
    * the UI invokes `respond` from a fresh async chain where the parent's
    * ALS frame is gone.
    *
+   * `inheritedAgentId` does the same for logical agent ownership. It is
+   * needed by deferred approval because the user's approval response runs
+   * from the parent UI chain, after the subagent's AsyncLocalStorage frame
+   * has unwound.
+   *
    * Exposed (rather than inlined twice) so the contract stays testable in
    * isolation; see `agent-core.test.ts`.
    */
   runInAgentFrames<T>(
     fn: () => Promise<T>,
     inheritedView?: RuntimeContentGeneratorView,
+    inheritedAgentId?: string,
   ): Promise<T> {
-    return subagentNameContext.run(this.name, () =>
-      this.withRuntimeView(fn, inheritedView),
-    );
+    return subagentNameContext.run(this.name, () => {
+      const runWithView = () => this.withRuntimeView(fn, inheritedView);
+      return inheritedAgentId
+        ? runWithAgentContext(inheritedAgentId, runWithView)
+        : runWithView();
+    });
   }
 
   /**
@@ -1164,6 +1177,7 @@ export class AgentCore {
             // continuation — invoked later from the UI's async chain — can
             // restore it. See `runInAgentFrames` for the wiring.
             const inheritedView = getRuntimeContentGenerator();
+            const inheritedAgentId = getCurrentAgentId();
             this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
               subagentId: this.subagentId,
               round: currentRound,
@@ -1186,9 +1200,12 @@ export class AgentCore {
                 // reasoning-loop ALS frames), so re-enter both the agent's
                 // runtime view AND its name context before the resumed
                 // tool body runs. See `runInAgentFrames` for rationale.
+                // Also restore the logical owner agent id when present so
+                // approved tools such as Monitor keep owner routing.
                 await this.runInAgentFrames(
                   () => waiting.confirmationDetails.onConfirm(outcome, payload),
                   inheritedView,
+                  inheritedAgentId ?? undefined,
                 );
               },
               timestamp: Date.now(),

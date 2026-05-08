@@ -148,7 +148,11 @@ export interface BackgroundTaskEntry {
   outputFile?: string;
   /** Absolute path to the agent's sidecar metadata file. */
   metaPath?: string;
-  /** Inputs queued for delivery between tool rounds. */
+  /**
+   * Inputs queued for delivery between tool rounds.
+   * Strings are parent `send_message` payloads; notification objects are
+   * owner-routed Monitor notifications.
+   */
   pendingMessages?: AgentExternalInput[];
   /**
    * True once a terminal task-notification has been emitted for this entry.
@@ -484,6 +488,11 @@ export class BackgroundTaskRegistry {
     return this.queueExternalInput(agentId, message);
   }
 
+  /**
+   * Enqueue generalized external input for an agent. Use queueMessage for the
+   * parent send_message text path; this lower-level API also accepts
+   * structured inputs such as owner-routed Monitor notifications.
+   */
   queueExternalInput(agentId: string, input: AgentExternalInput): boolean {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return false;

@@ -165,7 +165,7 @@ export interface AgentApprovalRequestEvent {
 export interface AgentExternalMessageEvent {
   subagentId: string;
   /** Source kind for observability; messages are parent send_message text. */
-  kind: 'message' | 'notification';
+  kind?: 'message' | 'notification';
   /** Raw message text (without any framing prefix). */
   text: string;
   timestamp: number;

@@ -512,6 +512,27 @@ describe('agent-transcript', () => {
       expect(records[0].externalInputKind).toBe('notification');
     });
 
+    it('defaults legacy EXTERNAL_MESSAGE events without kind to message records', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: 'agent-x',
+        text: 'legacy follow-up from parent',
+        timestamp: 100,
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      expect(records[0].type).toBe('user');
+      expect(records[0].message).toEqual({
+        role: 'user',
+        parts: [{ text: 'legacy follow-up from parent' }],
+      });
+      expect(records[0].externalInputKind).toBe('message');
+    });
+
     it('stops writing after cleanup', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
