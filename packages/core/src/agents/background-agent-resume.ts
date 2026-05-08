@@ -496,6 +496,7 @@ export class BackgroundAgentResumeService {
     });
 
     let cleanupOwnedMonitorNotifications: (() => void) | undefined;
+    let cleanupJsonl: (() => void) | undefined;
 
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
@@ -607,22 +608,18 @@ export class BackgroundAgentResumeService {
             });
 
       const projectRoot = this.config.getProjectRoot();
-      const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
-        bgEventEmitter,
-        outputFile,
-        {
-          agentId: meta.agentId,
-          agentName: target.agentName,
-          agentColor: target.subagentConfig?.color ?? meta.agentColor,
-          sessionId: meta.parentSessionId,
-          cwd: projectRoot,
-          version: this.config.getCliVersion() || 'unknown',
-          gitBranch: getGitBranch(projectRoot),
-          initialUserPrompt: writerInitialPrompt,
-          appendToExisting: true,
-          initialParentUuid: recovery.lastStableUuid,
-        },
-      );
+      cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
+        agentId: meta.agentId,
+        agentName: target.agentName,
+        agentColor: target.subagentConfig?.color ?? meta.agentColor,
+        sessionId: meta.parentSessionId,
+        cwd: projectRoot,
+        version: this.config.getCliVersion() || 'unknown',
+        gitBranch: getGitBranch(projectRoot),
+        initialUserPrompt: writerInitialPrompt,
+        appendToExisting: true,
+        initialParentUuid: recovery.lastStableUuid,
+      }).cleanup;
 
       const nextResumeCount = (meta.resumeCount ?? 0) + 1;
       patchAgentMeta(metaPath, {
@@ -686,11 +683,11 @@ export class BackgroundAgentResumeService {
       cleanupOwnedMonitorNotifications = () => {
         if (cleanedUpOwnedMonitorNotifications) return;
         cleanedUpOwnedMonitorNotifications = true;
-        monitorRegistry.setAgentNotificationCallback(meta.agentId, undefined);
-        monitorRegistry.setAgentLifecycleCallback(meta.agentId, undefined);
         monitorRegistry.cancelRunningForOwner(meta.agentId, {
           notify: false,
         });
+        monitorRegistry.setAgentNotificationCallback(meta.agentId, undefined);
+        monitorRegistry.setAgentLifecycleCallback(meta.agentId, undefined);
       };
 
       const hookSystem = this.config.getHookSystem();
@@ -820,6 +817,7 @@ export class BackgroundAgentResumeService {
       return entry;
     } catch (error) {
       cleanupOwnedMonitorNotifications?.();
+      cleanupJsonl?.();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.warn(

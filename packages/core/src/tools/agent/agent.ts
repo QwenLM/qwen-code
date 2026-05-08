@@ -591,9 +591,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     monitorRegistry.setAgentLifecycleCallback(agentId, wake);
 
     return () => {
+      monitorRegistry.cancelRunningForOwner(agentId, { notify: false });
       monitorRegistry.setAgentNotificationCallback(agentId, undefined);
       monitorRegistry.setAgentLifecycleCallback(agentId, undefined);
-      monitorRegistry.cancelRunningForOwner(agentId, { notify: false });
     };
   }
 
