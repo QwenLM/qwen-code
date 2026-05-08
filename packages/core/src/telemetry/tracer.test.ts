@@ -20,10 +20,23 @@ const mockState = vi.hoisted(() => ({
   activeContext: {} as unknown,
   throwOnSetStatus: false,
   throwOnEnd: false,
+  nonWritableSetStatus: false,
 }));
+const debugWarnCalls = vi.hoisted((): unknown[][] => []);
 
 vi.mock('./session-context.js', () => ({
   getSessionContext: () => mockState.sessionContext,
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    debug: () => {},
+    info: () => {},
+    warn: (...args: unknown[]) => {
+      debugWarnCalls.push(args);
+    },
+    error: () => {},
+  }),
 }));
 
 // Collect span operations for assertions
@@ -49,7 +62,7 @@ vi.mock('@opentelemetry/api', async () => {
   ) {
     const record: SpanRecord = { name, attributes, statuses: [], ended: false };
     spans.push(record);
-    return {
+    const span = {
       ...record,
       spanContext: () => ({
         traceId: 'a'.repeat(32),
@@ -70,6 +83,10 @@ vi.mock('@opentelemetry/api', async () => {
         record.ended = true;
       },
     };
+    if (mockState.nonWritableSetStatus) {
+      Object.defineProperty(span, 'setStatus', { writable: false });
+    }
+    return span;
   }
 
   const mockTracer = {
@@ -118,6 +135,8 @@ beforeEach(() => {
   mockState.activeContext = {};
   mockState.throwOnSetStatus = false;
   mockState.throwOnEnd = false;
+  mockState.nonWritableSetStatus = false;
+  debugWarnCalls.length = 0;
 });
 
 describe('withSpan', () => {
@@ -144,6 +163,23 @@ describe('withSpan', () => {
     // Only the ERROR status set by the callback should be present
     expect(spans[0].statuses).toEqual([
       { code: SpanStatusCode.ERROR, message: 'hook denied' },
+    ]);
+    expect(spans[0].ended).toBe(true);
+  });
+
+  it('tracks explicit status without mutating non-writable spans', async () => {
+    mockState.nonWritableSetStatus = true;
+
+    await withSpan('test.non-writable-status', {}, async (span) => {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: 'custom error',
+      });
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0].statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'custom error' },
     ]);
     expect(spans[0].ended).toBe(true);
   });
@@ -200,6 +236,7 @@ describe('withSpan', () => {
     expect(result).toBe(42);
     expect(spans[0].statuses).toEqual([]);
     expect(spans[0].ended).toBe(true);
+    expect(debugWarnCalls[0]?.[0]).toContain('OTel span setStatus failed');
   });
 
   it('does not let ERROR status failures mask the original error', async () => {

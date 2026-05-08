@@ -325,7 +325,9 @@ describe('LogToSpanProcessor', () => {
       } as unknown as ReadableLogRecord);
 
       expect(stderrWrite).toHaveBeenCalledWith(
-        expect.stringContaining('dropped 1 oldest span(s)'),
+        expect.stringContaining(
+          'dropped 1 oldest span(s) since last warning, 1 total',
+        ),
       );
 
       await processor.forceFlush();
@@ -335,6 +337,44 @@ describe('LogToSpanProcessor', () => {
         'event3',
       ]);
     } finally {
+      stderrWrite.mockRestore();
+    }
+  });
+
+  it('reports total dropped spans across overflow warnings', async () => {
+    await processor.shutdown();
+    processor = new LogToSpanProcessor(mockExporter, 60000, 2);
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const dateNow = vi
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(31_001);
+
+    try {
+      for (const body of ['event1', 'event2', 'event3', 'event4']) {
+        processor.onEmit({
+          body,
+          hrTime: [1000, 0] as [number, number],
+          attributes: {},
+        } as unknown as ReadableLogRecord);
+      }
+
+      expect(stderrWrite).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining(
+          'dropped 1 oldest span(s) since last warning, 1 total',
+        ),
+      );
+      expect(stderrWrite).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining(
+          'dropped 1 oldest span(s) since last warning, 2 total',
+        ),
+      );
+    } finally {
+      dateNow.mockRestore();
       stderrWrite.mockRestore();
     }
   });

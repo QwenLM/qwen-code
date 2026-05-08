@@ -67,6 +67,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private readonly maxBufferSize: number;
   private lastBufferOverflowWarningMs: number | undefined;
   private droppedSpansSinceLastBufferWarning = 0;
+  private totalDroppedSpans = 0;
 
   constructor(spanExporter: SpanExporter);
   constructor(
@@ -192,6 +193,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
 
   private warnBufferOverflow(droppedSpanCount: number): void {
     this.droppedSpansSinceLastBufferWarning += droppedSpanCount;
+    this.totalDroppedSpans += droppedSpanCount;
     const now = Date.now();
     if (
       this.lastBufferOverflowWarningMs !== undefined &&
@@ -206,7 +208,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     this.lastBufferOverflowWarningMs = now;
     try {
       process.stderr.write(
-        `[LogToSpan] buffer exceeded max size (${this.maxBufferSize}); dropped ${droppedSinceLastWarning} oldest span(s)\n`,
+        `[LogToSpan] buffer exceeded max size (${this.maxBufferSize}); dropped ${droppedSinceLastWarning} oldest span(s) since last warning, ${this.totalDroppedSpans} total\n`,
       );
     } catch {
       // Logging diagnostics must not interrupt telemetry ingestion.

@@ -16,8 +16,39 @@ import {
 import { SERVICE_NAME } from './constants.js';
 import { deriveTraceId, randomSpanId } from './trace-id-utils.js';
 import { getSessionContext } from './session-context.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 const tracer = trace.getTracer(SERVICE_NAME);
+const debugLogger = createDebugLogger('OTEL_TRACER');
+const TELEMETRY_WARNING_INTERVAL_MS = 30_000;
+let lastTelemetryWarningMs: number | undefined;
+let suppressedTelemetryWarnings = 0;
+
+function warnTelemetryOperationFailed(operation: string, error: unknown): void {
+  const now = Date.now();
+  if (
+    lastTelemetryWarningMs !== undefined &&
+    now - lastTelemetryWarningMs < TELEMETRY_WARNING_INTERVAL_MS
+  ) {
+    suppressedTelemetryWarnings += 1;
+    return;
+  }
+
+  const suppressedSuffix =
+    suppressedTelemetryWarnings > 0
+      ? `; suppressed ${suppressedTelemetryWarnings} similar warning(s)`
+      : '';
+  suppressedTelemetryWarnings = 0;
+  lastTelemetryWarningMs = now;
+
+  try {
+    debugLogger.warn(
+      `OTel span ${operation} failed: ${error instanceof Error ? error.message : String(error)}${suppressedSuffix}`,
+    );
+  } catch {
+    // Diagnostics must not mask caller behavior.
+  }
+}
 
 function safeSetStatus(
   span: Span,
@@ -25,7 +56,8 @@ function safeSetStatus(
 ): void {
   try {
     span.setStatus(status);
-  } catch {
+  } catch (error) {
+    warnTelemetryOperationFailed('setStatus', error);
     // OTel errors must not mask caller behavior.
   }
 }
@@ -33,7 +65,8 @@ function safeSetStatus(
 function safeEndSpan(span: Span): void {
   try {
     span.end();
-  } catch {
+  } catch (error) {
+    warnTelemetryOperationFailed('end', error);
     // OTel errors must not mask caller behavior.
   }
 }
@@ -56,17 +89,20 @@ function wrapSpanWithStatusTracking(span: Span): {
   wasStatusSet: () => boolean;
 } {
   let statusSet = false;
-  const originalSetStatus = span.setStatus.bind(span);
-  span.setStatus = (...args: Parameters<Span['setStatus']>) => {
-    statusSet = true;
-    try {
-      return originalSetStatus(...args);
-    } catch {
-      // OTel errors must not mask caller behavior.
-      return span;
-    }
-  };
-  return { wrappedSpan: span, wasStatusSet: () => statusSet };
+  const wrappedSpan = new Proxy(span, {
+    get(target, prop, receiver) {
+      if (prop === 'setStatus') {
+        return (status: Parameters<Span['setStatus']>[0]) => {
+          statusSet = true;
+          safeSetStatus(target, status);
+          return target;
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as Span;
+  return { wrappedSpan, wasStatusSet: () => statusSet };
 }
 
 /**
