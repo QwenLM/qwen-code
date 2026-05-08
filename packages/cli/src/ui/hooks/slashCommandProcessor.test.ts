@@ -1070,6 +1070,63 @@ describe('useSlashCommandProcessor', () => {
         skillManagerSpy.mockRestore();
       }
     });
+
+    it('should register SkillManager listener after config initialization', async () => {
+      const removeListener = vi.fn();
+      const addChangeListener = vi.fn().mockReturnValue(removeListener);
+      const fakeSkillManager = { addChangeListener };
+      let initializedForConfig = false;
+      const skillManagerSpy = vi
+        .spyOn(mockConfig, 'getSkillManager')
+        .mockImplementation(() =>
+          initializedForConfig
+            ? (fakeSkillManager as unknown as ReturnType<
+                typeof mockConfig.getSkillManager
+              >)
+            : null,
+        );
+
+      try {
+        mockBuiltinLoadCommands.mockResolvedValue([]);
+        mockFileLoadCommands.mockResolvedValue([]);
+        mockMcpLoadCommands.mockResolvedValue([]);
+
+        const { rerender, unmount } = renderHook(
+          ({ isConfigInitialized }) => {
+            initializedForConfig = isConfigInitialized;
+            return useSlashCommandProcessor(
+              mockConfig,
+              mockSettings,
+              mockAddItem,
+              mockClearItems,
+              mockLoadHistory,
+              vi.fn(),
+              vi.fn(),
+              false,
+              vi.fn(),
+              { current: true },
+              vi.fn(),
+              createMockActions(),
+              new Map(),
+              isConfigInitialized,
+              null,
+            );
+          },
+          { initialProps: { isConfigInitialized: false } },
+        );
+
+        expect(addChangeListener).not.toHaveBeenCalled();
+
+        rerender({ isConfigInitialized: true });
+
+        await waitFor(() => expect(addChangeListener).toHaveBeenCalledTimes(1));
+
+        unmount();
+        expect(removeListener).toHaveBeenCalledTimes(1);
+      } finally {
+        skillManagerSpy.mockRestore();
+      }
+    });
   });
 
   describe('Slash Command Logging', () => {

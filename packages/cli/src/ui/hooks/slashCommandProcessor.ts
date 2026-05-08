@@ -365,6 +365,9 @@ export const useSlashCommandProcessor = (
   // until restart. Bumping reloadTrigger re-runs the loader effect below
   // and CommandService picks up the fresh skill list.
   useEffect(() => {
+    if (!isConfigInitialized) {
+      return;
+    }
     const skillManager = config?.getSkillManager();
     if (!skillManager) {
       return;
@@ -372,7 +375,7 @@ export const useSlashCommandProcessor = (
     return skillManager.addChangeListener(() => {
       reloadCommands();
     });
-  }, [config, reloadCommands]);
+  }, [config, isConfigInitialized, reloadCommands]);
 
   useEffect(() => {
     const controller = new AbortController();
