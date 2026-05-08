@@ -22,11 +22,13 @@ import type {
   AnsiOutputDisplay,
   Config,
   McpToolProgressData,
+  FileDiff,
 } from '@qwen-code/qwen-code-core';
-import { AgentExecutionDisplay } from '../subagents/index.js';
+import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
@@ -48,6 +50,14 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
 export type TextEmphasis = 'high' | 'medium' | 'low';
+type DiffResultDisplay = Pick<
+  FileDiff,
+  | 'fileDiff'
+  | 'fileName'
+  | 'truncatedForSession'
+  | 'fileDiffLength'
+  | 'fileDiffTruncated'
+>;
 
 function sliceTextForMaxHeight(
   text: string,
@@ -174,7 +184,7 @@ const useResultDisplayRenderer = (
     ) {
       return {
         type: 'diff',
-        data: resultDisplay as { fileDiff: string; fileName: string },
+        data: resultDisplay as DiffResultDisplay,
       };
     }
 
@@ -238,7 +248,20 @@ const PlanResultRenderer: React.FC<{
 );
 
 /**
- * Component to render subagent execution results
+ * Component to render subagent execution results.
+ *
+ * The verbose inline frame has been retired. Three surfaces remain:
+ *
+ * - **Live phase (running)**: nothing inline — `LiveAgentPanel` (the
+ *   always-on bottom roster) and `BackgroundTasksDialog` (Down-arrow
+ *   detail view) own progress reporting.
+ * - **Approval prompt (focus-locked)**: full inline approval banner so
+ *   the user can answer without context-switching into the dialog;
+ *   sibling subagents render a queued marker.
+ * - **Committed phase (terminal — completed / failed / cancelled)**: a
+ *   single-line scrollback summary so the conversation history retains
+ *   a permanent record after the panel's 8s window expires and the
+ *   dialog closes. Format: `<icon> <type>: <description> · N tools · Xs · Yk tokens`.
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -246,24 +269,111 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth: number;
   config: Config;
   isFocused?: boolean;
-  isWaitingForOtherApproval?: boolean;
-}> = ({
-  data,
-  availableHeight,
-  childWidth,
-  config,
-  isFocused,
-  isWaitingForOtherApproval,
-}) => (
-  <AgentExecutionDisplay
-    data={data}
-    availableHeight={availableHeight}
-    childWidth={childWidth}
-    config={config}
-    isFocused={isFocused}
-    isWaitingForOtherApproval={isWaitingForOtherApproval}
-  />
-);
+}> = ({ data, availableHeight, childWidth, config, isFocused }) => {
+  if (data.pendingConfirmation && isFocused) {
+    const agentLabel = data.subagentName || 'agent';
+    return (
+      <Box flexDirection="column" paddingLeft={1}>
+        <Box>
+          <Text color={theme.text.secondary}>Approval requested by </Text>
+          <Text bold color={theme.text.accent}>
+            {agentLabel}
+          </Text>
+          <Text color={theme.text.secondary}>:</Text>
+        </Box>
+        <ToolConfirmationMessage
+          confirmationDetails={data.pendingConfirmation}
+          isFocused={isFocused}
+          availableTerminalHeight={availableHeight}
+          contentWidth={childWidth - 2}
+          compactMode={true}
+          config={config}
+        />
+      </Box>
+    );
+  }
+  if (data.pendingConfirmation) {
+    const agentLabel = data.subagentName || 'agent';
+    return (
+      <Box paddingLeft={1}>
+        <Text color={theme.text.secondary} dimColor>
+          ⏳ Queued approval:{' '}
+        </Text>
+        <Text dimColor>{agentLabel}</Text>
+      </Box>
+    );
+  }
+  // Terminal phase: render a single-line scrollback summary so the
+  // conversation history keeps a permanent record after the panel's
+  // 8s visibility window expires (LiveAgentPanel evicts terminal rows;
+  // BackgroundTasksDialog only retains them while open). Skip
+  // `running` / `background` since the panel + dialog cover those.
+  if (
+    data.status === 'completed' ||
+    data.status === 'failed' ||
+    data.status === 'cancelled'
+  ) {
+    return <SubagentScrollbackSummary data={data} />;
+  }
+  return null;
+};
+
+/**
+ * One-line summary that lands in scrollback when a subagent reaches a
+ * terminal state. The verbose 15-row frame is retired (it caused
+ * scrollback flicker); this single line preserves the persistent
+ * record without re-introducing the flicker.
+ *
+ *   ✔ researcher: investigate import order · 5 tools · 12s · 2.4k tokens
+ */
+const SubagentScrollbackSummary: React.FC<{
+  data: AgentResultDisplay;
+}> = ({ data }) => {
+  const { glyph, color } = (() => {
+    switch (data.status) {
+      case 'completed':
+        return { glyph: '✔', color: theme.status.success };
+      case 'failed':
+        return { glyph: '✖', color: theme.status.error };
+      case 'cancelled':
+        return { glyph: '✖', color: theme.status.warning };
+      default:
+        return { glyph: '·', color: theme.text.secondary };
+    }
+  })();
+  const stats = data.executionSummary;
+  const parts: string[] = [];
+  if (stats?.totalToolCalls !== undefined) {
+    parts.push(
+      `${stats.totalToolCalls} tool${stats.totalToolCalls === 1 ? '' : 's'}`,
+    );
+  }
+  if (stats?.totalDurationMs !== undefined) {
+    parts.push(
+      formatDuration(stats.totalDurationMs, { hideTrailingZeros: true }),
+    );
+  }
+  if (stats?.totalTokens && stats.totalTokens > 0) {
+    parts.push(`${formatTokenCount(stats.totalTokens)} tokens`);
+  }
+  const tail = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
+  const typePrefix = data.subagentName ? `${data.subagentName}: ` : '';
+  const reason =
+    data.status !== 'completed' && data.terminateReason
+      ? ` · ${data.terminateReason}`
+      : '';
+  return (
+    <Box paddingLeft={1}>
+      <Text wrap="truncate-end">
+        <Text color={color}>{`${glyph} `}</Text>
+        <Text bold>{typePrefix}</Text>
+        <Text color={theme.text.secondary}>{data.taskDescription}</Text>
+        <Text color={theme.text.secondary}>{tail}</Text>
+        <Text color={theme.text.secondary}>{reason}</Text>
+      </Text>
+    </Box>
+  );
+};
 
 /**
  * Component to render string results (markdown or plain text)
@@ -319,19 +429,38 @@ const StringResultRenderer: React.FC<{
  * Component to render diff results
  */
 const DiffResultRenderer: React.FC<{
-  data: { fileDiff: string; fileName: string };
+  data: DiffResultDisplay;
   availableHeight?: number;
   childWidth: number;
   settings?: LoadedSettings;
-}> = ({ data, availableHeight, childWidth, settings }) => (
-  <DiffRenderer
-    diffContent={data.fileDiff}
-    filename={data.fileName}
-    availableTerminalHeight={availableHeight}
-    contentWidth={childWidth}
-    settings={settings}
-  />
-);
+}> = ({ data, availableHeight, childWidth, settings }) => {
+  const diffHeight =
+    data.truncatedForSession && availableHeight !== undefined
+      ? Math.max(1, availableHeight - 1)
+      : availableHeight;
+
+  return (
+    <Box flexDirection="column">
+      {data.truncatedForSession && (
+        <Text color={theme.status.warning} wrap="wrap">
+          {data.fileDiffTruncated
+            ? 'Saved session preview only; full diff omitted from JSONL'
+            : 'Saved session preview only; full file contents truncated in JSONL'}
+          {data.fileDiffTruncated && typeof data.fileDiffLength === 'number'
+            ? ` (${data.fileDiffLength} chars).`
+            : '.'}
+        </Text>
+      )}
+      <DiffRenderer
+        diffContent={data.fileDiff}
+        filename={data.fileName}
+        availableTerminalHeight={diffHeight}
+        contentWidth={childWidth}
+        settings={settings}
+      />
+    </Box>
+  );
+};
 
 export interface ToolMessageProps extends IndividualToolCallDisplay {
   availableTerminalHeight?: number;
@@ -342,10 +471,13 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   embeddedShellFocused?: boolean;
   config?: Config;
   forceShowResult?: boolean;
-  /** Whether this tool's subagent confirmation prompt should respond to keyboard input. */
+  /**
+   * Whether this subagent owns keyboard input for the inline approval
+   * surface — when true the focus-holder banner renders and the
+   * underlying ToolConfirmationMessage receives keystrokes; when false
+   * sibling subagents render a dim "Queued approval" marker instead.
+   */
   isFocused?: boolean;
-  /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
-  isWaitingForOtherApproval?: boolean;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -363,7 +495,6 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   isFocused,
-  isWaitingForOtherApproval,
   executionStartTime,
 }) => {
   const settings = useSettings();
@@ -518,7 +649,6 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={innerWidth}
                 config={config}
                 isFocused={isFocused}
-                isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             )}
             {effectiveDisplayRenderer.type === 'diff' && (

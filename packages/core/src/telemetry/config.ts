@@ -99,6 +99,13 @@ export async function resolveTelemetrySettings(options: {
     parseBooleanEnvFlag(env['QWEN_TELEMETRY_LOG_PROMPTS']) ??
     settings.logPrompts;
 
+  const includeSensitiveSpanAttributes =
+    parseBooleanEnvFlag(
+      env['QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES'],
+    ) ??
+    settings.includeSensitiveSpanAttributes ??
+    false;
+
   const outfile =
     argv.telemetryOutfile ?? env['QWEN_TELEMETRY_OUTFILE'] ?? settings.outfile;
 
@@ -106,12 +113,33 @@ export async function resolveTelemetrySettings(options: {
     parseBooleanEnvFlag(env['QWEN_TELEMETRY_USE_COLLECTOR']) ??
     settings.useCollector;
 
+  // Per-signal endpoint overrides (HTTP only).
+  // Priority: QWEN_ env var > standard OTEL_ env var > settings.json
+  const otlpTracesEndpoint =
+    env['QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT'] ??
+    env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] ??
+    settings.otlpTracesEndpoint;
+
+  const otlpLogsEndpoint =
+    env['QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT'] ??
+    env['OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'] ??
+    settings.otlpLogsEndpoint;
+
+  const otlpMetricsEndpoint =
+    env['QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT'] ??
+    env['OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'] ??
+    settings.otlpMetricsEndpoint;
+
   return {
     enabled,
     target,
     otlpEndpoint,
     otlpProtocol,
+    otlpTracesEndpoint,
+    otlpLogsEndpoint,
+    otlpMetricsEndpoint,
     logPrompts,
+    includeSensitiveSpanAttributes,
     outfile,
     useCollector,
   };

@@ -389,6 +389,12 @@ export interface ToolResult {
   returnDisplay: ToolResultDisplay;
 
   /**
+   * Concrete filesystem paths discovered or touched during successful execution.
+   * Scheduler-side path activation consumes these in addition to input fields.
+   */
+  resultFilePaths?: string[];
+
+  /**
    * If this property is present, the tool call is considered a failure.
    */
   error?: {
@@ -555,6 +561,13 @@ export interface FileDiff {
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;
+  truncatedForSession?: boolean;
+  fileDiffLength?: number;
+  originalContentLength?: number;
+  newContentLength?: number;
+  fileDiffTruncated?: boolean;
+  originalContentTruncated?: boolean;
+  newContentTruncated?: boolean;
 }
 
 export interface DiffStat {

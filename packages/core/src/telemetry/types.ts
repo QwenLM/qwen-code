@@ -333,7 +333,6 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   output_token_count: number;
   cached_content_token_count: number;
   thoughts_token_count: number;
-  tool_token_count: number;
   total_token_count: number;
   response_text?: string;
   prompt_id: string;
@@ -364,7 +363,6 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.output_token_count = usage_data?.candidatesTokenCount ?? 0;
     this.cached_content_token_count = usage_data?.cachedContentTokenCount ?? 0;
     this.thoughts_token_count = usage_data?.thoughtsTokenCount ?? 0;
-    this.tool_token_count = usage_data?.toolUsePromptTokenCount ?? 0;
     this.total_token_count = usage_data?.totalTokenCount ?? 0;
     this.response_text = response_text;
     this.prompt_id = prompt_id;
@@ -1206,7 +1204,7 @@ export class MemoryDreamEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   /** 'auto' = scheduler-triggered; 'manual' = user ran /dream */
   trigger: 'auto' | 'manual';
-  status: 'updated' | 'noop' | 'failed';
+  status: 'updated' | 'noop' | 'failed' | 'cancelled';
   deduped_entries: number;
   touched_topics_count: number;
   touched_topics: string;
@@ -1214,7 +1212,7 @@ export class MemoryDreamEvent implements BaseTelemetryEvent {
 
   constructor(params: {
     trigger: 'auto' | 'manual';
-    status: 'updated' | 'noop' | 'failed';
+    status: 'updated' | 'noop' | 'failed' | 'cancelled';
     deduped_entries: number;
     touched_topics: string[];
     duration_ms: number;

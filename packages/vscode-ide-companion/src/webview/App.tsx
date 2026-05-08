@@ -23,6 +23,7 @@ import {
   useMessageSubmit,
 } from './hooks/useMessageSubmit.js';
 import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
+import { stripZeroWidthSpaces } from '@qwen-code/webui';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
@@ -176,7 +177,9 @@ const MessageList = React.memo<MessageListProps>(
       }
       // No wrapper div — message components render directly as children
       // of the scroll container, preserving the original CSS layout.
-      if (child == null) return null;
+      if (child == null) {
+        return null;
+      }
       mapping.push(index);
       return <React.Fragment key={`msg-${index}`}>{child}</React.Fragment>;
     });
@@ -212,7 +215,9 @@ function findMessageIndex(
   while (directChild && directChild.parentElement !== container) {
     directChild = directChild.parentElement;
   }
-  if (!directChild) return -1;
+  if (!directChild) {
+    return -1;
+  }
 
   // Find DOM child position among container's children
   const children = container.children;
@@ -796,32 +801,29 @@ export const App: React.FC = () => {
           }
         };
 
-        if (itemId === 'auth') {
+        // Client-side commands that trigger extension actions directly
+        // instead of being sent to the agent as messages.
+        const clientActions: Record<string, () => void> = {
+          auth: () => vscode.postMessage({ type: 'auth', data: {} }),
+          account: () =>
+            vscode.postMessage({ type: 'getAccountInfo', data: {} }),
+          model: () => setShowModelSelector(true),
+        };
+
+        const clientAction = clientActions[itemId];
+        if (clientAction) {
           clearTriggerText();
-          vscode.postMessage({ type: 'auth', data: {} });
+          clientAction();
           closeCompletion();
           return;
         }
 
-        if (itemId === 'account') {
-          clearTriggerText();
-          vscode.postMessage({ type: 'getAccountInfo', data: {} });
-          closeCompletion();
-          return;
-        }
-
-        if (itemId === 'model') {
-          clearTriggerText();
-          setShowModelSelector(true);
-          closeCompletion();
-          return;
-        }
-
-        // Handle server-provided slash commands by sending them as messages.
-        // Skip when fillOnly (Tab) — let the generic insertion path fill the
-        // command text so the user can keep typing arguments.
-        // Special case: /skills always uses fill behavior (Enter = Tab) to
-        // allow the secondary skill picker to appear.
+        // For server-provided slash commands, decide based on the `input`
+        // field: commands without input (input == null) auto-submit
+        // immediately; commands that accept input fall through to the generic
+        // insertion path so users can type arguments before submitting.
+        // Special case: /skills always uses fill behavior to allow the
+        // secondary skill picker to appear.
         const serverCmd = availableCommands.find((c) => c.name === itemId);
         const isSkillsCmd = shouldOpenSkillsSecondaryPicker(
           item,
@@ -829,19 +831,19 @@ export const App: React.FC = () => {
         );
         if (
           serverCmd &&
-          !fillOnly &&
           !isSkillsCmd &&
           !isExpandableSlashCommand(serverCmd.name)
         ) {
-          // Clear the trigger text since we're sending the command
-          clearTriggerText();
-          // Send the slash command as a user message
-          vscode.postMessage({
-            type: 'sendMessage',
-            data: { text: `/${serverCmd.name}` },
-          });
-          closeCompletion();
-          return;
+          if (!serverCmd.input && !fillOnly) {
+            clearTriggerText();
+            vscode.postMessage({
+              type: 'sendMessage',
+              data: { text: `/${serverCmd.name}` },
+            });
+            closeCompletion();
+            return;
+          }
+          // Command accepts input — fall through to fill the input box.
         }
 
         // Handle secondary skill selection — send `/skills <name>` with
@@ -875,12 +877,16 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Current text and cursor
-      const text = inputElement.textContent || '';
+      // Current text and cursor — strip U+200B height placeholder so it
+      // does not contaminate the inserted completion text.
+      const rawText = inputElement.textContent || '';
+      const text = stripZeroWidthSpaces(rawText);
       const range = selection.getRangeAt(0);
 
-      // Compute total text offset for contentEditable
-      let cursorPos = text.length;
+      // Compute total text offset for contentEditable.  The DOM offsets
+      // are based on rawText (which may contain U+200B), so we compute the
+      // raw cursor position first and then adjust for stripped characters.
+      let rawCursorPos = rawText.length;
       if (range.startContainer === inputElement) {
         const childIndex = range.startOffset;
         let offset = 0;
@@ -891,7 +897,7 @@ export const App: React.FC = () => {
         ) {
           offset += inputElement.childNodes[i].textContent?.length || 0;
         }
-        cursorPos = offset || text.length;
+        rawCursorPos = offset || rawText.length;
       } else if (range.startContainer.nodeType === Node.TEXT_NODE) {
         const walker = document.createTreeWalker(
           inputElement,
@@ -910,8 +916,14 @@ export const App: React.FC = () => {
           offset += node.textContent?.length || 0;
           node = walker.nextNode();
         }
-        cursorPos = found ? offset : text.length;
+        rawCursorPos = found ? offset : rawText.length;
       }
+      // Adjust cursor to match the stripped text by subtracting
+      // zero-width characters that appeared before the cursor.
+      const zeroWidthBeforeCursor = (
+        rawText.substring(0, rawCursorPos).match(/\u200B/g) || []
+      ).length;
+      const cursorPos = Math.max(0, rawCursorPos - zeroWidthBeforeCursor);
 
       // Replace from trigger to cursor with selected value
       const textBeforeCursor = text.substring(0, cursorPos);
@@ -1203,7 +1215,9 @@ export const App: React.FC = () => {
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const message = event.data;
-      if (message?.type !== 'copyCommand') return;
+      if (message?.type !== 'copyCommand') {
+        return;
+      }
 
       const { action } = message.data as { action: string };
 
@@ -1234,7 +1248,9 @@ export const App: React.FC = () => {
               msg.kind === 'image' && msg.imagePath
                 ? `![image](${msg.imagePath})`
                 : (msg.content || '').trim();
-            if (!content) continue;
+            if (!content) {
+              continue;
+            }
             if (msg.role === 'user') {
               parts.push(`**User:** ${content}`);
             } else if (msg.role === 'thinking') {
@@ -1247,7 +1263,9 @@ export const App: React.FC = () => {
             item.type === 'in-progress-tool-call'
           ) {
             const tc = item.data as ToolCallData;
-            if (!shouldShowToolCall(tc.kind)) continue;
+            if (!shouldShowToolCall(tc.kind)) {
+              continue;
+            }
             const text = formatToolCallForCopy(tc, true);
             if (text) {
               parts.push(`**[Tool: ${tc.kind}]**\n\n${text}`);
