@@ -566,6 +566,18 @@ export async function runNonInteractive(
             if ('modelOverride' in toolResponse) {
               modelOverride = toolResponse.modelOverride;
             }
+
+            // Single-shot contract: once structured_output has succeeded
+            // we terminate immediately, so any *remaining* tool calls in
+            // this same model batch must not run (a model that emits
+            // `[structured_output, write_file]` should not see write_file
+            // execute). Tool calls that came BEFORE structured_output in
+            // the batch have already executed; preventing those requires
+            // a pre-scan of toolCallRequests and is tracked as a
+            // follow-up (overlap with #3598).
+            if (hasStructuredSubmission) {
+              break;
+            }
           }
           if (hasStructuredSubmission) {
             // Abort any in-flight background agents so they don't race the

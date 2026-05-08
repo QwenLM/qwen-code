@@ -323,6 +323,11 @@ export class ToolSearchTool extends BaseDeclarativeTool<
             type: 'string',
             description:
               'Query to find deferred tools. Use "select:<tool_name>" for direct selection, or keywords to search.',
+            // Reject empty queries at validation time so the model
+            // doesn't waste a tool call to discover the runtime error
+            // (`Error: query is empty`). The runtime guard stays as a
+            // safety net for whitespace-only inputs that pass minLength.
+            minLength: 1,
           },
           max_results: {
             type: 'integer',

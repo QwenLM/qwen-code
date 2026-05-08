@@ -290,6 +290,17 @@ describe('ToolSearchTool', () => {
     ).toEqual(['hidden', 'visible']);
   });
 
+  it('rejects empty query at build time via schema (minLength)', () => {
+    // The schema now declares `query: { minLength: 1 }`, so an empty
+    // string fails Ajv validation in `tool.build()` instead of being
+    // caught at runtime — the model sees the error earlier and doesn't
+    // burn a tool-call cycle to learn the contract.
+    const tool = new ToolSearchTool(config);
+    expect(() => tool.build({ query: '' })).toThrow(
+      /must NOT have fewer than 1 character/i,
+    );
+  });
+
   it('rejects empty query with error', async () => {
     const tool = new ToolSearchTool(config);
     const invocation = tool.build({ query: '   ' });

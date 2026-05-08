@@ -2519,6 +2519,81 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('skips remaining tool calls in the same batch after structured_output succeeds', async () => {
+    // Single-shot contract: a model emitting
+    // `[structured_output(...), write_file(...)]` in the same response
+    // must not have write_file run after structured_output records.
+    // Tool calls *before* structured_output in the batch already ran
+    // (their elimination needs a pre-scan, tracked as follow-up).
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'number' } },
+    });
+
+    const sideEffectCallId = 'write-1';
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'so-batch',
+            name: ToolNames.STRUCTURED_OUTPUT,
+            args: { answer: 7 },
+            isClientInitiated: false,
+            prompt_id: 'p-batch',
+          },
+        },
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: sideEffectCallId,
+            name: 'write_file',
+            args: { path: '/tmp/should-not-run', content: 'side effect' },
+            isClientInitiated: false,
+            prompt_id: 'p-batch',
+          },
+        },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Structured output accepted.' }],
+    });
+
+    const adapter = makeMockAdapter();
+    await runNonInteractive(mockConfig, mockSettings, 'go', 'p-batch', {
+      adapter,
+    });
+
+    // executeToolCall called exactly once — for structured_output.
+    // write_file would be the second call if the loop hadn't broken.
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ name: ToolNames.STRUCTURED_OUTPUT }),
+      expect.any(AbortSignal),
+      expect.any(Object),
+    );
+    // emitResult landed; side-effect tool name should not appear in any
+    // emitToolResult call.
+    expect(adapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: false,
+        structuredResult: { answer: 7 },
+      }),
+    );
+    const toolResultCalls = vi.mocked(adapter.emitToolResult).mock.calls;
+    const sideEffectEmitted = toolResultCalls.some(
+      ([req]) => req.callId === sideEffectCallId,
+    );
+    expect(sideEffectEmitted).toBe(false);
+  });
+
   it('terminates even when structured_output args are undefined under an empty schema', async () => {
     // Pin the boolean-sentinel contract: the previous
     // `structuredSubmission !== undefined` check broke if the model
