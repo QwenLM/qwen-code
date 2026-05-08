@@ -75,7 +75,7 @@ export function isForceExpandGroup(
   // run's outcome (LiveAgentPanel evicts terminal rows after its
   // visibility window). If the group merged into a compact batch,
   // the summary would never render and the user would lose the
-  // committed audit trail. Mirrors the `hasCommittedTerminalSubagent`
+  // committed audit trail. Mirrors the `hasTerminalSubagent`
   // predicate in `ToolGroupMessage.showCompact`.
   if (
     tools.some((t) => {

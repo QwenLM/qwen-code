@@ -213,7 +213,7 @@ describe('mergeCompactToolGroups', () => {
       // Terminal task_execution groups must not be absorbed: their
       // SubagentScrollbackSummary lands inline as the persistent
       // record of the run's outcome, and the compact path can't
-      // surface it. Mirrors `hasCommittedTerminalSubagent` in
+      // surface it. Mirrors `hasTerminalSubagent` in
       // `ToolGroupMessage.showCompact`.
       const subagentResult = {
         type: 'task_execution',

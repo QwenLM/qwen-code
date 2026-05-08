@@ -280,16 +280,22 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // Compact mode: entire group → single line summary
   // Force-expand when: user must interact (Confirming or subagent pending
   // confirmation), tool errored, shell is focused, or user-initiated.
-  // Also force-expand when this group has just committed and contains
-  // a terminal subagent — `CompactToolGroupDisplay` doesn't know about
-  // `task_execution` results, so the compact path would skip
-  // `SubagentScrollbackSummary` and the user would lose the persistent
-  // record promised by the LiveAgentPanel → committed-summary handoff.
-  // Stay compact while the parent turn is still live (`isPending`),
-  // because the panel below the composer is still showing the row.
+  // Also force-expand when this group carries a terminal subagent —
+  // `CompactToolGroupDisplay` doesn't know about `task_execution`
+  // results, so the compact path would skip `SubagentScrollbackSummary`
+  // entirely. Applies in BOTH live and committed phases:
+  //   - committed phase: the summary is the persistent audit trail.
+  //   - live phase: `unregisterForeground`'s post-delete emit has
+  //     already evicted the panel snapshot row by the time a foreground
+  //     subagent reaches a terminal status, so the inline summary is
+  //     the only surface that carries the run's outcome until the
+  //     parent commits. Mirrors the renderer-side decision in
+  //     `SubagentExecutionRenderer` (terminal summary fires regardless
+  //     of `isPending`) and the preprocessor in
+  //     `mergeCompactToolGroups.isForceExpandGroup` (no `isPending`
+  //     gate either).
   const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
-  const hasCommittedTerminalSubagent =
-    !isPending && inlineToolCalls.some(isTerminalSubagentTool);
+  const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const showCompact =
     compactMode &&
     !hasConfirmingTool &&
@@ -297,7 +303,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     !hasErrorTool &&
     !isEmbeddedShellFocused &&
     !isUserInitiated &&
-    !hasCommittedTerminalSubagent;
+    !hasTerminalSubagent;
 
   if (showCompact) {
     return (
