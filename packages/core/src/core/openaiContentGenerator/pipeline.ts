@@ -555,8 +555,7 @@ export class ContentGenerationPipeline {
       errorMessage.includes('model is unloaded') ||
       errorMessage.includes('model not loaded') ||
       errorMessage.includes('model unloaded') ||
-      errorMessage.includes('is not loaded') ||
-      errorMessage.includes('model not found')
+      errorMessage.includes('is not loaded')
     );
   }
 
