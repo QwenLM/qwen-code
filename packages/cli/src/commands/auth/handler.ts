@@ -555,14 +555,13 @@ export async function showAuthStatus(): Promise<void> {
         !!process.env[OPENROUTER_ENV_KEY] ||
         !!mergedSettings.env?.[OPENROUTER_ENV_KEY];
 
-      const managedProvider = openAiProviders
-        .map((providerConfig) =>
-          findProviderByCredentials(
-            providerConfig.baseUrl,
-            providerConfig.envKey,
-          ),
-        )
-        .find((p) => p && resolveMetadataKey(p));
+      const foundProvider = activeConfig
+        ? findProviderByCredentials(activeConfig.baseUrl, activeConfig.envKey)
+        : undefined;
+      const managedProvider =
+        foundProvider && resolveMetadataKey(foundProvider)
+          ? foundProvider
+          : undefined;
 
       if (isActiveOpenRouter) {
         if (hasOpenRouterApiKey) {

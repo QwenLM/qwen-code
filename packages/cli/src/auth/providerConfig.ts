@@ -327,6 +327,11 @@ export function buildInstallPlan(
   const protocol = inputs.protocol ?? config.protocol;
   const envKey = resolveEnvKey(config, inputs);
   const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  if (models.length === 0) {
+    throw new Error(
+      `No models configured for provider "${config.id}". Check model list or provider configuration.`,
+    );
+  }
   const firstModelId = models[0]?.id;
 
   return {

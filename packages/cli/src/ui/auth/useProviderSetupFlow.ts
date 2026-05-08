@@ -194,7 +194,10 @@ export function useProviderSetupFlow(
   const selectProtocol = useCallback(
     (selectedProtocol: AuthType) => {
       setProtocol(selectedProtocol);
-      setBaseUrl(DEFAULT_BASE_URLS[selectedProtocol] ?? '');
+      const nextBaseUrl = DEFAULT_BASE_URLS[selectedProtocol] ?? '';
+      setBaseUrl(nextBaseUrl);
+      setApiKey('');
+      setApiKeyError(null);
       goNext();
     },
     [goNext],

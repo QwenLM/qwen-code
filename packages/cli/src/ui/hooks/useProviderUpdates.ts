@@ -233,7 +233,11 @@ export function useProviderUpdates(
           delete installPlan.modelSelection;
         }
 
-        await applyProviderInstallPlan(installPlan, { settings, config });
+        await applyProviderInstallPlan(installPlan, {
+          settings,
+          config,
+          refreshAuth: false,
+        });
 
         const activeModel = config.getModel();
         const displayName = t(providerCfg.label);

@@ -483,6 +483,17 @@ export function selectRecommendedOpenRouterModels(
     }
   }
 
+  // Fallback: if no free models found, pick top non-free models so the user
+  // has at least something usable after completing OAuth.
+  if (recommended.length === 0) {
+    for (const model of sorted) {
+      if (recommended.length >= limit) {
+        break;
+      }
+      addRecommendedModel(recommended, model, selectedIds, limit);
+    }
+  }
+
   return recommended;
 }
 
