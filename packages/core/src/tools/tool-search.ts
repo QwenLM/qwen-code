@@ -291,8 +291,15 @@ class ToolSearchInvocation extends BaseToolInvocation<
       };
     }
 
+    // Escape `<` in the JSON-stringified schema so any `</function>`
+    // (or `</functions>`) substring inside a tool's description / enum
+    // / examples can't prematurely close the pseudo-XML wrapper. The
+    // `<` JSON unicode escape decodes back to `<` when the model
+    // interprets the JSON, but as raw text inside the wrapper it's no
+    // longer the start of a closing tag.
     const schemaBlocks = loaded.map(
-      (tool) => `<function>${JSON.stringify(tool.schema)}</function>`,
+      (tool) =>
+        `<function>${JSON.stringify(tool.schema).replace(/</g, '\\u003c')}</function>`,
     );
     let llmContent = '';
     if (schemaBlocks.length > 0) {
