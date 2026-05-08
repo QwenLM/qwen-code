@@ -149,15 +149,15 @@ describe('buildInstallPlan', () => {
     expect(plan.modelSelection).toEqual({ modelId: 'pre-1' });
   });
 
-  it('omits modelSelection when models list is empty', () => {
+  it('throws when models list is empty', () => {
     const config = makeConfig({ models: undefined, modelNamePrefix: '' });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://custom.com/v1',
-      apiKey: 'sk-custom',
-      modelIds: [],
-    });
-
-    expect(plan.modelSelection).toBeUndefined();
+    expect(() =>
+      buildInstallPlan(config, {
+        baseUrl: 'https://custom.com/v1',
+        apiKey: 'sk-custom',
+        modelIds: [],
+      }),
+    ).toThrow(/No models configured for provider/);
   });
 
   it('resolves envKey from function', () => {
@@ -258,19 +258,19 @@ describe('resolveOwnsModel (via buildInstallPlan)', () => {
     expect(ownsModel?.({ id: 'x', envKey: 'OTHER' })).toBe(false);
   });
 
-  it('returns undefined when envKey is a function and no custom ownsModel', () => {
+  it('throws when envKey is a function and models list is empty', () => {
     const config = makeConfig({
       envKey: () => 'DYNAMIC',
       models: undefined,
       modelNamePrefix: '',
     });
-    const plan = buildInstallPlan(config, {
-      baseUrl: 'https://x.com',
-      apiKey: 'sk',
-      modelIds: [],
-    });
-
-    expect(plan.modelProviders?.[0]?.ownsModel).toBeUndefined();
+    expect(() =>
+      buildInstallPlan(config, {
+        baseUrl: 'https://x.com',
+        apiKey: 'sk',
+        modelIds: [],
+      }),
+    ).toThrow(/No models configured for provider/);
   });
 
   it('uses custom ownsModel when provided', () => {

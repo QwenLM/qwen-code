@@ -228,7 +228,7 @@ describe('useProviderUpdates', () => {
     );
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
-    expect(mockConfig.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
   });
 
   it('does not overwrite existing env key with empty value', async () => {
