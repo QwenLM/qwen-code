@@ -348,6 +348,59 @@ describe('<MainContent />', () => {
     expect(lengthAtLastCall()).toBe(TOTAL);
   });
 
+  it('renders newly finalized item without a disappear frame when gap is within CHUNK_SIZE (issue #3899)', () => {
+    // Regression: when a pending item finalizes, it is removed from
+    // pendingHistoryItems immediately. If replayCount still lags behind
+    // mergedHistory.length by ≤ PROGRESSIVE_REPLAY_CHUNK_SIZE, the item
+    // would be absent from BOTH areas for one render frame. The gap-based
+    // condition must render the full list synchronously in that case.
+    //
+    // Setup: 100 items = exactly the replay threshold, so initialReplayCount
+    // returns 100 (fully shown, no chunking). The component state is stable
+    // at replayCount=100 with no pending effects.
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 100 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+
+    const { rerender } = renderMainContent(
+      createUIState({ history, historyRemountKey: 1 }),
+    );
+    // All 100 + 3 prefix items rendered immediately (below/at threshold).
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(103);
+
+    // Simulate a pending item finalizing: history grows by 1, same remount key.
+    // replayCount is 100; new length is 101; gap = 1 ≤ PROGRESSIVE_REPLAY_CHUNK_SIZE (50).
+    staticItemsSpy.mockClear();
+    rerender(
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <CompactModeProvider value={{ compactMode: false }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                history: [
+                  ...history,
+                  { type: 'user' as const, id: 100, text: 'new msg' },
+                ],
+                historyRemountKey: 1,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </CompactModeProvider>
+      </AppContext.Provider>,
+    );
+
+    // The first render after the append must show all 104 items — no frame
+    // where the 101st item disappears (which would register as 103 here).
+    expect(staticItemsSpy.mock.calls[0]?.[0]).toHaveLength(104);
+  });
+
   it('synchronously resets to the first chunk on historyRemountKey change after a full catch-up (Ctrl+O regression, issue #3899)', async () => {
     // Wenshao's review: with the previous useEffect-based reset, the FIRST
     // render after a Ctrl+O-induced historyRemountKey bump would still feed

@@ -332,15 +332,16 @@ export const MainContent = () => {
     return () => clearImmediate(handle);
   }, [replayCount, mergedHistory.length]);
 
-  // TODO(#3899 follow-up): items at indexes >= replayCount are not yet in
-  // <Static>. If a pending item finalizes at index N during the catch-up
-  // window, it briefly disappears from the screen until replayCount reaches
-  // N. The window is bounded by chunkCount × event-loop tick (~100 ms for
-  // 500 items, ~1 s for 5000). For multi-thousand-item resumes a "tail
-  // buffer" — keep the trailing un-replayed items in the dynamic area until
-  // <Static> catches up — would close this gap.
+  // Render the full list when the tail gap is small (≤ CHUNK_SIZE). This
+  // covers the normal append path: a pending item finalizes, replayCount is
+  // already close to the new length, so we skip one useless slice frame.
+  // Without this, a just-finalized item could briefly disappear for one tick
+  // because it is gone from pendingHistoryItems but not yet in the Static
+  // slice. Chunked replay is still used for large remount gaps (Ctrl+O on a
+  // long session) where the gap is >> CHUNK_SIZE.
   const visibleHistoryItemsWithSourceCopyOffsets =
-    replayCount >= historyItemsWithSourceCopyOffsets.length
+    historyItemsWithSourceCopyOffsets.length - replayCount <=
+    PROGRESSIVE_REPLAY_CHUNK_SIZE
       ? historyItemsWithSourceCopyOffsets
       : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
