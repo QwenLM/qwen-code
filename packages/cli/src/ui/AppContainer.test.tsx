@@ -1856,7 +1856,7 @@ describe('AppContainer State Management', () => {
                   callId: 'c1',
                   name: 'shell',
                   description: 'shell description',
-                  status: 'Success',
+                  status: ToolCallStatus.Success,
                   resultDisplay: undefined,
                   confirmationDetails: undefined,
                 },
