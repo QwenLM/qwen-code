@@ -4,98 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CommandModule, Argv } from 'yargs';
-import {
-  handleQwenAuth,
-  handleApiKeyAuth,
-  runInteractiveAuth,
-  showAuthStatus,
-} from './auth/handler.js';
-import { t } from '../i18n/index.js';
+/**
+ * Deprecated since v0.15.8: the `qwen auth` CLI subcommand has been removed.
+ *
+ * Interactive users should use the richer /auth TUI dialog instead.
+ * CI/headless users should configure authentication via env vars or CLI flags.
+ */
 
-// Define subcommands separately
-const qwenOauthCommand = {
-  command: 'qwen-oauth',
-  describe: t('Authenticate using Qwen OAuth'),
-  handler: async () => {
-    await handleQwenAuth('qwen-oauth', {});
-  },
-};
-
-const codePlanCommand = {
-  command: 'coding-plan',
-  describe: t('Authenticate using Alibaba Cloud Coding Plan'),
-  builder: (yargs: Argv) =>
-    yargs
-      .option('base-url', {
-        alias: 'u',
-        describe: t('Base URL for Coding Plan'),
-        type: 'string',
-      })
-      .option('key', {
-        alias: 'k',
-        describe: t('API key for Coding Plan'),
-        type: 'string',
-      }),
-  handler: async (argv: { 'base-url'?: string; key?: string }) => {
-    const baseUrl = argv['base-url'];
-    const key = argv['key'] as string | undefined;
-
-    if (baseUrl && key) {
-      await handleQwenAuth('coding-plan', { baseUrl, key });
-    } else {
-      await handleQwenAuth('coding-plan', {});
-    }
-  },
-};
-
-const apiKeyCommand = {
-  command: 'api-key',
-  describe: t('Authenticate using an API key'),
-  handler: async () => {
-    await handleApiKeyAuth();
-  },
-};
-
-const openRouterCommand = {
-  command: 'openrouter',
-  describe: t('Authenticate using OpenRouter API key setup'),
-  builder: (yargs: Argv) =>
-    yargs.option('key', {
-      alias: 'k',
-      describe: t('API key for OpenRouter'),
-      type: 'string',
-    }),
-  handler: async (argv: { key?: string }) => {
-    const key = argv['key'] as string | undefined;
-    await handleQwenAuth('openrouter', { key });
-  },
-};
-
-const statusCommand = {
-  command: 'status',
-  describe: t('Show current authentication status'),
-  handler: async () => {
-    await showAuthStatus();
-  },
-};
+import type { CommandModule } from 'yargs';
+import { writeStdoutLine } from '../utils/stdioHelpers.js';
 
 export const authCommand: CommandModule = {
   command: 'auth',
-  describe: t(
-    'Configure Qwen authentication with OpenRouter, Coding Plan, API Key, or Qwen-OAuth',
-  ),
-  builder: (yargs: Argv) =>
-    yargs
-      .command(qwenOauthCommand)
-      .command(codePlanCommand)
-      .command(openRouterCommand)
-      .command(apiKeyCommand)
-      .command(statusCommand)
-      .demandCommand(0) // Don't require a subcommand
-      .version(false),
-  handler: async () => {
-    // This handler is for when no subcommand is provided - show interactive menu
-    await runInteractiveAuth();
+  describe: 'Configure authentication (removed since v0.15.8)',
+  builder: (yargs) => yargs.version(false),
+  handler: () => {
+    writeStdoutLine(
+      '\n' +
+        '\x1b[33m⚠  qwen auth has been removed since v0.15.8\x1b[0m\n' +
+        '\n' +
+        '  \x1b[36mInteractive\x1b[0m   →  run qwen and use /auth to configure (8+ providers, guided setup)\n' +
+        '  \x1b[36mCI / Headless\x1b[0m →  set OPENAI_API_KEY + OPENAI_BASE_URL + OPENAI_MODEL env vars\n' +
+        '                     or pass --openai-api-key, --openai-base-url, --model\n' +
+        '  \x1b[36mScripted\x1b[0m      →  edit \x1b[36m~/.qwen/settings.json\x1b[0m, or run qwen interactively once\n' +
+        '\n' +
+        '  Check auth status → \x1b[36m/doctor\x1b[0m\n',
+    );
+    process.exit(0);
   },
 };

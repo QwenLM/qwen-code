@@ -36,7 +36,6 @@ import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
 import type { Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
-import { authCommand } from '../commands/auth.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -54,6 +53,7 @@ import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
+import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 
 // UUID v4 regex pattern for validation
@@ -610,7 +610,6 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(mcpCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
-    // Register Auth subcommands
     .command(authCommand)
     // Register Hooks subcommands
     .command(hooksCommand)
@@ -638,11 +637,12 @@ export async function parseArguments(): Promise<CliArgs> {
     result._.length > 0 &&
     (result._[0] === 'mcp' ||
       result._[0] === 'extensions' ||
+      result._[0] === 'auth' ||
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review')
   ) {
-    // MCP/Extensions/Hooks/Channel/Review commands handle their own
+    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
