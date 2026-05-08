@@ -148,4 +148,29 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
   it('returns null for a missing file', () => {
     expect(svc.readLastRecordUuid(path.join(tmpRoot, 'nope.jsonl'))).toBeNull();
   });
+
+  it('does not extract a uuid from a payload object inside a partial-tail fragment', () => {
+    // When the last record exceeds TAIL_READ_SIZE (64 KiB), the tail buffer
+    // starts mid-record. Without the boundary guard, _recoverObjectsFromLine
+    // walks the partial fragment with depth starting at 0, finds a balanced
+    // inner `{ "uuid": "fake" }` object inside the record's payload, and
+    // surfaces "fake" as if it were the last top-level uuid. renameSession
+    // would then anchor custom_title.parentUuid at payload data and
+    // reconstructHistory would truncate the chain on resume.
+    //
+    // Filler is a long array of zeros (no quote characters) so the parser's
+    // inString state stays aligned even when entering mid-fragment, ensuring
+    // the trojan is reachable. ~80k entries → ~160 KB, comfortably above
+    // TAIL_READ_SIZE.
+    const filler = new Array(80000).fill(0).join(',');
+    const giantLine =
+      `{"uuid":"real-last","filler":[${filler}],` +
+      `"trojan":{"uuid":"fake-from-payload"}}`;
+    const file = writeJsonl('big-tail.jsonl', `${giantLine}\n`);
+
+    // We cannot recover "real-last" — it lies before the tail window. The
+    // critical assertion is the absence of the false-positive recovery: the
+    // function must not surface the payload's nested uuid.
+    expect(svc.readLastRecordUuid(file)).not.toBe('fake-from-payload');
+  });
 });

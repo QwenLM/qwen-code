@@ -263,6 +263,17 @@ export class SessionService {
       const tail = buffer.toString('utf-8');
       const lines = tail.split('\n');
 
+      // When tail-reading from mid-file, the first split segment is a partial
+      // fragment of a record that started before our window. Running tolerant
+      // recovery on it can surface a balanced inner `{ "uuid": ... }` object
+      // from inside the record's payload as if it were a top-level uuid —
+      // `renameSession` would then anchor `custom_title.parentUuid` at payload
+      // data and break the parent chain. Discard that first segment; complete
+      // physical lines after the first `\n` are safe to recover.
+      if (readStart > 0) {
+        lines.shift();
+      }
+
       // Walk physical lines bottom-up; on each line walk recovered records
       // bottom-up too, so a `}{`-glued tail returns the *latest* record.
       for (let i = lines.length - 1; i >= 0; i--) {
@@ -271,7 +282,7 @@ export class SessionService {
         const records = jsonl.parseLineTolerant<ChatRecord>(trimmed, filePath);
         for (let j = records.length - 1; j >= 0; j--) {
           const record = records[j];
-          if (record?.uuid) {
+          if (record.uuid) {
             return record.uuid;
           }
         }

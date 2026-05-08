@@ -112,14 +112,19 @@ export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
  * recovered. Use this from any streaming reader that walks JSONL line-by-line
  * and wants the same recovery semantics as `read()` / `readLines()`.
  *
- * Non-object JSON values (e.g. a bare `null` or `42` line) are filtered out:
- * JSONL records in this codebase are always objects, and forwarding scalars
- * would trip property accesses in callers (`record.type`, `record.uuid`).
+ * Non-object JSON values (e.g. a bare `null`, `42`, or `[1,2,3]` line) are
+ * filtered out: JSONL records in this codebase are always objects, and
+ * forwarding scalars or arrays would trip property accesses in callers
+ * (`record.type`, `record.uuid`).
  */
 export function parseLineTolerant<T>(line: string, filePath: string): T[] {
   try {
     const parsed = JSON.parse(line);
-    if (parsed !== null && typeof parsed === 'object') {
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed)
+    ) {
       return [parsed as T];
     }
     debugLogger.warn(`Skipping non-object JSONL value in ${filePath}`);
