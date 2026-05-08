@@ -905,7 +905,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('loadSession rejects when sessionExists returns false, skipping config load', async () => {
-    // Mock SessionService to report session does not exist
+    // Save the default SessionService mock and override for this test
+    const savedImpl = vi.mocked(SessionService).getMockImplementation();
     const sessionExistsStub = vi.fn().mockResolvedValue(false);
     vi.mocked(SessionService).mockImplementation(
       () =>
@@ -914,32 +915,40 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }) as unknown as InstanceType<typeof SessionService>,
     );
 
-    await setupSessionMocks('session-nonexistent');
+    try {
+      await setupSessionMocks('session-nonexistent');
 
-    const agentPromise = runAcpAgent(
-      mockConfig,
-      makeSessionSettings(),
-      mockArgv,
-    );
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
 
-    const agent = capturedAgentFactory!({
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    }) as AgentLike;
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
 
-    await expect(
-      agent.loadSession({
-        cwd: '/tmp',
-        sessionId: 'nonexistent',
-      }),
-    ).rejects.toThrow('Session nonexistent does not exist at /tmp');
+      await expect(
+        agent.loadSession({
+          cwd: '/tmp',
+          sessionId: 'nonexistent',
+        }),
+      ).rejects.toThrow('Session nonexistent does not exist at /tmp');
 
-    // Verify sessionExists was queried for the correct session
-    expect(sessionExistsStub).toHaveBeenCalledWith('nonexistent');
+      // Verify sessionExists was queried for the correct session
+      expect(sessionExistsStub).toHaveBeenCalledWith('nonexistent');
 
-    mockConnectionState.resolve();
-    await agentPromise;
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      // Restore the default mock to avoid polluting subsequent tests
+      vi.mocked(SessionService).mockImplementation(
+        savedImpl as typeof vi.mocked<typeof SessionService>,
+      );
+      // Also let beforeEach clearAllMocks handle the sessionExists stub
+    }
   });
 });

@@ -57,6 +57,16 @@ function sessionsPath(): string {
   return path.join(os.homedir(), '.qwen', 'channels', 'sessions.json');
 }
 
+async function restoreAndLogSessions(router: SessionRouter): Promise<void> {
+  const result = await router.restoreSessions();
+  if (result.restored > 0 || result.failed > 0) {
+    writeStdoutLine(
+      `[Channel] Sessions restored: ${result.restored}` +
+        (result.failed > 0 ? `, failed: ${result.failed}` : ''),
+    );
+  }
+}
+
 function loadChannelsConfig(): Record<string, unknown> {
   const settings = loadSettings(process.cwd());
   const channels = (
@@ -216,13 +226,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   registerToolCallDispatch(bridge, router, channels);
 
   // Restore sessions from previous run
-  const restoreResult = await router.restoreSessions();
-  if (restoreResult.restored > 0 || restoreResult.failed > 0) {
-    writeStdoutLine(
-      `[Channel] Sessions restored: ${restoreResult.restored}` +
-        (restoreResult.failed > 0 ? `, failed: ${restoreResult.failed}` : ''),
-    );
-  }
+  await restoreAndLogSessions(router);
 
   try {
     await channel.connect();
@@ -375,13 +379,7 @@ async function startAll(proxy?: string): Promise<void> {
   registerToolCallDispatch(bridge, router, channels);
 
   // Restore sessions from previous run
-  const restoreResult = await router.restoreSessions();
-  if (restoreResult.restored > 0 || restoreResult.failed > 0) {
-    writeStdoutLine(
-      `[Channel] Sessions restored: ${restoreResult.restored}` +
-        (restoreResult.failed > 0 ? `, failed: ${restoreResult.failed}` : ''),
-    );
-  }
+  await restoreAndLogSessions(router);
 
   // Connect all channels
   let connectedCount = 0;

@@ -298,46 +298,48 @@ describe('SessionRouter', () => {
       const tmpDir = join('/tmp', `test-restore-${Date.now()}`);
       mkdirSync(tmpDir, { recursive: true });
 
-      const persistFile = join(tmpDir, 'sessions.json');
-      const entries = {
-        'telegram:alice:chat1': {
-          sessionId: 'old-session-1',
-          target: {
-            channelName: 'telegram',
-            senderId: 'alice',
-            chatId: 'chat1',
+      try {
+        const persistFile = join(tmpDir, 'sessions.json');
+        const entries = {
+          'telegram:alice:chat1': {
+            sessionId: 'old-session-1',
+            target: {
+              channelName: 'telegram',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/workspace',
           },
-          cwd: '/workspace',
-        },
-        'telegram:bob:chat2': {
-          sessionId: 'old-session-2',
-          target: {
-            channelName: 'telegram',
-            senderId: 'bob',
-            chatId: 'chat2',
+          'telegram:bob:chat2': {
+            sessionId: 'old-session-2',
+            target: {
+              channelName: 'telegram',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/workspace',
           },
-          cwd: '/workspace',
-        },
-      };
-      writeFileSync(persistFile, JSON.stringify(entries, null, 2));
+        };
+        writeFileSync(persistFile, JSON.stringify(entries, null, 2));
 
-      const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
-      const result = await router.restoreSessions();
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
+        const result = await router.restoreSessions();
 
-      expect(result.restored).toBe(2);
-      expect(result.failed).toBe(0);
-      expect(bridge.loadSession).toHaveBeenCalledTimes(2);
-      expect(router.hasSession('telegram', 'alice', 'chat1')).toBe(true);
-      expect(router.hasSession('telegram', 'bob', 'chat2')).toBe(true);
+        expect(result.restored).toBe(2);
+        expect(result.failed).toBe(0);
+        expect(bridge.loadSession).toHaveBeenCalledTimes(2);
+        expect(router.hasSession('telegram', 'alice', 'chat1')).toBe(true);
+        expect(router.hasSession('telegram', 'bob', 'chat2')).toBe(true);
 
-      const target = router.getTarget('old-session-1');
-      expect(target).toEqual({
-        channelName: 'telegram',
-        senderId: 'alice',
-        chatId: 'chat1',
-      });
-
-      rmSync(tmpDir, { recursive: true });
+        const target = router.getTarget('old-session-1');
+        expect(target).toEqual({
+          channelName: 'telegram',
+          senderId: 'alice',
+          chatId: 'chat1',
+        });
+      } finally {
+        rmSync(tmpDir, { recursive: true });
+      }
     });
 
     it('skips entries whose loadSession throws', async () => {
@@ -346,53 +348,55 @@ describe('SessionRouter', () => {
       const tmpDir = join('/tmp', `test-restore-fail-${Date.now()}`);
       mkdirSync(tmpDir, { recursive: true });
 
-      const persistFile = join(tmpDir, 'sessions.json');
-      const entries = {
-        'telegram:alice:chat1': {
-          sessionId: 'good-session',
-          target: {
-            channelName: 'telegram',
-            senderId: 'alice',
-            chatId: 'chat1',
+      try {
+        const persistFile = join(tmpDir, 'sessions.json');
+        const entries = {
+          'telegram:alice:chat1': {
+            sessionId: 'good-session',
+            target: {
+              channelName: 'telegram',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/workspace',
           },
-          cwd: '/workspace',
-        },
-        'telegram:bob:chat2': {
-          sessionId: 'stale-session',
-          target: {
-            channelName: 'telegram',
-            senderId: 'bob',
-            chatId: 'chat2',
+          'telegram:bob:chat2': {
+            sessionId: 'stale-session',
+            target: {
+              channelName: 'telegram',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/workspace',
           },
-          cwd: '/workspace',
-        },
-      };
-      writeFileSync(persistFile, JSON.stringify(entries, null, 2));
+        };
+        writeFileSync(persistFile, JSON.stringify(entries, null, 2));
 
-      // Make loadSession throw for the stale session
-      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
-        (id: string) => {
-          if (id === 'stale-session') {
-            throw new Error('Session not found');
-          }
-          return id;
-        },
-      );
+        // Make loadSession throw for the stale session
+        (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+          (id: string) => {
+            if (id === 'stale-session') {
+              throw new Error('Session not found');
+            }
+            return id;
+          },
+        );
 
-      const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
-      const result = await router.restoreSessions();
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
+        const result = await router.restoreSessions();
 
-      expect(result.restored).toBe(1);
-      expect(result.failed).toBe(1);
-      expect(router.hasSession('telegram', 'alice', 'chat1')).toBe(true);
-      expect(router.hasSession('telegram', 'bob', 'chat2')).toBe(false);
+        expect(result.restored).toBe(1);
+        expect(result.failed).toBe(1);
+        expect(router.hasSession('telegram', 'alice', 'chat1')).toBe(true);
+        expect(router.hasSession('telegram', 'bob', 'chat2')).toBe(false);
 
-      // Persist file should be updated to remove the failed entry
-      const { readFileSync } = await import('node:fs');
-      const updated = JSON.parse(readFileSync(persistFile, 'utf-8'));
-      expect(Object.keys(updated)).toEqual(['telegram:alice:chat1']);
-
-      rmSync(tmpDir, { recursive: true });
+        // Persist file should be updated to remove the failed entry
+        const { readFileSync } = await import('node:fs');
+        const updated = JSON.parse(readFileSync(persistFile, 'utf-8'));
+        expect(Object.keys(updated)).toEqual(['telegram:alice:chat1']);
+      } finally {
+        rmSync(tmpDir, { recursive: true });
+      }
     });
 
     it('returns zeros when no persist file exists', async () => {
@@ -412,16 +416,18 @@ describe('SessionRouter', () => {
       const tmpDir = join('/tmp', `test-restore-empty-${Date.now()}`);
       mkdirSync(tmpDir, { recursive: true });
 
-      const persistFile = join(tmpDir, 'sessions.json');
-      writeFileSync(persistFile, '{}');
+      try {
+        const persistFile = join(tmpDir, 'sessions.json');
+        writeFileSync(persistFile, '{}');
 
-      const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
-      const result = await router.restoreSessions();
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
+        const result = await router.restoreSessions();
 
-      expect(result).toEqual({ restored: 0, failed: 0 });
-      expect(bridge.loadSession).not.toHaveBeenCalled();
-
-      rmSync(tmpDir, { recursive: true });
+        expect(result).toEqual({ restored: 0, failed: 0 });
+        expect(bridge.loadSession).not.toHaveBeenCalled();
+      } finally {
+        rmSync(tmpDir, { recursive: true });
+      }
     });
   });
 });
