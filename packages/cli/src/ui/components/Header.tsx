@@ -48,7 +48,7 @@ interface HeaderProps {
    */
   customBannerSubtitle?: string;
   version: string;
-  authDisplayType?: AuthDisplayType;
+  authDisplayType?: AuthDisplayType | string;
   model: string;
   workingDirectory: string;
 }

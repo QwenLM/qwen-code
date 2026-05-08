@@ -140,6 +140,11 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         this.params.file_path,
         'overwriting',
+        // WriteFile replaces the entire file: a partial read is not
+        // enough evidence. Edit's `old_string` matching covers the
+        // "fabricated content" case for in-place edits, but there is
+        // no equivalent guard on the overwrite path.
+        { requireFullRead: true },
       );
       if (!decision.ok) {
         // Surface the structured ToolErrorType through scheduler.
@@ -184,7 +189,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         this.params.file_path,
         'overwriting',
-        { expectExisting: true },
+        { expectExisting: true, requireFullRead: true },
       );
       if (!postDecision.ok) {
         debugLogger.warn('post-read TOCTOU rejection (confirmation)', {
@@ -258,6 +263,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         file_path,
         'overwriting',
+        { requireFullRead: true },
       );
       if (!decision.ok) {
         return {
@@ -321,7 +327,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         file_path,
         'overwriting',
-        { expectExisting: true },
+        { expectExisting: true, requireFullRead: true },
       );
       if (!postDecision.ok) {
         debugLogger.warn('post-read TOCTOU rejection (execute)', {
@@ -389,7 +395,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         // file from stale bytes. For new-file creation
         // (`fileExists === false`), ENOENT is the expected pre-write
         // state (ok:true → writeTextFile creates).
-        { expectExisting: fileExists },
+        //
+        // `requireFullRead: true` only matters when stat succeeds
+        // (file currently exists). On the new-file path the helper
+        // returns ok:true via ENOENT before consulting this flag, so
+        // creation is still exempt regardless.
+        { expectExisting: fileExists, requireFullRead: true },
       );
       if (!writeDecision.ok) {
         debugLogger.warn('pre-write TOCTOU rejection', {

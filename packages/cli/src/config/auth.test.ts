@@ -280,4 +280,45 @@ describe('validateAuthMethod', () => {
     const result = validateAuthMethod(AuthType.USE_OPENAI, mockConfig);
     expect(result).toBeNull();
   });
+
+  it('should accept runtime-resolved settings key when modelProvider declares a custom envKey', () => {
+    delete process.env['CUSTOM_API_KEY'];
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        security: { auth: { apiKey: 'settings-fallback-key' } },
+        model: { name: 'custom-model' },
+        modelProviders: {
+          openai: [{ id: 'custom-model', envKey: 'CUSTOM_API_KEY' }],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    const mockConfig = {
+      getModelsConfig: vi.fn().mockReturnValue({
+        getModel: vi.fn().mockReturnValue('custom-model'),
+        getGenerationConfig: vi
+          .fn()
+          .mockReturnValue({ apiKey: 'settings-fallback-key' }),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const result = validateAuthMethod(AuthType.USE_OPENAI, mockConfig);
+    expect(result).toBeNull();
+  });
+
+  it('should keep no-config validation strict for missing custom envKey', () => {
+    delete process.env['CUSTOM_API_KEY'];
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        security: { auth: { apiKey: 'settings-fallback-key' } },
+        model: { name: 'custom-model' },
+        modelProviders: {
+          openai: [{ id: 'custom-model', envKey: 'CUSTOM_API_KEY' }],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    const result = validateAuthMethod(AuthType.USE_OPENAI);
+    expect(result).toContain('CUSTOM_API_KEY');
+  });
 });

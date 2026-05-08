@@ -719,6 +719,92 @@ export class SessionService {
   }
 
   /**
+   * Forks a session to a new sessionId.
+   *
+   * Reads the source JSONL into memory, rewrites every record's `sessionId`
+   * to `newSessionId`, rebuilds the `parentUuid` chain in write order so the
+   * fork is a linear continuation, stamps `forkedFrom: { sessionId, messageUuid }`
+   * on every copied record for audit, and writes the result to `<newId>.jsonl`.
+   *
+   * Mirrors Claude Code's `/branch` storage model: full in-memory copy + per-
+   * message forkedFrom (see claude-code/src/commands/branch/branch.ts).
+   *
+   * The source file is not modified.
+   *
+   * @throws If source does not exist, source is empty, source belongs to a
+   *   different project, or the target file already exists.
+   */
+  async forkSession(
+    sourceSessionId: string,
+    newSessionId: string,
+  ): Promise<{ filePath: string; copiedCount: number }> {
+    if (!SESSION_FILE_PATTERN.test(`${sourceSessionId}.jsonl`)) {
+      throw new Error(`Invalid source sessionId: ${sourceSessionId}`);
+    }
+    if (!SESSION_FILE_PATTERN.test(`${newSessionId}.jsonl`)) {
+      throw new Error(`Invalid new sessionId: ${newSessionId}`);
+    }
+
+    const chatsDir = this.getChatsDir();
+    const sourcePath = path.join(chatsDir, `${sourceSessionId}.jsonl`);
+    const targetPath = path.join(chatsDir, `${newSessionId}.jsonl`);
+
+    // Read + parse the full source transcript.
+    const records = await jsonl.read<ChatRecord>(sourcePath);
+    if (records.length === 0) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+
+    // Verify project ownership via the first record's cwd.
+    if (getProjectHash(records[0].cwd) !== this.projectHash) {
+      throw new Error(
+        `Source session does not belong to current project: ${sourceSessionId}`,
+      );
+    }
+
+    // Rebuild the parentUuid chain in write order so the fork is a clean
+    // linear descendant. `forkedFrom` captures the origin of each message.
+    let prevUuid: string | null = null;
+    const forked: ChatRecord[] = records.map((record) => {
+      const next: ChatRecord = {
+        ...record,
+        sessionId: newSessionId,
+        parentUuid: prevUuid,
+        forkedFrom: {
+          sessionId: sourceSessionId,
+          messageUuid: record.uuid,
+        },
+      };
+      prevUuid = record.uuid;
+      return next;
+    });
+
+    fs.mkdirSync(chatsDir, { recursive: true });
+    const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
+
+    // Exclusive create: one syscall that both asserts "file doesn't exist"
+    // and opens for writing, eliminating the TOCTOU window between a
+    // separate existsSync check and writeFileSync. Also guarantees we
+    // never silently overwrite an existing session file.
+    let fd: number;
+    try {
+      fd = fs.openSync(targetPath, 'wx', 0o600);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`Target session file already exists: ${newSessionId}`);
+      }
+      throw err;
+    }
+    try {
+      fs.writeFileSync(fd, body, { encoding: 'utf8' });
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    return { filePath: targetPath, copiedCount: forked.length };
+  }
+
+  /**
    * Gets the custom title for a session by reading from its JSONL file.
    *
    * @param sessionId The session ID to look up
@@ -816,6 +902,67 @@ export class SessionService {
     }
 
     return matches;
+  }
+
+  /**
+   * Returns the customTitles in this project that start with `prefix`
+   * (case-insensitive). Single project-wide scan — meant to replace
+   * repeated `findSessionsByTitle()` probes when the caller needs to
+   * pick the first free `(Branch N)` slot in memory.
+   *
+   * Skips the heavy hydration steps (message count, prompt extraction)
+   * that `findSessionsByTitle` does — collision lookup only needs the
+   * title and a project filter, so we read the first record only when
+   * the title actually matches the prefix.
+   *
+   * @param prefix Case-insensitive title prefix to match.
+   */
+  async findSessionTitlesByPrefix(prefix: string): Promise<string[]> {
+    const normalizedPrefix = prefix.toLowerCase().trim();
+    const titles: string[] = [];
+    const chatsDir = this.getChatsDir();
+
+    let fileNames: string[];
+    try {
+      fileNames = fs.readdirSync(chatsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return titles;
+      }
+      throw error;
+    }
+
+    let filesProcessed = 0;
+    for (const name of fileNames) {
+      if (!SESSION_FILE_PATTERN.test(name)) continue;
+      if (filesProcessed >= MAX_FILES_TO_PROCESS) break;
+      filesProcessed++;
+
+      const filePath = path.join(chatsDir, name);
+
+      // Cheap tail-read to extract the title before doing any project-
+      // filter work. Saves a per-file jsonl.readLines on the common
+      // case where most sessions don't share this prefix.
+      const titleInfo = this.readSessionTitleInfoFromFile(filePath);
+      if (!titleInfo.title) continue;
+      const normalizedTitle = titleInfo.title.toLowerCase().trim();
+      if (!normalizedTitle.startsWith(normalizedPrefix)) continue;
+
+      // Project filter — same semantics as findSessionsByTitle: scope
+      // collisions to the current project so a fork in another project
+      // can't make this one bump unnecessarily.
+      try {
+        const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+        if (records.length === 0) continue;
+        if (getProjectHash(records[0].cwd) !== this.projectHash) continue;
+      } catch {
+        continue;
+      }
+
+      titles.push(titleInfo.title);
+    }
+
+    return titles;
   }
 
   /**

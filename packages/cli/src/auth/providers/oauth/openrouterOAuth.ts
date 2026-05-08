@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -8,46 +8,36 @@ import { createServer, type Server } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import open from 'open';
 
-import {
-  AuthType,
-  type Config,
-  type ModelProvidersConfig,
-  type ProviderModelConfig as ModelConfig,
-} from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { type ProviderModelConfig as ModelConfig } from '@qwen-code/qwen-code-core';
 
 export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
-export const OPENROUTER_DEFAULT_MODEL = 'openai/gpt-4o-mini';
+export const OPENROUTER_DEFAULT_MODEL = 'z-ai/glm-4.5-air:free';
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 export const OPENROUTER_OAUTH_AUTHORIZE_URL = 'https://openrouter.ai/auth';
 export const OPENROUTER_OAUTH_EXCHANGE_URL =
   'https://openrouter.ai/api/v1/auth/keys';
 export const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
-export const OPENROUTER_OAUTH_CALLBACK_URL =
-  'http://localhost:3000/openrouter/callback';
+export const OPENROUTER_OAUTH_CALLBACK_PORT = 3000;
+const OPENROUTER_OAUTH_CALLBACK_PORT_RETRIES = 10;
+export const OPENROUTER_OAUTH_CALLBACK_URL = `http://localhost:${OPENROUTER_OAUTH_CALLBACK_PORT}/openrouter/callback`;
 const OPENROUTER_CODE_CHALLENGE_METHOD = 'S256';
 const OPENROUTER_OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const OPENROUTER_MINIMUM_TEXT_MODELS = 1;
 
 export const OPENROUTER_DEFAULT_MODELS: ModelConfig[] = [
   {
-    id: 'openai/gpt-4o-mini',
-    name: 'OpenRouter · GPT-4o mini',
+    id: 'z-ai/glm-4.5-air:free',
+    name: 'OpenRouter · GLM 4.5 Air',
     baseUrl: OPENROUTER_BASE_URL,
     envKey: OPENROUTER_ENV_KEY,
+    generationConfig: { contextWindowSize: 128000 },
   },
   {
-    id: 'anthropic/claude-3.7-sonnet',
-    name: 'OpenRouter · Claude 3.7 Sonnet',
+    id: 'openai/gpt-oss-120b:free',
+    name: 'OpenRouter · GPT OSS 120B',
     baseUrl: OPENROUTER_BASE_URL,
     envKey: OPENROUTER_ENV_KEY,
-  },
-  {
-    id: 'google/gemini-2.5-flash',
-    name: 'OpenRouter · Gemini 2.5 Flash',
-    baseUrl: OPENROUTER_BASE_URL,
-    envKey: OPENROUTER_ENV_KEY,
+    generationConfig: { contextWindowSize: 131072 },
   },
 ];
 
@@ -151,18 +141,17 @@ export function createOpenRouterOAuthSession(
   };
 }
 
-export function startOAuthCallbackListener(
-  callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
-  timeoutMs = OPENROUTER_OAUTH_TIMEOUT_MS,
-  expectedState?: string,
-): OAuthCallbackListener {
-  const parsedUrl = new URL(callbackUrl);
-  if (parsedUrl.protocol !== 'http:') {
-    throw new Error(
-      'Only http localhost callback URLs are currently supported.',
-    );
-  }
+export interface OAuthCallbackListenerWithPort extends OAuthCallbackListener {
+  /** The actual port the server bound to (may differ from the requested port). */
+  port: number;
+}
 
+function createOAuthCallbackServer(
+  parsedUrl: URL,
+  expectedState: string,
+  port: number,
+  timeoutMs: number,
+): OAuthCallbackListenerWithPort {
   let server: Server | undefined;
   let timeout: NodeJS.Timeout | undefined;
   let settled = false;
@@ -237,7 +226,7 @@ export function startOAuthCallbackListener(
     }
 
     const callbackState = requestUrl.searchParams.get('state');
-    if (expectedState && callbackState !== expectedState) {
+    if (callbackState !== expectedState) {
       res.statusCode = 400;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.end('Invalid OAuth state.');
@@ -269,14 +258,12 @@ export function startOAuthCallbackListener(
   });
 
   server.once('error', (error) => {
-    rejectReady(error instanceof Error ? error : new Error(String(error)));
-    void finish(
-      'reject',
-      error instanceof Error ? error : new Error(String(error)),
-    );
+    const err = error instanceof Error ? error : new Error(String(error));
+    rejectReady(err);
+    void finish('reject', err);
+    waitForCode.catch(() => undefined);
   });
 
-  const port = parsedUrl.port ? Number(parsedUrl.port) : 80;
   server.listen(port, parsedUrl.hostname, () => {
     resolveReady();
   });
@@ -292,7 +279,66 @@ export function startOAuthCallbackListener(
     ready,
     waitForCode,
     close,
+    port,
   };
+}
+
+export function startOAuthCallbackListener(
+  callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
+  timeoutMs = OPENROUTER_OAUTH_TIMEOUT_MS,
+  expectedState: string,
+): OAuthCallbackListenerWithPort {
+  const parsedUrl = new URL(callbackUrl);
+  if (parsedUrl.protocol !== 'http:') {
+    throw new Error(
+      'Only http localhost callback URLs are currently supported.',
+    );
+  }
+
+  const port = parsedUrl.port ? Number(parsedUrl.port) : 80;
+  return createOAuthCallbackServer(parsedUrl, expectedState, port, timeoutMs);
+}
+
+export async function startOAuthCallbackListenerWithRetry(
+  callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
+  timeoutMs = OPENROUTER_OAUTH_TIMEOUT_MS,
+  expectedState: string,
+  maxRetries = OPENROUTER_OAUTH_CALLBACK_PORT_RETRIES,
+): Promise<OAuthCallbackListenerWithPort> {
+  const parsedUrl = new URL(callbackUrl);
+  if (parsedUrl.protocol !== 'http:') {
+    throw new Error(
+      'Only http localhost callback URLs are currently supported.',
+    );
+  }
+
+  const basePort = parsedUrl.port ? Number(parsedUrl.port) : 80;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const port = basePort + attempt;
+    const listener = createOAuthCallbackServer(
+      parsedUrl,
+      expectedState,
+      port,
+      timeoutMs,
+    );
+    try {
+      await listener.ready;
+      return listener;
+    } catch (error: unknown) {
+      const isAddrInUse =
+        error instanceof Error &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'EADDRINUSE';
+      if (!isAddrInUse || attempt === maxRetries) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(
+    `Could not find an available port (tried ${basePort}–${basePort + maxRetries}).`,
+  );
 }
 
 function buildOpenRouterHeaders() {
@@ -304,8 +350,12 @@ function buildOpenRouterHeaders() {
   };
 }
 
-const OPENROUTER_MODEL_PRIORITY_PREFIXES = ['qwen/', 'glm/', 'minimax/'];
-const OPENROUTER_RECOMMENDED_MODEL_LIMIT = 16;
+const OPENROUTER_RECOMMENDED_FREE_MODEL_IDS = [
+  'z-ai/glm-4.5-air:free',
+  'openai/gpt-oss-120b:free',
+];
+const OPENROUTER_RECOMMENDED_MODEL_LIMIT =
+  OPENROUTER_RECOMMENDED_FREE_MODEL_IDS.length;
 const OPENROUTER_FREE_MODEL_ID_HINT = ':free';
 
 export function getPreferredOpenRouterModelId(
@@ -325,13 +375,13 @@ function isOpenRouterFreeModelId(modelId: string): boolean {
   );
 }
 
-function getOpenRouterModelPriority(modelId: string): number {
+function getOpenRouterRecommendedFreeModelPriority(modelId: string): number {
   const normalizedId = modelId.toLowerCase();
-  const matchedIndex = OPENROUTER_MODEL_PRIORITY_PREFIXES.findIndex((prefix) =>
-    normalizedId.startsWith(prefix),
+  const matchedIndex = OPENROUTER_RECOMMENDED_FREE_MODEL_IDS.findIndex(
+    (recommendedId) => recommendedId === normalizedId,
   );
   return matchedIndex === -1
-    ? OPENROUTER_MODEL_PRIORITY_PREFIXES.length
+    ? OPENROUTER_RECOMMENDED_FREE_MODEL_IDS.length
     : matchedIndex;
 }
 
@@ -340,16 +390,17 @@ function isOpenRouterFreeConfig(model: ModelConfig): boolean {
 }
 
 function compareOpenRouterModels(a: ModelConfig, b: ModelConfig): number {
+  const recommendedFreeDiff =
+    getOpenRouterRecommendedFreeModelPriority(a.id) -
+    getOpenRouterRecommendedFreeModelPriority(b.id);
+  if (recommendedFreeDiff !== 0) {
+    return recommendedFreeDiff;
+  }
+
   const freeDiff =
     Number(isOpenRouterFreeConfig(b)) - Number(isOpenRouterFreeConfig(a));
   if (freeDiff !== 0) {
     return freeDiff;
-  }
-
-  const priorityDiff =
-    getOpenRouterModelPriority(a.id) - getOpenRouterModelPriority(b.id);
-  if (priorityDiff !== 0) {
-    return priorityDiff;
   }
 
   return a.id.localeCompare(b.id);
@@ -389,14 +440,6 @@ function toOpenRouterModelConfig(
   };
 }
 
-function chooseRepresentativeModel(
-  models: ModelConfig[],
-  predicate: (model: ModelConfig) => boolean,
-  selectedIds: Set<string>,
-): ModelConfig | undefined {
-  return models.find((model) => predicate(model) && !selectedIds.has(model.id));
-}
-
 function addRecommendedModel(
   target: ModelConfig[],
   model: ModelConfig | undefined,
@@ -414,72 +457,41 @@ export function selectRecommendedOpenRouterModels(
   models: ModelConfig[],
   limit = OPENROUTER_RECOMMENDED_MODEL_LIMIT,
 ): ModelConfig[] {
-  if (models.length <= limit) {
-    return models;
-  }
-
   const sorted = [...models].sort(compareOpenRouterModels);
   const recommended: ModelConfig[] = [];
   const selectedIds = new Set<string>();
 
-  const freeModels = sorted.filter((model) => isOpenRouterFreeConfig(model));
-  for (const model of freeModels.slice(0, Math.min(limit, 6))) {
-    addRecommendedModel(recommended, model, selectedIds, limit);
-  }
-
-  for (const prefix of OPENROUTER_MODEL_PRIORITY_PREFIXES) {
+  for (const recommendedId of OPENROUTER_RECOMMENDED_FREE_MODEL_IDS) {
     addRecommendedModel(
       recommended,
-      chooseRepresentativeModel(
-        sorted,
-        (model) => model.id.toLowerCase().startsWith(prefix),
-        selectedIds,
+      sorted.find(
+        (model) =>
+          model.id.toLowerCase() === recommendedId &&
+          isOpenRouterFreeConfig(model),
       ),
       selectedIds,
       limit,
     );
   }
-
-  for (const family of ['anthropic/', 'google/', 'openai/']) {
-    addRecommendedModel(
-      recommended,
-      chooseRepresentativeModel(
-        sorted,
-        (model) => model.id.toLowerCase().startsWith(family),
-        selectedIds,
-      ),
-      selectedIds,
-      limit,
-    );
-  }
-
-  addRecommendedModel(
-    recommended,
-    chooseRepresentativeModel(
-      sorted,
-      (model) => model.capabilities?.vision === true,
-      selectedIds,
-    ),
-    selectedIds,
-    limit,
-  );
-
-  addRecommendedModel(
-    recommended,
-    chooseRepresentativeModel(
-      sorted,
-      (model) => (model.generationConfig?.contextWindowSize || 0) >= 1000000,
-      selectedIds,
-    ),
-    selectedIds,
-    limit,
-  );
 
   for (const model of sorted) {
     if (recommended.length >= limit) {
       break;
     }
-    addRecommendedModel(recommended, model, selectedIds, limit);
+    if (isOpenRouterFreeConfig(model)) {
+      addRecommendedModel(recommended, model, selectedIds, limit);
+    }
+  }
+
+  // Fallback: if no free models found, pick top non-free models so the user
+  // has at least something usable after completing OAuth.
+  if (recommended.length === 0) {
+    for (const model of sorted) {
+      if (recommended.length >= limit) {
+        break;
+      }
+      addRecommendedModel(recommended, model, selectedIds, limit);
+    }
   }
 
   return recommended;
@@ -497,66 +509,6 @@ export function mergeOpenRouterConfigs(
     (existing) => !isOpenRouterConfig(existing),
   );
   return [...openRouterModels, ...nonOpenRouterConfigs];
-}
-
-export interface ApplyOpenRouterModelsResult {
-  updatedConfigs: ModelConfig[];
-  activeModelId?: string;
-  persistScope: ReturnType<typeof getPersistScopeForModelSelection>;
-}
-
-export async function applyOpenRouterModelsConfiguration(params: {
-  settings: LoadedSettings;
-  config: Config;
-  apiKey: string;
-  reloadConfig: boolean;
-}): Promise<ApplyOpenRouterModelsResult> {
-  const { settings, config, apiKey, reloadConfig } = params;
-  const persistScope = getPersistScopeForModelSelection(settings);
-
-  settings.setValue(persistScope, `env.${OPENROUTER_ENV_KEY}`, apiKey);
-  process.env[OPENROUTER_ENV_KEY] = apiKey;
-
-  const existingConfigs =
-    (settings.merged.modelProviders as ModelProvidersConfig | undefined)?.[
-      AuthType.USE_OPENAI
-    ] || [];
-  const openRouterCatalog = await getOpenRouterModelsWithFallback();
-  const openRouterModels = selectRecommendedOpenRouterModels(openRouterCatalog);
-  const updatedConfigs = mergeOpenRouterConfigs(
-    existingConfigs,
-    openRouterModels,
-  );
-
-  settings.setValue(
-    persistScope,
-    `modelProviders.${AuthType.USE_OPENAI}`,
-    updatedConfigs,
-  );
-  settings.setValue(
-    persistScope,
-    'security.auth.selectedType',
-    AuthType.USE_OPENAI,
-  );
-
-  const activeModelId = getPreferredOpenRouterModelId(updatedConfigs);
-  if (activeModelId) {
-    settings.setValue(persistScope, 'model.name', activeModelId);
-  }
-
-  if (reloadConfig) {
-    const updatedModelProviders: ModelProvidersConfig = {
-      ...(settings.merged.modelProviders as ModelProvidersConfig | undefined),
-      [AuthType.USE_OPENAI]: updatedConfigs,
-    };
-    config.reloadModelProvidersConfig(updatedModelProviders);
-  }
-
-  return {
-    updatedConfigs,
-    activeModelId,
-    persistScope,
-  };
 }
 
 export async function fetchOpenRouterModels(): Promise<ModelConfig[]> {
@@ -646,9 +598,9 @@ interface OAuthSignalTarget {
   ): void;
 }
 
-interface OpenRouterOAuthLoginDeps {
+export interface OpenRouterOAuthLoginDeps {
   openBrowser?: typeof open;
-  startListener?: typeof startOAuthCallbackListener;
+  startListener?: typeof startOAuthCallbackListenerWithRetry;
   exchangeApiKey?: typeof exchangeAuthCodeForApiKey;
   now?: () => number;
   signalTarget?: OAuthSignalTarget;
@@ -660,30 +612,61 @@ export async function runOpenRouterOAuthLogin(
   callbackUrl = OPENROUTER_OAUTH_CALLBACK_URL,
   deps: OpenRouterOAuthLoginDeps = {},
 ): Promise<OpenRouterOAuthResult> {
-  const session = deps.session || createOpenRouterOAuthSession(callbackUrl);
-  const {
-    callbackUrl: effectiveCallbackUrl,
-    codeVerifier,
-    state,
-    authorizationUrl: authUrl,
-  } = session;
-
   const openBrowser = deps.openBrowser || open;
-  const startListener = deps.startListener || startOAuthCallbackListener;
+  const startListener =
+    deps.startListener || startOAuthCallbackListenerWithRetry;
   const exchangeApiKey = deps.exchangeApiKey || exchangeAuthCodeForApiKey;
   const now = deps.now || Date.now;
   const signalTarget = deps.signalTarget || process;
   const abortSignal = deps.abortSignal;
 
-  const listener = startListener(
-    effectiveCallbackUrl,
-    OPENROUTER_OAUTH_TIMEOUT_MS,
+  const pkcePair = createPkcePair();
+  const state = createOAuthState();
+
+  const preSession = deps.session || {
+    callbackUrl,
+    codeVerifier: pkcePair.codeVerifier,
     state,
+  };
+
+  const listener = await startListener(
+    preSession.callbackUrl,
+    OPENROUTER_OAUTH_TIMEOUT_MS,
+    preSession.state,
   );
+
+  const portChanged =
+    listener.port !==
+    (new URL(preSession.callbackUrl).port
+      ? Number(new URL(preSession.callbackUrl).port)
+      : 80);
+  const actualCallbackUrl = portChanged
+    ? preSession.callbackUrl.replace(/:\d+/, `:${String(listener.port)}`)
+    : preSession.callbackUrl;
+
+  let authUrl: string;
+  if (deps.session?.authorizationUrl && !portChanged) {
+    authUrl = deps.session.authorizationUrl;
+  } else {
+    const challenge =
+      deps.session != null
+        ? new URL(deps.session.authorizationUrl).searchParams.get(
+            'code_challenge',
+          )!
+        : pkcePair.codeChallenge;
+    authUrl = buildOpenRouterAuthorizationUrl({
+      callbackUrl: actualCallbackUrl,
+      codeChallenge: challenge,
+      state: preSession.state,
+      codeChallengeMethod: OPENROUTER_CODE_CHALLENGE_METHOD,
+    });
+  }
+
+  const codeVerifier = preSession.codeVerifier;
+
   let cleanupSignalHandlers = () => {};
   let cleanupAbortListener = () => {};
   try {
-    await listener.ready;
     await openBrowser(authUrl);
 
     const waitForCancel = new Promise<never>((_, reject) => {
