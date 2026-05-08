@@ -21,6 +21,11 @@ const { mockGetOrCreateSharedDispatcher, mockDebugLogger } = vi.hoisted(() => {
   };
 });
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  AuthType: {
+    USE_OPENAI: 'openai',
+    USE_ANTHROPIC: 'anthropic',
+    USE_GEMINI: 'gemini',
+  },
   createDebugLogger: () => mockDebugLogger,
   detectRuntime: () => 'node',
   getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,

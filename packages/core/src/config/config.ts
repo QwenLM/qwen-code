@@ -33,6 +33,7 @@ import {
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -130,6 +131,9 @@ import {
 import { getAutoMemoryRoot } from '../memory/paths.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
+
+const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 
 import {
   ModelsConfig,
@@ -227,6 +231,7 @@ export interface TelemetrySettings {
   /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
   otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
+  includeSensitiveSpanAttributes?: boolean;
   outfile?: string;
   useCollector?: boolean;
 }
@@ -236,9 +241,70 @@ export interface OutputSettings {
 }
 
 export interface GitCoAuthorSettings {
-  enabled?: boolean;
+  commit: boolean;
+  pr: boolean;
   name?: string;
   email?: string;
+}
+
+/**
+ * Shape accepted by the Config constructor for the `gitCoAuthor` param.
+ *
+ * A plain `boolean` is accepted for backward compatibility: older settings
+ * (shipped before commit and PR attribution were split) stored this field as
+ * a single boolean, and we treat that as applying to both sub-toggles so
+ * nobody's stored preference silently flips.
+ */
+export type GitCoAuthorParam = boolean | { commit?: boolean; pr?: boolean };
+
+function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
+  commit: boolean;
+  pr: boolean;
+} {
+  if (typeof value === 'boolean') {
+    return { commit: value, pr: value };
+  }
+  // Default to `true` (the schema default) ONLY when the sub-field
+  // is genuinely absent. For PRESENT-but-non-boolean values, honor
+  // common string forms (`"true"`/`"yes"`/`"on"`/`"1"` → true,
+  // `"false"`/`"no"`/`"off"`/`"0"`/`""` → false) and treat anything
+  // else as opt-out. settings.json is user-editable, and the previous
+  // "default-to-true on mismatch" policy meant a hand-edited
+  // `{ "commit": "false" }` silently activated attribution against
+  // the user's clear intent. Safer-by-default: ambiguous values
+  // disable rather than enable.
+  const pickBool = (v: unknown, fieldName: string): boolean => {
+    if (v === undefined) return true;
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') {
+      const lowered = v.trim().toLowerCase();
+      if (
+        lowered === 'true' ||
+        lowered === 'yes' ||
+        lowered === 'on' ||
+        lowered === '1'
+      ) {
+        return true;
+      }
+      // Known disable-intent forms — silent (matches user intent).
+      const knownDisable = ['false', 'no', 'off', '0', 'disabled', ''];
+      if (!knownDisable.includes(lowered)) {
+        // Unrecognised string — disable (safer-by-default) but log
+        // so a user wondering "why is my setting being ignored?"
+        // can see the actual coercion in QWEN_DEBUG_LOG_FILE.
+        gitCoAuthorLogger.warn(
+          `Unrecognized string value for general.gitCoAuthor.${fieldName}: ${JSON.stringify(v)}; treating as false. Accepted forms: true/yes/on/1, false/no/off/0/empty.`,
+        );
+      }
+      return false;
+    }
+    if (typeof v === 'number') return v === 1;
+    return false;
+  };
+  return {
+    commit: pickBool(value?.commit, 'commit'),
+    pr: pickBool(value?.pr, 'pr'),
+  };
 }
 
 export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
@@ -374,7 +440,7 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
-  gitCoAuthor?: boolean;
+  gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
   /**
    * If true, disables the per-session FileReadCache short-circuit
@@ -774,11 +840,13 @@ export class Config {
       otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
       otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
+      includeSensitiveSpanAttributes:
+        params.telemetry?.includeSensitiveSpanAttributes ?? false,
       outfile: params.telemetry?.outfile,
       useCollector: params.telemetry?.useCollector,
     };
     this.gitCoAuthor = {
-      enabled: params.gitCoAuthor ?? true,
+      ...normalizeGitCoAuthor(params.gitCoAuthor),
       name: 'Qwen-Coder',
       email: 'qwen-coder@alibabacloud.com',
     };
@@ -1218,7 +1286,9 @@ export class Config {
   }
 
   getContentGenerator(): ContentGenerator {
-    return this.contentGenerator;
+    return (
+      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator
+    );
   }
 
   /**
@@ -1376,6 +1446,12 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    // The commit-attribution singleton accumulates per-file AI edits
+    // and a session-scoped prompt counter — both stop being meaningful
+    // when the session resets. Without this, pending attributions
+    // from the previous session could attach to a commit in the new
+    // one, and the "N-shotted" PR label would span sessions.
+    CommitAttributionService.resetInstance();
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }
@@ -1398,7 +1474,10 @@ export class Config {
   }
 
   getContentGeneratorConfig(): ContentGeneratorConfig {
-    return this.contentGeneratorConfig;
+    return (
+      getRuntimeContentGenerator()?.contentGeneratorConfig ??
+      this.contentGeneratorConfig
+    );
   }
 
   getContentGeneratorConfigSources(): ContentGeneratorConfigSources {
@@ -1414,7 +1493,9 @@ export class Config {
   }
 
   getModel(): string {
-    return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
+    return (
+      this.getContentGeneratorConfig()?.model || this.modelsConfig.getModel()
+    );
   }
 
   onModelChange(listener: (model: string) => void): () => void {
@@ -1586,7 +1667,7 @@ export class Config {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean },
+    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
     this.notifyModelChangeListeners();
@@ -2022,6 +2103,10 @@ export class Config {
     return this.telemetrySettings.logPrompts ?? true;
   }
 
+  getTelemetryIncludeSensitiveSpanAttributes(): boolean {
+    return this.telemetrySettings.includeSensitiveSpanAttributes ?? false;
+  }
+
   getTelemetryOtlpEndpoint(): string | undefined {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
@@ -2378,7 +2463,7 @@ export class Config {
   }
 
   getAuthType(): AuthType | undefined {
-    return this.contentGeneratorConfig?.authType;
+    return this.getContentGeneratorConfig()?.authType;
   }
 
   getCliVersion(): string | undefined {

@@ -1005,6 +1005,24 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
   });
 
+  it('should use includeSensitiveSpanAttributes from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { includeSensitiveSpanAttributes: true },
+    };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it('should default includeSensitiveSpanAttributes to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { telemetry: { enabled: true } };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
+  });
+
   it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -2662,6 +2680,17 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
   });
 
+  it('should prioritize QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', 'true');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { includeSensitiveSpanAttributes: false },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
   it('should prioritize QWEN_TELEMETRY_OUTFILE over settings', async () => {
     vi.stubEnv('QWEN_TELEMETRY_OUTFILE', '/gemini/env/telemetry.log');
     process.argv = ['node', 'script.js'];
@@ -2742,6 +2771,27 @@ describe('Telemetry configuration via environment variables', () => {
       [],
     );
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+  });
+
+  it("should treat QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES='1' as true", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it("should treat QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES='false' as false", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', 'false');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { telemetry: { includeSensitiveSpanAttributes: true } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
   });
 });
 

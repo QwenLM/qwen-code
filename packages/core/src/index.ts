@@ -32,30 +32,19 @@ export {
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
   ModelRegistry,
+  modelRegistryKey,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,
   type ModelProvidersConfig,
   type ModelSwitchMetadata,
+  MODEL_GENERATION_CONFIG_FIELDS,
   type OnModelChangeCallback,
   QWEN_OAUTH_MODELS,
   resolveModelConfig,
   type ResolvedModelConfig,
   validateModelConfig,
 } from './models/index.js';
-
-// Coding Plan constants
-export {
-  CodingPlanRegion,
-  type CodingPlanTemplate,
-  CODING_PLAN_ENV_KEY,
-  computeCodingPlanVersion,
-  generateCodingPlanTemplate,
-  getCodingPlanConfig,
-  getCodingPlanBaseUrls,
-  isCodingPlanConfig,
-  getRegionFromBaseUrl,
-} from './constants/codingPlan.js';
 
 // Output formatting
 export * from './output/json-formatter.js';
@@ -147,7 +136,12 @@ export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
-export { stripTerminalControlSequences } from './utils/terminalSafe.js';
+export {
+  stripTerminalControlSequences,
+  TERMINAL_OSC_REGEX,
+  TERMINAL_CSI_REGEX,
+  TERMINAL_SHIFT_DCS_REGEX,
+} from './utils/terminalSafe.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';

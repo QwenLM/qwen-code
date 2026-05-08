@@ -27,9 +27,9 @@ const codePlanCommand = {
   describe: t('Authenticate using Alibaba Cloud Coding Plan'),
   builder: (yargs: Argv) =>
     yargs
-      .option('region', {
-        alias: 'r',
-        describe: t('Region for Coding Plan (china/global)'),
+      .option('base-url', {
+        alias: 'u',
+        describe: t('Base URL for Coding Plan'),
         type: 'string',
       })
       .option('key', {
@@ -37,15 +37,13 @@ const codePlanCommand = {
         describe: t('API key for Coding Plan'),
         type: 'string',
       }),
-  handler: async (argv: { region?: string; key?: string }) => {
-    const region = argv['region'] as string | undefined;
+  handler: async (argv: { 'base-url'?: string; key?: string }) => {
+    const baseUrl = argv['base-url'];
     const key = argv['key'] as string | undefined;
 
-    // If region and key are provided, use them directly
-    if (region && key) {
-      await handleQwenAuth('coding-plan', { region, key });
+    if (baseUrl && key) {
+      await handleQwenAuth('coding-plan', { baseUrl, key });
     } else {
-      // Otherwise, prompt interactively
       await handleQwenAuth('coding-plan', {});
     }
   },

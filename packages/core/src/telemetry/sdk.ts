@@ -203,6 +203,10 @@ export function initializeTelemetry(config: Config): void {
         // bridge owns its own forceFlush/shutdown lifecycle.
         logToSpanProcessor = new LogToSpanProcessor(
           new OTLPTraceExporterHttp({ url: tracesUrl }),
+          {
+            includeSensitiveSpanAttributes:
+              config.getTelemetryIncludeSensitiveSpanAttributes(),
+          },
         );
       }
       if (metricsUrl) {
