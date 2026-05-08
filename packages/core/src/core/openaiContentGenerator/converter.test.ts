@@ -2083,6 +2083,168 @@ describe('OpenAIContentConverter', () => {
       expect(emitted[1]).toBe('\nStep two is to validate them.');
       expect(emitted[2]).toBe('Brand new unrelated message.');
     });
+
+    it('should resume prefix detection cleanly after exiting cumulative mode', () => {
+      const ctx = withStreamParser();
+      // Establish cumulative mode, then break it, then send another cumulative
+      // stream — the fresh baseline should allow re-entry into cumulative mode.
+      const chunks = [
+        'Step one is to gather inputs.',
+        'Step one is to gather inputs.\nStep two is to validate them.',
+        'Brand new unrelated message.',
+        'Brand new unrelated message. And more.',
+      ];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-reentry-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      expect(emitted[0]).toBe('Step one is to gather inputs.');
+      expect(emitted[1]).toBe('\nStep two is to validate them.');
+      // Cumulative mode exits; fresh baseline = chunk 3
+      expect(emitted[2]).toBe('Brand new unrelated message.');
+      // Chunk 4 prefix-extends chunk 3 — re-enters cumulative, emits suffix only
+      expect(emitted[3]).toBe(' And more.');
+    });
+
+    it('should not poison the baseline when short chunks repeat before threshold', () => {
+      const ctx = withStreamParser();
+      // Short exact-repeat followed by a prefix-extending chunk.
+      // The repeat must NOT corrupt emittedText so the extension is detected.
+      const chunks = ['Hi', 'Hi', 'Hi there, how are you today?'];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-short-repeat-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial
+      expect(emitted[0]).toBe('Hi');
+      // Chunk 2: short exact repeat — passthrough, baseline stays 'Hi'
+      expect(emitted[1]).toBe('Hi');
+      // Chunk 3: prefix-extends 'Hi' — enters cumulative, emits suffix
+      expect(emitted[2]).toBe(' there, how are you today?');
+    });
+
+    it('should normalize cumulative reasoning_content deltas to suffixes', () => {
+      const ctx = withStreamParser();
+      const chunks = [
+        'Let me reason step by step.',
+        'Let me reason step by step.\nFirst: check the inputs.',
+        'Let me reason step by step.\nFirst: check the inputs.\nSecond: validate.',
+      ];
+
+      const emitted = chunks.map((reasoning_content, index) => {
+        const part = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-cumulative2-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      expect(emitted[0]).toEqual({
+        text: 'Let me reason step by step.',
+        thought: true,
+      });
+      expect(emitted[1]).toEqual({
+        text: '\nFirst: check the inputs.',
+        thought: true,
+      });
+      expect(emitted[2]).toEqual({
+        text: '\nSecond: validate.',
+        thought: true,
+      });
+    });
+
+    it('should deduplicate interleaved reasoning_content and content channels independently', () => {
+      const ctx = withStreamParser();
+      // reasoning_content and content each use a separate state object;
+      // cumulative detection in one channel must not bleed into the other.
+      const chunks: Array<{ reasoning_content?: string; content?: string }> = [
+        { reasoning_content: 'Let me think about this carefully.' },
+        { content: 'Here' },
+        { reasoning_content: 'Let me think about this carefully.\nStep two.' },
+        { content: 'Here is the answer.' },
+      ];
+
+      const emitted = chunks.map(
+        (delta, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-interleaved-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta,
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts ?? [],
+      );
+
+      // Reasoning chunk 1: emits as thought
+      expect(emitted[0]).toEqual([
+        { text: 'Let me think about this carefully.', thought: true },
+      ]);
+      // Content chunk 1: emits as text (independent state)
+      expect(emitted[1]).toEqual([{ text: 'Here' }]);
+      // Reasoning chunk 2: cumulative extension — emits suffix only
+      expect(emitted[2]).toEqual([{ text: '\nStep two.', thought: true }]);
+      // Content chunk 2: cumulative extension of content channel
+      expect(emitted[3]).toEqual([{ text: ' is the answer.' }]);
+    });
   });
 
   describe('OpenAI -> Gemini tagged thinking content', () => {

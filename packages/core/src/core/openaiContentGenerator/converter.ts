@@ -92,30 +92,36 @@ function normalizeStreamingTextDelta(
       'normalizeStreamingTextDelta: exiting cumulative mode (chunk does not match prior accumulated text)',
     );
     state.cumulativeMode = false;
+    // Reset baseline to current chunk so future prefix checks use fresh state.
+    state.emittedText = rawDelta;
+    return rawDelta;
   }
 
   if (
     rawDelta.startsWith(state.emittedText) &&
     rawDelta.length > state.emittedText.length
   ) {
-    const suffix = rawDelta.slice(state.emittedText.length);
+    const prevLen = state.emittedText.length;
+    const suffix = rawDelta.slice(prevLen);
     state.emittedText = rawDelta;
     state.cumulativeMode = true;
     debugLogger.debug(
-      `normalizeStreamingTextDelta: entered cumulative mode (prefix overlap, prev=${state.emittedText.length - suffix.length}b -> curr=${rawDelta.length}b)`,
+      `normalizeStreamingTextDelta: entered cumulative mode (prefix overlap, prev=${prevLen}b -> curr=${rawDelta.length}b)`,
     );
     return suffix;
   }
 
-  if (
-    rawDelta === state.emittedText &&
-    rawDelta.length >= CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
-  ) {
-    state.cumulativeMode = true;
-    debugLogger.debug(
-      `normalizeStreamingTextDelta: entered cumulative mode (exact repeat, ${rawDelta.length}b)`,
-    );
-    return '';
+  if (rawDelta === state.emittedText) {
+    if (rawDelta.length >= CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH) {
+      state.cumulativeMode = true;
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: entered cumulative mode (exact repeat, ${rawDelta.length}b)`,
+      );
+      return '';
+    }
+    // Short exact repeat: don't mutate emittedText so it remains a valid
+    // prefix baseline for the next prefix-overlap check.
+    return rawDelta;
   }
 
   state.emittedText += rawDelta;
@@ -1115,13 +1121,17 @@ export function convertOpenAIChunkToGemini(
           cumulativeMode: false,
         }),
       );
-      parts.push(
-        ...convertOpenAITextToParts(
-          normalizedContent,
-          requestContext,
-          Boolean(choice.finish_reason),
-        ),
-      );
+      // Skip empty-string push mid-stream; still call on finish_reason to
+      // flush any buffered tagged-thinking content.
+      if (normalizedContent || choice.finish_reason) {
+        parts.push(
+          ...convertOpenAITextToParts(
+            normalizedContent,
+            requestContext,
+            Boolean(choice.finish_reason),
+          ),
+        );
+      }
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
       parts.push(...convertOpenAITextToParts('', requestContext, true));
