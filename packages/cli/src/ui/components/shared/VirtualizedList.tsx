@@ -59,16 +59,24 @@ export type VirtualizedListRef<T> = {
   };
 };
 
-function findLastIndex<T>(
-  array: T[],
-  predicate: (value: T, index: number, obj: T[]) => unknown,
-): number {
-  for (let i = array.length - 1; i >= 0; i--) {
-    if (predicate(array[i], i, array)) {
-      return i;
-    }
+// Returns the smallest index i such that arr[i] > target. If every entry is
+// <= target, returns arr.length. Assumes arr is monotonically non-decreasing.
+function upperBound(arr: number[], target: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (arr[mid] <= target) lo = mid + 1;
+    else hi = mid;
   }
-  return -1;
+  return lo;
+}
+
+// Largest index i such that arr[i] <= target, or -1 if none. Used in the
+// hot render path on the offsets array (which is monotonic by construction);
+// O(log n) replaces the previous O(n) linear scan.
+function findLastLE(arr: number[], target: number): number {
+  return upperBound(arr, target) - 1;
 }
 
 const VirtualizedListItem = memo(
@@ -92,7 +100,7 @@ const VirtualizedListItem = memo(
     onSetRef: (index: number, el: DOMElement | null) => void;
   }) => {
     const itemRef = useRef<DOMElement>(null);
-     
+
     const { height, hasMeasured } = useBoxMetrics(
       itemRef as React.RefObject<DOMElement>,
     );
@@ -198,7 +206,7 @@ function VirtualizedList<T>(
   });
 
   const containerRef = useRef<DOMElement>(null);
-   
+
   const { width: measuredContainerWidth, height: measuredContainerHeight } =
     useBoxMetrics(containerRef as React.RefObject<DOMElement>);
 
@@ -239,7 +247,7 @@ function VirtualizedList<T>(
       scrollTop: number,
       offsets: number[],
     ): { index: number; offset: number } => {
-      const index = findLastIndex(offsets, (offset) => offset <= scrollTop);
+      const index = findLastLE(offsets, scrollTop);
       if (index === -1) {
         return { index: 0, offset: 0 };
       }
@@ -432,19 +440,17 @@ function VirtualizedList<T>(
     props.targetScrollIndex,
   ]);
 
-  const startIndex = Math.max(
-    0,
-    findLastIndex(offsets, (offset) => offset <= actualScrollTop) - 1,
-  );
+  const startIndex = Math.max(0, findLastLE(offsets, actualScrollTop) - 1);
   const viewHeightForEndIndex =
     scrollableContainerHeight > 0 ? scrollableContainerHeight : 50;
-  const endIndexOffset = offsets.findIndex(
-    (offset) => offset > actualScrollTop + viewHeightForEndIndex,
+  const endIndexOffsetRaw = upperBound(
+    offsets,
+    actualScrollTop + viewHeightForEndIndex,
   );
   const endIndex =
-    endIndexOffset === -1
+    endIndexOffsetRaw >= offsets.length
       ? data.length - 1
-      : Math.min(data.length - 1, endIndexOffset);
+      : Math.min(data.length - 1, endIndexOffsetRaw);
 
   const topSpacerHeight =
     renderStatic === true ? 0 : (offsets[startIndex] ?? 0);
@@ -709,7 +715,6 @@ function VirtualizedList<T>(
   );
 }
 
- 
 const VirtualizedListWithForwardRef = forwardRef(VirtualizedList) as <T>(
   props: VirtualizedListProps<T> & { ref?: React.Ref<VirtualizedListRef<T>> },
 ) => React.ReactElement;
