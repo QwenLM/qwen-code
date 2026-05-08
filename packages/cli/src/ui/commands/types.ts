@@ -90,7 +90,7 @@ export interface CommandContext {
     loadHistory: UseHistoryManagerReturn['loadHistory'];
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
-    reloadCommands: () => void;
+    reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
     dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
@@ -353,6 +353,19 @@ export interface SlashCommand {
    * description for modelInvocable commands.
    */
   whenToUse?: string;
+
+  /**
+   * Non-localized description reserved for model-visible metadata.
+   * Dynamic command localization may rewrite `description` for UI display while
+   * keeping this value stable for model invocation hints.
+   */
+  modelDescription?: string;
+
+  /**
+   * Marks command descriptions that should be localized at runtime to match the
+   * current UI language.
+   */
+  localizeDescription?: boolean;
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];

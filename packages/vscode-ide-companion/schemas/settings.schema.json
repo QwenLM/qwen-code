@@ -119,6 +119,11 @@
           "type": "string",
           "default": "auto"
         },
+        "dynamicCommandTranslation": {
+          "description": "Enable AI translation for dynamic slash command descriptions. When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.",
+          "type": "boolean",
+          "default": false
+        },
         "terminalBell": {
           "description": "Play terminal bell sound when response completes or needs approval.",
           "type": "boolean",

@@ -62,9 +62,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 const mockGetCommands = vi.hoisted(() => vi.fn());
 const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
 const mockCommandServiceCreate = vi.hoisted(() => vi.fn());
+const mockCommandServiceFromCommands = vi.hoisted(() => vi.fn());
 vi.mock('./services/CommandService.js', () => ({
   CommandService: {
     create: mockCommandServiceCreate,
+    fromCommands: mockCommandServiceFromCommands,
   },
 }));
 
@@ -107,6 +109,23 @@ describe('runNonInteractive', () => {
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
+    );
+    mockCommandServiceFromCommands.mockImplementation(
+      (
+        commands: Array<{
+          name: string;
+          modelInvocable?: boolean;
+          hidden?: boolean;
+        }>,
+      ) => ({
+        getCommands: () => commands,
+        getCommandsForMode: (mode: ExecutionMode) =>
+          filterCommandsForMode(commands, mode),
+        getModelInvocableCommands: () =>
+          commands.filter(
+            (command) => !command.hidden && command.modelInvocable === true,
+          ),
+      }),
     );
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,

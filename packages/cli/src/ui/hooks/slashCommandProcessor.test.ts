@@ -122,7 +122,7 @@ describe('useSlashCommandProcessor', () => {
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
     recordSlashCommand: vi.fn(),
   });
-  const mockSettings = {} as LoadedSettings;
+  const mockSettings = { merged: {} } as LoadedSettings;
 
   const createMockActions = (): SlashCommandProcessorActions => ({
     openAuthDialog: mockOpenAuthDialog,

@@ -18,9 +18,11 @@ import { filterCommandsForMode } from './services/commandUtils.js';
 const mockGetCommands = vi.hoisted(() => vi.fn());
 const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
 const mockCommandServiceCreate = vi.hoisted(() => vi.fn());
+const mockCommandServiceFromCommands = vi.hoisted(() => vi.fn());
 vi.mock('./services/CommandService.js', () => ({
   CommandService: {
     create: mockCommandServiceCreate,
+    fromCommands: mockCommandServiceFromCommands,
   },
 }));
 
@@ -34,6 +36,16 @@ describe('handleSlashCommand', () => {
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
     );
+    mockCommandServiceFromCommands.mockImplementation((commands) => ({
+      getCommands: () => commands,
+      getCommandsForMode: (mode: ExecutionMode) =>
+        filterCommandsForMode(commands, mode),
+      getModelInvocableCommands: () =>
+        commands.filter(
+          (command: { modelInvocable?: boolean; hidden?: boolean }) =>
+            !command.hidden && command.modelInvocable === true,
+        ),
+    }));
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
       getCommandsForMode: mockGetCommandsForMode,
@@ -348,6 +360,16 @@ describe('getAvailableCommands', () => {
   let mockConfig: Config;
 
   beforeEach(() => {
+    mockCommandServiceFromCommands.mockImplementation((commands) => ({
+      getCommands: () => commands,
+      getCommandsForMode: (mode: ExecutionMode) =>
+        filterCommandsForMode(commands, mode),
+      getModelInvocableCommands: () =>
+        commands.filter(
+          (command: { modelInvocable?: boolean; hidden?: boolean }) =>
+            !command.hidden && command.modelInvocable === true,
+        ),
+    }));
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
       getCommandsForMode: mockGetCommandsForMode,
@@ -366,14 +388,14 @@ describe('getAvailableCommands', () => {
   });
 
   it('includes /export in the default non-interactive command list', async () => {
-    mockGetCommandsForMode.mockReturnValue([
-      {
-        name: 'export',
-        description: 'Export current session',
-        kind: CommandKind.BUILT_IN,
-        action: vi.fn(),
-      },
-    ]);
+    const exportCommand = {
+      name: 'export',
+      description: 'Export current session',
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: vi.fn(),
+    };
+    mockGetCommands.mockReturnValue([exportCommand]);
 
     const commands = await getAvailableCommands(
       mockConfig,
