@@ -11,6 +11,7 @@ import path from 'node:path';
 import {
   _recoverObjectsFromLine,
   _resetEnsuredDirsCacheForTest,
+  parseLineTolerant,
   read,
   readLines,
 } from './jsonl-utils.js';
@@ -81,6 +82,44 @@ describe('_recoverObjectsFromLine', () => {
   });
 });
 
+describe('parseLineTolerant', () => {
+  it('returns the parsed object for a well-formed line', () => {
+    expect(parseLineTolerant<{ a: number }>('{"a":1}', '/tmp/x.jsonl')).toEqual(
+      [{ a: 1 }],
+    );
+  });
+
+  it('recovers both records from a `}{`-glued line', () => {
+    expect(
+      parseLineTolerant<{ uuid: string }>(
+        '{"uuid":"a"}{"uuid":"b"}',
+        '/tmp/x.jsonl',
+      ),
+    ).toEqual([{ uuid: 'a' }, { uuid: 'b' }]);
+  });
+
+  it('returns [] when nothing balanced can be recovered', () => {
+    expect(parseLineTolerant('not-json', '/tmp/x.jsonl')).toEqual([]);
+  });
+
+  it('filters non-object JSON values (e.g. bare `null`) instead of forwarding them', () => {
+    // Without the filter, callers that do `record.type` would crash on the
+    // returned scalar; integration sites then propagate to outer catches and
+    // zero out whole counts.
+    expect(parseLineTolerant('null', '/tmp/x.jsonl')).toEqual([]);
+    expect(parseLineTolerant('42', '/tmp/x.jsonl')).toEqual([]);
+    expect(parseLineTolerant('"a string"', '/tmp/x.jsonl')).toEqual([]);
+  });
+
+  it('filters bare JSON arrays (typeof [] === "object" trap)', () => {
+    // Docstring promises only objects flow through. Arrays would otherwise
+    // slip past the `typeof === 'object'` check and force callers to add
+    // their own `Array.isArray` guards before `record.type`.
+    expect(parseLineTolerant('[1,2,3]', '/tmp/x.jsonl')).toEqual([]);
+    expect(parseLineTolerant('[]', '/tmp/x.jsonl')).toEqual([]);
+  });
+});
+
 describe('read() / readLines() with malformed lines', () => {
   it('reads a clean file unchanged', async () => {
     const file = tmpFile('{"a":1}\n{"a":2}\n{"a":3}\n');
@@ -128,5 +167,18 @@ describe('read() / readLines() with malformed lines', () => {
   it('skips blank lines', async () => {
     const file = tmpFile('{"a":1}\n\n{"a":2}\n');
     expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);
+  });
+
+  it('drops scalar / array lines so callers do not see non-object records', async () => {
+    // Locks in the broader semantic change beyond #3681 Item 1: read() and
+    // readLines() now silently skip well-formed JSON that is not an object.
+    // Pre-#3692 these would have round-tripped through `JSON.parse(line)`
+    // and surfaced as `null` / `42` / `"s"` / `[1,2]` array elements.
+    const file = tmpFile('{"a":1}\nnull\n42\n"a string"\n[1,2,3]\n{"a":2}\n');
+    expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);
+    expect(await readLines<{ a: number }>(file, 10)).toEqual([
+      { a: 1 },
+      { a: 2 },
+    ]);
   });
 });

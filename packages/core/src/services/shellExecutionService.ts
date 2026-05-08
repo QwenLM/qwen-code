@@ -141,6 +141,15 @@ export interface ShellExecutionResult {
    * alive and the caller has taken over its lifecycle. Callers receiving
    * `promoted: true` must NOT treat exitCode/signal as terminal — the
    * underlying process has not exited.
+   *
+   * Note on the result shape: when `promoted: true`, `aborted` is set to
+   * `false` even though the AbortSignal fired. The contract is that
+   * `aborted` answers "should the caller emit a cancel/timeout
+   * message?" — and a promoted shell is neither cancelled nor timed
+   * out (the child kept running, ownership simply transferred). This
+   * lets existing `if (result.aborted)` branches stay unchanged; new
+   * promote handling lives in a separate `if (result.promoted)` arm.
+   * Settled in #3831 design question 7 / @tanzhenxin's PR-1 review note.
    */
   promoted?: boolean;
   /** The process ID of the spawned shell. */
@@ -699,7 +708,19 @@ export class ShellExecutionService {
             exitCode: null,
             signal: null,
             error: null,
-            aborted: true,
+            // `aborted: false` (despite the abort signal having fired) is
+            // intentional — this is the result-shape decision settled in
+            // #3831 design question 7 (raised by @tanzhenxin in the PR-1
+            // review). The flag answers "should the caller emit cancel /
+            // timeout copy?" not "did the abort signal fire?" — and a
+            // promoted shell did NOT cancel (the child kept running), so
+            // existing `if (result.aborted)` branches in callers (e.g.
+            // `tools/shell.ts`) fall through naturally to the success-shape
+            // arm where we then check `result.promoted`. Without this,
+            // every consumer would have to remember to check `promoted`
+            // before `aborted` to avoid emitting "cancelled" copy for a
+            // process that's still running.
+            aborted: false,
             promoted: true,
             pid: child.pid,
             executionMethod: 'child_process',
@@ -1289,7 +1310,10 @@ export class ShellExecutionService {
             exitCode: null,
             signal: null,
             error,
-            aborted: true,
+            // See childProcessFallback for the full rationale — promoted
+            // results are NOT user-cancellations, so callers' `if
+            // (result.aborted)` branches must NOT trigger.
+            aborted: false,
             promoted: true,
             pid: ptyProcess.pid,
             executionMethod:
