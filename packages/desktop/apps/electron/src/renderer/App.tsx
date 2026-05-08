@@ -30,6 +30,7 @@ import { NavigationProvider } from '@/contexts/NavigationContext'
 import { navigate, routes } from './lib/navigate'
 import type { ViewRoute } from '../shared/routes'
 import { attachmentFromContentRef, toDraftRef } from './lib/drafts'
+import { getSessionDeleteNavigationRoute } from './lib/session-delete-navigation'
 import { stripMarkdown } from './utils/text'
 import { coerceInputText } from './lib/input-text'
 import { getSessionsToRefreshAfterStaleReconnect } from './lib/reconnect-recovery'
@@ -1314,8 +1315,16 @@ export default function App() {
     await window.electronAPI.deleteSession(sessionId)
     // Remove from per-session atom and metadata map (no sessionsAtom)
     removeSession(sessionId)
+    const route = getSessionDeleteNavigationRoute({
+      deleted: true,
+      deletedSessionId: sessionId,
+      selectedSessionId: sessionSelection.selected,
+    })
+    if (route) {
+      navigate(route)
+    }
     return true
-  }, [store, removeSession])
+  }, [store, removeSession, sessionSelection.selected])
 
   // Auto-delete handler for empty sessions (fire-and-forget, no confirmation)
   const handleAutoDeleteEmptySession = useCallback((sessionId: string) => {
