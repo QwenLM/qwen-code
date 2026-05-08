@@ -230,6 +230,49 @@ describe('QwenAgent slash command history', () => {
     expect(messages[0]?.textElements).toBeUndefined();
   });
 
+  it('marks replayed pre-tool assistant text as commentary, not thought', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const messages = (agent as unknown as QwenHistoryInternals).buildHistoryMessages(
+      'session-with-commentary',
+      [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'I will inspect the available commands.' },
+          _meta: { timestamp: 1_000 },
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-list',
+          kind: 'list',
+          title: 'List',
+          rawInput: { path: 'packages/cli/src/ui/commands' },
+          _meta: { timestamp: 1_001, toolName: 'List' },
+        },
+        {
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'Private reasoning stays internal.' },
+          _meta: { timestamp: 1_002 },
+        },
+      ],
+      cwd,
+    );
+    agent.destroy();
+
+    expect(messages.map(message => [
+      message.role,
+      message.content,
+      message.isIntermediate ?? false,
+      message.intermediateKind ?? '',
+    ])).toEqual([
+      ['assistant', 'I will inspect the available commands.', true, 'commentary'],
+      ['tool', 'Running List...', false, ''],
+      ['assistant', 'Private reasoning stays internal.', true, 'thought'],
+    ]);
+  });
+
   it('writes slash command text elements into the Qwen transcript user record', () => {
     const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
@@ -621,6 +664,7 @@ describe('QwenAgent slash command history', () => {
       type: 'text_complete',
       text: 'I should inspect the project.',
       isIntermediate: true,
+      intermediateKind: 'thought',
       turnId: 'qwen-turn-test',
     });
     expect(third).toEqual({
@@ -673,6 +717,7 @@ describe('QwenAgent slash command history', () => {
       type: 'text_complete',
       text: 'I will read the file first.',
       isIntermediate: true,
+      intermediateKind: 'commentary',
       turnId: 'qwen-turn-tool',
     });
     expect(third).toMatchObject({

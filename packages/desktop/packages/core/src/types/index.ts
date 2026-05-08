@@ -25,6 +25,7 @@ export type {
 // Message types
 export type {
   MessageRole,
+  IntermediateMessageKind,
   ToolStatus,
   ToolDisplayMeta,
   AttachmentType,

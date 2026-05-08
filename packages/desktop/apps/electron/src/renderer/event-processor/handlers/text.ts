@@ -110,6 +110,7 @@ export function handleTextComplete(
       isStreaming: false,
       isPending: false,
       isIntermediate: event.isIntermediate,
+      intermediateKind: event.intermediateKind,
       turnId: event.turnId,
       parentToolUseId: event.parentToolUseId,
       // Overwrite text_delta's Date.now() with main process monotonic timestamp
@@ -130,6 +131,7 @@ export function handleTextComplete(
     isStreaming: false,
     isPending: false,
     isIntermediate: event.isIntermediate,
+    intermediateKind: event.intermediateKind,
     turnId: event.turnId,
     parentToolUseId: event.parentToolUseId,
   }

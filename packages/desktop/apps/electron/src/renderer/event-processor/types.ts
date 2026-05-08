@@ -43,6 +43,7 @@ export interface TextCompleteEvent {
   text: string
   turnId?: string
   isIntermediate?: boolean
+  intermediateKind?: 'commentary' | 'thought'
   parentToolUseId?: string
   /** Timestamp from main process for consistent ordering with session.jsonl */
   timestamp?: number

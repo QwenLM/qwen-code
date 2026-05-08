@@ -580,6 +580,7 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
           type: 'intermediate',
           status: message.isPending ? 'running' : 'completed',
           content: message.content,
+          intermediateKind: message.intermediateKind,
           timestamp: message.timestamp,
           parentId: message.parentToolUseId,
         }
@@ -802,7 +803,7 @@ export function formatActivityAsMarkdown(activity: ActivityItem): string {
 
   if (activity.type === 'intermediate') {
     // Commentary/thinking
-    lines.push('# Commentary')
+    lines.push(activity.intermediateKind === 'thought' ? '# Thinking' : '# Commentary')
     lines.push('')
     if (activity.content) {
       lines.push(activity.content)
