@@ -7,22 +7,7 @@
 import * as fs from 'node:fs';
 import { parse, stringify } from 'comment-json';
 import { writeStderrLine } from './stdioHelpers.js';
-
-/**
- * Options for updateSettingsFilePreservingFormat.
- */
-export interface UpdateSettingsOptions {
-  /**
-   * When true, keys present in the original file but NOT in the updates
-   * object are removed (sync mode). When false (default), the updates are
-   * merged into the existing file (merge mode), preserving keys not
-   * mentioned in updates.
-   *
-   * Use sync mode for migrations that may remove deprecated keys.
-   * Use merge mode for runtime setValue that only touches known keys.
-   */
-  sync?: boolean;
-}
+import { writeWithBackupSync } from './writeWithBackup.js';
 
 /**
  * Updates a JSON file while preserving comments and formatting.
@@ -43,13 +28,11 @@ export interface UpdateSettingsOptions {
 export function updateSettingsFilePreservingFormat(
   filePath: string,
   updates: Record<string, unknown>,
-  options: UpdateSettingsOptions = {},
+  sync = false,
 ): boolean {
-  const { sync = false } = options;
-
   if (!fs.existsSync(filePath)) {
     const content = stringify(updates, null, 2);
-    writeFileSyncAtomic(filePath, content);
+    writeWithBackupSync(filePath, content);
     return true;
   }
 
@@ -61,7 +44,7 @@ export function updateSettingsFilePreservingFormat(
   } catch (_error) {
     writeStderrLine('Error parsing settings file.');
     writeStderrLine(
-      'Settings file may be corrupted. Please check the JSON syntax.',
+      `Settings file may be corrupted: ${_error instanceof Error ? _error.message : String(_error)}`,
     );
     return false;
   }
@@ -89,75 +72,8 @@ export function updateSettingsFilePreservingFormat(
     return false;
   }
 
-  writeFileSyncAtomic(filePath, updatedContent);
+  writeWithBackupSync(filePath, updatedContent);
   return true;
-}
-
-/**
- * Atomically writes content to a file using a temp-file + rename strategy.
- * Writes to a .tmp file first, backs up the existing target to .orig,
- * then renames the .tmp to the target path.
- *
- * If the rename fails, attempts to restore from the .orig backup.
- */
-function writeFileSyncAtomic(targetPath: string, content: string): void {
-  const tempPath = `${targetPath}.tmp`;
-  const backupPath = `${targetPath}.orig`;
-
-  // Clean up any stale temp file
-  try {
-    if (fs.existsSync(tempPath)) {
-      fs.unlinkSync(tempPath);
-    }
-  } catch (_e) {
-    // Ignore cleanup errors
-  }
-
-  try {
-    // Write to temp file
-    fs.writeFileSync(tempPath, content, 'utf-8');
-
-    // Back up existing target
-    if (fs.existsSync(targetPath)) {
-      try {
-        fs.renameSync(targetPath, backupPath);
-      } catch (backupError) {
-        try {
-          fs.unlinkSync(tempPath);
-        } catch (_e) {
-          // Ignore
-        }
-        throw new Error(
-          `Failed to backup existing file: ${backupError instanceof Error ? backupError.message : String(backupError)}`,
-        );
-      }
-    }
-
-    // Rename temp to target
-    try {
-      fs.renameSync(tempPath, targetPath);
-    } catch (renameError) {
-      // Attempt to restore backup
-      if (fs.existsSync(backupPath)) {
-        try {
-          fs.renameSync(backupPath, targetPath);
-        } catch (_restoreError) {
-          // Best-effort restore failed; re-throw original error
-        }
-      }
-      throw renameError;
-    }
-  } catch (error) {
-    // Clean up temp file on any error
-    try {
-      if (fs.existsSync(tempPath)) {
-        fs.unlinkSync(tempPath);
-      }
-    } catch (_e) {
-      // Ignore
-    }
-    throw error;
-  }
 }
 
 export function applyUpdates(

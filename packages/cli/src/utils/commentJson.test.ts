@@ -314,7 +314,7 @@ describe('migration write-back via updateSettingsFilePreservingFormat', () => {
     const result = updateSettingsFilePreservingFormat(
       testFilePath,
       migratedSettings,
-      { sync: true },
+      true,
     );
 
     expect(result).toBe(true);
@@ -347,7 +347,7 @@ describe('migration write-back via updateSettingsFilePreservingFormat', () => {
     const result = updateSettingsFilePreservingFormat(
       testFilePath,
       migratedSettings,
-      { sync: true },
+      true,
     );
 
     expect(result).toBe(true);
@@ -385,7 +385,7 @@ describe('migration write-back via updateSettingsFilePreservingFormat', () => {
     const result = updateSettingsFilePreservingFormat(
       testFilePath,
       migratedSettings,
-      { sync: true },
+      true,
     );
 
     expect(result).toBe(true);
@@ -398,5 +398,23 @@ describe('migration write-back via updateSettingsFilePreservingFormat', () => {
     // Unrelated key in same nested object preserved
     expect(content).toContain('someOtherSetting');
     expect(content).toContain('keep-me');
+  });
+
+  it('should remove all keys when sync=true with empty updates object', () => {
+    // Documents the behavior: sync mode with empty updates wipes all keys.
+    // This is intentional for migrations that restructure the entire file.
+    const original = `{
+  "a": 1,
+  "b": { "c": 2 }
+}`;
+    fs.writeFileSync(testFilePath, original, 'utf-8');
+
+    const result = updateSettingsFilePreservingFormat(testFilePath, {}, true);
+
+    expect(result).toBe(true);
+    const content = fs.readFileSync(testFilePath, 'utf-8');
+    expect(content).not.toContain('"a"');
+    expect(content).not.toContain('"b"');
+    expect(content).not.toContain('"c"');
   });
 });

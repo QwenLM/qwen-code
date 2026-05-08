@@ -40,6 +40,7 @@ import {
 import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import * as commentJsonUtils from '../utils/commentJson.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
@@ -85,6 +86,7 @@ vi.mock('node:fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
     mkdirSync: vi.fn(),
+    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
     realpathSync: (p: string) => p,
   };
 });
@@ -102,6 +104,7 @@ vi.mock('fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
     mkdirSync: vi.fn(),
+    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
     realpathSync: (p: string) => p,
   };
 });
@@ -113,6 +116,21 @@ vi.mock('./extension.js', () => ({
 vi.mock('strip-json-comments', () => ({
   default: vi.fn((content) => content),
 }));
+
+vi.mock('../utils/commentJson.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/commentJson.js')>();
+  return {
+    ...original,
+    // Wrap with vi.fn so tests can spy/mock, but default to calling through
+    // to the real implementation (which uses writeWithBackupSync).
+    updateSettingsFilePreservingFormat: vi.fn((...args: unknown[]) =>
+      original.updateSettingsFilePreservingFormat(
+        ...(args as [string, Record<string, unknown>, boolean]),
+      ),
+    ),
+  };
+});
 
 describe('Settings Loading and Merging', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
@@ -137,6 +155,8 @@ describe('Settings Loading and Merging', () => {
       isTrusted: true,
       source: 'file',
     });
+    // Ensure the mock delegates to the real implementation by default
+    // (set up in vi.mock factory above).
   });
 
   afterEach(() => {
@@ -2372,6 +2392,29 @@ describe('Settings Loading and Merging', () => {
           [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
         });
       });
+    });
+
+    it('should log error when updateSettingsFilePreservingFormat returns false during migration', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ theme: 'dark' });
+          return '{}';
+        },
+      );
+      // Simulate the write-back being refused (e.g. validation failure)
+      const mockFn =
+        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      mockFn.mockReturnValue(false);
+
+      // Should not throw — the error is caught and logged internally
+      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).not.toThrow();
+
+      // The mock should have been called (the migration path was reached)
+      expect(mockFn).toHaveBeenCalled();
     });
   });
 

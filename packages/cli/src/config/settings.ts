@@ -738,7 +738,7 @@ export function loadSettings(
             const written = updateSettingsFilePreservingFormat(
               filePath,
               settingsObject,
-              { sync: true },
+              true,
             );
             if (!written) {
               debugLogger.error(
