@@ -376,6 +376,13 @@ export const MainContent = () => {
   // Stable renderItem: completed items receive the original item reference so
   // VirtualHistoryItem.memo can bail out on unchanged props. Pending items
   // get id:0 (matching the legacy path) and always re-render during streaming.
+  //
+  // In VP mode, pending items do NOT receive an availableTerminalHeight bound.
+  // All items (including pending) are rendered inside VirtualizedList's
+  // overflowY="hidden" container, which uses ink 7's native clipping as the
+  // viewport guard. Passing undefined lets the full streaming content be
+  // available for virtual scrolling — JS truncation at terminal height would
+  // silently cut off content the user could otherwise scroll to read.
   const renderVirtualItem = useCallback(
     ({ item }: { item: HistoryItem }) => {
       const isPending = item.id < 0;
@@ -384,11 +391,7 @@ export const MainContent = () => {
           terminalWidth={terminalWidth}
           mainAreaWidth={mainAreaWidth}
           availableTerminalHeight={
-            isPending
-              ? uiState.constrainHeight
-                ? availableTerminalHeight
-                : undefined
-              : staticAreaMaxItemHeight
+            isPending ? undefined : staticAreaMaxItemHeight
           }
           availableTerminalHeightGemini={
             isPending ? undefined : MAX_GEMINI_MESSAGE_LINES
@@ -410,8 +413,6 @@ export const MainContent = () => {
       terminalWidth,
       mainAreaWidth,
       staticAreaMaxItemHeight,
-      availableTerminalHeight,
-      uiState.constrainHeight,
       uiState.isEditorDialogOpen,
       uiState.activePtyId,
       uiState.embeddedShellFocused,
