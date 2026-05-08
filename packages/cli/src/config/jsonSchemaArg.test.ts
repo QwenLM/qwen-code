@@ -42,9 +42,7 @@ describe('resolveJsonSchemaArg', () => {
   });
 
   it('throws on invalid JSON', () => {
-    expect(() => resolveJsonSchemaArg('{not json}')).toThrow(
-      /not valid JSON/,
-    );
+    expect(() => resolveJsonSchemaArg('{not json}')).toThrow(/not valid JSON/);
   });
 
   it('throws when the parsed value is not an object', () => {
@@ -77,5 +75,16 @@ describe('resolveJsonSchemaArg', () => {
       '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}',
     );
     expect(schema).toBeDefined();
+  });
+
+  it('rejects schemas whose top-level type is not "object"', () => {
+    // The schema becomes structured_output's parameter schema; tool args
+    // are object-shaped, so non-object roots can never be satisfied.
+    expect(() => resolveJsonSchemaArg('{"type":"string"}')).toThrow(
+      /top-level type must be "object"/,
+    );
+    expect(() => resolveJsonSchemaArg('{"type":"array"}')).toThrow(
+      /top-level type must be "object"/,
+    );
   });
 });

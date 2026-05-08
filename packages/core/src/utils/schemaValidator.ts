@@ -72,12 +72,24 @@ export class SchemaValidator {
    * to surface invalid schemas instead of letting them no-op at runtime.
    */
   static compileStrict(schema: unknown): string | null {
-    if (!schema || typeof schema !== 'object') {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
       return 'schema must be a JSON object';
     }
-    const validator = getValidator(schema as AnySchema);
+    // Use a dedicated strict-mode Ajv so typos like `propertees` raise
+    // instead of being silently ignored. The shared ajvDefault/ajv2020
+    // instances run with `strictSchema: false` so unknown MCP keywords
+    // don't break runtime validation — that leniency is wrong for
+    // explicit user-supplied schemas where `compileStrict` is exactly
+    // the surface meant to surface mistakes.
+    const isDraft2020 =
+      '$schema' in schema &&
+      (schema as { $schema?: string }).$schema === DRAFT_2020_12_SCHEMA;
+    const strictAjv: Ajv = isDraft2020
+      ? new Ajv2020Class({ strict: true })
+      : new AjvClass({ strict: true });
+    addFormatsFunc(strictAjv);
     try {
-      validator.compile(schema as AnySchema);
+      strictAjv.compile(schema as AnySchema);
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);

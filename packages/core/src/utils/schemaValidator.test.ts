@@ -478,5 +478,28 @@ describe('SchemaValidator', () => {
       expect(SchemaValidator.compileStrict(undefined)).toMatch(/JSON object/);
       expect(SchemaValidator.compileStrict('a string')).toMatch(/JSON object/);
     });
+
+    it('rejects arrays even though typeof === "object"', () => {
+      // Arrays satisfy `typeof === 'object'` but are not valid JSON Schema
+      // root values; the prior guard accepted them and let the misleading
+      // error surface from Ajv much later.
+      expect(SchemaValidator.compileStrict([])).toMatch(/JSON object/);
+      expect(SchemaValidator.compileStrict([{ type: 'string' }])).toMatch(
+        /JSON object/,
+      );
+    });
+
+    it('flags unknown keywords (typos) under strict mode', () => {
+      // The shared SchemaValidator.validate is intentionally lenient
+      // (`strictSchema: false`) so MCP-style custom keywords don't break
+      // runtime validation. compileStrict is the explicit user-supplied
+      // surface and should NOT swallow typos like `propertees`.
+      const err = SchemaValidator.compileStrict({
+        type: 'object',
+        propertees: { foo: { type: 'string' } },
+      });
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/propert/i);
+    });
   });
 });

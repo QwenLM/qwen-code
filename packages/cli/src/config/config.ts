@@ -231,6 +231,19 @@ export function resolveJsonSchemaArg(
     );
   }
 
+  // The schema becomes the parameter schema of the synthetic
+  // structured_output tool, and tool-call arguments are object-shaped.
+  // A schema like `{"type":"string"}` would compile fine but be
+  // unsatisfiable as a tool-call argument — fail at parse time so the
+  // user sees the contract violation immediately instead of at runtime.
+  const schemaType = (parsed as { type?: unknown }).type;
+  if (schemaType !== undefined && schemaType !== 'object') {
+    throw new FatalConfigError(
+      `--json-schema top-level type must be "object" (got "${String(schemaType)}"); ` +
+        'wrap your value under an object property if you need a non-object payload.',
+    );
+  }
+
   return parsed as Record<string, unknown>;
 }
 
@@ -540,7 +553,7 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('json-schema', {
           type: 'string',
           description:
-            'JSON Schema that the model\'s final output must conform to ' +
+            "JSON Schema that the model's final output must conform to " +
             '(headless mode only). Accepts a JSON literal or "@path/to/schema.json". ' +
             'Registers a synthetic `structured_output` tool; the session ends on ' +
             'the first valid call.',
