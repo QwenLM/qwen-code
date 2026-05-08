@@ -1509,6 +1509,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let isBinaryStream = false;
     let totalLines = 0;
     let totalBytes = 0;
+    let trailingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const doUpdate = () => {
+      if (!updateOutput) return;
+      if (typeof cumulativeOutput === 'string') {
+        updateOutput(cumulativeOutput);
+      } else {
+        updateOutput({
+          ansiOutput: cumulativeOutput,
+          totalLines,
+          totalBytes,
+          ...(this.params.timeout != null && {
+            timeoutMs: this.params.timeout,
+          }),
+        });
+      }
+      lastUpdateTime = Date.now();
+    };
 
     const { result: resultPromise, pid } = await ShellExecutionService.execute(
       commandToExecute,
@@ -1539,9 +1557,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
             // Plain text data can arrive in bursts and does not need every
             // chunk to force a React render; the final ToolResult still
             // carries the complete output after command completion.
-            shouldUpdate =
-              Array.isArray(event.chunk) ||
-              Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS;
+            if (Array.isArray(event.chunk)) {
+              shouldUpdate = true;
+            } else if (
+              Date.now() - lastUpdateTime >
+              OUTPUT_UPDATE_INTERVAL_MS
+            ) {
+              shouldUpdate = true;
+              // Cancel any pending trailing flush — this leading-edge update covers it.
+              if (trailingFlushTimer !== null) {
+                clearTimeout(trailingFlushTimer);
+                trailingFlushTimer = null;
+              }
+            } else {
+              // Throttled: schedule a trailing flush so the last suppressed
+              // chunk is still shown if the command goes quiet within the window.
+              if (trailingFlushTimer !== null) clearTimeout(trailingFlushTimer);
+              const remaining =
+                OUTPUT_UPDATE_INTERVAL_MS - (Date.now() - lastUpdateTime);
+              trailingFlushTimer = setTimeout(() => {
+                trailingFlushTimer = null;
+                doUpdate();
+              }, remaining);
+            }
             break;
           case 'binary_detected':
             isBinaryStream = true;
@@ -1562,21 +1600,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
           }
         }
 
-        if (shouldUpdate && updateOutput) {
-          if (typeof cumulativeOutput === 'string') {
-            updateOutput(cumulativeOutput);
-          } else {
-            updateOutput({
-              ansiOutput: cumulativeOutput,
-              totalLines,
-              totalBytes,
-              // Only include timeout when user explicitly set it
-              ...(this.params.timeout != null && {
-                timeoutMs: this.params.timeout,
-              }),
-            });
-          }
-          lastUpdateTime = Date.now();
+        if (shouldUpdate) {
+          doUpdate();
         }
       },
       combinedSignal,
@@ -1612,6 +1637,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const executionStartTime = performance.now();
 
     const result = await resultPromise;
+
+    // Cancel any pending trailing flush — the command has settled and the
+    // final ToolResult carries the complete output.
+    if (trailingFlushTimer !== null) {
+      clearTimeout(trailingFlushTimer);
+      trailingFlushTimer = null;
+    }
 
     // Background-promote path: the user pressed Ctrl+B (PR-3 wires the
     // keybind to `promoteAbortController.abort({ kind: 'background' })`),

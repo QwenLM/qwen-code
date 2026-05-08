@@ -736,7 +736,7 @@ describe('ShellTool', () => {
     describe('Streaming to `updateOutput`', () => {
       let updateOutputMock: Mock;
       beforeEach(() => {
-        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
         updateOutputMock = vi.fn();
       });
       afterEach(() => {
@@ -797,22 +797,126 @@ describe('ShellTool', () => {
         });
         const promise = invocation.execute(mockAbortSignal, updateOutputMock);
 
+        // Leading-edge fires immediately
         mockShellOutputCallback({ type: 'data', chunk: 'line 1' });
         expect(updateOutputMock).toHaveBeenCalledOnce();
         expect(updateOutputMock).toHaveBeenLastCalledWith('line 1');
 
+        // Suppressed: trailing flush scheduled
         mockShellOutputCallback({ type: 'data', chunk: 'line 2' });
         expect(updateOutputMock).toHaveBeenCalledOnce();
 
+        // Advance time: trailing flush fires, emitting 'line 2'
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('line 2');
+
+        // Advance time past the interval window again so next chunk fires immediately
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
 
         mockShellOutputCallback({ type: 'data', chunk: 'line 3' });
-        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenCalledTimes(3);
         expect(updateOutputMock).toHaveBeenLastCalledWith('line 3');
 
         resolveExecutionPromise({
           rawOutput: Buffer.from('line 1\nline 2\nline 3'),
           output: 'line 1\nline 2\nline 3',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should flush the last suppressed text chunk when the command goes quiet', async () => {
+        const invocation = shellTool.build({
+          command: 'long-running-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+
+        // Leading-edge update
+        mockShellOutputCallback({ type: 'data', chunk: 'progress: 0%' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        // Suppressed: within the throttle window
+        mockShellOutputCallback({ type: 'data', chunk: 'progress: 50%' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        // Advance time to trigger the trailing flush timer
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+
+        // The trailing flush must have fired with the latest suppressed chunk
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('progress: 50%');
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('progress: 50%'),
+          output: 'progress: 50%',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should pass ANSI chunks through immediately without throttling', async () => {
+        const invocation = shellTool.build({
+          command: 'interactive-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+
+        const ansiChunk1 = [
+          [
+            {
+              text: 'Hello',
+              bold: false,
+              italic: false,
+              dim: false,
+              underline: false,
+              strikethrough: false,
+              inverse: false,
+              hidden: false,
+              blink: false,
+              foreground: undefined,
+              background: undefined,
+            },
+          ],
+        ];
+        const ansiChunk2 = [
+          [
+            {
+              text: 'World',
+              bold: false,
+              italic: false,
+              dim: false,
+              underline: false,
+              strikethrough: false,
+              inverse: false,
+              hidden: false,
+              blink: false,
+              foreground: undefined,
+              background: undefined,
+            },
+          ],
+        ];
+
+        // Both ANSI chunks should fire updateOutput immediately, back-to-back
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk1 });
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk2 });
+
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
           exitCode: 0,
           signal: null,
           error: null,
