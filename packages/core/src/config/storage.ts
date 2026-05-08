@@ -173,11 +173,9 @@ export class Storage {
   }
 
   static getGlobalIdeDir(): string {
-    // Pinned to the global Qwen dir (not the runtime base dir) so the VS Code
-    // companion and the CLI agree on the lock-file location. The companion
-    // can only see env vars (QWEN_HOME / QWEN_RUNTIME_DIR), not the
-    // settings-based runtimeOutputDir, so anchoring discovery to the global
-    // dir keeps both sides aligned.
+    // Pinned to the global Qwen dir so the VS Code companion (which only
+    // sees env vars, not settings-based runtimeOutputDir) finds the same
+    // lock-file location as the CLI.
     return path.join(Storage.getGlobalQwenDir(), IDE_DIR_NAME);
   }
 

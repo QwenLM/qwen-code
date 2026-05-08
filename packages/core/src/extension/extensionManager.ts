@@ -548,24 +548,10 @@ export class ExtensionManager {
       ).filter((extension): extension is Extension => extension !== null);
     } else {
       // Default: load all extensions from QWEN_HOME-aware user extensions dir.
-      const userExtensionsDir = ExtensionStorage.getUserExtensionsDir();
-      let subdirs: string[];
-      try {
-        subdirs = fs.readdirSync(userExtensionsDir);
-      } catch {
-        return;
-      }
-      extensions = [];
-      for (const subdir of subdirs) {
-        const extensionDir = path.join(userExtensionsDir, subdir);
-        const extension = await this.loadExtension({
-          extensionDir,
-          workspaceDir: this.workspaceDir,
-        });
-        if (extension != null) {
-          extensions.push(extension);
-        }
-      }
+      extensions = await this.loadExtensionsFromExtensionsDir(
+        ExtensionStorage.getUserExtensionsDir(),
+        this.workspaceDir,
+      );
     }
     extensions.forEach((extension) => {
       this.extensionCache!.set(extension.name, extension);
@@ -618,23 +604,29 @@ export class ExtensionManager {
 
   async loadExtensionsFromDir(dir: string): Promise<Extension[]> {
     const storage = new Storage(dir);
-    const extensionsDir = storage.getExtensionsDir();
+    return this.loadExtensionsFromExtensionsDir(
+      storage.getExtensionsDir(),
+      dir,
+    );
+  }
 
+  private async loadExtensionsFromExtensionsDir(
+    extensionsDir: string,
+    workspaceDir: string,
+  ): Promise<Extension[]> {
     let subdirs: string[];
     try {
       subdirs = fs.readdirSync(extensionsDir);
     } catch {
-      // Directory doesn't exist or is inaccessible
       return [];
     }
 
     const extensions: Extension[] = [];
     for (const subdir of subdirs) {
       const extensionDir = path.join(extensionsDir, subdir);
-
       const extension = await this.loadExtension({
         extensionDir,
-        workspaceDir: dir,
+        workspaceDir,
       });
       if (extension != null) {
         extensions.push(extension);

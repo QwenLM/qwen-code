@@ -65,7 +65,7 @@ export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
 // from `~/.env` or `~/.qwen/.env` by `preResolveHomeEnvOverrides()` in
 // `loadSettings()`, which runs after this module is imported. A const
 // captured here would freeze the pre-bootstrap value and split state across
-// callers (#3159793469, #3177804507).
+// callers.
 export function getUserSettingsPath(): string {
   return Storage.getGlobalSettingsPath();
 }
@@ -521,35 +521,33 @@ function getUserLevelEnvPaths(): Set<string> {
 
 /**
  * Pre-resolves QWEN_HOME and QWEN_RUNTIME_DIR from user-level `.env` files
- * before any settings or storage paths are read.
+ * before any settings or storage paths are read. Required because
+ * module-load `Storage.getGlobalQwenDir()` would otherwise snapshot legacy
+ * paths for settings.json, OAuth tokens, installation_id, etc., while the
+ * regular `.env` load (inside `loadSettings`) only runs later — splitting
+ * global state between `~/.qwen/...` and `<QWEN_HOME>/...`.
  *
- * Required because module-load `Storage.getGlobalQwenDir()` snapshots paths
- * for settings.json, OAuth tokens, installation_id, etc., but the regular
- * `.env` load runs only later from inside `loadSettings`. Without this
- * pre-pass, a `~/.qwen/.env` or `~/.env` setting `QWEN_HOME=/foo` would
- * migrate `~/.qwen/settings.json` while routing every other write to
- * `/foo/...`, leaving global state split.
+ * Only home-scoped paths are consulted; project `.env` files are barred from
+ * changing these vars by `PROJECT_ENV_HARDCODED_EXCLUSIONS`.
  *
- * Only home-scoped paths are consulted — project `.env` files are barred
- * from changing these vars by `PROJECT_ENV_HARDCODED_EXCLUSIONS`.
- *
- * Exported so `main()` can run it before `parseArguments()`: yargs subcommand
- * handlers (e.g. `channel status`/`stop`) `process.exit` before
- * `loadSettings()` has a chance to bootstrap, so without this they would read
- * legacy `~/.qwen/...` paths even when the running service wrote under
- * `<QWEN_HOME>/...`.
+ * Exported so `main()` can run it before yargs subcommand handlers (e.g.
+ * `channel status`/`stop`) — those `process.exit` before `loadSettings()`
+ * gets a chance to bootstrap.
  */
+let homeEnvBootstrapped = false;
 export function preResolveHomeEnvOverrides(): void {
-  // Both vars already set — nothing to bootstrap from .env.
+  if (homeEnvBootstrapped) {
+    return;
+  }
+  homeEnvBootstrapped = true;
+
   if (process.env['QWEN_HOME'] && process.env['QWEN_RUNTIME_DIR']) {
     return;
   }
 
-  // Use Storage.getGlobalQwenDir() to derive the user's home directory so
-  // we share the same homedir resolution as the rest of the storage layer.
-  // When QWEN_HOME is unset, getGlobalQwenDir() == `<homedir>/.qwen`, so
-  // path.dirname() recovers `<homedir>`. This avoids a separate `node:os`
-  // import path that wouldn't follow the same mocking.
+  // Storage.getGlobalQwenDir() shares the same homedir resolution as the
+  // rest of the storage layer; when QWEN_HOME is unset it equals
+  // `<homedir>/.qwen`, so path.dirname() recovers `<homedir>`.
   const globalQwenDir = Storage.getGlobalQwenDir();
   const candidates: string[] = [path.join(globalQwenDir, '.env')];
   if (!process.env['QWEN_HOME']) {
@@ -573,25 +571,26 @@ export function preResolveHomeEnvOverrides(): void {
   }
 }
 
+/** Test-only: reset the home-env bootstrap latch. */
+export function resetHomeEnvBootstrapForTesting(): void {
+  homeEnvBootstrapped = false;
+}
+
 /**
  * Surfaces a one-shot warning when QWEN_HOME has been redirected but the
- * user hasn't migrated their existing global state. We don't auto-copy
- * OAuth tokens, settings, memory, etc. — that's a deliberate choice — but
- * silently starting fresh is a footgun, so we tell the user explicitly.
- *
- * Returns null when there's nothing to warn about.
+ * user hasn't migrated their existing global state. Auto-copying OAuth
+ * tokens / settings / memory is intentionally skipped, but silently starting
+ * fresh is a footgun. Returns null when there's nothing to warn about.
  */
 function detectQwenHomeRedirectWithoutMigration(
   activeUserSettingsPath: string,
 ): string | null {
-  // Only fires when QWEN_HOME has actually been set — otherwise active and
-  // legacy paths agree by definition. We compute the legacy path by briefly
-  // unsetting QWEN_HOME so Storage uses its homedir-based default; this also
-  // ensures we use the same homedir resolution as the rest of the storage
-  // layer rather than picking up a separate `node:os` import.
   if (!process.env['QWEN_HOME']) {
     return null;
   }
+  // Compute the legacy path by briefly unsetting QWEN_HOME so Storage uses
+  // its homedir-based default — same homedir resolution as the rest of the
+  // storage layer. try/finally restores the env on any throw.
   const activeQwenDir = Storage.getGlobalQwenDir();
   const savedQwenHome = process.env['QWEN_HOME'];
   delete process.env['QWEN_HOME'];
@@ -625,93 +624,64 @@ function detectQwenHomeRedirectWithoutMigration(
  * When workspace is untrusted, only allow user-level .env files at:
  * - ~/.qwen/.env
  * - ~/.env
+ * - <QWEN_HOME>/.env (when set)
  */
-function findEnvFile(settings: Settings, startDir: string): string | null {
+function findEnvFile(
+  settings: Settings,
+  startDir: string,
+  userLevelPaths: Set<string> = getUserLevelEnvPaths(),
+): string | null {
   const homeDir = homedir();
   const isTrusted = isWorkspaceTrusted(settings).isTrusted;
 
-  // Pre-compute user-level .env paths for fast comparison
   const globalQwenDir = Storage.getGlobalQwenDir();
-  const userLevelPaths = getUserLevelEnvPaths();
-
-  // Determine if we can use this .env file based on trust settings
-  const canUseEnvFile = (filePath: string): boolean =>
-    isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
-
-  // When QWEN_HOME overrides the default, skip legacy ~/.qwen/.env
-  // during walk-up so the fallback correctly picks up globalQwenDir/.env.
   const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
   const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
 
+  const canUseEnvFile = (filePath: string): boolean =>
+    isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
+
+  // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
+  // ~/.qwen/.env (only when QWEN_HOME redirects), then ~/.env.
+  // Users who add `QWEN_HOME=` to an existing global env file shouldn't lose
+  // credentials still in the legacy file; routing vars inside it are already
+  // pinned by `preResolveHomeEnvOverrides` (no-override).
+  const findHomeCandidate = (): string | null => {
+    const candidates = [path.join(globalQwenDir, '.env')];
+    if (hasCustomConfigDir) {
+      candidates.push(path.join(legacyQwenDir, '.env'));
+    }
+    candidates.push(path.join(homeDir, '.env'));
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate) && canUseEnvFile(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  };
+
   let currentDir = path.resolve(startDir);
+  let visitedHomeDir = false;
   while (true) {
-    // Prefer gemini-specific .env under QWEN_DIR
-    const geminiEnvPath = path.join(currentDir, QWEN_DIR, '.env');
-    const isLegacyHome =
-      hasCustomConfigDir &&
-      path.normalize(path.join(currentDir, QWEN_DIR)) === legacyQwenDir;
-    if (
-      !isLegacyHome &&
-      fs.existsSync(geminiEnvPath) &&
-      canUseEnvFile(geminiEnvPath)
-    ) {
-      return geminiEnvPath;
-    }
-
-    // When QWEN_HOME points outside the legacy home dir, prefer
-    // <QWEN_HOME>/.env over <homeDir>/.env at the home-dir step. Without
-    // this, the walk would return ~/.env before the post-loop fallback ever
-    // had a chance to consult QWEN_HOME, reversing the qwen-specific
-    // precedence we have for ~/.qwen/.env in the default case.
-    if (hasCustomConfigDir && currentDir === homeDir) {
-      const customQwenEnvPath = path.join(globalQwenDir, '.env');
-      if (
-        fs.existsSync(customQwenEnvPath) &&
-        canUseEnvFile(customQwenEnvPath)
-      ) {
-        return customQwenEnvPath;
+    if (currentDir === homeDir) {
+      visitedHomeDir = true;
+      const found = findHomeCandidate();
+      if (found) return found;
+    } else {
+      // Workspace step: prefer .qwen/.env, then plain .env.
+      const geminiEnvPath = path.join(currentDir, QWEN_DIR, '.env');
+      if (fs.existsSync(geminiEnvPath) && canUseEnvFile(geminiEnvPath)) {
+        return geminiEnvPath;
       }
-      // Fall back to legacy ~/.qwen/.env. Users who add `QWEN_HOME=` to an
-      // existing global env file shouldn't lose the credentials still living
-      // in that file just because the new dir hasn't been populated. Routing
-      // vars inside it are pinned by no-override (preResolveHomeEnvOverrides
-      // already set them), so this only forwards ordinary keys.
-      const legacyQwenEnvPath = path.join(legacyQwenDir, '.env');
-      if (
-        fs.existsSync(legacyQwenEnvPath) &&
-        canUseEnvFile(legacyQwenEnvPath)
-      ) {
-        return legacyQwenEnvPath;
+      const envPath = path.join(currentDir, '.env');
+      if (fs.existsSync(envPath) && canUseEnvFile(envPath)) {
+        return envPath;
       }
-    }
-
-    const envPath = path.join(currentDir, '.env');
-    if (fs.existsSync(envPath) && canUseEnvFile(envPath)) {
-      return envPath;
     }
 
     const parentDir = path.dirname(currentDir);
     if (parentDir === currentDir || !parentDir) {
-      // At home directory - check fallback .env files
-      const homeGeminiEnvPath = path.join(globalQwenDir, '.env');
-      if (fs.existsSync(homeGeminiEnvPath)) {
-        return homeGeminiEnvPath;
-      }
-      // Legacy ~/.qwen/.env fallback when QWEN_HOME redirects elsewhere — the
-      // walk skipped this file via `isLegacyHome`, so without an explicit
-      // fallback users who add `QWEN_HOME=` to an existing global env file
-      // would lose any credentials still living in it.
-      if (hasCustomConfigDir) {
-        const legacyQwenEnvPath = path.join(legacyQwenDir, '.env');
-        if (fs.existsSync(legacyQwenEnvPath)) {
-          return legacyQwenEnvPath;
-        }
-      }
-      const homeEnvPath = path.join(homeDir, '.env');
-      if (fs.existsSync(homeEnvPath)) {
-        return homeEnvPath;
-      }
-      return null;
+      return visitedHomeDir ? null : findHomeCandidate();
     }
     currentDir = parentDir;
   }
@@ -749,7 +719,8 @@ export function setUpCloudShellEnvironment(envFilePath: string | null): void {
  * 5. defaults
  */
 export function loadEnvironment(settings: Settings): void {
-  const envFilePath = findEnvFile(settings, process.cwd());
+  const userLevelPaths = getUserLevelEnvPaths();
+  const envFilePath = findEnvFile(settings, process.cwd(), userLevelPaths);
 
   // Cloud Shell environment variable handling
   if (process.env['CLOUD_SHELL'] === 'true') {
@@ -765,15 +736,11 @@ export function loadEnvironment(settings: Settings): void {
 
       const excludedVars =
         settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
-      const userLevelPaths = getUserLevelEnvPaths();
       const normalizedEnvFilePath = path.normalize(envFilePath);
-      // Two independent classifications:
-      // - homeScoped: `.env` lives under the user's home Qwen dir or `~/.env`.
-      //   Only home-scoped files may set QWEN_HOME / QWEN_RUNTIME_DIR; a
-      //   workspace file redirecting them would split global state.
-      // - qwenScoped: any `.env` whose immediate parent is `.qwen` (including
-      //   `<repo>/.qwen/.env`). Per docs, these are never filtered by the
-      //   user-configurable `excludedEnvVars` list.
+      // homeScoped: `.env` lives under the user's home Qwen dir or `~/.env` —
+      //   only these may set QWEN_HOME / QWEN_RUNTIME_DIR.
+      // qwenScoped: any `.env` whose immediate parent is `.qwen` (including
+      //   `<repo>/.qwen/.env`) — exempt from the user `excludedEnvVars` list.
       const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
       const isQwenScopedEnvFile =
         isHomeScopedEnvFile ||
@@ -791,7 +758,6 @@ export function loadEnvironment(settings: Settings): void {
             continue;
           }
 
-          // Only set if not already present in process.env (no-override)
           if (!Object.hasOwn(process.env, key)) {
             process.env[key] = parsedEnv[key];
           }
@@ -802,8 +768,7 @@ export function loadEnvironment(settings: Settings): void {
     }
   }
 
-  // Step 2: Load environment variables from settings.env as fallback (lowest priority)
-  // Only set if not already present (no-override, after .env is loaded).
+  // Step 2: settings.env fallback (lowest priority, no-override).
   // Storage-routing vars must never come from settings.json — a workspace
   // settings.json could otherwise redirect global state after path bootstrap.
   if (settings.env) {

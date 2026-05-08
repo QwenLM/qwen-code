@@ -54,6 +54,7 @@ import {
   loadEnvironment,
   SETTINGS_VERSION,
   SETTINGS_VERSION_KEY,
+  resetHomeEnvBootstrapForTesting,
 } from './settings.js';
 import { needsMigration } from './migration/index.js';
 import { QWEN_DIR } from '@qwen-code/qwen-code-core';
@@ -143,6 +144,7 @@ describe('Settings Loading and Merging', () => {
       isTrusted: true,
       source: 'file',
     });
+    resetHomeEnvBootstrapForTesting();
   });
 
   afterEach(() => {

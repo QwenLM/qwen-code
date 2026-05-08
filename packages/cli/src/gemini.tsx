@@ -362,10 +362,8 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
-  // Bootstrap QWEN_HOME / QWEN_RUNTIME_DIR from `~/.qwen/.env` and `~/.env`
-  // before yargs parses subcommands. Subcommand handlers (e.g. `channel
-  // status`/`stop`) call `process.exit` from inside parseArguments, so
-  // `loadSettings()` never gets a chance to run for them.
+  // Run before yargs parses subcommands — handlers like `channel status`/`stop`
+  // call `process.exit` before `loadSettings()` would otherwise bootstrap.
   preResolveHomeEnvOverrides();
 
   let argv = await parseArguments();

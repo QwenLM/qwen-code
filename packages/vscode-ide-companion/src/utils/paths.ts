@@ -39,14 +39,9 @@ let envBootstrapped = false;
 
 /**
  * Pre-resolves QWEN_HOME / QWEN_RUNTIME_DIR from `<homedir>/.qwen/.env` and
- * `<homedir>/.env` when missing from process env. Mirrors the CLI's
- * preResolveHomeEnvOverrides so the companion's lock-file location agrees
- * with the CLI's discovery path even when these vars are configured only
- * via `.env` files.
- *
- * Idempotent — safe to call repeatedly. Module-private state (no flag reset
- * needed for tests) and intentionally avoids any cross-package imports from
- * core, matching the existing standalone-companion convention.
+ * `<homedir>/.env`. Mirrors the CLI's `preResolveHomeEnvOverrides` so the
+ * companion's lock-file location agrees with the CLI even when these vars
+ * are only configured via `.env`. Idempotent.
  */
 function bootstrapHomeEnvOverrides(): void {
   if (envBootstrapped) {
@@ -87,11 +82,9 @@ function bootstrapHomeEnvOverrides(): void {
     readInto(path.join(homeDir, '.env'));
   }
 
-  // If QWEN_HOME was discovered via one of the candidates above, also read
-  // <new QWEN_HOME>/.env so QWEN_RUNTIME_DIR can be sourced from there. The
-  // CLI's findEnvFile prefers <QWEN_HOME>/.env, so without this second pass
-  // the companion would fall back to QWEN_HOME and write lock files into a
-  // different runtime dir than the one the CLI is reading from.
+  // If QWEN_HOME was just discovered, also read <new QWEN_HOME>/.env so
+  // QWEN_RUNTIME_DIR can be sourced from there — otherwise the companion
+  // would write lock files into a different runtime dir than the CLI reads.
   const discoveredQwenHome = process.env['QWEN_HOME'];
   if (discoveredQwenHome && discoveredQwenHome !== initialQwenHome) {
     const discoveredDir = resolvePath(discoveredQwenHome);
@@ -101,10 +94,7 @@ function bootstrapHomeEnvOverrides(): void {
   }
 }
 
-/**
- * Test-only: reset the bootstrap latch so suite-wide env mutations are
- * picked up by subsequent path lookups.
- */
+/** Test-only: reset the bootstrap latch. */
 export function resetEnvBootstrapForTesting(): void {
   envBootstrapped = false;
 }

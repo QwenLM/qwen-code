@@ -16,7 +16,11 @@ import {
 } from '../config/settings.js';
 import { promisify } from 'node:util';
 import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
-import { FatalSandboxError, Storage } from '@qwen-code/qwen-code-core';
+import {
+  FatalSandboxError,
+  Storage,
+  isSubpath,
+} from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -40,23 +44,6 @@ function ensureDirectoryAndGetRealPath(dir: string): string {
     fs.mkdirSync(dir, { recursive: true });
   }
   return fs.realpathSync(dir);
-}
-
-function normalizeForPathComparison(pathToNormalize: string): string {
-  const normalized = path.normalize(pathToNormalize);
-  return os.platform() === 'win32' ? normalized.toLowerCase() : normalized;
-}
-
-function isSameOrChildPath(childPath: string, parentPath: string): boolean {
-  const child = normalizeForPathComparison(childPath);
-  const parent = normalizeForPathComparison(parentPath);
-  const relative = path.relative(parent, child);
-  return (
-    relative === '' ||
-    (relative !== '' &&
-      !relative.startsWith('..') &&
-      !path.isAbsolute(relative))
-  );
 }
 
 const LOCAL_DEV_SANDBOX_IMAGE_NAME = 'qwen-code-sandbox';
@@ -473,13 +460,13 @@ export async function start_sandbox(
     userSettingsDirRealPath,
   );
   const runtimeBaseDirContainerPath = getContainerPath(runtimeBaseDirRealPath);
-  const runtimeCoveredByUserSettings = isSameOrChildPath(
-    runtimeBaseDirRealPath,
+  const runtimeCoveredByUserSettings = isSubpath(
     userSettingsDirRealPath,
+    runtimeBaseDirRealPath,
   );
-  const userSettingsCoveredByRuntime = isSameOrChildPath(
-    userSettingsDirRealPath,
+  const userSettingsCoveredByRuntime = isSubpath(
     runtimeBaseDirRealPath,
+    userSettingsDirRealPath,
   );
   const runtimeSameAsUserSettings =
     runtimeCoveredByUserSettings && userSettingsCoveredByRuntime;

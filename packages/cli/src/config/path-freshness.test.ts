@@ -10,17 +10,11 @@ import { homedir } from 'node:os';
 import { getUserSettingsDir, getUserSettingsPath } from './settings.js';
 import { getTrustedFoldersPath } from './trustedFolders.js';
 
-// Regression guard for #3159793469 / #3177804507 / 2026-05-06 review issue #2.
-//
-// `QWEN_HOME` may be resolved from `~/.env` or `~/.qwen/.env` by
-// `preResolveHomeEnvOverrides()` in `loadSettings()`, which runs AFTER any
-// module that imports a settings/trustedFolders path has loaded. If any such
-// path is captured into a top-level `const`, the post-bootstrap value is lost
-// and callers (sandbox launcher, trusted-folders reader, etc.) split state.
-//
-// These tests poke `process.env.QWEN_HOME` after the modules have already
-// loaded and assert that every exported path getter reflects the new value.
-// Anyone who reintroduces a top-level capture will turn one of these red.
+// Regression guard: `QWEN_HOME` is resolved by `preResolveHomeEnvOverrides()`
+// AFTER any module that imports a settings/trustedFolders path has loaded.
+// A top-level `const` would freeze the pre-bootstrap value and split state
+// across callers. Each test mutates `process.env.QWEN_HOME` post-load and
+// asserts the exported path getters reflect the new value.
 
 describe('settings/trustedFolders path getters are lazy', () => {
   let originalQwenHome: string | undefined;
