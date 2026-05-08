@@ -41,8 +41,17 @@ const addFormatsFunc = (addFormats as any).default || addFormats;
 addFormatsFunc(ajvDefault);
 addFormatsFunc(ajv2020);
 
-// Canonical draft-2020-12 meta-schema URI (used by rmcp MCP servers)
+// Canonical draft-2020-12 meta-schema URI (used by rmcp MCP servers).
+// JSON Schema authors commonly include both `…/schema` and `…/schema#`
+// — the trailing `#` is an empty fragment and points at the same
+// document. Normalize before comparing so either form selects ajv2020.
 const DRAFT_2020_12_SCHEMA = 'https://json-schema.org/draft/2020-12/schema';
+
+function isDraft2020Uri(uri: unknown): boolean {
+  if (typeof uri !== 'string') return false;
+  const normalized = uri.endsWith('#') ? uri.slice(0, -1) : uri;
+  return normalized === DRAFT_2020_12_SCHEMA;
+}
 
 /**
  * Returns the appropriate validator based on schema's $schema field.
@@ -52,7 +61,7 @@ function getValidator(schema: AnySchema): Ajv {
     typeof schema === 'object' &&
     schema !== null &&
     '$schema' in schema &&
-    schema.$schema === DRAFT_2020_12_SCHEMA
+    isDraft2020Uri(schema.$schema)
   ) {
     return ajv2020;
   }
@@ -75,23 +84,30 @@ export class SchemaValidator {
     if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
       return 'schema must be a JSON object';
     }
-    // Use a dedicated strict-mode Ajv so typos like `propertees` raise
-    // instead of being silently ignored. The shared ajvDefault/ajv2020
-    // instances run with `strictSchema: false` so unknown MCP keywords
-    // don't break runtime validation — that leniency is wrong for
-    // explicit user-supplied schemas where `compileStrict` is exactly
-    // the surface meant to surface mistakes.
+    // Use a dedicated Ajv with `strictSchema: true` so typos like
+    // `propertees` raise instead of being silently ignored. The shared
+    // ajvDefault/ajv2020 instances run with `strictSchema: false` so
+    // unknown MCP keywords don't break runtime validation — that
+    // leniency is wrong for explicit user-supplied schemas where
+    // `compileStrict` is exactly the surface meant to surface mistakes.
     //
-    // `allowUnionTypes: true` keeps spec-valid type unions like
-    // `{"type":["string","number"]}` and `{"type":["object","null"]}`
-    // accepted — strict mode rejects those by default, but they're
-    // common in real-world schemas and rejecting them at parse time
-    // breaks otherwise-valid `--json-schema` payloads.
-    const isDraft2020 =
-      '$schema' in schema &&
-      (schema as { $schema?: string }).$schema === DRAFT_2020_12_SCHEMA;
-    const strictOptions = { strict: true, allowUnionTypes: true };
-    const strictAjv: Ajv = isDraft2020
+    // We deliberately do NOT pass `strict: true` (which would also
+    // enable `strictRequired`, `strictTypes`, etc): those rules go
+    // beyond JSON Schema validity and would reject spec-valid schemas
+    // like `{type:'object', required:['x']}` (no matching `properties`)
+    // or anything using a custom `format`. Keep typo detection;
+    // tolerate the looser-but-still-spec-valid patterns users actually
+    // ship in `--json-schema`.
+    const strictOptions = {
+      strictSchema: true, // catches unknown keywords (typos)
+      strictRequired: false, // allow `required` without `properties`
+      strictTypes: false, // allow inferred / partial type info
+      validateFormats: false, // unknown `format` values don't fail
+      allowUnionTypes: true, // type: ["a","b"]
+    };
+    const strictAjv: Ajv = isDraft2020Uri(
+      (schema as { $schema?: unknown }).$schema,
+    )
       ? new Ajv2020Class(strictOptions)
       : new AjvClass(strictOptions);
     addFormatsFunc(strictAjv);

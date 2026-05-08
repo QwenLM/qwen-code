@@ -518,5 +518,51 @@ describe('SchemaValidator', () => {
         SchemaValidator.compileStrict({ type: ['object', 'null'] }),
       ).toBeNull();
     });
+
+    it('accepts spec-valid schemas that Ajv `strict: true` would reject', () => {
+      // The previous `strict: true` setting enabled lint rules beyond
+      // JSON-Schema validity (strictRequired / strictTypes /
+      // validateFormats), which rejected real-world spec-valid schemas
+      // and broke `--json-schema` for legitimate users.
+
+      // strictRequired: required without listing in properties.
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          required: ['answer'],
+        }),
+      ).toBeNull();
+
+      // strictTypes: nested const/enum without explicit type.
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          properties: { mode: { enum: ['a', 'b'] } },
+        }),
+      ).toBeNull();
+
+      // validateFormats: unknown custom format string.
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          properties: { id: { type: 'string', format: 'snowflake-id' } },
+        }),
+      ).toBeNull();
+    });
+
+    it('accepts the draft-2020-12 URI with a trailing `#` fragment', () => {
+      // Both `…/schema` and `…/schema#` reference the same meta-schema;
+      // exact-equality on the canonical URI rejected the trailing-`#`
+      // form, falling back to the draft-07 Ajv and surfacing as
+      // `no schema with key or ref ...`. Real schemas in the wild
+      // include the `#` because spec examples often do.
+      expect(
+        SchemaValidator.compileStrict({
+          $schema: 'https://json-schema.org/draft/2020-12/schema#',
+          type: 'object',
+          properties: { foo: { type: 'string' } },
+        }),
+      ).toBeNull();
+    });
   });
 });
