@@ -98,6 +98,22 @@ export function createServeApp(
         workspaceCwd: cwd,
         modelServiceId,
       });
+      // Client may have disconnected during the 1-3s spawn window. If so,
+      // the response can't be delivered. The session is otherwise orphaned
+      // (in `byId` / `byWorkspace` with no client knowing the id), and
+      // under churn this leaks one child process per aborted request.
+      //
+      // `req.aborted` flips on the request's `abort` event (legacy but
+      // still reliable on Node 20). Combined with `!session.attached` we
+      // only reap when WE spawned a fresh child for this request — if
+      // another client legitimately attached, killing it tears out their
+      // work mid-flight.
+      if (req.aborted && !session.attached) {
+        bridge.killSession(session.sessionId).catch(() => {
+          // Best-effort cleanup; channel.exited will eventually reap.
+        });
+        return;
+      }
       res.status(200).json(session);
     } catch (err) {
       res.status(500).json({ error: errorMessage(err) });

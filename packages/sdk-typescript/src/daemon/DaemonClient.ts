@@ -40,7 +40,18 @@ export interface DaemonClientOptions {
    * to work (jsdom's polyfill is incompatible with undici).
    */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Per-call request timeout in milliseconds. Applied to every non-streaming
+   * method (createOrAttachSession, prompt, setSessionModel, cancel, …) so
+   * an unresponsive daemon doesn't block callers indefinitely. Streaming
+   * (`subscribeEvents`) is intentionally excluded — SSE connections are
+   * long-lived; cancellation is via `opts.signal`. Defaults to 30s. Set to
+   * `0` or `Infinity` to disable.
+   */
+  fetchTimeoutMs?: number;
 }
+
+const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 
 /**
  * Strip any trailing slashes from a base URL via plain string ops. The
@@ -94,11 +105,36 @@ export class DaemonClient {
   private readonly baseUrl: string;
   private readonly token: string | undefined;
   private readonly _fetch: typeof globalThis.fetch;
+  private readonly fetchTimeoutMs: number;
 
   constructor(opts: DaemonClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
     this.token = opts.token;
     this._fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
+    this.fetchTimeoutMs = opts.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+  }
+
+  /**
+   * Wrap a fetch call with the per-client `fetchTimeoutMs`. If the caller
+   * passes their own `signal`, both signals abort the request via
+   * `AbortSignal.any`, so caller cancellation and the per-call timeout
+   * compose. Streaming endpoints (subscribeEvents) call `_fetch` directly
+   * to skip the timeout — long-lived SSE connections must not be killed
+   * by it.
+   */
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit = {},
+  ): Promise<Response> {
+    if (!this.fetchTimeoutMs || !Number.isFinite(this.fetchTimeoutMs)) {
+      return await this._fetch(url, init);
+    }
+    const timeoutSignal = AbortSignal.timeout(this.fetchTimeoutMs);
+    const callerSignal = init.signal ?? undefined;
+    const signal = callerSignal
+      ? AbortSignal.any([callerSignal, timeoutSignal])
+      : timeoutSignal;
+    return await this._fetch(url, { ...init, signal });
   }
 
   // -- Plumbing -----------------------------------------------------------
@@ -140,7 +176,7 @@ export class DaemonClient {
   // -- Lifecycle / discovery ---------------------------------------------
 
   async health(): Promise<{ status: string }> {
-    const res = await this._fetch(`${this.baseUrl}/health`, {
+    const res = await this.fetchWithTimeout(`${this.baseUrl}/health`, {
       headers: this.headers(),
     });
     if (!res.ok) throw await this.failOnError(res, 'GET /health');
@@ -148,7 +184,7 @@ export class DaemonClient {
   }
 
   async capabilities(): Promise<DaemonCapabilities> {
-    const res = await this._fetch(`${this.baseUrl}/capabilities`, {
+    const res = await this.fetchWithTimeout(`${this.baseUrl}/capabilities`, {
       headers: this.headers(),
     });
     if (!res.ok) throw await this.failOnError(res, 'GET /capabilities');
@@ -160,7 +196,7 @@ export class DaemonClient {
   async createOrAttachSession(
     req: CreateSessionRequest,
   ): Promise<DaemonSession> {
-    const res = await this._fetch(`${this.baseUrl}/session`, {
+    const res = await this.fetchWithTimeout(`${this.baseUrl}/session`, {
       method: 'POST',
       headers: this.headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
@@ -179,7 +215,7 @@ export class DaemonClient {
   async listWorkspaceSessions(
     workspaceCwd: string,
   ): Promise<DaemonSessionSummary[]> {
-    const res = await this._fetch(
+    const res = await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/${encodeURIComponent(workspaceCwd)}/sessions`,
       { headers: this.headers() },
     );
@@ -199,7 +235,7 @@ export class DaemonClient {
     sessionId: string,
     modelId: string,
   ): Promise<SetModelResult> {
-    const res = await this._fetch(
+    const res = await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/model`,
       {
         method: 'POST',
@@ -211,6 +247,10 @@ export class DaemonClient {
     return (await res.json()) as SetModelResult;
   }
 
+  // `prompt` is intentionally exempt from `fetchTimeoutMs` — the request
+  // is long-lived (model + tool turns can take minutes). Callers who
+  // want cancellation should pass an `AbortSignal` (we'd add one to
+  // PromptRequest in a follow-up) or rely on `cancel(sessionId)`.
   async prompt(sessionId: string, req: PromptRequest): Promise<PromptResult> {
     const res = await this._fetch(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
@@ -225,7 +265,7 @@ export class DaemonClient {
   }
 
   async cancel(sessionId: string): Promise<void> {
-    const res = await this._fetch(
+    const res = await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`,
       {
         method: 'POST',
@@ -271,7 +311,10 @@ export class DaemonClient {
     if (!res.body) {
       throw new Error('SSE response has no body');
     }
-    yield* parseSseStream(res.body);
+    // Forward the abort signal so post-200 aborts stop the iteration.
+    // Without this, callers who `controller.abort()` after the response
+    // arrives keep receiving frames until the upstream closes.
+    yield* parseSseStream(res.body, opts.signal);
   }
 
   // -- Permissions -------------------------------------------------------
@@ -285,7 +328,7 @@ export class DaemonClient {
     requestId: string,
     response: PermissionResponse,
   ): Promise<boolean> {
-    const res = await this._fetch(
+    const res = await this.fetchWithTimeout(
       `${this.baseUrl}/permission/${encodeURIComponent(requestId)}`,
       {
         method: 'POST',

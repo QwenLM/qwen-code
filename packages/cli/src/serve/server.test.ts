@@ -67,6 +67,7 @@ interface FakeBridge extends HttpAcpBridge {
     signal?: AbortSignal;
   }>;
   cancelCalls: Array<{ sessionId: string; req?: CancelNotification }>;
+  killCalls: string[];
   permissionVotes: Array<{
     requestId: string;
     response: RequestPermissionResponse;
@@ -80,6 +81,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const calls: BridgeSpawnRequest[] = [];
   const promptCalls: FakeBridge['promptCalls'] = [];
   const cancelCalls: FakeBridge['cancelCalls'] = [];
+  const killCalls: string[] = [];
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const listCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
@@ -101,6 +103,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     calls,
     promptCalls,
     cancelCalls,
+    killCalls,
     permissionVotes,
     listCalls,
     setModelCalls,
@@ -145,6 +148,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req) {
       setModelCalls.push({ sessionId, req });
       return setModelImpl(sessionId, req);
+    },
+    async killSession(sessionId) {
+      killCalls.push(sessionId);
     },
     async shutdown() {
       shutdownCalls += 1;

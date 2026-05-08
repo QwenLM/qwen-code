@@ -14,6 +14,18 @@ import type { ServeOptions } from './types.js';
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 
+/**
+ * Wrap raw IPv6 literals in brackets so the printed URL is a valid RFC 3986
+ * authority. `host:port` is ambiguous when host contains `:`, so the URL
+ * form requires `[host]:port` for IPv6. Pass-through for IPv4 and DNS
+ * names. Already-bracketed input is left alone.
+ */
+function formatHostForUrl(host: string): string {
+  if (host.startsWith('[')) return host;
+  if (host.includes(':')) return `[${host}]`;
+  return host;
+}
+
 export interface RunHandle {
   server: Server;
   url: string;
@@ -92,7 +104,7 @@ export async function runQwenServe(
     const server = app.listen(opts.port, listenHostname, () => {
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
-      const url = `http://${opts.hostname}:${actualPort}`;
+      const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
       writeStdoutLine(`qwen serve listening on ${url} (mode=${opts.mode})`);
       if (!token) {
         writeStderrLine(

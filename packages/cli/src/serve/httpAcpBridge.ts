@@ -145,6 +145,15 @@ export interface HttpAcpBridge {
     req: SetSessionModelRequest,
   ): Promise<SetSessionModelResponse>;
 
+  /**
+   * Kill the agent process for the session and remove it from the maps.
+   * Used by the HTTP route layer to reap orphans created when a client
+   * disconnects mid-spawn (the server-side child kept being created
+   * even though no caller will ever know the sessionId). Idempotent —
+   * unknown / already-dead sessions are no-ops.
+   */
+  killSession(sessionId: string): Promise<void>;
+
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
 
@@ -364,17 +373,27 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   }
 
   // Single-scope reuse keyed by canonical workspace path.
-  // KNOWN GAP: there is currently no path that removes a session from these
-  // maps when its child process crashes between requests. The next prompt
-  // against the dead session will fail (channel writes throw / responses
-  // never arrive within `initTimeoutMs`), so the failure is surfaced — but
-  // the entry stays in the maps as garbage until daemon shutdown. Stage 2's
-  // in-process bridge eliminates the spawned-child failure mode entirely.
+  // Cleanup-on-crash: `channel.exited` (registered at line ~469) removes
+  // the entry from both maps + cancels pending permissions + publishes
+  // `session_died` + closes the EventBus when the child process dies
+  // between requests. Stage 2's in-process bridge eliminates the
+  // spawned-child failure mode entirely — but for Stage 1, the next
+  // prompt against a crashed session sees `SessionNotFoundError`
+  // (cleanup raced ahead of the request), not a hung channel write.
   const byWorkspace = new Map<string, SessionEntry>();
   const byId = new Map<string, SessionEntry>();
   // Daemon-wide pending permission table; requestIds are UUIDs so collisions
   // across sessions are infeasible in practice.
   const pendingPermissions = new Map<string, PendingPermission>();
+  // Set by `shutdown()` so any in-flight `spawnOrAttach` that was
+  // dispatched on an existing connection AFTER the shutdown snapshot
+  // taken in `shutdown()` fails fast instead of creating a child the
+  // shutdown path has no more visibility into. Without this, the
+  // server.listen → bridge.shutdown ordering in `runQwenServe` leaves
+  // a window between (a) shutdown snapshotting `byId` for kills and
+  // (b) `server.close` rejecting new connections, during which a
+  // late-arriving `POST /session` slips a fresh child past cleanup.
+  let shuttingDown = false;
   // Coalesces concurrent `spawnOrAttach` calls for the same workspace under
   // single-scope. Without this, two parallel callers would both pass the
   // `byWorkspace.get` check, both spawn, and one entry would be orphaned
@@ -445,6 +464,15 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         'newSession',
       );
 
+      // Late-shutdown re-check: shutdown() may have flipped while we
+      // were in `connection.newSession` (~1s on cold start). If we
+      // commit to the maps now, the snapshot in shutdown() already
+      // missed this entry — child leaks past `process.exit(0)`. Tear
+      // down what we have and surface to the caller.
+      if (shuttingDown) {
+        await channel.kill().catch(() => {});
+        throw new Error('HttpAcpBridge is shutting down');
+      }
       entry = {
         sessionId: newSessionResp.sessionId,
         workspaceCwd: workspaceKey,
@@ -617,6 +645,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     },
 
     async spawnOrAttach(req) {
+      if (shuttingDown) {
+        // `runQwenServe.close()` calls `bridge.shutdown()` BEFORE
+        // `server.close()`. During that window, established HTTP
+        // connections can still hit `POST /session`. Refuse here so
+        // late-arrivers don't spawn children the shutdown path won't
+        // see — they'd otherwise leak past `process.exit(0)`.
+        throw new Error('HttpAcpBridge is shutting down');
+      }
       if (!path.isAbsolute(req.workspaceCwd)) {
         throw new Error(
           `workspaceCwd must be an absolute path; got "${req.workspaceCwd}"`,
@@ -688,6 +724,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     async sendPrompt(sessionId, req, signal) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      // Pre-aborted: skip the queue entirely. Without this the prompt
+      // chains onto promptQueue, waits its turn, and the FIFO worker
+      // checks `signal.aborted` only AFTER reaching the head — wasted
+      // queue churn on every retry-after-abort, plus a confusing trace
+      // where the prompt appears to "run" before erroring.
+      if (signal?.aborted) {
+        throw new DOMException('Prompt aborted', 'AbortError');
+      }
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
@@ -810,7 +854,23 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           p: SetSessionModelRequest,
         ): Promise<SetSessionModelResponse>;
       };
-      const response = await conn.unstable_setSessionModel(normalized);
+      // Serialize through `entry.modelChangeQueue` so a `POST /session/:id/model`
+      // can't race with `applyModelServiceId` (e.g. an attach-with-different-
+      // modelServiceId) and leave the agent connection in an indeterminate
+      // model. `applyModelServiceId` already chains on this queue; without
+      // mirroring that here, two concurrent model changes interleave and the
+      // last `model_switched` event published may not match the actual model
+      // the agent is on.
+      const work = entry.modelChangeQueue.then(() =>
+        conn.unstable_setSessionModel(normalized),
+      );
+      // Tail-swallow on the queue so a model-change failure doesn't poison
+      // every subsequent change (matches `applyModelServiceId`'s pattern).
+      entry.modelChangeQueue = work.then(
+        () => undefined,
+        () => undefined,
+      );
+      const response = await work;
       try {
         entry.events.publish({
           type: 'model_switched',
@@ -822,7 +882,32 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       return response;
     },
 
+    async killSession(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) return;
+      // Remove from the maps eagerly so concurrent `spawnOrAttach`
+      // can't reattach to a session we're tearing down. The
+      // `channel.exited` cleanup at line 461-484 also removes from
+      // these maps, but eager removal narrows the race window.
+      byWorkspace.delete(entry.workspaceCwd);
+      byId.delete(sessionId);
+      // Resolve any still-pending permission as cancelled (matches the
+      // shutdown path) so callers awaiting requestPermission unwind.
+      for (const id of Array.from(entry.pendingPermissionIds)) {
+        resolvePending(id, { outcome: { outcome: 'cancelled' } });
+      }
+      entry.events.close();
+      await entry.channel.kill().catch(() => {
+        // Best-effort kill — channel may already be dead.
+      });
+    },
+
     async shutdown() {
+      // Set BEFORE the snapshot so any racing `spawnOrAttach` triggered
+      // by an in-flight HTTP connection after `runQwenServe.close()`
+      // entered the bridge.shutdown() phase fails fast instead of
+      // spawning a child this teardown won't see.
+      shuttingDown = true;
       const entries = Array.from(byId.values());
       // Resolve every still-pending permission as cancelled before clearing
       // the maps so callers awaiting `requestPermission` unwind cleanly.
