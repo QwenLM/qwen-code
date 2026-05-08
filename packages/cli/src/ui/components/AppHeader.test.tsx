@@ -17,14 +17,32 @@ import type { LoadedSettings } from '../../config/settings.js';
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
-const createSettings = (options?: { hideTips?: boolean }): LoadedSettings =>
-  ({
-    merged: {
-      ui: {
-        hideTips: options?.hideTips ?? true,
-      },
+const createSettings = (options?: {
+  hideTips?: boolean;
+  hideBanner?: boolean;
+  customBannerTitle?: string;
+  customBannerSubtitle?: string;
+  customAsciiArt?: unknown;
+}): LoadedSettings => {
+  const ui = {
+    hideTips: options?.hideTips ?? true,
+    hideBanner: options?.hideBanner,
+    customBannerTitle: options?.customBannerTitle,
+    customBannerSubtitle: options?.customBannerSubtitle,
+    customAsciiArt: options?.customAsciiArt,
+  };
+  return {
+    merged: { ui },
+    system: { settings: {}, originalSettings: {}, path: '' },
+    systemDefaults: { settings: {}, originalSettings: {}, path: '' },
+    user: {
+      settings: { ui },
+      originalSettings: { ui },
+      path: '/home/u/.qwen/settings.json',
     },
-  }) as never;
+    workspace: { settings: {}, originalSettings: {}, path: '' },
+  } as never;
+};
 
 const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ authType: undefined })),
@@ -90,5 +108,46 @@ describe('<AppHeader />', () => {
     expect(lastFrame()).toContain('>_ Qwen Code');
     expect(lastFrame()).toContain('gemini-pro');
     expect(lastFrame()).toContain('/projects/qwen-code');
+  });
+
+  it('hides the banner when ui.hideBanner is set, but keeps tips intact', () => {
+    const { lastFrame } = renderWithProviders(
+      createMockUIState(),
+      createSettings({ hideTips: false, hideBanner: true }),
+    );
+    expect(lastFrame()).not.toContain('>_ Qwen Code');
+    expect(lastFrame()).not.toContain('██╔═══██╗');
+  });
+
+  it('renders the custom subtitle end-to-end through resolveCustomBanner (replaces the blank spacer between title and auth line)', () => {
+    const { lastFrame } = renderWithProviders(
+      createMockUIState(),
+      createSettings({
+        customBannerTitle: 'DataWorks DataAgent',
+        customBannerSubtitle: 'Built-in DataWorks Official Skills',
+      }),
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('DataWorks DataAgent');
+    expect(frame).toContain('Built-in DataWorks Official Skills');
+    const titleIdx = frame.indexOf('DataWorks DataAgent');
+    const subtitleIdx = frame.indexOf('Built-in DataWorks Official Skills');
+    expect(titleIdx).toBeLessThan(subtitleIdx);
+  });
+
+  it('renders custom banner title and inline ASCII art end-to-end through resolveCustomBanner', () => {
+    const { lastFrame } = renderWithProviders(
+      createMockUIState(),
+      createSettings({
+        customBannerTitle: 'Acme CLI',
+        customAsciiArt: '   ACME\n   ----',
+      }),
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Acme CLI');
+    expect(frame).not.toContain('>_ Qwen Code');
+    expect(frame).toContain('ACME');
+    // Default Qwen logo must NOT bleed through when the user supplied art.
+    expect(frame).not.toContain('██╔═══██╗');
   });
 });

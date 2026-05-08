@@ -33,6 +33,7 @@ import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
+  type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
 
@@ -103,10 +104,23 @@ function terminalStatusPresentation(
   }
 }
 
+// Foreground agent rows get this prefix so users can tell at a glance
+// that cancelling one will unblock — and end — the parent's current
+// turn, a much heavier consequence than cancelling a truly async
+// background entry. `[blocking]` reads more directly than the earlier
+// `[in turn]` (which was widely misread as "queued / sequential" —
+// the opposite meaning).
+const FOREGROUND_ROW_PREFIX = '[blocking]';
+const SHELL_ROW_PREFIX = '[shell]';
+
 function rowLabel(entry: DialogEntry): string {
   switch (entry.kind) {
-    case 'agent':
-      return buildBackgroundEntryLabel(entry, { includePrefix: false });
+    case 'agent': {
+      const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
+      return entry.flavor === 'foreground'
+        ? `${FOREGROUND_ROW_PREFIX} ${label}`
+        : label;
+    }
     case 'shell':
       // Shell / monitor prefixes mirror the dialog's "section" visual hint
       // without needing per-kind section headers (which would complicate
@@ -115,9 +129,16 @@ function rowLabel(entry: DialogEntry): string {
       // is acceptable for the dialog's information-density profile —
       // adding `wrap="truncate-end"` here would hide context the user
       // explicitly opened the dialog to see.
-      return `[shell] ${entry.command}`;
+      return `${SHELL_ROW_PREFIX} ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
+    case 'dream': {
+      const sessionsHint =
+        entry.sessionCount !== undefined
+          ? ` reviewing ${entry.sessionCount} session${entry.sessionCount === 1 ? '' : 's'}`
+          : '';
+      return `[dream] memory consolidation${sessionsHint}`;
+    }
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -282,6 +303,14 @@ const DetailBody: React.FC<{
           maxWidth={maxWidth}
         />
       );
+    case 'dream':
+      return (
+        <DreamDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -289,6 +318,189 @@ const DetailBody: React.FC<{
       );
     }
   }
+};
+
+// ─── Dream detail body ─────────────────────────────────────
+//
+// Shows what the agent is reviewing (session count), what it has
+// touched (topic files, only populated on completion), and the latest
+// progress text from MemoryManager. Cancellation is wired through the
+// shared `x stop` keystroke (handled by `cancelSelected` in the
+// context, which routes dream entries to `MemoryManager.cancelTask`).
+// In-flight progress is still static — the dream's fork agent reports
+// only at schedule + completion via MemoryManager.update; live
+// per-turn phase reporting requires extending runForkedAgent's
+// AgentPathParams with an onAssistantMessage callback (separate PR).
+//
+// Layout follows the Shell/Monitor convention — flat children of
+// MaxSizedBox separated by empty `<Box />` spacers (nesting a
+// `flexDirection="column"` container inside MaxSizedBox eats the
+// children silently).
+const DreamDetailBody: React.FC<{
+  entry: DreamDialogEntry;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = 'Dream';
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.sessionCount !== undefined) {
+    dimSubtitleParts.push(
+      `${entry.sessionCount} session${entry.sessionCount === 1 ? '' : 's'}`,
+    );
+  }
+  if (entry.touchedTopics && entry.touchedTopics.length > 0) {
+    dimSubtitleParts.push(
+      `${entry.touchedTopics.length} topic${entry.touchedTopics.length === 1 ? '' : 's'}`,
+    );
+  }
+
+  // Topic file lists can grow for an active session sweep; cap the
+  // displayed slice and add a "+N more" tail rather than letting the
+  // dialog body push the hint footer off-screen.
+  const MAX_TOPICS = 8;
+  const topics = entry.touchedTopics ?? [];
+  const visibleTopics = topics.slice(0, MAX_TOPICS);
+  const hiddenTopicCount = Math.max(0, topics.length - visibleTopics.length);
+  const hasError = Boolean(entry.error);
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${STATUS_VERBS[entry.status]} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      {entry.sessionCount !== undefined && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              Sessions reviewing
+            </Text>
+          </Box>
+          <Box>
+            <Text>{String(entry.sessionCount)}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {entry.progressText && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              Progress
+            </Text>
+          </Box>
+          <Box>
+            <Text wrap="wrap">{entry.progressText}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {topics.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {`Topics touched (${topics.length})`}
+            </Text>
+          </Box>
+          {visibleTopics.map((topic) => (
+            <Box key={topic}>
+              <Text>{`  · ${topic}`}</Text>
+            </Box>
+          ))}
+          {hiddenTopicCount > 0 && (
+            <Box>
+              <Text
+                color={theme.text.secondary}
+              >{`  · +${hiddenTopicCount} more`}</Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              Error
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {/*
+        Lock-release / metadata-write warnings on a successfully-
+        completed dream. Rendered as warnings (not errors) so the
+        terminal status stays Completed; explains why subsequent
+        dreams may be silently skipped as 'locked' (lock release
+        failure) or why the scheduler gate isn't picking up the
+        latest run (metadata write failure).
+      */}
+      {entry.lockReleaseError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.warning}>
+              Lock release warning
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {entry.lockReleaseError}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="wrap">
+              {`Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+      {entry.metadataWriteError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.warning}>
+              Metadata write warning
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {entry.metadataWriteError}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="wrap">
+              {`The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
 };
 
 const AgentDetailBody: React.FC<{
@@ -640,6 +852,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // those transitions — so we re-read from the registry here.
   const [activityTick, setActivityTick] = useState(0);
 
+  // Two-step cancel for foreground entries: cancelling one ends the
+  // parent's current turn with a partial result for that subagent —
+  // a much heavier consequence than cancelling a background async task.
+  // `pendingCancelEntryId` records the entry that has been armed for
+  // cancellation; the next `x` press confirms. Esc resets.
+  const [pendingCancelEntryId, setPendingCancelEntryId] = useState<
+    string | null
+  >(null);
+
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
     if (!fromSnapshot) return fromSnapshot;
@@ -748,6 +969,32 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
   }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus, exitDetail]);
 
+  // Encapsulates the cancel flow with the foreground confirm-step.
+  // Foreground entries: first `x` arms; second `x` confirms. Background
+  // and shell entries: one-shot cancel (no behavior change).
+  const handleCancelKey = () => {
+    if (!selectedEntry) return;
+    // `x` only has a meaning for entries the user can still act on:
+    // `running` → cancel, `paused` (agent kind) → abandon. Terminal
+    // statuses (completed/failed/cancelled) ignore the keypress so a
+    // foreground entry that just settled can't display the misleading
+    // "x again to confirm stop" line during the brief window before it
+    // unregisters.
+    const isCancelable = selectedEntry.status === 'running';
+    const isAbandonable =
+      selectedEntry.kind === 'agent' && selectedEntry.status === 'paused';
+    if (!isCancelable && !isAbandonable) return;
+    const entryKey = entryId(selectedEntry);
+    const isForegroundAgent =
+      selectedEntry.kind === 'agent' && selectedEntry.flavor === 'foreground';
+    if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
+      setPendingCancelEntryId(entryKey);
+      return;
+    }
+    setPendingCancelEntryId(null);
+    cancelSelected();
+  };
+
   useKeypress(
     (key) => {
       if (!dialogOpen) return;
@@ -755,10 +1002,12 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       if (dialogMode === 'list') {
         if (key.name === 'up') {
           moveSelectionUp();
+          setPendingCancelEntryId(null);
           return;
         }
         if (key.name === 'down') {
           moveSelectionDown();
+          setPendingCancelEntryId(null);
           return;
         }
         if (key.name === 'return') {
@@ -766,6 +1015,11 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           return;
         }
         if (key.name === 'escape' || key.name === 'left') {
+          if (pendingCancelEntryId) {
+            // Esc backs out of the confirm step before closing the dialog.
+            setPendingCancelEntryId(null);
+            return;
+          }
           closeDialog();
           return;
         }
@@ -774,7 +1028,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           return;
         }
         if (key.sequence === 'x' && !key.ctrl && !key.meta) {
-          cancelSelected();
+          handleCancelKey();
           return;
         }
         // Note: the "stop all agents" chord (ctrl+x ctrl+k in claw-code)
@@ -787,6 +1041,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 
       // detail mode
       if (key.name === 'left') {
+        // Reset the foreground confirm-step before leaving detail so the
+        // armed state can't carry into list mode and turn a stray `x` into
+        // an unintended cancel on the same entry.
+        setPendingCancelEntryId(null);
         exitDetail();
         return;
       }
@@ -795,6 +1053,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         key.name === 'return' ||
         key.name === 'space'
       ) {
+        if (pendingCancelEntryId && key.name === 'escape') {
+          setPendingCancelEntryId(null);
+          return;
+        }
         closeDialog();
         return;
       }
@@ -803,7 +1065,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         return;
       }
       if (key.sequence === 'x' && !key.ctrl && !key.meta) {
-        cancelSelected();
+        handleCancelKey();
         return;
       }
     },
@@ -818,8 +1080,20 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     !selectedEntry.resumeBlockedReason;
 
   // Hint footer — context-sensitive.
+  const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
+  const showCancelConfirmHint =
+    pendingCancelEntryId !== null && pendingCancelEntryId === selectedEntryKey;
   const hints: string[] = [];
-  if (dialogMode === 'list') {
+  if (showCancelConfirmHint) {
+    // Force the confirmation step into the hint row so the user sees
+    // exactly what the next `x` will do. Phrasing matches the
+    // `[blocking]` row prefix \u2014 "blocking turn" reads as "your input
+    // is waiting on this", which is what the cancel actually unblocks.
+    hints.push(
+      'x again to confirm stop \u00b7 ends the blocking turn',
+      'Esc cancel',
+    );
+  } else if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
     if (selectedEntry?.status === 'running') hints.push('x stop');
     if (selectedEntryAllowsResume) hints.push('r resume');

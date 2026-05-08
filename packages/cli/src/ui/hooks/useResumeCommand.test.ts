@@ -163,6 +163,7 @@ describe('useResumeCommand', () => {
       }),
       getBackgroundShellRegistry: () => ({
         getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       }),
       getMonitorRegistry: () => ({
@@ -248,6 +249,7 @@ describe('useResumeCommand', () => {
       }),
       getBackgroundShellRegistry: () => ({
         getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       }),
       getMonitorRegistry: () => ({
@@ -306,6 +308,7 @@ describe('useResumeCommand', () => {
       }),
       getBackgroundShellRegistry: () => ({
         getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       }),
       getMonitorRegistry: () => ({
@@ -364,6 +367,7 @@ describe('useResumeCommand', () => {
       }),
       getBackgroundShellRegistry: () => ({
         getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       }),
       getMonitorRegistry: () => ({

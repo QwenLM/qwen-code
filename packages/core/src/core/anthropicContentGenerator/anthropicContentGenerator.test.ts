@@ -484,6 +484,176 @@ describe('AnthropicContentGenerator', () => {
       expect(convertResponseSpy).toHaveBeenCalledTimes(1);
     });
 
+    // DeepSeek extends reasoning_effort with a 'max' tier; the Anthropic
+    // converter passes it through to output_config.effort and bumps the
+    // thinking budget accordingly.
+    it("passes effort: 'max' through to output_config and bumps thinking budget", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'deepseek-v4-pro',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'deepseek-v4-pro',
+          apiKey: 'test-key',
+          // The clamp decision uses hostname only, so a DeepSeek-shaped
+          // baseURL is required for `'max'` to pass through (model-name
+          // alone won't bypass the clamp — that would let "deepseek-clone"
+          // routed to api.anthropic.com sneak past it).
+          baseUrl: 'https://api.deepseek.com/anthropic',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          output_config: { effort: 'max' },
+          thinking: { type: 'enabled', budget_tokens: 128_000 },
+        }),
+      );
+    });
+
+    it("still clamps effort: 'max' when model name says 'deepseek' but hostname is api.anthropic.com", async () => {
+      // The broader `isDeepSeekAnthropicProvider` falls back to model-name
+      // matching to cover sglang/vllm self-hosted DeepSeek deployments,
+      // but trusting that for the 'max' clamp decision would let a model
+      // configured as e.g. "deepseek-distill" but routed to real
+      // api.anthropic.com bypass the clamp and trip a 400. The clamp
+      // therefore uses hostname-only detection.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'deepseek-distill', // model name suggests DeepSeek...
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com', // ...but routed to real Anthropic.
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
+      );
+    });
+
+    it("clamps effort: 'max' to 'high' on a non-DeepSeek anthropic provider", async () => {
+      // 'max' is a DeepSeek extension; real Anthropic only accepts
+      // low/medium/high. Clamp so a config targeting DeepSeek doesn't 400
+      // when reused against a stricter Anthropic backend. The thinking
+      // budget must also drop from the 'max' tier (128K) to the 'high'
+      // tier (64K) so the effort label and the budget stay consistent.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          output_config: { effort: 'high' },
+          thinking: { type: 'enabled', budget_tokens: 64_000 },
+        }),
+      );
+    });
+
+    it("preserves explicit budget_tokens even when effort: 'max' is clamped", async () => {
+      // User-supplied budget_tokens is an escape hatch: it bypasses the
+      // effort-based ladder unconditionally, including the 'max' clamp.
+      // So `{ effort: 'max', budget_tokens: 128_000 }` against real
+      // api.anthropic.com lands as `output_config.effort: 'high'`
+      // (clamped — the effort enum would otherwise 400) but
+      // `thinking.budget_tokens: 128_000` (preserved verbatim — the
+      // server accepts any int within the model's context window).
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max', budget_tokens: 128_000 },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          output_config: { effort: 'high' },
+          thinking: { type: 'enabled', budget_tokens: 128_000 },
+        }),
+      );
+    });
+
     it('omits thinking when request.config.thinkingConfig.includeThoughts is false', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({

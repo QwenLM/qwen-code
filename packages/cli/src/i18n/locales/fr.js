@@ -1175,7 +1175,7 @@ export default {
   // ============================================================================
   // Commandes - Modèle
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Changer le modèle pour cette session (--fast pour le modèle de suggestion)',
   'Set a lighter model for prompt suggestions and speculative execution':
     "Définir un modèle plus léger pour les suggestions d'invite et l'exécution spéculative",
@@ -1185,6 +1185,8 @@ export default {
     "Type d'authentification non disponible.",
   'No models available for the current authentication type ({{authType}}).':
     "Aucun modèle disponible pour le type d'authentification actuel ({{authType}}).",
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commandes - Effacer

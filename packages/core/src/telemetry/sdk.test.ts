@@ -111,8 +111,10 @@ describe('Telemetry SDK', () => {
       getTelemetryTarget: () => 'local',
       getTelemetryUseCollector: () => false,
       getTelemetryOutfile: () => undefined,
+      getTelemetryIncludeSensitiveSpanAttributes: () => false,
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
+      getCliVersion: () => '1.0.0-test',
     } as unknown as Config;
   });
 
@@ -238,8 +240,28 @@ describe('Telemetry SDK', () => {
     });
     // Logs falls back to LogToSpanProcessor (bridges logs → spans)
     expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
-    expect(LogToSpanProcessor).toHaveBeenCalled();
+    expect(LogToSpanProcessor).toHaveBeenCalledWith(expect.anything(), {
+      includeSensitiveSpanAttributes: false,
+    });
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
+  });
+
+  it('passes sensitive span attribute config to the log-to-span bridge', () => {
+    vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+      'http://traces-host/token/api/otlp/traces',
+    );
+    vi.spyOn(
+      mockConfig,
+      'getTelemetryIncludeSensitiveSpanAttributes',
+    ).mockReturnValue(true);
+
+    initializeTelemetry(mockConfig);
+
+    expect(LogToSpanProcessor).toHaveBeenCalledWith(expect.anything(), {
+      includeSensitiveSpanAttributes: true,
+    });
   });
 
   it('should warn and skip startup for gRPC per-signal endpoints without base endpoint', () => {
@@ -331,5 +353,90 @@ describe('Telemetry SDK', () => {
     await shutdownTelemetry();
 
     expect(isTelemetrySdkInitialized()).toBe(false);
+  });
+
+  it('should set service.version to the application version, not Node.js version', () => {
+    initializeTelemetry(mockConfig);
+
+    const constructorCall = vi.mocked(NodeSDK).mock.calls[0]![0]!;
+    const resource = constructorCall.resource as {
+      attributes: Record<string, string>;
+    };
+    expect(resource.attributes['service.version']).toBe('1.0.0-test');
+    expect(resource.attributes['service.version']).not.toBe(process.version);
+  });
+
+  it('should complete shutdown within timeout when SDK shutdown hangs', async () => {
+    vi.useFakeTimers();
+    const shutdownSpy = vi
+      .spyOn(NodeSDK.prototype, 'shutdown')
+      .mockReturnValue(new Promise<void>(() => {}));
+    const diagWarnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+    try {
+      initializeTelemetry(mockConfig);
+
+      const shutdownPromise = shutdownTelemetry();
+
+      // Advance past the 10s timeout
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await shutdownPromise;
+
+      expect(isTelemetrySdkInitialized()).toBe(false);
+      expect(diagWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Telemetry shutdown timed out'),
+      );
+    } finally {
+      shutdownSpy.mockRestore();
+      diagWarnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('should complete shutdown normally when SDK resolves before timeout', async () => {
+    const shutdownSpy = vi
+      .spyOn(NodeSDK.prototype, 'shutdown')
+      .mockResolvedValue();
+    try {
+      initializeTelemetry(mockConfig);
+
+      await shutdownTelemetry();
+
+      expect(isTelemetrySdkInitialized()).toBe(false);
+    } finally {
+      shutdownSpy.mockRestore();
+    }
+  });
+
+  it('should log error when sdk.shutdown() rejects', async () => {
+    const shutdownSpy = vi
+      .spyOn(NodeSDK.prototype, 'shutdown')
+      .mockReturnValue(Promise.reject(new Error('shutdown failed')));
+    const diagErrorSpy = vi.spyOn(diag, 'error').mockImplementation(() => {});
+    try {
+      initializeTelemetry(mockConfig);
+
+      await shutdownTelemetry();
+
+      expect(isTelemetrySdkInitialized()).toBe(false);
+      expect(diagErrorSpy).toHaveBeenCalledWith(
+        'Error shutting down SDK:',
+        expect.any(Error),
+      );
+    } finally {
+      shutdownSpy.mockRestore();
+      diagErrorSpy.mockRestore();
+    }
+  });
+
+  it('should fall back to "unknown" when getCliVersion returns undefined', () => {
+    vi.spyOn(mockConfig, 'getCliVersion').mockImplementation(() => undefined);
+    initializeTelemetry(mockConfig);
+
+    const constructorCall = vi.mocked(NodeSDK).mock.calls[0]![0]!;
+    const resource = constructorCall.resource as {
+      attributes: Record<string, string>;
+    };
+    expect(resource.attributes['service.version']).toBe('unknown');
   });
 });

@@ -121,6 +121,7 @@ Forcing the user to confirm-or-decline every time the PR has any Qwen Code histo
 **Priority matters because** a stale or resolved comment that happens to share a `(path, line)` with a new finding is not a real conflict — the underlying code may have changed in the stale case, and the conversation is already closed in the resolved case. Without priority, the line-based check would fire false-positive prompts on those.
 
 **Trade-off:**
+
 - ✅ Common case (re-running /review on a PR after a few new commits) no longer prompts unnecessarily.
 - ✅ The terminal log keeps the user informed about what was skipped, so transparency is preserved.
 - ❌ Conceptual overlap that doesn't share a line is missed — e.g. a prior comment on line 559 about cache lifecycle and a new comment on line 1352 about cache lifecycle would be classified `No conflict`. Line-based heuristics cannot detect "same root cause, different anchor." If the user wants semantic-overlap detection, they must read the terminal log and the PR comments themselves.
@@ -144,6 +145,7 @@ Line-based classification was chosen because it's deterministic, cheap, and catc
 **Why this stacks with self-PR downgrade:** a self-authored PR with red CI hits **both** downgrade rules. The event is `COMMENT` either way, so stacking is operationally a no-op — but the body should mention both reasons so a future maintainer reading the review knows why an LLM that found no Critical issues did not approve.
 
 **Trade-off:**
+
 - ✅ No more "LLM approved while CI is red" embarrassments.
 - ✅ Reviewer's substantive work (inline comments) is preserved.
 - ❌ Adds two extra API calls (`check-runs` + `statuses`) per APPROVE-bound submit; only relevant for the `APPROVE` path so the cost is negligible.

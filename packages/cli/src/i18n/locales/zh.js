@@ -1142,7 +1142,7 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '设置用于输入建议和推测执行的轻量模型',
@@ -1150,6 +1150,8 @@ export default {
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
     '当前认证类型 ({{authType}}) 没有可用的模型',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
