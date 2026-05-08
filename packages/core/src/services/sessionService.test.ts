@@ -582,10 +582,12 @@ describe('SessionService', () => {
 
   describe('countSessionMessages', () => {
     // The lazy counter that replaces the per-file readline scan from
-    // listSessions. Three contracts to pin: it actually counts what it
+    // listSessions. Four contracts to pin: it actually counts what it
     // promises, it short-circuits on bad input without touching the disk,
-    // and it returns 0 on any read failure (caller must not see an
-    // exception bubble up — the picker treats 0 as "unknown").
+    // it returns 0 on any read failure (caller must not see an exception
+    // bubble up — the picker treats 0 as "unknown"), and it scopes to
+    // the current project (mirroring deleteSession/renameSession's
+    // first-record cwd check).
 
     const stubCreateReadStream = (
       lines: string[],
@@ -597,6 +599,20 @@ describe('SessionService', () => {
         );
 
     it('should count unique user/assistant uuids and ignore other record types', async () => {
+      // Project scoping reads the first record before the count stream;
+      // give it a record from this project so the count proceeds.
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      // Real countSessionMessagesFromPath routes each line through
+      // parseLineTolerant. The default mock is a no-op; for this test we
+      // need it to actually decode the JSON so the uuid set is populated.
+      vi.mocked(jsonl.parseLineTolerant).mockImplementation((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          return Array.isArray(parsed) ? parsed : [parsed];
+        } catch {
+          return [];
+        }
+      });
       const lines = [
         // Two user records sharing a uuid — should be counted once
         JSON.stringify({ uuid: 'u1', type: 'user' }),
@@ -629,19 +645,49 @@ describe('SessionService', () => {
     });
 
     it('should return 0 when the session file is missing (ENOENT)', async () => {
-      vi.spyOn(fs, 'createReadStream').mockImplementation(() => {
-        const stream = new Readable({ read() {} });
-        process.nextTick(() => {
-          const err = new Error('ENOENT') as NodeJS.ErrnoException;
-          err.code = 'ENOENT';
-          stream.emit('error', err);
-        });
-        return stream as unknown as fs.ReadStream;
-      });
+      // The first-record read fires before the count stream, so simulate
+      // ENOENT there too — readLines surfaces it as a thrown error.
+      vi.mocked(jsonl.readLines).mockRejectedValue(
+        Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+      );
 
       const count = await sessionService.countSessionMessages(sessionIdA);
 
       expect(count).toBe(0);
+    });
+
+    it('should return 0 when the session belongs to a different project', async () => {
+      // A valid session ID can exist in the shared chats directory while
+      // its first-record cwd hashes to a different project. Lazy-count
+      // callers must not bypass project scoping.
+      const otherProjectRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/some/other/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([otherProjectRecord]);
+      // Make the projectHash mock context-sensitive so the cwd check
+      // actually distinguishes projects.
+      vi.mocked(getProjectHash).mockImplementation((cwd) =>
+        cwd === '/test/project/root' ? 'test-project-hash' : 'other-hash',
+      );
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(0);
+      // No streaming pass should have started — the project check
+      // short-circuits before the expensive part.
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+
+    it('should return 0 when the session file has no records (empty file)', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([]);
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(0);
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
     });
   });
 

@@ -360,6 +360,13 @@ export class SessionService {
    * corruption shape) still contributes both records, instead of being
    * silently dropped.
    *
+   * Project-scoped: returns 0 if the file's first record belongs to a
+   * different project. Sibling public methods (deleteSession,
+   * renameSession, loadSession) apply the same first-record cwd check;
+   * mirroring it here keeps lazy-count callers from accidentally
+   * counting a session that lives in the shared chats directory but
+   * belongs to another project.
+   *
    * This is intentionally NOT called from {@link listSessions} or
    * {@link findSessionsByTitle} — it would be O(total bytes on disk) per
    * picker open, dominating wall time once a project accumulates dozens
@@ -373,6 +380,15 @@ export class SessionService {
     }
     const chatsDir = this.getChatsDir();
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+
+    try {
+      const firstRecords = await jsonl.readLines<ChatRecord>(filePath, 1);
+      if (firstRecords.length === 0) return 0;
+      if (getProjectHash(firstRecords[0].cwd) !== this.projectHash) return 0;
+    } catch {
+      return 0;
+    }
+
     return this.countSessionMessagesFromPath(filePath);
   }
 
