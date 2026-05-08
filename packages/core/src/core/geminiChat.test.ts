@@ -11,7 +11,7 @@ import type {
   GenerateContentResponse,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
-import type { ContentGenerator } from '../core/contentGenerator.js';
+import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
 import {
   GeminiChat,
   InvalidStreamError,
@@ -1311,6 +1311,93 @@ describe('GeminiChat', async () => {
               'answer after compact',
         ),
       ).toBe(true);
+    });
+
+    it('uses the parsed context limit when reactive overflow lacks an actual token count', async () => {
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 128_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(
+          new Error("This model's maximum context length is 128000 tokens."),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-reactive-limit-only',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(128_000);
+    });
+
+    it('uses the configured context window when reactive overflow has no token counts', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 262_144,
+      });
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 262_144,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(new Error('context_length_exceeded'))
+        .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-reactive-window-fallback',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(262_144);
     });
 
     it('does not attempt reactive compression more than once per send', async () => {

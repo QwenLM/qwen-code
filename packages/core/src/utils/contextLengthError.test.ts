@@ -61,6 +61,16 @@ describe('contextLengthError', () => {
     expect(info.limitTokens).toBe(128000);
   });
 
+  it('parses maximum context length limits without actual token counts', () => {
+    const info = getContextLengthExceededInfo(
+      new Error("This model's maximum context length is 128000 tokens."),
+    );
+
+    expect(info.isExceeded).toBe(true);
+    expect(info.actualTokens).toBeUndefined();
+    expect(info.limitTokens).toBe(128000);
+  });
+
   it('extracts nested JSON error messages from strings', () => {
     const info = getContextLengthExceededInfo(
       new Error(
@@ -84,5 +94,26 @@ describe('contextLengthError', () => {
 
     expect(info.isExceeded).toBe(true);
     expect(info.message).toContain('Input token length is too long');
+  });
+
+  it('does not match object keys as context overflow text', () => {
+    const info = getContextLengthExceededInfo({
+      context: 'request body',
+      detail: 'tokens are available',
+      status: 'exceeded',
+    });
+
+    expect(info.isExceeded).toBe(false);
+    expect(info.message).not.toContain('context');
+    expect(info.message).toContain('tokens are available');
+  });
+
+  it('does not match broad token wording across separate fragments', () => {
+    const info = getContextLengthExceededInfo({
+      message: 'context window check',
+      detail: 'tokens exceeded by policy wording',
+    });
+
+    expect(info.isExceeded).toBe(false);
   });
 });

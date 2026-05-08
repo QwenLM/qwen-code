@@ -23,7 +23,11 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
 import type { Config } from '../config/config.js';
-import { ESCALATED_MAX_TOKENS, tokenLimit } from './tokenLimits.js';
+import {
+  DEFAULT_TOKEN_LIMIT,
+  ESCALATED_MAX_TOKENS,
+  tokenLimit,
+} from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -624,6 +628,11 @@ export class GeminiChat {
             if (contextOverflow.isExceeded) {
               if (!reactiveCompressionAttempted) {
                 reactiveCompressionAttempted = true;
+                const reactiveOriginalTokenCount =
+                  contextOverflow.actualTokens ??
+                  contextOverflow.limitTokens ??
+                  self.config.getContentGeneratorConfig()?.contextWindowSize ??
+                  DEFAULT_TOKEN_LIMIT;
                 debugLogger.warn(
                   'Context length exceeded; attempting reactive compression.',
                 );
@@ -634,7 +643,7 @@ export class GeminiChat {
                     true,
                     params.config?.abortSignal,
                     {
-                      originalTokenCountOverride: contextOverflow.actualTokens,
+                      originalTokenCountOverride: reactiveOriginalTokenCount,
                       trigger: 'auto',
                     },
                   );
@@ -677,6 +686,11 @@ export class GeminiChat {
                     compressionError,
                   );
                 }
+              } else {
+                debugLogger.warn(
+                  'Reactive compression already attempted; ' +
+                    'propagating the context overflow error to caller.',
+                );
               }
               break;
             }

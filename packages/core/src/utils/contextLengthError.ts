@@ -29,7 +29,7 @@ const CONTEXT_LENGTH_PATTERNS = [
   /\brange of input length should be\b/i,
   /\btoo many tokens\b/i,
   /\btokens?\s*>\s*[\d,]+\s*(?:maximum|max|limit)\b/i,
-  /\b(?:input|prompt|messages?|context)\b[\s\S]{0,120}\btokens?\b[\s\S]{0,120}\bexceed(?:s|ed|ing)?\b/i,
+  /\b(?:input|prompt|messages?|context)\b[^\n]{0,120}\btokens?\b[^\n]{0,120}\bexceed(?:s|ed|ing)?\b/i,
 ];
 
 function parseInteger(value: string): number {
@@ -55,6 +55,15 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(openAiMatch[2]!),
       limitTokens: parseInteger(openAiMatch[1]!),
+    };
+  }
+
+  const maxContextLimitMatch = text.match(
+    /maximum context length is\s*(\d[\d,]*)\s*tokens?/i,
+  );
+  if (maxContextLimitMatch) {
+    return {
+      limitTokens: parseInteger(maxContextLimitMatch[1]!),
     };
   }
 
@@ -130,8 +139,7 @@ function collectStrings(
     strings.push(...collectStrings(value.cause, seen, depth + 1));
   }
 
-  for (const [key, nested] of Object.entries(value)) {
-    strings.push(key);
+  for (const [, nested] of Object.entries(value)) {
     strings.push(...collectStrings(nested, seen, depth + 1));
   }
 
@@ -160,7 +168,9 @@ export function getContextLengthExceededInfo(
   const isTimeout = TIMEOUT_PATTERNS.some((pattern) => pattern.test(message));
   const isExceeded =
     !isTimeout &&
-    CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(message));
+    fragments.some((fragment) =>
+      CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)),
+    );
   const counts = isExceeded ? parseTokenCounts(message) : {};
 
   return {
