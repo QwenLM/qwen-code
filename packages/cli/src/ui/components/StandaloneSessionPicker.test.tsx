@@ -1236,6 +1236,13 @@ describe('SessionPicker', () => {
       // jumped past the first (highest-relevance) match. Now ↓
       // simply commits the focus transition; selectedIndex stays at
       // 0 (already reset by the query-change effect).
+      //
+      // Inter-key waits are 50ms (not the 30ms used elsewhere): on
+      // Windows runners the keypress → useEffect → render chain
+      // through `/login` + ARROW_DOWN + Enter consistently exceeded
+      // 30ms and dropped the Enter event — the spy never saw the
+      // selection. Tests in this file already use 50ms in similar
+      // multi-step sequences; align with that.
       const sessions = [
         createMockSession({
           sessionId: 'first-match',
@@ -1263,11 +1270,11 @@ describe('SessionPicker', () => {
 
       await wait(100);
       stdin.write('/login');
-      await wait(30);
+      await wait(50);
       stdin.write(ARROW_DOWN); // exit search → first match should be highlighted
-      await wait(30);
+      await wait(50);
       stdin.write('\r'); // Enter from list = select highlighted row
-      await wait(30);
+      await wait(50);
 
       expect(onSelect).toHaveBeenCalledWith('first-match');
     });
