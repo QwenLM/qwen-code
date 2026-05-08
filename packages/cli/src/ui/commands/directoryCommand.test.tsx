@@ -6,9 +6,14 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { directoryCommand, expandHomeDir } from './directoryCommand.js';
-import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  WorkspaceContext,
+  SettingsFile,
+} from '@qwen-code/qwen-code-core';
 import type { CommandContext } from './types.js';
 import { MessageType } from '../types.js';
+// eslint-disable-next-line import/no-internal-modules
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -76,11 +81,9 @@ describe('directoryCommand', () => {
         originalSettings: {},
       } as SettingsFile,
       setValue: vi.fn(),
-      forScope: vi.fn(function (scope: string) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const self = this as any;
-        if (scope === 'user') return self.user;
-        return self.workspace;
+      forScope: vi.fn(function (this: SettingsFile, scope: string) {
+        if (scope === 'user') return this.user;
+        return this.workspace;
       }),
     });
 

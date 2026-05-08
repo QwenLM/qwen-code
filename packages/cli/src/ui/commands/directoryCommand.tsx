@@ -14,7 +14,9 @@ import {
   loadServerHierarchicalMemory,
   ConditionalRulesRegistry,
 } from '@qwen-code/qwen-code-core';
+// eslint-disable-next-line import/no-internal-modules
 import { t } from '../../i18n/index.js';
+// eslint-disable-next-line import/no-internal-modules
 import { SettingScope } from '../../config/settings.js';
 
 export function expandHomeDir(p: string): string {
@@ -440,7 +442,7 @@ export const directoryCommand: SlashCommand = {
           }
         }
 
-        const removed = workspaceContext.removeDirectory(expandedDir);
+        const removed = workspaceContext.removeDirectory(canonicalDirectory);
         if (!removed) {
           addItem(
             {
