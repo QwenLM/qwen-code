@@ -963,7 +963,7 @@ describe('Server Config (config.ts)', () => {
     };
 
     try {
-      new Config(paramsWithInvalidDir);
+      const config = new Config(paramsWithInvalidDir);
 
       expect(mockWarn).toHaveBeenCalledWith(
         expect.stringContaining(
@@ -972,6 +972,14 @@ describe('Server Config (config.ts)', () => {
       );
       expect(mockWarn).toHaveBeenCalledWith(
         expect.stringContaining(nonExistentDir),
+      );
+      // Warning should also be visible via getWarnings() for TUI display.
+      expect(config.getWarnings()).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'The following workspace directories were skipped',
+          ),
+        ]),
       );
     } finally {
       // Restore the mock to avoid leaking into subsequent tests.

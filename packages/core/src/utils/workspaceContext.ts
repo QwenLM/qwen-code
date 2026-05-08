@@ -101,11 +101,14 @@ export class WorkspaceContext {
         return;
       }
       this.directories.add(resolved);
-      this.skippedDirectories.delete(directory);
+      this.skippedDirectories.delete(resolved);
       this.notifyDirectoriesChanged();
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      this.skippedDirectories.set(directory, reason);
+      const absolutePath = path.isAbsolute(directory)
+        ? directory
+        : path.resolve(basePath, directory);
+      this.skippedDirectories.set(absolutePath, reason);
     }
   }
 

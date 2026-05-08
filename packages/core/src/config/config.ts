@@ -799,28 +799,6 @@ export class Config {
       this.targetDir,
       this.explicitIncludeDirectories,
     );
-    const skippedDirs = this.workspaceContext.getSkippedDirectories().filter(
-      (d) => path.resolve(d) !== this.targetDir,
-    );
-    if (skippedDirs.length > 0) {
-      const lines = skippedDirs.map((d) => {
-        const reason = this.workspaceContext.getSkippedDirectoryReason(d);
-        let cause: string;
-        if (reason?.startsWith('Directory does not exist')) {
-          cause = 'does not exist';
-        } else if (reason?.startsWith('Path is not a directory')) {
-          cause = 'is not a directory';
-        } else {
-          cause = 'is not readable';
-        }
-        return `  - ${expandHomeDir(d)} (${cause})`;
-      });
-      const msg =
-        'The following workspace directories were skipped:\n' +
-        lines.join('\n');
-      this.debugLogger.warn(msg);
-      process.stderr.write(`Warning: ${msg}\n`);
-    }
     this.debugMode = params.debugMode;
 
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -926,6 +904,31 @@ export class Config {
     this.warnings = params.warnings ?? [];
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
+
+    // Warn about skipped directories (visible in TUI via getWarnings()).
+    const skippedDirs = this.workspaceContext.getSkippedDirectories().filter(
+      (d) => path.resolve(d) !== this.targetDir,
+    );
+    if (skippedDirs.length > 0) {
+      const lines = skippedDirs.map((d) => {
+        const reason = this.workspaceContext.getSkippedDirectoryReason(d);
+        let cause: string;
+        if (reason?.startsWith('Directory does not exist')) {
+          cause = 'does not exist';
+        } else if (reason?.startsWith('Path is not a directory')) {
+          cause = 'is not a directory';
+        } else {
+          cause = 'is not readable';
+        }
+        return `  - ${expandHomeDir(d)} (${cause})`;
+      });
+      const msg =
+        'The following workspace directories were skipped:\n' +
+        lines.join('\n');
+      this.debugLogger.warn(msg);
+      this.warnings.push(msg);
+      process.stderr.write(`Warning: ${msg}\n`);
+    }
 
     // (web search removed)
     this.useRipgrep = params.useRipgrep ?? true;
