@@ -40,7 +40,10 @@ import {
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
-import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
+import {
+  getCurrentAgentId,
+  runWithAgentContext,
+} from '../../agents/runtime/agent-context.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -238,7 +241,7 @@ export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
  * rebuilt its tool registry via {@link rebuildToolRegistryOnOverride}.
  *
  * Used by spawn sites that may be called with a wrapper-on-wrapper
- * argument (e.g. `subagent-manager.ts:maybeOverrideContentGenerator`
+ * argument (e.g. `subagent-manager.ts:buildSubagentContextOverride`
  * receiving `bgConfig = Object.create(agentConfig)` from the
  * background-agent path) to skip a redundant rebuild.
  */
@@ -251,7 +254,7 @@ export function hasRebuiltToolRegistry(config: Config): boolean {
  * Rebuilds the tool registry on `override` so core tools resolve
  * `this.config` to `override` instead of `base`. Used by both
  * {@link createApprovalModeOverride} and
- * `subagent-manager.ts:maybeOverrideContentGenerator` to avoid
+ * `subagent-manager.ts:buildSubagentContextOverride` to avoid
  * duplicated rebuild logic.
  *
  * - `override.createToolRegistry(...)` runs on the override (so the
@@ -1489,7 +1492,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // from this subagent's model record this agent's id as their
         // `parentAgentId` in the sidecar meta.
         const framedBgBody = () =>
-          runWithAgentContext({ agentId: hookOpts.agentId }, bgBody);
+          runWithAgentContext(hookOpts.agentId, bgBody);
         void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
@@ -1535,7 +1538,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // SkillTool the fork's model instantiates from this registry leaks
         // its change-listener on shared SubagentManager / SkillManager.
         const runFramedFork = () =>
-          runWithAgentContext({ agentId: hookOpts.agentId }, async () => {
+          runWithAgentContext(hookOpts.agentId, async () => {
             try {
               await this.runSubagentWithHooks(subagent, contextState, hookOpts);
             } finally {
@@ -1568,7 +1571,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const fgHookOpts = { ...hookOpts, signal: fgAbortController.signal };
       const runFramed = () =>
-        runWithAgentContext({ agentId: hookOpts.agentId }, () =>
+        runWithAgentContext(hookOpts.agentId, () =>
           this.runSubagentWithHooks(subagent, contextState, fgHookOpts),
         );
 

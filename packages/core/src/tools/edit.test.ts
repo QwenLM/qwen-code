@@ -30,6 +30,7 @@ import { ApprovalMode } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 describe('EditTool', () => {
   let tool: EditTool;
@@ -498,6 +499,60 @@ describe('EditTool', () => {
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+    });
+
+    // The Edit tool feeds the commit-attribution singleton on success so
+    // commit notes can later report per-file AI/human ratios. Service-
+    // level tests for `recordEdit` already exist; these guard against
+    // the wiring at the tool boundary regressing (e.g. someone moves
+    // the call out of the success path).
+    describe('commit-attribution wiring', () => {
+      beforeEach(() => {
+        CommitAttributionService.resetInstance();
+      });
+
+      it('records AI-originated edits in the attribution service', async () => {
+        const initial = 'old line';
+        const updated = 'new line';
+        fs.writeFileSync(filePath, initial, 'utf8');
+        // Prior-read enforcement (origin/main #3774) requires the file
+        // to have been Read before Edit can mutate it.
+        seedPriorRead(filePath);
+        const invocation = tool.build({
+          file_path: filePath,
+          old_string: 'old',
+          new_string: 'new',
+        });
+
+        await invocation.execute(new AbortController().signal);
+
+        const attribution =
+          CommitAttributionService.getInstance().getFileAttribution(filePath);
+        expect(attribution).toBeDefined();
+        // The actual char count is implementation detail of
+        // computeCharContribution; we only assert the entry exists
+        // with a positive contribution.
+        expect(attribution!.aiContribution).toBeGreaterThan(0);
+        // Length sanity: contribution is bounded by the new content.
+        expect(attribution!.aiContribution).toBeLessThanOrEqual(updated.length);
+      });
+
+      it('skips attribution when the edit is modified_by_user', async () => {
+        fs.writeFileSync(filePath, 'old line', 'utf8');
+        seedPriorRead(filePath);
+        const invocation = tool.build({
+          file_path: filePath,
+          old_string: 'old',
+          new_string: 'new',
+          modified_by_user: true,
+        });
+
+        await invocation.execute(new AbortController().signal);
+
+        expect(
+          CommitAttributionService.getInstance().getFileAttribution(filePath),
+        ).toBeUndefined();
+      });
     });
 
     it('should create a new file if old_string is empty and file does not exist, and return created message', async () => {

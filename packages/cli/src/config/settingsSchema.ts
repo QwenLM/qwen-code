@@ -79,6 +79,27 @@ export interface SettingDefinition {
   /** Schema for array items when type is 'array' */
   items?: SettingItemDefinition;
   /**
+   * Primitive shapes a field accepted before it was expanded to its current
+   * type. The exported JSON Schema wraps the field in `anyOf` so values from
+   * those older shapes don't trip the IDE validator while the runtime
+   * migration is still pending. Has no runtime effect — it's purely a
+   * compatibility hint for editors.
+   *
+   * Narrowed to the subset our generator can faithfully emit as a
+   * one-liner `{ type: <legacyType> }` schema fragment. `'enum'` is
+   * not a valid JSON Schema `type` value at all (enum constraints
+   * use the `enum` keyword, not `type: 'enum'`), so allowing it here
+   * would silently produce an invalid `settings.schema.json`.
+   * `'object'` IS a valid JSON Schema type, but a bare
+   * `{ type: 'object' }` legacy entry would accept ANY object value
+   * — most likely not what the field's pre-expansion shape actually
+   * permitted. Future legacy shapes that need `enum` / structured-
+   * object compatibility should land their own branch in
+   * `convertSettingToJsonSchema` (with proper `enum:` / `properties:`
+   * companions) instead of widening this set.
+   */
+  legacyTypes?: ReadonlyArray<'boolean' | 'string' | 'number' | 'array'>;
+  /**
    * Escape hatch for the JSON Schema generator: when set, this object is
    * emitted verbatim under the setting's properties entry instead of the
    * shape derived from `type`/`properties`/etc. The `description` is still
@@ -387,14 +408,47 @@ const SETTINGS_SCHEMA = {
         showInDialog: true,
       },
       gitCoAuthor: {
-        type: 'boolean',
-        label: 'Attribution: commit',
+        type: 'object',
+        label: 'Attribution',
         category: 'General',
         requiresRestart: false,
-        default: true,
+        // Match `normalizeGitCoAuthor`'s runtime defaults so the IDE
+        // schema publishes the same "enabled by default" hint users see
+        // at runtime. The empty-object form here would silently lose
+        // editor-surfaced defaults.
+        default: { commit: true, pr: true },
         description:
-          'Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.',
-        showInDialog: true,
+          'Attribution added to git commits and pull requests created through Qwen Code.',
+        showInDialog: false,
+        // Pre-V4 settings stored this as a single boolean. The V3→V4
+        // migration rewrites those on first launch, but the IDE schema
+        // validator runs before that — accept the boolean shape so users
+        // editing settings.json in VS Code don't see a spurious warning
+        // until they run qwen once. Config.normalizeGitCoAuthor handles
+        // the boolean at runtime.
+        legacyTypes: ['boolean'],
+        properties: {
+          commit: {
+            type: 'boolean',
+            label: 'Attribution: commit',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both.',
+            showInDialog: true,
+          },
+          pr: {
+            type: 'boolean',
+            label: 'Attribution: PR',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Append a Qwen Code attribution line to PR descriptions when running `gh pr create`.',
+            showInDialog: true,
+          },
+        },
       },
       checkpointing: {
         type: 'object',

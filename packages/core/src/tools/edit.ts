@@ -45,6 +45,7 @@ import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
@@ -566,6 +567,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
             lineEnding: editData.lineEnding,
           },
         });
+      }
+
+      // Track AI contribution for commit attribution
+      if (!this.params.modified_by_user) {
+        CommitAttributionService.getInstance().recordEdit(
+          this.params.file_path,
+          editData.currentContent,
+          editData.newContent,
+        );
       }
 
       // Mark the cache entry written, capturing the post-write stats
