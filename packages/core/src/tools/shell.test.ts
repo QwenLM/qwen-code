@@ -3334,6 +3334,95 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain(commandPassedToService);
       });
 
+      it('rethrows + kills child when mkdirSync(outputDir) throws — no orphan zombie', async () => {
+        // @tanzhenxin's review on #3894: mkdirSync ran before any
+        // try/catch, so an unwritable output dir (read-only mount,
+        // sandbox perms, ENOSPC on metadata) rejected the handler
+        // BEFORE the registry's kill listener was wired — the still-
+        // running child became an orphan with no kill path until the
+        // OS reaped it on session end. Pin the regression: mkdir-throw
+        // is re-raised AND the child gets SIGTERM right away.
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        const mkdirSyncSpy = vi.mocked(fs.mkdirSync);
+        try {
+          mkdirSyncSpy.mockImplementation(() => {
+            throw new Error('EROFS: read-only file system');
+          });
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 22222,
+          });
+
+          await expect(promise).rejects.toThrow('EROFS');
+          // SIGTERM is sync after the throw — no fake timers needed.
+          expect(processKillSpy).toHaveBeenCalledWith(-22222, 'SIGTERM');
+        } finally {
+          mkdirSyncSpy.mockReturnValue(undefined);
+          processKillSpy.mockRestore();
+        }
+      });
+
+      it('promote-refused race (aborted: true, promoted: false after promote signal) is reported as benign race, not "Command timed out"', async () => {
+        // @tanzhenxin's review on #3894: when PR-3's Ctrl+B keybind
+        // fires `promoteAbortController.abort` but the service's race
+        // guard refuses promotion (the child terminated a beat
+        // earlier), the result lands `aborted: true, promoted: false`.
+        // Without excluding the promote signal from the timeout
+        // discriminator, the foreground path falsely reports
+        // "Command timed out" for a process that finished naturally.
+        const setPromoteAc = vi.fn();
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = (invocation as ShellToolInvocation).execute(
+          mockAbortSignal,
+          undefined,
+          {},
+          undefined,
+          setPromoteAc,
+        );
+        // Capture the promote AC the foreground path exposes.
+        await Promise.resolve();
+        const promoteAc = setPromoteAc.mock.calls[0]?.[0] as
+          | AbortController
+          | undefined;
+        expect(promoteAc).toBeInstanceOf(AbortController);
+        // Fire promote AFTER the child supposedly terminated — the
+        // service refuses with `aborted: true, promoted: false`.
+        promoteAc!.abort({ kind: 'background', shellId: 'bg_late' });
+        resolveShellExecution({
+          output: 'oops too late\n',
+          exitCode: null,
+          signal: null,
+          aborted: true,
+          promoted: false,
+          pid: 33333,
+        });
+        const result = await promise;
+
+        // Must NOT say "timed out" — the child finished naturally.
+        expect(String(result.llmContent)).not.toContain('timed out');
+        // Should explain the benign race so the agent doesn't retry as
+        // a cancellation/timeout.
+        expect(String(result.llmContent)).toContain(
+          'Command finished before the background-promote',
+        );
+        // Captured output is preserved.
+        expect(String(result.llmContent)).toContain('oops too late');
+      });
+
       it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
         // #3894 review: today `BackgroundShellRegistry.register` is
         // internally safe (Map.set + emit) but if a future

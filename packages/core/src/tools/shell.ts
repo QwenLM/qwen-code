@@ -1657,9 +1657,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     let llmContent = '';
     if (result.aborted) {
-      // Check if it was a timeout or user cancellation
+      // Check if it was a timeout or user cancellation. Exclude BOTH
+      // the user signal AND the promote signal — the latter matters
+      // when PR-3's Ctrl+B keybind fires `promoteAbortController.abort`
+      // but the service's race guard refused promotion (the child
+      // terminated a beat earlier). The result then lands with
+      // `aborted: true, promoted: false`; without the
+      // `promoteAbortController.signal.aborted` exclusion, the
+      // foreground path would falsely report "Command timed out" for
+      // a process that finished naturally.
       const wasTimeout =
-        effectiveTimeout && combinedSignal.aborted && !signal.aborted;
+        effectiveTimeout &&
+        combinedSignal.aborted &&
+        !signal.aborted &&
+        !promoteAbortController.signal.aborted;
+      const wasPromoteRefused =
+        promoteAbortController.signal.aborted && !signal.aborted;
 
       if (wasTimeout) {
         llmContent = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
@@ -1667,6 +1680,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
           llmContent += ` Below is the output before it timed out:\n${result.output}`;
         } else {
           llmContent += ' There was no output before it timed out.';
+        }
+      } else if (wasPromoteRefused) {
+        // The user pressed Ctrl+B (promote) but the service refused —
+        // typically the child had already terminated by the time the
+        // signal was checked. Treat as a benign race: report what
+        // actually happened (the run completed, just without the
+        // promote handoff) rather than as a cancellation or timeout.
+        llmContent =
+          'Command finished before the background-promote request could be honoured (the child had already exited).';
+        if (result.output.trim()) {
+          llmContent += ` Output:\n${result.output}`;
         }
       } else {
         llmContent = 'Command was cancelled by user before it could complete.';
@@ -1795,13 +1819,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
         returnDisplayMessage = result.output;
       } else {
         if (result.aborted) {
-          // Check if it was a timeout or user cancellation
+          // Check if it was a timeout, a refused-promote, or a real user
+          // cancellation. See the matching block above for why we also
+          // exclude `promoteAbortController.signal.aborted` from the
+          // timeout discriminator.
           const wasTimeout =
-            effectiveTimeout && combinedSignal.aborted && !signal.aborted;
+            effectiveTimeout &&
+            combinedSignal.aborted &&
+            !signal.aborted &&
+            !promoteAbortController.signal.aborted;
+          const wasPromoteRefused =
+            promoteAbortController.signal.aborted && !signal.aborted;
 
           returnDisplayMessage = wasTimeout
             ? `Command timed out after ${effectiveTimeout}ms.`
-            : 'Command cancelled by user.';
+            : wasPromoteRefused
+              ? 'Command finished before background-promote could be honoured.'
+              : 'Command cancelled by user.';
         } else if (result.signal) {
           returnDisplayMessage = `Command terminated by signal: ${result.signal}`;
         } else if (result.error) {
@@ -1955,7 +1989,50 @@ export class ShellToolInvocation extends BaseToolInvocation<
       'background-shells',
       this.config.getSessionId(),
     );
-    fs.mkdirSync(outputDir, { recursive: true });
+    // The service has already detached its kill path by the time we
+    // get here (PR-1's ownership-transfer contract), so any throw
+    // before we wire up the registry's kill listener leaves the still-
+    // running child as an orphan zombie that nothing can stop until
+    // the OS reaps it on session end. Wrap the mkdir + write best-
+    // effort: if either fails, log + reap the child immediately and
+    // report the failure to the caller (mirrors the safety pattern
+    // around `registry.register` further down).
+    let mkdirError: Error | undefined;
+    try {
+      fs.mkdirSync(outputDir, { recursive: true });
+    } catch (err) {
+      mkdirError = err instanceof Error ? err : new Error(String(err));
+    }
+    if (mkdirError) {
+      debugLogger.warn(
+        `promote: mkdirSync(${outputDir}) failed before registry register — killing orphan child: ${mkdirError.message}`,
+      );
+      const pid = result.pid;
+      if (pid !== undefined) {
+        if (os.platform() === 'win32') {
+          try {
+            const taskkillChild = childProcess.spawn('taskkill', [
+              '/pid',
+              String(pid),
+              '/f',
+              '/t',
+            ]);
+            taskkillChild.on('error', () => {
+              /* swallow — already in error path */
+            });
+          } catch {
+            /* swallow */
+          }
+        } else {
+          try {
+            process.kill(-pid, 'SIGTERM');
+          } catch {
+            /* swallow — pid gone or perms */
+          }
+        }
+      }
+      throw mkdirError;
+    }
 
     const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
     const outputPath = path.join(outputDir, `shell-${shellId}.output`);
