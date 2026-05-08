@@ -139,5 +139,18 @@ describe('TextInput', () => {
 
       expect(onSubmit).toHaveBeenCalledTimes(1);
     });
+
+    it('ellipsizes long single-line values in the middle when enabled', () => {
+      const { lastFrame } = render(
+        <TextInput
+          value="sk-token-plan-abcdefghijklmnopqrstuvwxyz0123456789"
+          onChange={onChange}
+          inputWidth={20}
+          ellipsizeOverflow
+        />,
+      );
+
+      expect(lastFrame()).toContain('sk-token-...23456789');
+    });
   });
 });

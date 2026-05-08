@@ -33,6 +33,21 @@ export interface TextInputProps {
   validationErrors?: string[];
   inputWidth?: number;
   initialCursorOffset?: number;
+  ellipsizeOverflow?: boolean;
+}
+
+function ellipsizeMiddle(text: string, width: number): string {
+  if (width <= 0) return '';
+  if (stringWidth(text) <= width) return text;
+  if (width <= 3) return cpSlice(text, 0, width);
+
+  const available = width - 3;
+  const headLength = Math.ceil(available / 2);
+  const tailLength = Math.floor(available / 2);
+  return `${cpSlice(text, 0, headLength)}...${cpSlice(
+    text,
+    cpLen(text) - tailLength,
+  )}`;
 }
 
 export function TextInput({
@@ -48,6 +63,7 @@ export function TextInput({
   validationErrors = [],
   inputWidth = 80,
   initialCursorOffset,
+  ellipsizeOverflow = false,
 }: TextInputProps) {
   const allowMultiline = height > 1;
 
@@ -162,6 +178,8 @@ export function TextInput({
               {chalk.inverse(placeholder.slice(0, 1))}
               <Text color={Colors.Gray}>{placeholder.slice(1)}</Text>
             </Text>
+          ) : ellipsizeOverflow && stringWidth(buffer.text) > inputWidth ? (
+            <Text>{ellipsizeMiddle(buffer.text, inputWidth)}</Text>
           ) : (
             linesToRender.map((lineText, visualIdxInRenderedSet) => {
               const cursorVisualRow = cursorVisualRowAbsolute - scrollVisualRow;
