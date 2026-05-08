@@ -362,6 +362,38 @@ describe('keyMatchers', () => {
         createKey('a', { ctrl: true }),
       ],
     },
+
+    // Viewport scroll commands
+    {
+      command: Command.SCROLL_UP,
+      positive: [createKey('up', { shift: true })],
+      negative: [createKey('up'), createKey('up', { ctrl: true })],
+    },
+    {
+      command: Command.SCROLL_DOWN,
+      positive: [createKey('down', { shift: true })],
+      negative: [createKey('down'), createKey('down', { ctrl: true })],
+    },
+    {
+      command: Command.PAGE_UP,
+      positive: [createKey('pageup'), createKey('pageup', { ctrl: true })],
+      negative: [createKey('pagedown'), createKey('up')],
+    },
+    {
+      command: Command.PAGE_DOWN,
+      positive: [createKey('pagedown'), createKey('pagedown', { ctrl: true })],
+      negative: [createKey('pageup'), createKey('down')],
+    },
+    {
+      command: Command.SCROLL_HOME,
+      positive: [createKey('home', { ctrl: true })],
+      negative: [createKey('home'), createKey('home', { shift: true })],
+    },
+    {
+      command: Command.SCROLL_END,
+      positive: [createKey('end', { ctrl: true })],
+      negative: [createKey('end'), createKey('end', { shift: true })],
+    },
   ];
 
   describe('Data-driven key binding matches original logic', () => {
