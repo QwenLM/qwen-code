@@ -81,7 +81,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     return this.params.query;
   }
 
-  async execute(): Promise<ToolResult> {
+  async execute(_signal: AbortSignal): Promise<ToolResult> {
     const query = (this.params.query ?? '').trim();
     if (!query) {
       return {
@@ -264,8 +264,11 @@ export class ToolSearchTool extends BaseDeclarativeTool<
               'Query to find deferred tools. Use "select:<tool_name>" for direct selection, or keywords to search.',
           },
           max_results: {
-            type: 'number',
+            type: 'integer',
             description: 'Maximum number of results to return (default: 5)',
+            minimum: 1,
+            maximum: HARD_MAX_RESULTS,
+            default: DEFAULT_MAX_RESULTS,
           },
         },
         required: ['query'],

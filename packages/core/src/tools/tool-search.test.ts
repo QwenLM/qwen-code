@@ -209,7 +209,18 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('No tools found matching');
   });
 
-  it('enforces max_results cap', async () => {
+  it('enforces max_results cap — schema rejects values above HARD_MAX_RESULTS', () => {
+    const tool = new ToolSearchTool(config);
+    // Schema declares maximum: 20, so out-of-range values fail at
+    // validate-time (before reaching the internal clamp). Pin the
+    // contract so the model can't sneak in absurd page sizes that
+    // bypass the cap by some path.
+    expect(() => tool.build({ query: 'slack', max_results: 100 })).toThrow(
+      /max_results must be <= 20/,
+    );
+  });
+
+  it('caps results at HARD_MAX_RESULTS for an in-range request', async () => {
     for (let i = 0; i < 25; i++) {
       registry.registerTool(
         new MockTool({
@@ -221,8 +232,10 @@ describe('ToolSearchTool', () => {
     }
 
     const tool = new ToolSearchTool(config);
-    // Ask for 100, should be clamped to 20.
-    const invocation = tool.build({ query: 'slack', max_results: 100 });
+    // Ask for the schema cap (20) — should return at most 20 even
+    // though 25 candidates exist. This is the live-load defense the
+    // internal clamp still backs up.
+    const invocation = tool.build({ query: 'slack', max_results: 20 });
     const result = await invocation.execute(new AbortController().signal);
 
     const matches = (String(result.llmContent).match(/<function>/g) ?? [])
