@@ -966,7 +966,7 @@ describe('Server Config (config.ts)', () => {
 
     expect(mockWarn).toHaveBeenCalledWith(
       expect.stringContaining(
-        'The following --include-directories paths were skipped',
+        'The following workspace directories were skipped',
       ),
     );
     expect(mockWarn).toHaveBeenCalledWith(

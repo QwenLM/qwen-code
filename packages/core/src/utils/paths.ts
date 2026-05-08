@@ -84,11 +84,24 @@ export function expandHomeDir(p: string): string {
   if (!p) {
     return '';
   }
+
+  let homeDir: string;
+  try {
+    homeDir = os.homedir();
+  } catch {
+    return p;
+  }
+
   let expandedPath = p;
-  if (p.toLowerCase().startsWith('%userprofile%')) {
-    expandedPath = os.homedir() + p.substring('%userprofile%'.length);
+  if (
+    process.platform === 'win32' &&
+    (p.toLowerCase() === '%userprofile%' ||
+      p.toLowerCase().startsWith('%userprofile%\\') ||
+      p.toLowerCase().startsWith('%userprofile%/'))
+  ) {
+    expandedPath = homeDir + p.substring('%userprofile%'.length);
   } else if (p === '~' || p.startsWith('~/')) {
-    expandedPath = os.homedir() + p.substring(1);
+    expandedPath = homeDir + p.substring(1);
   }
   return path.normalize(expandedPath);
 }

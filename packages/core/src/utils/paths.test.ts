@@ -932,17 +932,17 @@ describe('expandHomeDir', () => {
     expect(expandHomeDir('~documents')).toBe('~documents');
   });
 
-  it('should expand %userprofile% (case-insensitive) to home directory', () => {
-    expect(expandHomeDir('%userprofile%')).toBe(path.normalize(homeDir));
-    expect(expandHomeDir('%USERPROFILE%')).toBe(path.normalize(homeDir));
+  it('should expand %userprofile% (case-insensitive) to home directory on Windows', () => {
+    if (process.platform === 'win32') {
+      expect(expandHomeDir('%userprofile%')).toBe(path.normalize(homeDir));
+      expect(expandHomeDir('%USERPROFILE%')).toBe(path.normalize(homeDir));
+    }
   });
 
-  it('should expand %userprofile%\\path to home directory path', () => {
-    // We use path.join to get the correct separator for the current platform
-    const result = expandHomeDir('%userprofile%/documents');
-    expect(result).toBe(path.join(homeDir, 'documents'));
-
+  it('should expand %userprofile%\\path to home directory path on Windows', () => {
     if (process.platform === 'win32') {
+      const result = expandHomeDir('%userprofile%/documents');
+      expect(result).toBe(path.join(homeDir, 'documents'));
       const resultWin = expandHomeDir('%userprofile%\\documents');
       expect(resultWin).toBe(path.join(homeDir, 'documents'));
     }
@@ -958,5 +958,38 @@ describe('expandHomeDir', () => {
     expect(expandHomeDir('relative/path')).toBe(
       path.normalize('relative/path'),
     );
+  });
+
+  it('should not expand %userprofile% on non-Windows platforms', () => {
+    if (process.platform !== 'win32') {
+      expect(expandHomeDir('%userprofile%')).toBe('%userprofile%');
+      expect(expandHomeDir('%userprofile%/docs')).toBe(
+        path.normalize('%userprofile%/docs'),
+      );
+      expect(expandHomeDir('%USERPROFILE%')).toBe('%USERPROFILE%');
+    }
+  });
+
+  it('should not expand %userprofile% without separator', () => {
+    if (process.platform === 'win32') {
+      // %userprofile%foo should not expand — no separator after %userprofile%
+      expect(expandHomeDir('%userprofile%foo')).toBe(
+        path.normalize('%userprofile%foo'),
+      );
+    }
+  });
+
+  it('should handle os.homedir() throwing gracefully', () => {
+    const homedirSpy = vi.spyOn(os, 'homedir').mockImplementation(() => {
+      throw new Error('HOME not set');
+    });
+    try {
+      // Should return the original path when homedir fails
+      expect(expandHomeDir('~')).toBe('~');
+      expect(expandHomeDir('~/docs')).toBe('~/docs');
+      expect(expandHomeDir('%userprofile%')).toBe('%userprofile%');
+    } finally {
+      homedirSpy.mockRestore();
+    }
   });
 });

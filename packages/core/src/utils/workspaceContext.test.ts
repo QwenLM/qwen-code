@@ -535,3 +535,58 @@ describe('WorkspaceContext isInitialDirectory', () => {
     expect(ctx.isInitialDirectory('/some/random/path')).toBe(false);
   });
 });
+
+describe('WorkspaceContext getSkippedDirectories', () => {
+  let tempDir: string;
+  let cwd: string;
+  let validDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-context-skipped-')),
+    );
+    cwd = path.join(tempDir, 'project');
+    validDir = path.join(tempDir, 'valid');
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(validDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('should return empty array when all directories are valid', () => {
+    const ctx = new WorkspaceContext(cwd, [validDir]);
+    expect(ctx.getSkippedDirectories()).toEqual([]);
+  });
+
+  it('should return skipped directories when some are invalid', () => {
+    const nonExistent = path.join(tempDir, 'non-existent');
+    const ctx = new WorkspaceContext(cwd, [nonExistent, validDir]);
+    const skipped = ctx.getSkippedDirectories();
+    expect(skipped).toContain(nonExistent);
+    expect(skipped).not.toContain(validDir);
+  });
+
+  it('should clear a skipped directory when addDirectory succeeds later', () => {
+    const initiallyInvalid = path.join(tempDir, 'will-exist');
+    const ctx = new WorkspaceContext(cwd, [initiallyInvalid]);
+    expect(ctx.getSkippedDirectories()).toContain(initiallyInvalid);
+
+    fs.mkdirSync(initiallyInvalid, { recursive: true });
+    ctx.addDirectory(initiallyInvalid);
+    expect(ctx.getSkippedDirectories()).not.toContain(initiallyInvalid);
+    expect(ctx.getDirectories()).toContain(initiallyInvalid);
+  });
+
+  it('should track multiple skipped directories', () => {
+    const invalid1 = path.join(tempDir, 'invalid-1');
+    const invalid2 = path.join(tempDir, 'invalid-2');
+    const ctx = new WorkspaceContext(cwd, [invalid1, invalid2, validDir]);
+    const skipped = ctx.getSkippedDirectories();
+    expect(skipped).toContain(invalid1);
+    expect(skipped).toContain(invalid2);
+    expect(skipped).not.toContain(validDir);
+  });
+});

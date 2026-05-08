@@ -733,10 +733,12 @@ export class Config {
       this.targetDir,
       this.explicitIncludeDirectories,
     );
-    const skippedDirs = this.workspaceContext.getSkippedDirectories();
+    const skippedDirs = this.workspaceContext.getSkippedDirectories().filter(
+      (d) => path.resolve(d) !== this.targetDir,
+    );
     if (skippedDirs.length > 0) {
       this.debugLogger.warn(
-        `The following --include-directories paths were skipped because they do not exist or are not readable:\n${skippedDirs.map((d) => `  - ${expandHomeDir(d)}`).join('\n')}`,
+        `The following workspace directories were skipped because they do not exist or are not readable:\n${skippedDirs.map((d) => `  - ${expandHomeDir(d)}`).join('\n')}`,
       );
     }
     this.debugMode = params.debugMode;

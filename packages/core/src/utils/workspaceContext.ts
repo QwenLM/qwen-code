@@ -97,6 +97,7 @@ export class WorkspaceContext {
         return;
       }
       this.directories.add(resolved);
+      this.skippedDirectories.delete(directory);
       this.notifyDirectoriesChanged();
     } catch (err) {
       this.skippedDirectories.add(directory);
