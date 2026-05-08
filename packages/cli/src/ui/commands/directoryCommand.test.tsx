@@ -477,10 +477,12 @@ describe('directoryCommand', () => {
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: MessageType.ERROR,
-          text: `Directory removed from workspace but error updating settings: ${settingsError.message}`,
+          text: `Failed to persist directory removal: ${settingsError.message}`,
         }),
         expect.any(Number),
       );
+      // Directory should NOT have been removed from memory since persistence failed
+      expect(mockWorkspaceContext.removeDirectory).not.toHaveBeenCalled();
     });
   });
 

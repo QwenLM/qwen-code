@@ -782,21 +782,21 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('should retry on model not loaded error', async () => {
+    it('should retry on model unloaded error variant', async () => {
       // Arrange
       const request: GenerateContentParameters = {
         model: 'test-model',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
       const userPromptId = 'test-prompt-id';
-      const notLoadedError = new Error('model not loaded');
+      const unloadedError = new Error('model unloaded');
 
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
       (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock)
-        .mockRejectedValueOnce(notLoadedError)
+        .mockRejectedValueOnce(unloadedError)
         .mockResolvedValueOnce({
           id: 'response-id',
           choices: [
@@ -811,6 +811,73 @@ describe('ContentGenerationPipeline', () => {
       expect(result).toBeDefined();
       expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(2);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('should not retry on model not loaded error (permanent, not JIT)', async () => {
+      // "model not loaded" can indicate permanent errors like
+      // "insufficient memory" or "invalid configuration" — not JIT loading.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const permanentError = new Error('model not loaded');
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockRejectedValue(
+        permanentError,
+      );
+
+      // Act & Assert
+      await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
+        'model not loaded',
+      );
+      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(1);
+      expect(mockErrorHandler.handle).toHaveBeenCalled();
+    });
+
+    it('should not retry on is not loaded error (too broad)', async () => {
+      // "is not loaded" is too broad — matches "API key is not loaded",
+      // "plugin is not loaded", etc.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const broadError = new Error('API key is not loaded');
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockRejectedValue(
+        broadError,
+      );
+
+      // Act & Assert
+      await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
+        'API key is not loaded',
+      );
+      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(1);
+      expect(mockErrorHandler.handle).toHaveBeenCalled();
+    });
+
+    it('should not retry on model not found error (permanent)', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const notFoundError = new Error('Model not found');
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockRejectedValue(
+        notFoundError,
+      );
+
+      // Act & Assert
+      await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
+        'Model not found',
+      );
+      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(1);
+      expect(mockErrorHandler.handle).toHaveBeenCalled();
     });
 
     it('should pass abort signal to OpenAI client when provided', async () => {

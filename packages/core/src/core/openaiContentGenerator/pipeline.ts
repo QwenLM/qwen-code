@@ -11,11 +11,15 @@ import {
   GenerateContentResponse,
 } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { OpenAIContentConverter } from './converter.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
+
+const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+const MODEL_LOAD_RETRY_DELAY_MS = 2000;
 
 /**
  * The OpenAI SDK adds an abort listener for every `chat.completions.create`
@@ -512,13 +516,12 @@ export class ContentGenerationPipeline {
       const result = await executor(openaiRequest, context);
       return result;
     } catch (error) {
-      // Retry once for model-unloaded errors.
-      // Local model servers like LM Studio support Just-In-Time (JIT) model
-      // loading: they load the model into memory when they receive the actual
-      // chat completion request. If the model is not currently loaded, the
-      // server returns an error (e.g. "Model is unloaded") instead of loading
-      // it. A single retry gives the server a second chance to load the model.
       if (this.isModelUnloadedError(error)) {
+        debugLogger.warn(
+          'Retrying request after model-unloaded error:',
+          error instanceof Error ? error.message : String(error),
+        );
+        await this.delay(MODEL_LOAD_RETRY_DELAY_MS);
         try {
           const openaiRequest = await this.buildRequest(
             request,
@@ -531,7 +534,6 @@ export class ContentGenerationPipeline {
           return await this.handleError(retryError, context, request);
         }
       }
-      // Use shared error handling logic
       return await this.handleError(error, context, request);
     }
   }
@@ -539,9 +541,11 @@ export class ContentGenerationPipeline {
   /**
    * Check if an error indicates that the model is not currently loaded in memory.
    *
-   * Local model servers like LM Studio may return an error when the requested
-   * model is not loaded, instead of loading it on demand. This method detects
-   * such errors so the pipeline can retry the request.
+   * Local model servers like LM Studio support Just-In-Time (JIT) model loading
+   * and return a specific error (e.g. "Model is unloaded") when the requested
+   * model is not in GPU memory. This method detects only those transient
+   * JIT-loading patterns — it deliberately does NOT match permanent errors like
+   * "model not found" (invalid model name) or "insufficient memory" (can't load).
    */
   private isModelUnloadedError(error: unknown): boolean {
     if (!error) return false;
@@ -551,12 +555,17 @@ export class ContentGenerationPipeline {
         ? error.message.toLowerCase()
         : String(error).toLowerCase();
 
+    // Only match known JIT-loading error patterns from local model servers
+    // (LM Studio, llama.cpp). These are transient — the model exists but
+    // isn't loaded into memory yet.
     return (
       errorMessage.includes('model is unloaded') ||
-      errorMessage.includes('model not loaded') ||
-      errorMessage.includes('model unloaded') ||
-      errorMessage.includes('is not loaded')
+      errorMessage.includes('model unloaded')
     );
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
