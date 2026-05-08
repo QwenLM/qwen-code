@@ -538,5 +538,46 @@ describe('sessionStorageUtils', () => {
         ),
       ).toEqual({ customTitle: 'A', titleSource: 'auto' });
     });
+
+    it('reuses a caller-provided scratch buffer across tail and head reads', () => {
+      // Mirror of the single-field variant's pool test. The multi-field
+      // path runs the same buffer through tail-then-head, so a buggy
+      // decode that ignored `bytesRead` would observe sentinel bytes
+      // left from the previous (larger) read and corrupt one of the
+      // fields. Drive a tail-hit followed by a head-fallback on a
+      // smaller file, sharing the buffer across both calls.
+      const tailHit = writeFile(
+        'tail-pair.jsonl',
+        '{"subtype":"custom_title","customTitle":"big","titleSource":"manual"}\n',
+      );
+      const header =
+        '{"subtype":"custom_title","customTitle":"x","titleSource":"auto"}\n';
+      const filler =
+        '{"type":"user","message":"' + 'y'.repeat(LITE_READ_BUF_SIZE) + '"}\n';
+      const headFallback = writeFile('head-pair.jsonl', header + filler);
+
+      const scratch = Buffer.alloc(LITE_READ_BUF_SIZE);
+      scratch.fill(0x55);
+
+      expect(
+        readLastJsonStringFieldsSync(
+          tailHit,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+          scratch,
+        ),
+      ).toEqual({ customTitle: 'big', titleSource: 'manual' });
+
+      expect(
+        readLastJsonStringFieldsSync(
+          headFallback,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+          scratch,
+        ),
+      ).toEqual({ customTitle: 'x', titleSource: 'auto' });
+    });
   });
 });

@@ -6,6 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import {
   afterEach,
   beforeEach,
@@ -572,6 +573,71 @@ describe('SessionService', () => {
       );
 
       expect(result).toBe(false);
+    });
+  });
+
+  describe('countSessionMessages', () => {
+    // The lazy counter that replaces the per-file readline scan from
+    // listSessions. Three contracts to pin: it actually counts what it
+    // promises, it short-circuits on bad input without touching the disk,
+    // and it returns 0 on any read failure (caller must not see an
+    // exception bubble up — the picker treats 0 as "unknown").
+
+    const stubCreateReadStream = (
+      lines: string[],
+    ): MockInstance<typeof fs.createReadStream> =>
+      vi
+        .spyOn(fs, 'createReadStream')
+        .mockImplementation(
+          () => Readable.from([lines.join('\n')]) as unknown as fs.ReadStream,
+        );
+
+    it('should count unique user/assistant uuids and ignore other record types', async () => {
+      const lines = [
+        // Two user records sharing a uuid — should be counted once
+        JSON.stringify({ uuid: 'u1', type: 'user' }),
+        JSON.stringify({ uuid: 'u1', type: 'user' }),
+        JSON.stringify({ uuid: 'a1', type: 'assistant' }),
+        // System / summary records aren't messages
+        JSON.stringify({ uuid: 's1', type: 'system' }),
+        JSON.stringify({ uuid: 'sum1', type: 'summary' }),
+        // Empty and malformed lines must not throw
+        '',
+        '   ',
+        'not-json',
+        JSON.stringify({ uuid: 'u2', type: 'user' }),
+      ];
+      const createReadStreamSpy = stubCreateReadStream(lines);
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(3); // u1, a1, u2
+      expect(createReadStreamSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should return 0 for invalid sessionId without touching the filesystem', async () => {
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const count = await sessionService.countSessionMessages('not-a-uuid');
+
+      expect(count).toBe(0);
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+
+    it('should return 0 when the session file is missing (ENOENT)', async () => {
+      vi.spyOn(fs, 'createReadStream').mockImplementation(() => {
+        const stream = new Readable({ read() {} });
+        process.nextTick(() => {
+          const err = new Error('ENOENT') as NodeJS.ErrnoException;
+          err.code = 'ENOENT';
+          stream.emit('error', err);
+        });
+        return stream as unknown as fs.ReadStream;
+      });
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(0);
     });
   });
 

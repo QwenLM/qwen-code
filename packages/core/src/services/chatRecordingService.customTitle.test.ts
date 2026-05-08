@@ -232,6 +232,62 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       expect(titleAppends).toHaveLength(0);
     });
 
+    it('omits titleSource on re-anchor when source is unknown (legacy resumed session)', async () => {
+      // The picker dim-styling depends on the persisted `titleSource`
+      // discriminator. Legacy `custom_title` records (written before
+      // the field existed) have no source — `getSessionTitleInfo`
+      // returns `source: undefined` for those, and the writer's
+      // re-anchor invariant must mirror that exact shape: emit
+      // `customTitle` alone, never a hardcoded `'manual'`. Otherwise
+      // resuming a legacy session on a current build would silently
+      // reclassify it the first time the threshold fires.
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      const getSessionTitleInfo = vi
+        .fn()
+        .mockReturnValue({ title: 'legacy-title', source: undefined });
+      (
+        mockConfig as unknown as {
+          getSessionService: () => {
+            getSessionTitleInfo: typeof getSessionTitleInfo;
+          };
+        }
+      ).getSessionService = () => ({ getSessionTitleInfo });
+
+      const svc = new ChatRecordingService(mockConfig);
+      // Constructor's finalize re-appends a custom_title record on resume
+      // — clear it out so we can isolate the threshold-triggered re-anchor.
+      await svc.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      const bulkText = 'x'.repeat(2000);
+      for (let i = 0; i < 20; i++) {
+        svc.recordUserMessage([{ text: bulkText }]);
+      }
+      await svc.flush();
+
+      const titleAppends = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.filter(([, record]) => {
+          const r = record as ChatRecord;
+          return r.type === 'system' && r.subtype === 'custom_title';
+        });
+
+      expect(titleAppends.length).toBeGreaterThanOrEqual(1);
+      const reanchored = titleAppends[0][1] as ChatRecord;
+      // Key must be ABSENT, not present-and-undefined — JSON.stringify
+      // would still serialize an explicit `undefined` away, but the
+      // record-shape contract is "no key when no source", so pin it.
+      expect(reanchored.systemPayload).toEqual({ customTitle: 'legacy-title' });
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          reanchored.systemPayload as object,
+          'titleSource',
+        ),
+      ).toBe(false);
+    });
+
     it('does not re-anchor on small write bursts under threshold', async () => {
       // A handful of small messages must not trigger a re-anchor —
       // the cost would defeat the whole point. Threshold is 32KB;
