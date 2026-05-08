@@ -53,6 +53,19 @@ export type TrackedWaitingToolCall = WaitingToolCall & {
 export type TrackedExecutingToolCall = ExecutingToolCall & {
   responseSubmittedToGemini?: boolean;
   pid?: number;
+  /**
+   * AbortController exposed by the shell tool so a UI surface (Ctrl+B
+   * keybind in `AppContainer`) can promote a running foreground shell
+   * to background mid-flight. Set by `coreToolScheduler` via the
+   * shell tool's `setPromoteAbortControllerCallback` when the shell
+   * branch enters the executing state. Undefined for non-shell tools.
+   *
+   * Aborting with reason `{ kind: 'background', shellId }` is the
+   * trigger; `ShellExecutionService` resolves with `promoted: true`
+   * and `shell.ts` registers a `BackgroundShellEntry` — the child
+   * keeps running.
+   */
+  promoteAbortController?: AbortController;
 };
 export type TrackedCompletedToolCall = CompletedToolCall & {
   responseSubmittedToGemini?: boolean;
@@ -114,12 +127,21 @@ export function useReactToolScheduler(
             existingTrackedCall?.responseSubmittedToGemini ?? false;
 
           if (coreTc.status === 'executing') {
+            const executingCore = coreTc as ExecutingToolCall;
             return {
               ...coreTc,
               responseSubmittedToGemini,
               liveOutput: (existingTrackedCall as TrackedExecutingToolCall)
                 ?.liveOutput,
-              pid: (coreTc as ExecutingToolCall).pid,
+              pid: executingCore.pid,
+              // Project the promote AbortController so the Ctrl+B
+              // keybind handler in AppContainer can find it via the
+              // executing tool call without re-plumbing through the
+              // scheduler. Set on shell-tool branches by
+              // `coreToolScheduler` when shell.ts fires its
+              // `setPromoteAbortControllerCallback`. Undefined for
+              // non-shell tools.
+              promoteAbortController: executingCore.promoteAbortController,
             };
           }
 
@@ -130,6 +152,7 @@ export function useReactToolScheduler(
             responseSubmittedToGemini,
             liveOutput: undefined,
             pid: undefined,
+            promoteAbortController: undefined,
           };
         }),
       );

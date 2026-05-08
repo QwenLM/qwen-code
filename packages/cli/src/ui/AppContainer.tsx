@@ -102,6 +102,7 @@ import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
+import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
@@ -2235,6 +2236,35 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
+      } else if (keyMatchers[Command.PROMOTE_SHELL_TO_BACKGROUND](key)) {
+        // Ctrl+B: promote a running foreground shell command to a
+        // background task (#3831). The child keeps running, the
+        // agent's turn unblocks, and the shell becomes a regular
+        // BackgroundShellEntry visible in `/tasks` + the dialog and
+        // stoppable via `task_stop`.
+        //
+        // Read from the ref (NOT the destructured `pendingToolCalls`)
+        // so we don't have to put `pendingToolCalls` in the deps
+        // array — that would re-bind the keypress handler on every
+        // tool-call status update, which is noisy.
+        //
+        // No-op when no foreground shell is currently executing OR
+        // the executing tool call is non-shell (no
+        // `promoteAbortController` projected). Falling through in
+        // the no-op case is intentional: while the agent is idle the
+        // input layer's own Ctrl+B handler (cursor-left in the
+        // prompt) should still fire as before.
+        const executingShell = pendingToolCallsRef.current.find(
+          (tc) =>
+            tc.status === 'executing' &&
+            tc.promoteAbortController !== undefined,
+        ) as TrackedExecutingToolCall | undefined;
+        if (executingShell?.promoteAbortController) {
+          executingShell.promoteAbortController.abort({
+            kind: 'background',
+          });
+          return;
+        }
       }
     },
     [

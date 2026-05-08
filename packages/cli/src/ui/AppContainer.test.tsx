@@ -1840,6 +1840,118 @@ describe('AppContainer State Management', () => {
 
       vi.useRealTimers();
     });
+
+    it('Ctrl+B promotes the running foreground shell tool call (#3831 PR-3)', () => {
+      // E2E for the keybind layer: Ctrl+B during an executing shell
+      // tool call must call abort({ kind: 'background' }) on the
+      // tool call's promoteAbortController. ShellExecutionService +
+      // shell.ts (covered by PR-1 / PR-2 unit tests) translate the
+      // abort reason into a registry-registered BackgroundShellEntry.
+      const promoteAc = new AbortController();
+      const abortSpy = vi.spyOn(promoteAc, 'abort');
+      const executingShell = {
+        status: 'executing',
+        request: { callId: 'call-shell-1', name: 'run_shell_command' },
+        promoteAbortController: promoteAc,
+      };
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        pendingToolCalls: [executingShell],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Find the global keypress handler. AppContainer registers
+      // multiple via useKeypress (text buffer, dialogs, etc.); the
+      // global one is identifiable by its body — it references the
+      // PROMOTE_SHELL_TO_BACKGROUND command we just added.
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('PROMOTE_SHELL_TO_BACKGROUND'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      // Fire Ctrl+B.
+      const ctrlBKey = {
+        name: 'b',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x02',
+      } as unknown as Key;
+      handleKeypress!(ctrlBKey);
+
+      expect(abortSpy).toHaveBeenCalledTimes(1);
+      const reason = abortSpy.mock.calls[0][0];
+      expect(reason).toEqual({ kind: 'background' });
+    });
+
+    it('Ctrl+B is a no-op when no foreground shell is currently executing', () => {
+      // Pin the safety contract: pressing Ctrl+B mid-prompt with no
+      // running shell must NOT throw, must NOT mistakenly fire any
+      // promote on a non-shell tool. Without the
+      // `promoteAbortController !== undefined` guard, the find would
+      // pick up a non-shell executing tool whose schema doesn't even
+      // expose a promote AC.
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        pendingToolCalls: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('PROMOTE_SHELL_TO_BACKGROUND'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      const ctrlBKey = {
+        name: 'b',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x02',
+      } as unknown as Key;
+      // No-op: no throw.
+      expect(() => handleKeypress!(ctrlBKey)).not.toThrow();
+    });
   });
 
   describe('Model Dialog Integration', () => {
