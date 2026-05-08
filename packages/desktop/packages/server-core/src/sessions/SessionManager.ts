@@ -592,6 +592,8 @@ interface ManagedSession {
   id: string
   workspace: Workspace
   agent: AgentInstance | null  // Lazy-loaded - null until first message
+  // Runtime-only single-flight guard for lazy agent construction.
+  agentCreatePromise?: Promise<AgentInstance>
   messages: Message[]
   isProcessing: boolean
   /** Set when user requests stop - allows event loop to drain before clearing isProcessing */
@@ -3092,6 +3094,22 @@ export class SessionManager implements ISessionManager {
    * 4. fallback: no connection configured
    */
   private async getOrCreateAgent(managed: ManagedSession): Promise<AgentInstance> {
+    if (managed.agent) return managed.agent
+
+    if (managed.agentCreatePromise) {
+      sessionLog.debug(`Waiting for in-flight agent creation for session ${managed.id}`)
+      return managed.agentCreatePromise
+    }
+
+    managed.agentCreatePromise = this.createAgentForManagedSession(managed)
+    try {
+      return await managed.agentCreatePromise
+    } finally {
+      managed.agentCreatePromise = undefined
+    }
+  }
+
+  private async createAgentForManagedSession(managed: ManagedSession): Promise<AgentInstance> {
     if (!managed.agent) {
       const end = perf.start('agent.create', { sessionId: managed.id })
 

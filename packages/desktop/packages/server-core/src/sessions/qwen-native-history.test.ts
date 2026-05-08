@@ -38,6 +38,54 @@ describe('Qwen native history loading', () => {
     }
   })
 
+  it('deduplicates concurrent agent creation for one managed session', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
+    tempRoots.push(workspaceRoot)
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: Date.now(),
+    }
+    const managed = createManagedSession({
+      id: '260508-concurrent-agent',
+      lastMessageAt: Date.now(),
+      permissionMode: 'allow-all',
+    }, workspace)
+    type TestManagedSession = ReturnType<typeof createManagedSession>
+    const manager = new SessionManager()
+    const fakeAgent = {
+      dispose: () => {},
+      destroy: () => {},
+    } as unknown as AgentBackend
+    let createCalls = 0
+
+    const managerInternals = manager as unknown as {
+      createAgentForManagedSession: (session: TestManagedSession) => Promise<AgentBackend>
+      getOrCreateAgent: (session: TestManagedSession) => Promise<AgentBackend>
+    }
+
+    managerInternals.createAgentForManagedSession = async (session) => {
+      createCalls += 1
+      await Promise.resolve()
+      session.agent = fakeAgent
+      return fakeAgent
+    }
+
+    const getOrCreateAgent = managerInternals.getOrCreateAgent.bind(manager)
+
+    const [firstAgent, secondAgent] = await Promise.all([
+      getOrCreateAgent(managed),
+      getOrCreateAgent(managed),
+    ])
+
+    expect(createCalls).toBe(1)
+    expect(firstAgent).toBe(fakeAgent)
+    expect(secondAgent).toBe(fakeAgent)
+  })
+
   it('lists provider-native sessions from the workspace default working directory', async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
     const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))

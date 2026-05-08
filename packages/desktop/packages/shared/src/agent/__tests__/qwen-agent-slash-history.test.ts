@@ -43,7 +43,10 @@ type QwenAvailableCommandsInternals = {
   ensureProcess: () => Promise<void>;
   callAcp: <T>(
     method: string,
-    execute: (connection: { loadSession: (params: unknown) => Promise<unknown> }) => Promise<T>,
+    execute: (connection: {
+      loadSession?: (params: unknown) => Promise<unknown>;
+      newSession?: (params: unknown) => Promise<unknown>;
+    }) => Promise<T>,
     timeoutMs?: number,
   ) => Promise<T>;
   handleSessionUpdate: (params: unknown) => void;
@@ -52,7 +55,10 @@ type QwenAvailableCommandsInternals = {
 
 const originalRuntimeDir = process.env.QWEN_RUNTIME_DIR;
 
-function createAgent(cwd: string): QwenAgent {
+function createAgent(
+  cwd: string,
+  onSdkSessionIdUpdate?: BackendConfig['onSdkSessionIdUpdate'],
+): QwenAgent {
   return new QwenAgent({
     provider: 'qwen',
     workspace: {
@@ -71,6 +77,7 @@ function createAgent(cwd: string): QwenAgent {
       permissionMode: 'ask',
     },
     isHeadless: true,
+    onSdkSessionIdUpdate,
   } as BackendConfig);
 }
 
@@ -604,6 +611,49 @@ describe('QwenAgent slash command history', () => {
 
     expect(calledMethods).toEqual(['session/load']);
     expect(snapshot?.availableCommands).toEqual([
+      { name: 'project:fix', description: 'Run project fix' },
+    ]);
+  });
+
+  it('deduplicates concurrent ACP session setup during command refresh', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const capturedSessionIds: string[] = [];
+    const agent = createAgent(cwd, sessionId => capturedSessionIds.push(sessionId));
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    let newSessionCalls = 0;
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (method, execute) => {
+      if (method === 'session/new') {
+        newSessionCalls += 1;
+        await Promise.resolve();
+        internals.handleSessionUpdate({
+          sessionId: 'qwen-session',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+          },
+        });
+        return execute({
+          newSession: async () => ({ sessionId: 'qwen-session', models: {}, modes: {} }),
+        });
+      }
+      throw new Error(`Unexpected ACP method ${method}`);
+    };
+
+    const [firstSnapshot, secondSnapshot] = await Promise.all([
+      agent.refreshAvailableCommands(),
+      agent.refreshAvailableCommands(),
+    ]);
+    agent.destroy();
+
+    expect(newSessionCalls).toBe(1);
+    expect(capturedSessionIds).toEqual(['qwen-session']);
+    expect(firstSnapshot?.availableCommands).toEqual([
+      { name: 'project:fix', description: 'Run project fix' },
+    ]);
+    expect(secondSnapshot?.availableCommands).toEqual([
       { name: 'project:fix', description: 'Run project fix' },
     ]);
   });

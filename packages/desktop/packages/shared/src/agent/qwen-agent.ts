@@ -587,6 +587,7 @@ export class QwenAgent extends BaseAgent {
   private initialized = false;
 
   private qwenSessionId: string | null = null;
+  private ensureQwenSessionPromise: Promise<void> | null = null;
   private eventQueue = new EventQueue();
   private _isProcessing = false;
   private abortReason?: AbortReason;
@@ -1269,6 +1270,28 @@ export class QwenAgent extends BaseAgent {
   // ============================================================
 
   private async ensureQwenSession(): Promise<void> {
+    if (this.qwenSessionId) {
+      this.debug(`Qwen ACP session reuse: using live session ${this.qwenSessionId}`);
+      await this.applySessionSettings(this.qwenSessionId);
+      this.flushPendingAvailableCommandsUpdate(this.qwenSessionId);
+      return;
+    }
+
+    if (this.ensureQwenSessionPromise) {
+      this.debug('Qwen ACP session reuse: waiting for in-flight session setup');
+      await this.ensureQwenSessionPromise;
+      return;
+    }
+
+    this.ensureQwenSessionPromise = this.createOrLoadQwenSession();
+    try {
+      await this.ensureQwenSessionPromise;
+    } finally {
+      this.ensureQwenSessionPromise = null;
+    }
+  }
+
+  private async createOrLoadQwenSession(): Promise<void> {
     if (this.qwenSessionId) {
       this.debug(`Qwen ACP session reuse: using live session ${this.qwenSessionId}`);
       await this.applySessionSettings(this.qwenSessionId);
