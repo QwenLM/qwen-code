@@ -17,6 +17,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Storage } from '../../config/storage.js';
 import { isNodeError } from '../../utils/errors.js';
+import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import type { TeamFile, TeamMember } from './types.js';
 import {
   TEAMS_DIR,
@@ -247,11 +248,7 @@ export async function writeTeamFile(
 ): Promise<void> {
   const filePath = getTeamFilePath(teamName);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(
-    filePath,
-    JSON.stringify(teamFile, null, 2) + '\n',
-    'utf-8',
-  );
+  await atomicWriteJSON(filePath, teamFile);
 }
 
 /**

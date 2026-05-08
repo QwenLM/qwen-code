@@ -742,7 +742,7 @@ export class TeamManager {
    * Returns a promise that resolves when either:
    * - A teammate message is delivered via the callback,
    * - All teammates have reached terminal status, or
-   * - The timeout fires (default 30s).
+   * - The timeout fires (default 120s).
    *
    * Returns the reason it resolved so the caller can
    * decide whether to inject a status summary.
@@ -1120,9 +1120,7 @@ export class TeamManager {
 
     // Reconcile: if agent already reached IDLE before we
     // attached, flush now.
-    if (
-      (agent as { getStatus(): AgentStatus }).getStatus() === AgentStatus.IDLE
-    ) {
+    if (agent.getStatus() === AgentStatus.IDLE) {
       void this.flushNextMessage(agentId, agentName);
     }
   }
@@ -1190,7 +1188,9 @@ export class TeamManager {
     // 2. Deliver the highest-priority pending message.
     const queue = this.pendingMessages.get(agentId);
     if (queue && queue.length > 0) {
-      queue.sort((a, b) => a.priority - b.priority);
+      if (queue.length > 1) {
+        queue.sort((a, b) => a.priority - b.priority);
+      }
       const msg = queue.shift()!;
       const labeled = msg.from
         ? `[Message from ${msg.from}]: ${msg.text}`

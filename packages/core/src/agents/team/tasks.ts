@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { isNodeError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import { getTasksDir } from './teamHelpers.js';
 import type { SwarmTask, SwarmTaskStatus } from './types.js';
 
@@ -343,7 +344,7 @@ export async function updateTask(
       assertMetadataWithinLimit(task.metadata);
     }
 
-    await fs.writeFile(taskPath, JSON.stringify(task, null, 2) + '\n', 'utf-8');
+    await atomicWriteJSON(taskPath, task);
 
     notifyTasksUpdated(teamName);
     return task;
@@ -442,7 +443,7 @@ async function removeEdgesReferencing(
     ) {
       return;
     }
-    await fs.writeFile(depPath, JSON.stringify(task, null, 2) + '\n', 'utf-8');
+    await atomicWriteJSON(depPath, task);
   } catch (err) {
     if (isNodeError(err) && err.code === 'ENOENT') return;
     throw err;
@@ -566,12 +567,10 @@ async function unblockDependents(
       try {
         const raw = await fs.readFile(depPath, 'utf-8');
         const task = JSON.parse(raw) as SwarmTask;
+        const before = task.blockedBy.length;
         task.blockedBy = task.blockedBy.filter((id) => id !== completedId);
-        await fs.writeFile(
-          depPath,
-          JSON.stringify(task, null, 2) + '\n',
-          'utf-8',
-        );
+        if (task.blockedBy.length === before) return;
+        await atomicWriteJSON(depPath, task);
       } finally {
         await release?.();
       }
@@ -638,7 +637,7 @@ export async function claimTask(
     task.owner = opts?.ownerName ?? agentId;
     task.status = 'in_progress';
 
-    await fs.writeFile(taskPath, JSON.stringify(task, null, 2) + '\n', 'utf-8');
+    await atomicWriteJSON(taskPath, task);
 
     notifyTasksUpdated(teamName);
     return task;

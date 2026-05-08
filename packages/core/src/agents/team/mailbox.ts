@@ -17,13 +17,12 @@
  * `AgentInteractive.enqueueMessage()`.
  */
 
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import * as process from 'node:process';
 import lockfile from 'proper-lockfile';
 import { isNodeError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import { getInboxesDir } from './teamHelpers.js';
 
 const debug = createDebugLogger('AGENTS_TEAM_MAILBOX');
@@ -92,7 +91,7 @@ export function getInboxPath(teamName: string, agentName: string): string {
  * Returns an empty array if the inbox doesn't exist.
  *
  * Reads happen without a lock: writes go through a tmp-file +
- * `rename` (atomicWriteJson), so a reader can race with a writer
+ * `rename` (atomicWriteJSON), so a reader can race with a writer
  * but will always observe either the pre-write or post-write
  * file — never a partial one. This avoids paying lock-contention
  * cost on the hot 500ms leader poll.
@@ -136,7 +135,6 @@ export async function writeMessage(
   message: MailboxMessage,
 ): Promise<void> {
   const inboxPath = getInboxPath(teamName, toAgentName);
-  await fs.mkdir(path.dirname(inboxPath), { recursive: true });
   await ensureInboxFile(inboxPath);
 
   const release = await lockfile.lock(inboxPath, LOCK_OPTIONS);
@@ -149,7 +147,7 @@ export async function writeMessage(
       return Number.isNaN(ts) || ts >= cutoff;
     });
     compacted.push(message);
-    await atomicWriteJson(inboxPath, compacted);
+    await atomicWriteJSON(inboxPath, compacted);
   } finally {
     await release();
   }
@@ -178,7 +176,7 @@ export async function consumeUnread(
     const updated = messages.map((m) =>
       predicate(m) ? { ...m, read: true } : m,
     );
-    await atomicWriteJson(inboxPath, updated);
+    await atomicWriteJSON(inboxPath, updated);
     return matching;
   } finally {
     await release();
@@ -257,42 +255,6 @@ async function ensureInboxFile(inboxPath: string): Promise<void> {
   } catch (err) {
     // EEXIST means file already exists — that's fine.
     if (!isNodeError(err) || err.code !== 'EEXIST') throw err;
-  }
-}
-
-/**
- * Atomically replace `inboxPath` with the JSON-serialised payload.
- *
- * `fs.writeFile(path, …)` opens with O_TRUNC, so a concurrent
- * lockless reader (the 500ms leader poll, `readInbox`) can see
- * the file zero-byte or half-written between the truncate and
- * the final write — `JSON.parse` then throws and the caller
- * (`readLeaderInboxOrQuarantine`) renames the inbox to
- * `.corrupt-{ts}`, dropping unread teammate messages.
- *
- * Writing to a sibling tmp file and `rename`-ing it onto the
- * target makes the swap atomic on POSIX: readers always observe
- * either the pre-write file or the post-write file, never a
- * partial one. On rename failure we best-effort unlink the tmp
- * file so we don't leak a sibling per failed write.
- */
-async function atomicWriteJson(
-  inboxPath: string,
-  data: MailboxMessage[],
-): Promise<void> {
-  const tmpPath = `${inboxPath}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
-  try {
-    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
-    await fs.rename(tmpPath, inboxPath);
-  } catch (err) {
-    try {
-      await fs.unlink(tmpPath);
-    } catch {
-      // Tmp may not exist if writeFile failed before creating it,
-      // or rename succeeded before throwing. Either way, nothing
-      // to clean up.
-    }
-    throw err;
   }
 }
 

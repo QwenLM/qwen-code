@@ -25,7 +25,7 @@ import { TeamManager } from '../agents/team/TeamManager.js';
 import { InProcessBackend } from '../agents/backends/InProcessBackend.js';
 import { isNodeError } from '../utils/errors.js';
 import type { TeamFile, TeamContext } from '../agents/team/types.js';
-import { LEADER_NAME } from '../agents/team/types.js';
+import { LEADER_NAME, MAX_TEAMMATES } from '../agents/team/types.js';
 
 export interface TeamCreateParams {
   team_name: string;
@@ -216,7 +216,7 @@ This creates:
 
 1. **Create a team** with TeamCreate - this creates both the team and its task list
 2. **Create tasks** using the Task tools (TaskCreate, TaskList, etc.) - they automatically use the team's task list
-3. **Spawn teammates** using the Agent tool with the \`name\` parameter to create teammates that join the active team (max ${config.getAgentsSettings().team?.maxTeammates ?? 10} teammates per team)
+3. **Spawn teammates** using the Agent tool with the \`name\` parameter to create teammates that join the active team (max ${config.getAgentsSettings().team?.maxTeammates ?? MAX_TEAMMATES} teammates per team)
 4. **Assign tasks** using TaskUpdate with \`owner\` to give tasks to idle teammates
 5. **Teammates work on assigned tasks** and mark them completed via TaskUpdate
 6. **Teammates go idle between turns** - after each turn, teammates automatically go idle and send a notification. IMPORTANT: Be patient with idle teammates! Don't comment on their idleness until it actually impacts your work.
