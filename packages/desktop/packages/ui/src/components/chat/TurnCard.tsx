@@ -2454,8 +2454,10 @@ export function ResponseCard({
   // Completed response or plan.
   if (isCompleted || variant === 'plan') {
     const isPlan = variant === 'plan'
+    const usePlainResponseChrome = !isPlan && showResponseActions
+    const useCardChrome = !usePlainResponseChrome
     const contentFadeStyle =
-      isPlan && isDarkMode
+      useCardChrome && isDarkMode
         ? {
             maskImage:
               'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
@@ -2469,7 +2471,8 @@ export function ResponseCard({
         <div
           className={cn(
             "relative group/response",
-            isPlan && "bg-background shadow-minimal rounded-[8px] overflow-hidden",
+            useCardChrome &&
+              "bg-background shadow-minimal rounded-[8px] overflow-hidden",
           )}
         >
           {/* Fullscreen button - desktop only; compact mode keeps message chrome minimal */}
@@ -2510,10 +2513,10 @@ export function ResponseCard({
             onMouseUp={handleTextSelection}
             className={cn(
               "pl-[22px] pr-[16px] py-3 text-sm",
-              isPlan && "overflow-y-auto scrollbar-hover",
+              useCardChrome && "overflow-y-auto scrollbar-hover",
             )}
             style={{
-              ...(isPlan ? { maxHeight: MAX_HEIGHT } : {}),
+              ...(useCardChrome ? { maxHeight: MAX_HEIGHT } : {}),
               ...contentFadeStyle,
             }}
           >
@@ -2602,7 +2605,7 @@ export function ResponseCard({
             </div>
           )}
 
-          {!compactMode && !isPlan && showResponseActions && (
+          {!compactMode && usePlainResponseChrome && (
             <div className="flex h-5 items-center justify-start gap-1.5 pl-[22px] pr-0.5 text-[11px] font-medium text-muted-foreground/70 opacity-0 pointer-events-none transition-opacity duration-150 select-none group-hover/response:pointer-events-auto group-hover/response:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
               <ResponseActionButton
                 label={copied ? t('common.copied') : t('common.copy')}
@@ -2656,16 +2659,40 @@ export function ResponseCard({
   }
 
   // Streaming response - show throttled content with spinner
+  const usePlainStreamingChrome = showResponseActions
+  const streamingContentFadeStyle =
+    !usePlainStreamingChrome && isDarkMode
+      ? {
+          maskImage:
+            'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
+          WebkitMaskImage:
+            'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
+        }
+      : {}
+
   return (
     <>
-      <div className="relative group/response">
+      <div
+        className={cn(
+          "relative group/response",
+          !usePlainStreamingChrome &&
+            "bg-background shadow-minimal rounded-[8px] overflow-hidden",
+        )}
+      >
         {/* Content area - uses displayedText (throttled) for performance */}
         <div
           ref={contentRef}
           data-search-root="response"
           onMouseDown={handleSelectionPointerDown}
           onMouseUp={handleTextSelection}
-          className="pl-[22px] pr-4 py-3 text-sm"
+          className={cn(
+            "pl-[22px] pr-4 py-3 text-sm",
+            !usePlainStreamingChrome && "overflow-y-auto scrollbar-hover",
+          )}
+          style={{
+            ...(!usePlainStreamingChrome ? { maxHeight: MAX_HEIGHT } : {}),
+            ...streamingContentFadeStyle,
+          }}
         >
           <div ref={contentLayerRef} className="relative">
             <Markdown
@@ -2683,11 +2710,18 @@ export function ResponseCard({
         {!compactMode && (
           <div
             className={cn(
-              "flex h-5 items-center gap-1.5 pl-[22px] text-muted-foreground/70",
+              usePlainStreamingChrome
+                ? "flex h-5 items-center gap-1.5 pl-[22px] text-muted-foreground/70"
+                : "px-4 py-2 border-t border-border/30 flex items-center bg-muted/20",
               SIZE_CONFIG.fontSize,
             )}
           >
-            <div className="flex items-center gap-2">
+            <div
+              className={cn(
+                "flex items-center gap-2",
+                !usePlainStreamingChrome && "text-muted-foreground",
+              )}
+            >
               <Spinner className={SIZE_CONFIG.spinnerSize} />
               <span>Streaming...</span>
             </div>
