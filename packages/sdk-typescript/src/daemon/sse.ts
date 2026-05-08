@@ -26,8 +26,20 @@ import type { DaemonEvent } from './types.js';
  * The reader is released in `finally` so `for await … break` paths and
  * AbortSignal cancellation both clean up cleanly.
  */
+/**
+ * Hard cap on accumulated unread bytes before we abort the stream as
+ * malformed. SSE frames are typically a few hundred bytes; even a
+ * heavily-batched provider rarely crosses 64 KiB. A buffer that grows
+ * past 16 MiB is a strong signal that the upstream is NOT SSE — e.g.
+ * a misconfigured proxy returned a non-streaming body, or the server
+ * never emits the `\n\n` separator. Without a cap, `buf` grows until
+ * the consumer OOMs.
+ */
+const MAX_BUF_BYTES = 16 * 1024 * 1024;
+
 export async function* parseSseStream(
   body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
 ): AsyncGenerator<DaemonEvent> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -35,6 +47,13 @@ export async function* parseSseStream(
 
   try {
     while (true) {
+      // Stop pulling more bytes if the caller aborted after the
+      // initial fetch resolved. Without this, the generator keeps
+      // reading + buffering indefinitely until the upstream closes,
+      // even though no consumer is iterating us anymore.
+      if (signal?.aborted) {
+        return;
+      }
       const { value, done } = await reader.read();
       if (done) {
         // Flush any bytes the decoder is still holding for an incomplete
@@ -51,6 +70,17 @@ export async function* parseSseStream(
         return;
       }
       buf += decoder.decode(value, { stream: true });
+      // Unbounded buffer is a memory-pressure vector — see MAX_BUF_BYTES.
+      // Use UTF-16 code-unit length as a proxy for bytes; it slightly
+      // over-estimates for ASCII (1:2) and under-estimates for 4-byte
+      // characters (2:4), both within the same order of magnitude as
+      // the cap, so the threshold is still meaningful as a guard.
+      if (buf.length > MAX_BUF_BYTES) {
+        throw new Error(
+          `parseSseStream: unread buffer exceeded ${MAX_BUF_BYTES} bytes ` +
+            `without a frame separator — upstream likely not SSE`,
+        );
+      }
       const consumed = consumeFrames(buf);
       if (consumed.frames.length > 0) {
         for (const raw of consumed.frames) {

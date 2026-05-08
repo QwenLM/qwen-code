@@ -10,7 +10,6 @@ import type { Argv, CommandModule } from 'yargs';
 // here would tax every `qwen` invocation (interactive, mcp, channel, etc.)
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
-import type { ServeMode } from '../serve/types.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 interface ServeArgs {
@@ -54,8 +53,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Stage 2 native in-process mode is not yet implemented; this flag will become opt-in then.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
-    const mode: ServeMode = argv['http-bridge'] ? 'http-bridge' : 'native';
-    if (mode === 'native') {
+    if (!argv['http-bridge']) {
       writeStderrLine(
         'qwen serve: --no-http-bridge (native mode) is not yet implemented; ' +
           'falling back to http-bridge.',
