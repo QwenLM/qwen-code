@@ -32,4 +32,8 @@ describe('isInternalPromptId', () => {
     expect(isInternalPromptId('btw-prompt-id')).toBe(false);
     expect(isInternalPromptId('context-prompt-id')).toBe(false);
   });
+
+  it('returns false for undefined', () => {
+    expect(isInternalPromptId(undefined)).toBe(false);
+  });
 });

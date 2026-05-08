@@ -28,7 +28,8 @@ const SIDE_QUERY_PROMPT_PREFIX = 'side-query:';
  * whose events should not be recorded to the chatRecordingService,
  * OpenAI logs, or other persistent stores visible in the UI.
  */
-export function isInternalPromptId(promptId: string): boolean {
+export function isInternalPromptId(promptId: string | undefined): boolean {
+  if (!promptId) return false;
   return (
     INTERNAL_PROMPT_IDS.has(promptId) ||
     promptId.startsWith(SIDE_QUERY_PROMPT_PREFIX)
