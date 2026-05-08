@@ -373,12 +373,6 @@ jobs:
           set -euo pipefail
           TAG_NAME="sdk-python-${RELEASE_TAG}"
 
-          if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
-            PRERELEASE_FLAG="--prerelease"
-          else
-            PRERELEASE_FLAG=""
-          fi
-
           if gh release view "${TAG_NAME}" --json tagName >/dev/null 2>&1; then
             echo "::warning::GitHub release ${TAG_NAME} already exists; skipping create."
             exit 0
@@ -403,29 +397,35 @@ jobs:
             echo ""
           } > "${NOTES_FILE}"
 
+          GH_RELEASE_ARGS=()
           if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
-            PREVIOUS_NOTES=$(gh release view "sdk-python-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>&1) || {
-              ERR_MSG="${PREVIOUS_NOTES}"
-              case "${ERR_MSG}" in
-                *"release not found"*|*"Not Found"*|*"HTTP 404"*)
-                  PREVIOUS_NOTES='See commit history for changes.'
-                  ;;
-                *)
-                  echo "::warning::Failed to fetch previous release notes: ${ERR_MSG}"
-                  PREVIOUS_NOTES='See commit history for changes.'
-                  ;;
-              esac
-            }
-            printf '%s\n' "${PREVIOUS_NOTES}" >> "${NOTES_FILE}"
+            PREVIOUS_TAG_NAME="sdk-python-${PREVIOUS_RELEASE_TAG}"
+            # Verify the previous tag exists in Git before using --notes-start-tag.
+            # If a prior release published to PyPI but failed to create a GitHub
+            # release/tag, the tag won't exist — fall back to static notes to
+            # avoid failing gh release create after PyPI publish.
+            if git rev-parse "${PREVIOUS_TAG_NAME}" >/dev/null 2>&1; then
+              GH_RELEASE_ARGS+=(--generate-notes --notes-start-tag "${PREVIOUS_TAG_NAME}")
+            else
+              echo "::warning::Previous tag ${PREVIOUS_TAG_NAME} not found; skipping --generate-notes."
+              echo "See commit history for changes." >> "${NOTES_FILE}"
+            fi
           else
+            # PREVIOUS_RELEASE_TAG is empty for preview/nightly (not computed)
+            # and for the very first stable release (no prior stable on PyPI).
+            # Skip --generate-notes to avoid including non-SDK commits.
             echo "See commit history for changes." >> "${NOTES_FILE}"
+          fi
+
+          if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
+            GH_RELEASE_ARGS+=(--prerelease)
           fi
 
           gh release create "${TAG_NAME}" \
             --target "${RELEASE_TARGET_SHA}" \
             --title "SDK Python Release ${RELEASE_TAG}" \
             --notes-file "${NOTES_FILE}" \
-            ${PRERELEASE_FLAG}
+            "${GH_RELEASE_ARGS[@]}"
 
           rm -f "${NOTES_FILE}"
 
