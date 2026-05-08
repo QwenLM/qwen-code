@@ -95,19 +95,26 @@ export class WorkspaceContext {
    * @param basePath Optional base path for resolving relative paths (defaults to cwd)
    */
   addDirectory(directory: string, basePath: string = process.cwd()): void {
+    // Compute the non-canonical absolute path up front so we can use it for
+    // both storing (on failure) and cleaning up (on success). The canonical
+    // path (via realpathSync) may differ when symlinks are involved.
+    const absolutePath = path.isAbsolute(directory)
+      ? directory
+      : path.resolve(basePath, directory);
+
     try {
       const resolved = this.resolveAndValidateDir(directory, basePath);
       if (this.directories.has(resolved)) {
         return;
       }
       this.directories.add(resolved);
+      // Clean up both the canonical and non-canonical variants — the
+      // skipped entry may have been stored under either form.
       this.skippedDirectories.delete(resolved);
+      this.skippedDirectories.delete(absolutePath);
       this.notifyDirectoriesChanged();
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      const absolutePath = path.isAbsolute(directory)
-        ? directory
-        : path.resolve(basePath, directory);
       this.skippedDirectories.set(absolutePath, reason);
     }
   }

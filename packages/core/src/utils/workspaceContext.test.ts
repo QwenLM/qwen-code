@@ -597,4 +597,24 @@ describe('WorkspaceContext getSkippedDirectories', () => {
     expect(reason).toBeDefined();
     expect(reason).toContain('Directory does not exist');
   });
+
+  it('should clear skipped entry when addDirectory succeeds after initial failure', () => {
+    const nonExistent = path.join(tempDir, 'non-existent');
+    const ctx = new WorkspaceContext(cwd, [nonExistent]);
+    expect(ctx.getSkippedDirectories()).toContain(nonExistent);
+
+    fs.mkdirSync(nonExistent, { recursive: true });
+    ctx.addDirectory(nonExistent);
+    expect(ctx.getSkippedDirectories()).not.toContain(nonExistent);
+    expect(ctx.getDirectories()).toContain(nonExistent);
+  });
+
+  it('should store skipped directories with absolute paths consistent with directories', () => {
+    const nonExistent = path.join(tempDir, 'non-existent');
+    const ctx = new WorkspaceContext(cwd, [nonExistent]);
+    const skipped = ctx.getSkippedDirectories();
+    for (const skippedPath of skipped) {
+      expect(path.isAbsolute(skippedPath)).toBe(true);
+    }
+  });
 });
