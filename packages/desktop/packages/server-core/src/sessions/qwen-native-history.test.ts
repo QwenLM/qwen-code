@@ -6,7 +6,7 @@ import type { AgentBackend } from '@craft-agent/shared/agent/backend'
 import type { Workspace } from '@craft-agent/shared/config'
 import { loadSession, saveSession } from '@craft-agent/shared/sessions'
 import { saveWorkspaceConfig } from '@craft-agent/shared/workspaces'
-import type { Message } from '@craft-agent/core/types'
+import type { AgentEvent, Message } from '@craft-agent/core/types'
 import { createManagedSession, SessionManager, setSessionPlatform } from './SessionManager.ts'
 
 const logger = {
@@ -28,6 +28,14 @@ setSessionPlatform({
   logger,
   isDebugMode: false,
 })
+
+async function waitUntil(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 20; i += 1) {
+    if (condition()) return
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+  }
+  expect(condition()).toBe(true)
+}
 
 describe('Qwen native history loading', () => {
   const tempRoots: string[] = []
@@ -793,6 +801,115 @@ describe('Qwen native history loading', () => {
       availableSkills: ['commit'],
     })
     expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(0)
+  })
+
+  it('does not reload Qwen native history between repeated edits of the latest user message', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-qwen-edit-'))
+    tempRoots.push(workspaceRoot)
+
+    const sessionId = '1d537f0f-330f-48fc-bfbb-2b9e4c3b5e00'
+    const timestamp = Date.parse('2026-05-09T09:00:00.000Z')
+    await saveSession({
+      id: sessionId,
+      workspaceRootPath: workspaceRoot,
+      sdkSessionId: sessionId,
+      sdkCwd: workspaceRoot,
+      workingDirectory: workspaceRoot,
+      name: 'editable qwen session',
+      createdAt: timestamp,
+      lastUsedAt: timestamp,
+      lastMessageAt: timestamp,
+      permissionMode: 'ask',
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      messages: [],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    })
+
+    const nativeMessages: Message[] = [
+      { id: `qwen-${sessionId}-1`, role: 'user', content: 'first prompt', timestamp },
+      { id: `qwen-${sessionId}-2`, role: 'assistant', content: 'first answer', timestamp: timestamp + 1 },
+      { id: `qwen-${sessionId}-7`, role: 'user', content: 'second prompt', timestamp: timestamp + 2 },
+    ]
+
+    let loadCalls = 0
+    const manager = new SessionManager({
+      createExternalSessionAgent: () => ({
+        loadSessionMessages: async () => {
+          loadCalls += 1
+          return nativeMessages
+        },
+        destroy: () => {},
+        dispose: () => {},
+      } as unknown as AgentBackend),
+    })
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    }
+    const managed = createManagedSession({
+      id: sessionId,
+      sdkSessionId: sessionId,
+      sdkCwd: workspaceRoot,
+      workingDirectory: workspaceRoot,
+      name: 'editable qwen session',
+      createdAt: timestamp,
+      lastUsedAt: timestamp,
+      lastMessageAt: timestamp,
+      messageCount: 0,
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+    }, workspace)
+
+    let rewindCalls = 0
+    let chatCalls = 0
+    const activeAgent = {
+      rewindToUserTurn: async (targetTurnIndex: number) => {
+        rewindCalls += 1
+        expect(targetTurnIndex).toBe(1)
+      },
+      async *chat(): AsyncGenerator<AgentEvent> {
+        chatCalls += 1
+        yield { type: 'complete' } as AgentEvent
+      },
+      getModel: () => 'qwen3-coder-flash',
+      setAllSources: () => {},
+      getSessionId: () => sessionId,
+      destroy: () => {},
+      dispose: () => {},
+    } as unknown as AgentBackend
+
+    const managerInternals = manager as unknown as {
+      sessions: Map<string, typeof managed>
+      getOrCreateAgent: (session: typeof managed) => Promise<AgentBackend>
+    }
+    managerInternals.sessions.set(sessionId, managed)
+    managerInternals.getOrCreateAgent = async (session) => {
+      session.agent = activeAgent
+      return activeAgent
+    }
+
+    await manager.updateMessageContent(sessionId, `qwen-${sessionId}-7`, 'second prompt edited once')
+    await waitUntil(() => chatCalls === 1 && !managed.isProcessing)
+    const firstEditedTimestamp = managed.messages.findLast(message => message.role === 'user')?.timestamp
+    expect(firstEditedTimestamp).toBeGreaterThan(timestamp + 2)
+
+    await manager.updateMessageContent(sessionId, `qwen-${sessionId}-7`, 'second prompt edited twice')
+    await waitUntil(() => chatCalls === 2 && !managed.isProcessing)
+    const secondEditedTimestamp = managed.messages.findLast(message => message.role === 'user')?.timestamp
+
+    expect(loadCalls).toBe(1)
+    expect(rewindCalls).toBe(2)
+    expect(secondEditedTimestamp).toBeGreaterThan(firstEditedTimestamp ?? 0)
+    expect(managed.messages.map(message => [message.role, message.content])).toEqual([
+      ['user', 'first prompt'],
+      ['assistant', 'first answer'],
+      ['user', 'second prompt edited twice'],
+    ])
   })
 
   it('uses the built-in Qwen Code connection for provider-native sessions missing llmConnection', async () => {

@@ -39,6 +39,7 @@ import type {
   AvailableCommandsSnapshot,
   BackendSessionListOptions,
   BackendSessionListResult,
+  BackendRewindResult,
   ChatOptions,
   PermissionRequestType,
   SdkMcpServerConfig,
@@ -968,6 +969,47 @@ export class QwenAgent extends BaseAgent {
       30_000,
     ));
     return result.success !== false;
+  }
+
+  async rewindToUserTurn(targetTurnIndex: number): Promise<BackendRewindResult> {
+    if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
+      throw new Error('targetTurnIndex must be a non-negative integer');
+    }
+
+    await this.ensureProcess();
+    await this.ensureQwenSession();
+
+    const sessionId = this.qwenSessionId;
+    if (!sessionId) throw new Error('Qwen ACP session was not created');
+
+    const result = toRecord(await this.callAcp(
+      'ext/rewindSession',
+      (connection) => connection.extMethod('rewindSession', {
+        sessionId,
+        targetTurnIndex,
+        cwd: this.resolvedCwd(),
+      }),
+      30_000,
+    ));
+
+    if (result.success !== true) {
+      throw new Error('Qwen ACP rewindSession did not report success');
+    }
+
+    const resultTargetTurnIndex = Number.isInteger(result.targetTurnIndex)
+      ? result.targetTurnIndex as number
+      : undefined;
+    const resultApiTruncateIndex = Number.isInteger(result.apiTruncateIndex)
+      ? result.apiTruncateIndex as number
+      : undefined;
+
+    return {
+      historyBeforeRewind: Array.isArray(result.historyBeforeRewind)
+        ? result.historyBeforeRewind
+        : undefined,
+      targetTurnIndex: resultTargetTurnIndex,
+      apiTruncateIndex: resultApiTruncateIndex,
+    };
   }
 
   async renameBackendSession(sessionId: string, title: string, options: { cwd?: string } = {}): Promise<boolean> {

@@ -226,7 +226,7 @@ export type SessionEvent =
   | { type: 'source_activated'; sessionId: string; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; sessionId: string; tokenUsage: { inputTokens: number; contextWindow?: number } }
   | { type: 'available_commands_update'; sessionId: string; availableCommands: AvailableSlashCommand[]; availableSkills?: string[] }
-  | { type: 'message_content_updated'; sessionId: string; message: Message }
+  | { type: 'message_content_updated'; sessionId: string; message: Message; truncateAfterMessageId?: string }
   | { type: 'message_annotations_updated'; sessionId: string; messageId: string; annotations: AnnotationV1[] }
   | { type: 'working_directory_error'; sessionId: string; error: string }
 

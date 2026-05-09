@@ -402,6 +402,7 @@ export interface MessageContentUpdatedEvent {
   type: 'message_content_updated'
   sessionId: string
   message: Message
+  truncateAfterMessageId?: string
 }
 
 /**

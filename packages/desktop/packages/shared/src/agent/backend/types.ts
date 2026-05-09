@@ -119,6 +119,12 @@ export interface BackendSessionMessagesResult extends Partial<AvailableCommandsS
   messages: Message[];
 }
 
+export interface BackendRewindResult {
+  historyBeforeRewind?: unknown[];
+  targetTurnIndex?: number;
+  apiTruncateIndex?: number;
+}
+
 /**
  * Context for applying bridge/config updates mid-session.
  * Used when sources change, tokens refresh, or auth completes.
@@ -443,6 +449,9 @@ export interface AgentBackend {
 
   /** Refresh provider-advertised slash commands when supported. */
   refreshAvailableCommands?(): Promise<AvailableCommandsSnapshot | null>;
+
+  /** Rewind provider-native history to before a zero-based user turn. */
+  rewindToUserTurn?(targetTurnIndex: number): Promise<BackendRewindResult>;
 
   /**
    * Clean up resources (MCP connections, watchers, etc.)

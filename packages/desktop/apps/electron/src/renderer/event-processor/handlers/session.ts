@@ -706,12 +706,18 @@ export function handleMessageContentUpdated(
   event: MessageContentUpdatedEvent,
 ): ProcessResult {
   const { session, streaming } = state;
+  const truncateIndex = event.truncateAfterMessageId
+    ? session.messages.findIndex((m) => m.id === event.truncateAfterMessageId)
+    : -1;
+  const messages = truncateIndex >= 0
+    ? session.messages.slice(0, truncateIndex + 1)
+    : session.messages;
 
   return {
     state: {
       session: {
         ...session,
-        messages: session.messages.map((m) =>
+        messages: messages.map((m) =>
           m.id === event.message.id
             ? {
                 ...event.message,
@@ -720,6 +726,10 @@ export function handleMessageContentUpdated(
               }
             : m,
         ),
+        lastMessageAt: event.message.timestamp ?? Date.now(),
+        lastMessageRole: 'user',
+        isProcessing: true,
+        currentStatus: undefined,
       },
       streaming,
     },

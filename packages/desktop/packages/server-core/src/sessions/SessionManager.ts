@@ -588,6 +588,18 @@ async function resolveToolDisplayMeta(
 /** Agent type - unified backend interface for all providers */
 type AgentInstance = AgentBackend
 
+type RewindableAgent = AgentBackend & {
+  rewindToUserTurn(targetTurnIndex: number): Promise<unknown>
+}
+
+function canRewindToUserTurn(agent: AgentBackend): agent is RewindableAgent {
+  return typeof agent.rewindToUserTurn === 'function'
+}
+
+function isQwenNativeHistoryMessageId(messageId: string, sdkSessionId?: string): boolean {
+  return !!sdkSessionId && messageId.startsWith(`qwen-${sdkSessionId}-`)
+}
+
 interface ManagedSession {
   id: string
   workspace: Workspace
@@ -2699,6 +2711,31 @@ export class SessionManager implements ISessionManager {
       managed.lastMessageAt ?? 0,
       managed.lastUsedAt ?? 0,
     )
+  }
+
+  private findMessageForContentUpdate(
+    managed: ManagedSession,
+    messageId: string,
+  ): { message: Message; index: number } | undefined {
+    const exactIndex = managed.messages.findIndex(m => m.id === messageId)
+    if (exactIndex >= 0) {
+      return { message: managed.messages[exactIndex], index: exactIndex }
+    }
+
+    if (
+      this.isQwenCanonicalMessageSession(managed) &&
+      isQwenNativeHistoryMessageId(messageId, managed.sdkSessionId)
+    ) {
+      const latestUserIndex = managed.messages.findLastIndex(m => m.role === 'user')
+      if (latestUserIndex >= 0) {
+        sessionLog.info(
+          `Mapped stale Qwen history message id ${messageId} to latest user message ${managed.messages[latestUserIndex].id} in session ${managed.id}`,
+        )
+        return { message: managed.messages[latestUserIndex], index: latestUserIndex }
+      }
+    }
+
+    return undefined
   }
 
   private async loadExternalSessionMessages(managed: ManagedSession): Promise<ExternalMessageLoadResult> {
@@ -5301,7 +5338,7 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
-   * Update the latest user message content and notify renderers.
+   * Edit the latest user message, rewind provider history, and rerun the turn.
    */
   async updateMessageContent(sessionId: string, messageId: string, content: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
@@ -5312,11 +5349,17 @@ export class SessionManager implements ISessionManager {
 
     await this.ensureMessagesLoaded(managed)
 
-    const message = managed.messages.find(m => m.id === messageId)
-    if (!message) {
+    if (managed.isProcessing) {
+      sessionLog.warn(`Cannot update message: session ${sessionId} is processing`)
+      throw new Error('Cannot edit a message while the session is processing')
+    }
+
+    const resolvedMessage = this.findMessageForContentUpdate(managed, messageId)
+    if (!resolvedMessage) {
       sessionLog.warn(`Cannot update message: message ${messageId} not found in session ${sessionId}`)
       throw new Error(`Message ${messageId} not found`)
     }
+    const { message, index: messageIndex } = resolvedMessage
 
     if (message.role !== 'user') {
       sessionLog.warn(`Cannot update message: message ${messageId} is not a user message`)
@@ -5324,7 +5367,7 @@ export class SessionManager implements ISessionManager {
     }
 
     const lastUserMessage = managed.messages.findLast(m => m.role === 'user')
-    if (lastUserMessage?.id !== messageId) {
+    if (lastUserMessage !== message) {
       sessionLog.warn(`Cannot update message: message ${messageId} is not the latest user message`)
       throw new Error('Only the latest sent message can be edited')
     }
@@ -5334,14 +5377,88 @@ export class SessionManager implements ISessionManager {
       throw new Error('Message content cannot be empty')
     }
 
+    const agent = await this.getOrCreateAgent(managed)
+    if (!canRewindToUserTurn(agent)) {
+      throw new Error('This session backend does not support editing sent messages')
+    }
+
+    const targetTurnIndex = managed.messages
+      .slice(0, messageIndex)
+      .filter(m => m.role === 'user')
+      .length
+
+    await agent.rewindToUserTurn(targetTurnIndex)
+
+    const rerunTimestamp = this.monotonic()
     message.content = nextContent
+    message.timestamp = rerunTimestamp
     if (message.textElements && message.textElements.length > 0) {
       delete message.textElements
     }
 
+    const storedAttachments = message.attachments
+    const attachments = this.rehydrateStoredAttachments(storedAttachments)
+    const truncatedCount = managed.messages.length - messageIndex - 1
+    managed.messages = managed.messages.slice(0, messageIndex + 1)
+    managed.lastMessageRole = 'user'
+    managed.lastFinalMessageId = this.getLastFinalAssistantMessageId(managed.messages)
+    managed.lastMessageAt = rerunTimestamp
+    if (this.isQwenCanonicalMessageSession(managed)) {
+      this.markExternalMessagesLoadedThrough(managed)
+    }
+
     this.persistSession(managed)
-    this.sendEvent({ type: 'message_content_updated', sessionId, message }, managed.workspace.id)
-    sessionLog.info(`Updated message ${messageId} content in session ${sessionId}`)
+    this.sendEvent({
+      type: 'message_content_updated',
+      sessionId,
+      message,
+      truncateAfterMessageId: message.id,
+    }, managed.workspace.id)
+
+    this.sendMessage(
+      sessionId,
+      nextContent,
+      attachments,
+      storedAttachments,
+      undefined,
+      message.id,
+    ).catch(error => {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      sessionLog.warn(`Failed to rerun edited message ${messageId} in session ${sessionId}: ${errorMessage}`)
+      this.sendEvent({ type: 'error', sessionId, error: errorMessage, timestamp: this.monotonic() }, managed.workspace.id)
+      if (managed.isProcessing) {
+        this.setProcessing(managed, false)
+        this.persistSession(managed)
+      }
+    })
+
+    sessionLog.info(`Updated message ${messageId} content in session ${sessionId}; truncated ${truncatedCount} stale messages and reran`)
+  }
+
+  private rehydrateStoredAttachments(storedAttachments?: StoredAttachment[]): FileAttachment[] | undefined {
+    if (!storedAttachments?.length) return undefined
+
+    const attachments: FileAttachment[] = []
+    for (const stored of storedAttachments) {
+      const attachment = readFileAttachment(stored.storedPath)
+      if (!attachment) {
+        sessionLog.warn(`Could not rehydrate stored attachment for edited message: ${stored.storedPath}`)
+        continue
+      }
+
+      attachment.type = stored.type
+      attachment.name = stored.name
+      attachment.mimeType = stored.mimeType
+      attachment.size = stored.size
+      attachment.storedPath = stored.storedPath
+      attachment.markdownPath = stored.markdownPath
+      if (stored.resizedBase64 && stored.mimeType.startsWith('image/')) {
+        attachment.base64 = stored.resizedBase64
+      }
+      attachments.push(attachment)
+    }
+
+    return attachments.length > 0 ? attachments : undefined
   }
 
   /**
@@ -6429,6 +6546,9 @@ export class SessionManager implements ISessionManager {
       managed.pendingExternalMetadata = undefined
       sessionLog.info(`Applying deferred external metadata for session ${sessionId} after processing stop`)
       this.applyExternalSessionMetadata(managed, pendingHeader)
+    }
+    if (this.isQwenCanonicalMessageSession(managed)) {
+      this.markExternalMessagesLoadedThrough(managed)
     }
 
     // 5. Check queue and process or complete
