@@ -266,7 +266,10 @@ export function extractLastJsonStringField(
  * maintain the head-or-tail invariant — by design we never trade
  * picker latency for completeness here.
  *
- * Worst-case I/O: 2 × LITE_READ_BUF_SIZE = 128KB per file, fixed.
+ * Normal worst-case I/O: 2 × LITE_READ_BUF_SIZE = 128KB per file.
+ * If a concurrent writer grows the file between the initial stat and a
+ * tail miss, we do one extra latest-tail read to catch a fresh EOF anchor
+ * while preserving a fixed retry bound.
  *
  * @param lineContains Optional substring that must appear on the same line
  *   as the matched field. See {@link extractLastJsonStringField}.
