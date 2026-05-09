@@ -312,6 +312,17 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
       case 'refreshTitle':
         log.info(`IPC: refreshTitle received for session ${sessionId}`)
         return sessionManager.refreshTitle(sessionId)
+      case 'getQwenPermissionSettings':
+        log.info(`IPC: getQwenPermissionSettings received for session ${sessionId}`)
+        return sessionManager.getSessionPermissionSettings(sessionId)
+      case 'setQwenPermissionRules':
+        log.info(`IPC: setQwenPermissionRules received for session ${sessionId}`)
+        return sessionManager.setSessionPermissionRules(
+          sessionId,
+          command.scope,
+          command.ruleType,
+          command.rules
+        )
       case 'refreshAvailableCommands':
         log.info(`IPC: refreshAvailableCommands received for session ${sessionId}`)
         return sessionManager.refreshAvailableCommands(sessionId, command)

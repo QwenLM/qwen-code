@@ -24,6 +24,9 @@ import type {
   UnreadSummary,
   ShareResult,
   RefreshAvailableCommandsOptions,
+  PermissionRuleType,
+  PermissionSettingsScope,
+  QwenPermissionSettings,
 } from '@craft-agent/shared/protocol'
 import type { SessionBundle, DispatchMode } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
@@ -115,6 +118,13 @@ export interface ISessionManager {
   ): boolean
   respondToCredential(sessionId: string, requestId: string, response: CredentialResponse): Promise<boolean>
   getSessionPermissionModeState(sessionId: string): PermissionModeState | null
+  getSessionPermissionSettings(sessionId: string): Promise<QwenPermissionSettings>
+  setSessionPermissionRules(
+    sessionId: string,
+    scope: PermissionSettingsScope,
+    ruleType: PermissionRuleType,
+    rules: string[],
+  ): Promise<QwenPermissionSettings>
 
   // ---------------------------------------------------------------------------
   // Plans

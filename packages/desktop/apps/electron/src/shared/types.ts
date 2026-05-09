@@ -232,7 +232,7 @@ export interface ElectronAPI {
   respondToCredential(sessionId: string, requestId: string, response: CredentialResponse): Promise<boolean>
 
   // Consolidated session command handler
-  sessionCommand(sessionId: string, command: SessionCommand): Promise<void | ShareResult | RefreshTitleResult | { count: number } | { success: boolean; availableCommands?: AvailableSlashCommand[]; availableSkills?: string[]; availableSkillDetails?: import('@craft-agent/core/types').AvailableSkillDetail[]; error?: string }>
+  sessionCommand(sessionId: string, command: SessionCommand): Promise<void | ShareResult | RefreshTitleResult | import('@craft-agent/shared/protocol').QwenPermissionSettings | { count: number } | { success: boolean; availableCommands?: AvailableSlashCommand[]; availableSkills?: string[]; availableSkillDetails?: import('@craft-agent/core/types').AvailableSkillDetail[]; error?: string }>
 
   // Server info (REMOTE_ELIGIBLE — returns data from whichever server owns the workspace)
   getServerHomeDir(): Promise<string>
