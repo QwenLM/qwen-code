@@ -58,12 +58,13 @@ export interface FileReadEntry {
   /**
    * True iff the most recent Read produced the whole file's current
    * content: no offset / limit / pages on the request AND the content
-   * was not truncated by the truncate-tool-output limit. Used both by
-   * the Read fast-path (to decide whether a follow-up "no-args" Read
-   * can return a `file_unchanged` placeholder) and by WriteFile's
-   * prior-read enforcement (to require "saw all bytes" before an
-   * overwrite). A truncated full read records `false` here because
-   * the model only saw the head of the file.
+   * was not truncated by the truncate-tool-output limit. Used by the
+   * Read fast-path (to decide whether a follow-up "no-args" Read can
+   * return a `file_unchanged` placeholder) — `priorReadEnforcement`
+   * does not consult this flag, since "fully read" cannot be made
+   * a precondition without deadlocking on files larger than the
+   * truncation limit (issue #3945). A truncated full read records
+   * `false` here because the model only saw the head of the file.
    */
   lastReadWasFull: boolean;
   /**

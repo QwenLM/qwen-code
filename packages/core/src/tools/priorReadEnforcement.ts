@@ -82,22 +82,9 @@ export type PriorReadVerb = 'editing' | 'overwriting';
  *    drift, not a "the file genuinely never existed" disappearance
  *    race. The default (`expectExisting: false`) is the pre-read
  *    behaviour: ENOENT means "go ahead and create".
- *  - `requireFullRead`: when true, a partial read (offset / limit /
- *    pages) of an existing file does NOT satisfy enforcement — only
- *    a full read does. EditTool can rely on its `old_string` matching
- *    as a content-derived guard against editing bytes the model never
- *    saw, so a partial read is acceptable there. WriteFileTool's
- *    overwrite path replaces the entire file and has no equivalent
- *    guard: a model that has only seen a slice would necessarily
- *    hallucinate the rest of the bytes it overwrites (the data-loss
- *    scenario in issue #2499). Pass `true` from WriteFileTool's
- *    enforcement call sites; leave unset / `false` for EditTool.
- *    The flag has no effect when the file does not yet exist
- *    (ENOENT → `ok: true` for new-file creation regardless).
  */
 export interface CheckPriorReadOptions {
   expectExisting?: boolean;
-  requireFullRead?: boolean;
 }
 
 /**
@@ -113,25 +100,18 @@ export interface CheckPriorReadOptions {
  * `lastReadCacheable` is purely about content type, not completeness.
  * A truncated or partial text read still records `lastReadCacheable:
  * true` because the bytes the model saw were text. Whether the model
- * has seen *every* byte is tracked separately on `lastReadWasFull`,
- * which `requireFullRead` consumes below. Decoupling those two
- * concerns is what fixed the issue #3964 regression where partial
- * reads of regular `.kt` / `.cpp` / `.py` files caused the next Edit
- * to be rejected with the misleading "binary / image / audio /
- * video / PDF / notebook payload" error.
- *
- * Partial vs full read policy depends on `options.requireFullRead`:
- *  - default (`requireFullRead !== true`, i.e. EditTool): a partial
- *    read (offset / limit / pages) counts. The `0 occurrences`
- *    failure mode in `calculateEdit` already catches a fabricated
- *    `old_string` that misses the actual bytes, so requiring a full
- *    read on top of that is over-defence at a real context cost.
- *  - `requireFullRead: true` (WriteFileTool overwrite): partial reads
- *    do NOT count. Overwriting replaces the entire file with no
- *    content-derived guard, so the model must have seen all current
- *    bytes — issue #2499 (LLM hallucinates content of an unread
- *    file and clobbers user changes) is exactly the partial-read-
- *    then-WriteFile case.
+ * has seen *every* byte is recorded on `lastReadWasFull` for the
+ * Read fast-path; we do NOT consult it for enforcement, because the
+ * truncate-tool-output limit makes "fully read" an impossible
+ * precondition on files larger than the limit (issue #3945).
+ * Aligning with Claude Code's `readFileState`: any prior read clears
+ * enforcement for both Edit and WriteFile; the mtime/size drift
+ * check above is the only gate that distinguishes "the model has
+ * seen current bytes" from "the model has seen older bytes", and it
+ * fires identically for both tools. Issue #2499 (model hallucinates
+ * unread bytes on overwrite) is the residual risk this stance
+ * accepts, mitigated by the drift check; users who need stricter
+ * behaviour can set `fileReadCacheDisabled: true`.
  *
  * Stat policy: `ENOENT` means the path disappeared between the
  * caller's `fileExists` check and now — a disappearance race that is
@@ -246,8 +226,7 @@ export async function checkPriorRead(
   if (
     status.state === 'fresh' &&
     status.entry.lastReadAt !== undefined &&
-    status.entry.lastReadCacheable &&
-    (!options.requireFullRead || status.entry.lastReadWasFull)
+    status.entry.lastReadCacheable
   ) {
     return { ok: true };
   }
@@ -296,48 +275,16 @@ export async function checkPriorRead(
       displayMessage: `non-text payload; cannot ${verbBare} via this tool.`,
     };
   }
-  // fresh + cacheable + partial, but caller demands a full read
-  // (WriteFile overwrites). The model has seen *some* of this file's
-  // current bytes, but not all of them — and the operation is about
-  // to replace every byte. Without this branch a partial-read-then-
-  // WriteFile would silently destroy content the model never saw,
-  // re-introducing the issue #2499 data-loss scenario.
-  if (
-    status.state === 'fresh' &&
-    status.entry.lastReadAt !== undefined &&
-    status.entry.lastReadCacheable &&
-    options.requireFullRead &&
-    !status.entry.lastReadWasFull
-  ) {
-    const raw =
-      `File ${filePath} has only been partially read in this session ` +
-      `(prior read used offset / limit / pages). ${verb === 'overwriting' ? 'Overwriting' : 'This operation'} ` +
-      `replaces the entire file, so the model must have seen all current ` +
-      `bytes first — not just the slice it has read. Re-read with the ` +
-      `${ToolNames.READ_FILE} tool without offset / limit / pages, then ` +
-      `retry ${verb} it.`;
-    return {
-      ok: false,
-      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
-      rawMessage: raw,
-      displayMessage: `partial read; full ${ToolNames.READ_FILE} required before ${verb} this file.`,
-    };
-  }
   // unknown: the model has never read this file in this session.
   const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
   const verbDisplay =
     verb === 'editing' ? 'editing this file' : 'overwriting this file';
-  const raw = options.requireFullRead
-    ? `File ${filePath} has not been read in this session. ` +
-      `${verb === 'overwriting' ? 'Overwriting' : 'This operation'} replaces ` +
-      `the entire file, so the model must have seen all current bytes ` +
-      `first. Use the ${ToolNames.READ_FILE} tool without offset / limit ` +
-      `/ pages to load the full content before ${verb} it.`
-    : `File ${filePath} has not been read in this session. ` +
-      `Use the ${ToolNames.READ_FILE} tool first to load the current ` +
-      `content (a partial read with offset / limit is fine — you only ` +
-      `need to have seen the bytes you intend to ${verbBare}) before ` +
-      `${verb} it.`;
+  const raw =
+    `File ${filePath} has not been read in this session. ` +
+    `Use the ${ToolNames.READ_FILE} tool first to load the current ` +
+    `content (a partial read with offset / limit is fine — you only ` +
+    `need to have seen the bytes you intend to ${verbBare}) before ` +
+    `${verb} it.`;
   return {
     ok: false,
     type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
