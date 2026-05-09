@@ -15,7 +15,8 @@ import {
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Storage } from '../config/storage.js';
-import { trace, type Span } from '@opentelemetry/api';
+import { trace, type Context, type Span } from '@opentelemetry/api';
+import { setSessionContext } from '../telemetry/session-context.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -35,6 +36,7 @@ vi.mock('node:fs', async (importOriginal) => {
 vi.mock('@opentelemetry/api', () => ({
   trace: {
     getActiveSpan: vi.fn().mockReturnValue(undefined),
+    getSpan: vi.fn().mockReturnValue(undefined),
   },
 }));
 
@@ -58,13 +60,16 @@ describe('debugLogger', () => {
     vi.setSystemTime(new Date('2026-01-24T10:30:00.000Z'));
     resetDebugLoggingState();
     setDebugLogSession(mockSession);
+    setSessionContext(undefined);
     // Default: no active OTel span
     vi.mocked(trace.getActiveSpan).mockReturnValue(undefined);
+    vi.mocked(trace.getSpan).mockReturnValue(undefined);
   });
 
   afterEach(() => {
     vi.useRealTimers();
     setDebugLogSession(null);
+    setSessionContext(undefined);
     Storage.setRuntimeBaseDir(null);
     if (previousDebugLogFileEnv === undefined) {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
@@ -210,6 +215,35 @@ describe('debugLogger', () => {
       const spanId1 = extractSpanId(calls[1]?.[1]);
       expect(spanId0).toBeDefined();
       expect(spanId0).toBe(spanId1);
+    });
+
+    it('uses the session root span context for fallback trace context', async () => {
+      const sessionRootContext = { root: true } as unknown as Context;
+      setSessionContext(sessionRootContext);
+      vi.mocked(trace.getSpan).mockImplementation((ctx) =>
+        ctx === sessionRootContext
+          ? ({
+              spanContext: () => ({
+                traceId: 'cccccccccccccccccccccccccccccccc',
+                spanId: 'dddddddddddddddd',
+                traceFlags: 1,
+              }),
+            } as unknown as Span)
+          : undefined,
+      );
+
+      const logger = createDebugLogger();
+      logger.debug('session root fallback');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining(
+          '[trace_id=cccccccccccccccccccccccccccccccc span_id=dddddddddddddddd]',
+        ),
+        'utf8',
+      );
     });
 
     it('creates a new debug directory after the runtime base dir changes', async () => {

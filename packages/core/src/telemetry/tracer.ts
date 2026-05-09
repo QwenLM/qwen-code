@@ -21,6 +21,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const tracer = trace.getTracer(SERVICE_NAME);
 const debugLogger = createDebugLogger('OTEL_TRACER');
 const TELEMETRY_WARNING_INTERVAL_MS = 30_000;
+const OPERATION_FAILED_SPAN_STATUS_MESSAGE = 'Operation failed';
 let lastTelemetryWarningMs: number | undefined;
 let suppressedTelemetryWarnings = 0;
 
@@ -112,7 +113,9 @@ function wrapSpanWithStatusTracking(span: Span): {
  *
  * If the callback sets a status explicitly (e.g. ERROR on a handled failure),
  * withSpan will not overwrite it. Only when no status has been set and the
- * callback resolves without throwing will the span be marked OK.
+ * callback resolves without throwing will the span be marked OK. If the
+ * callback throws before setting status, the span is marked ERROR with a
+ * generic message so raw exception text is not exported to OTel backends.
  */
 export async function withSpan<T>(
   name: string,
@@ -136,7 +139,7 @@ export async function withSpan<T>(
         if (!wasStatusSet()) {
           safeSetStatus(span, {
             code: SpanStatusCode.ERROR,
-            message: error instanceof Error ? error.message : String(error),
+            message: OPERATION_FAILED_SPAN_STATUS_MESSAGE,
           });
         }
         throw error;

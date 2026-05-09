@@ -194,8 +194,9 @@ describe('withSpan', () => {
 
     expect(spans).toHaveLength(1);
     expect(spans[0].statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'something failed' },
+      { code: SpanStatusCode.ERROR, message: 'Operation failed' },
     ]);
+    expect(JSON.stringify(spans[0].statuses)).not.toContain('something failed');
     expect(spans[0].ended).toBe(true);
   });
 
@@ -262,7 +263,7 @@ describe('withSpan', () => {
     ).rejects.toThrow('original failure');
 
     expect(spans[0].statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'original failure' },
+      { code: SpanStatusCode.ERROR, message: 'Operation failed' },
     ]);
     expect(spans[0].ended).toBe(false);
   });

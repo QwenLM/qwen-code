@@ -12,6 +12,7 @@ import { trace } from '@opentelemetry/api';
 import { Storage } from '../config/storage.js';
 import { updateSymlink } from './symlink.js';
 import { deriveTraceId, randomSpanId } from '../telemetry/trace-id-utils.js';
+import { getSessionContext } from '../telemetry/session-context.js';
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -96,11 +97,29 @@ function getActiveSpanTraceContext(): TraceContext | null {
   }
 }
 
+function getSessionRootTraceContext(): TraceContext | null {
+  try {
+    const sessionContext = getSessionContext();
+    const sessionSpan = sessionContext ? trace.getSpan(sessionContext) : null;
+    const ctx = sessionSpan?.spanContext();
+    if (ctx && ctx.traceId !== ZERO_TRACE_ID) {
+      return { traceId: ctx.traceId, spanId: ctx.spanId };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function getSessionTraceContext(
   session: DebugLogSession | null,
 ): TraceContext | null {
   if (!session) {
     return null;
+  }
+  const sessionRootCtx = getSessionRootTraceContext();
+  if (sessionRootCtx) {
+    return sessionRootCtx;
   }
   try {
     const sessionId = session.getSessionId();

@@ -1065,6 +1065,7 @@ describe('LoggingContentGenerator', () => {
     }
 
     const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
     expect(spanRecord.ended).toBe(true);
   });
 

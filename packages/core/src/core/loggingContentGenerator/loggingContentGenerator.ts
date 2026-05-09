@@ -411,6 +411,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstResponseId = '';
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
+    let terminalStatusAttempted = false;
 
     // Helper to run code within the span context during iteration.
     // This ensures debug log lines emitted during stream processing
@@ -455,6 +456,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         );
       }
       try {
+        terminalStatusAttempted = true;
         span?.setStatus({ code: SpanStatusCode.OK });
       } catch {
         // OTel errors must not mask successful stream consumption
@@ -476,6 +478,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         );
       }
       try {
+        terminalStatusAttempted = true;
         span?.setStatus({
           code: SpanStatusCode.ERROR,
           message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
@@ -485,6 +488,13 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     } finally {
+      if (!terminalStatusAttempted) {
+        try {
+          span?.setStatus({ code: SpanStatusCode.OK });
+        } catch {
+          // OTel errors must not mask stream cleanup
+        }
+      }
       try {
         span?.end();
       } catch {
