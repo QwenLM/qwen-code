@@ -23,7 +23,7 @@ vi.mock('os');
 vi.mock('crypto');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
-import { ShellTool } from './shell.js';
+import { ShellTool, type ShellToolInvocation } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { type Config } from '../config/config.js';
@@ -3076,6 +3076,399 @@ describe('ShellTool', () => {
         expect(observed).toMatch(
           /don'\\''t break me[\s\S]*Generated with Qwen Code/,
         );
+      });
+    });
+
+    describe('foreground → background promote (#3831 PR-2)', () => {
+      it("exposes a promote AbortController whose signal is wired into ShellExecutionService.execute's combined signal", async () => {
+        // Pin the operational guarantee: aborting the controller exposed
+        // via `setPromoteAbortControllerCallback` must actually reach
+        // `ShellExecutionService` — the bare "controller is an
+        // AbortController instance" assertion would still pass if
+        // `shell.ts` exposed the controller but forgot to include
+        // `promoteAbortController.signal` in `AbortSignal.any(...)`,
+        // silently breaking the future Ctrl+B keybind.
+        const setPromoteAc = vi.fn();
+        const invocation = shellTool.build({
+          command: 'npm run dev',
+          is_background: false,
+        });
+        // Cast to the concrete invocation type to access the extra
+        // ShellTool-specific execute() params (setPidCallback +
+        // setPromoteAbortControllerCallback) — the base ToolInvocation
+        // type only has the 3-param signature shared across all tools.
+        const promise = (invocation as ShellToolInvocation).execute(
+          mockAbortSignal,
+          undefined,
+          {},
+          undefined,
+          setPromoteAc,
+        );
+        resolveShellExecution({ pid: 12345 });
+        await promise;
+
+        expect(setPromoteAc).toHaveBeenCalledTimes(1);
+        const passedAc = setPromoteAc.mock.calls[0][0] as AbortController;
+        expect(passedAc).toBeInstanceOf(AbortController);
+
+        // Capture the AbortSignal handed to ShellExecutionService.execute
+        // (4th arg per the call signature) and verify firing the promote
+        // controller propagates through it.
+        const passedSignal = mockShellExecutionService.mock
+          .calls[0][3] as AbortSignal;
+        expect(passedSignal.aborted).toBe(false);
+        passedAc.abort({ kind: 'background', shellId: 'bg_unit_test' });
+        expect(passedSignal.aborted).toBe(true);
+      });
+
+      it('registers a bg_xxx entry on `result.promoted: true` and returns promote-flavored ToolResult', async () => {
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockReturnValue(undefined);
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        // Service signals promote: snapshot ready, child still alive.
+        resolveShellExecution({
+          output: 'partial output before promote',
+          exitCode: null,
+          signal: null,
+          aborted: false, // ← per #3831 design question 7
+          promoted: true,
+          pid: 99999,
+        });
+        const result = await promise;
+
+        // Entry registered with the spawn pid + promote AbortController.
+        expect(registry.register).toHaveBeenCalledTimes(1);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(entry.command).toBe('tail -f /tmp/never.log');
+        expect(entry.cwd).toBe('/test/dir');
+        expect(entry.status).toBe('running');
+        expect(entry.pid).toBe(99999);
+        expect(entry.shellId).toMatch(/^bg_/);
+        expect(entry.outputPath).toContain(entry.shellId);
+        expect(entry.abortController).toBeInstanceOf(AbortController);
+
+        // Snapshot written to disk.
+        expect(writeFileSyncSpy).toHaveBeenCalledWith(
+          entry.outputPath,
+          'partial output before promote',
+        );
+
+        // Model-facing copy points at /tasks / dialog / task_stop.
+        expect(result.llmContent).toContain(
+          `promoted to background as ${entry.shellId}`,
+        );
+        expect(result.llmContent).toContain(`PID: 99999`);
+        expect(result.llmContent).toContain('/tasks');
+        expect(result.llmContent).toContain(
+          `task_stop({ task_id: '${entry.shellId}'`,
+        );
+        expect(result.returnDisplay).toContain(
+          `Promoted to background: ${entry.shellId}`,
+        );
+        // No `error` on the result — promote is a success-shaped outcome
+        // per #3831 design question 7 / @tanzhenxin's PR-1 review.
+        expect(result.error).toBeUndefined();
+      });
+
+      it('aborting entry.abortController kills the child via SIGTERM/SIGKILL and marks the registry entry cancelled', async () => {
+        // Pin the core operational guarantee for promoted shells:
+        // `task_stop bg_xxx` (which goes through
+        // `registry.requestCancel` → `entry.abortController.abort()`)
+        // must actually stop the child + transition the entry to
+        // `'cancelled'`. The bare "fresh controller" check below
+        // doesn't exercise the full kill path.
+        vi.useFakeTimers();
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        try {
+          const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+          writeFileSyncSpy.mockReturnValue(undefined);
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 55555,
+          });
+          await promise;
+
+          const entry = (registry.register as Mock).mock.calls[0][0];
+          // Trigger the cancellation path the way `task_stop` does.
+          entry.abortController.abort();
+          // Sync part of cancelChild runs as a microtask after abort:
+          // SIGTERM is dispatched, then the listener awaits a 200ms
+          // timer before SIGKILL + registry.cancel. Flush microtasks +
+          // advance fake time past the SIGKILL window.
+          await Promise.resolve();
+          expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGTERM');
+          // Advance past PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS (200ms).
+          await vi.advanceTimersByTimeAsync(250);
+          expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGKILL');
+          // Registry entry transitions to 'cancelled' synchronously
+          // after SIGKILL — so /tasks reflects user intent without
+          // waiting for the (non-existent) settle path.
+          expect(registry.cancel).toHaveBeenCalledWith(
+            entry.shellId,
+            expect.any(Number),
+          );
+        } finally {
+          processKillSpy.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+
+      it("entry.abortController is a FRESH controller (not the already-aborted promote controller) so task_stop's abort() actually fires kill listeners", async () => {
+        // Real-bug regression: if `entry.abortController` were the
+        // same `promoteAbortController` that triggered the promote,
+        // it would already be in the `aborted: true` state by the time
+        // it landed in the registry. `task_stop bg_xxx` calls
+        // `entry.abortController.abort()` which is a no-op on an
+        // already-aborted controller, AND `ShellExecutionService` has
+        // detached its abort listener as part of the promote handoff,
+        // so the still-running child would survive task_stop forever.
+        // Pin: entry.abortController.signal.aborted === false at
+        // registration.
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockReturnValue(undefined);
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 77777,
+        });
+        await promise;
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(entry.abortController.signal.aborted).toBe(false);
+      });
+
+      it('survives a snapshot write failure — registry entry still registered', async () => {
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockImplementation(() => {
+          throw new Error('ENOSPC: no space left on device');
+        });
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: 'pre-promote',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 88888,
+        });
+        const result = await promise;
+
+        // The disk write failure is logged + swallowed: the entry is
+        // still valuable on its own; the file is the inspection
+        // surface, not the source of truth.
+        expect(registry.register).toHaveBeenCalledTimes(1);
+        expect(result.llmContent).toContain('promoted to background');
+      });
+
+      it('entry.command holds the post-co-author-rewrite form (commandToExecute), not raw params.command', async () => {
+        // #3894 review: previously `entry.command` used
+        // `this.params.command`, which diverges from what actually ran
+        // for `git commit -m` invocations that
+        // `addCoAuthorToGitCommit()` rewrote into a multi-line form
+        // with `-m "Co-Authored-By: …"`. Pin: registered entry MUST
+        // mirror the post-rewrite command so /tasks shows what the OS
+        // actually executed.
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockReturnValue(undefined);
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const rawCommand = 'git commit -m "feat: ship promote"';
+        const invocation = shellTool.build({
+          command: rawCommand,
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 33333,
+        });
+        const result = await promise;
+
+        // The actual command passed to ShellExecutionService.execute is
+        // the post-rewrite form — capture it from the service mock.
+        const commandPassedToService = mockShellExecutionService.mock
+          .calls[0][0] as string;
+        expect(commandPassedToService).not.toBe(rawCommand); // sanity: rewrite happened
+        expect(commandPassedToService).toContain('Co-authored-by');
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(entry.command).toBe(commandPassedToService);
+        expect(entry.command).not.toBe(rawCommand);
+
+        // llmContent also references the post-rewrite form so the
+        // model sees consistent state.
+        expect(result.llmContent).toContain(commandPassedToService);
+      });
+
+      it('rethrows + kills child when mkdirSync(outputDir) throws — no orphan zombie', async () => {
+        // @tanzhenxin's review on #3894: mkdirSync ran before any
+        // try/catch, so an unwritable output dir (read-only mount,
+        // sandbox perms, ENOSPC on metadata) rejected the handler
+        // BEFORE the registry's kill listener was wired — the still-
+        // running child became an orphan with no kill path until the
+        // OS reaped it on session end. Pin the regression: mkdir-throw
+        // is re-raised AND the child gets SIGTERM right away.
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        const mkdirSyncSpy = vi.mocked(fs.mkdirSync);
+        try {
+          mkdirSyncSpy.mockImplementation(() => {
+            throw new Error('EROFS: read-only file system');
+          });
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 22222,
+          });
+
+          await expect(promise).rejects.toThrow('EROFS');
+          // SIGTERM is sync after the throw — no fake timers needed.
+          expect(processKillSpy).toHaveBeenCalledWith(-22222, 'SIGTERM');
+        } finally {
+          mkdirSyncSpy.mockReturnValue(undefined);
+          processKillSpy.mockRestore();
+        }
+      });
+
+      it('promote-refused race (aborted: true, promoted: false after promote signal) is reported as benign race, not "Command timed out"', async () => {
+        // @tanzhenxin's review on #3894: when PR-3's Ctrl+B keybind
+        // fires `promoteAbortController.abort` but the service's race
+        // guard refuses promotion (the child terminated a beat
+        // earlier), the result lands `aborted: true, promoted: false`.
+        // Without excluding the promote signal from the timeout
+        // discriminator, the foreground path falsely reports
+        // "Command timed out" for a process that finished naturally.
+        const setPromoteAc = vi.fn();
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = (invocation as ShellToolInvocation).execute(
+          mockAbortSignal,
+          undefined,
+          {},
+          undefined,
+          setPromoteAc,
+        );
+        // Capture the promote AC the foreground path exposes.
+        await Promise.resolve();
+        const promoteAc = setPromoteAc.mock.calls[0]?.[0] as
+          | AbortController
+          | undefined;
+        expect(promoteAc).toBeInstanceOf(AbortController);
+        // Fire promote AFTER the child supposedly terminated — the
+        // service refuses with `aborted: true, promoted: false`.
+        promoteAc!.abort({ kind: 'background', shellId: 'bg_late' });
+        resolveShellExecution({
+          output: 'oops too late\n',
+          exitCode: null,
+          signal: null,
+          aborted: true,
+          promoted: false,
+          pid: 33333,
+        });
+        const result = await promise;
+
+        // Must NOT say "timed out" — the child finished naturally.
+        expect(String(result.llmContent)).not.toContain('timed out');
+        // Should explain the benign race so the agent doesn't retry as
+        // a cancellation/timeout.
+        expect(String(result.llmContent)).toContain(
+          'Command finished before the background-promote',
+        );
+        // Captured output is preserved.
+        expect(String(result.llmContent)).toContain('oops too late');
+      });
+
+      it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
+        // #3894 review: today `BackgroundShellRegistry.register` is
+        // internally safe (Map.set + emit) but if a future
+        // implementation throws, the promoted child is already
+        // detached from the service's listeners and would become an
+        // orphan zombie with no kill path. Pin: register-throw is
+        // re-raised AND the child gets SIGTERM (best-effort kill via
+        // the entry's abort listener).
+        vi.useFakeTimers();
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        try {
+          const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+          writeFileSyncSpy.mockReturnValue(undefined);
+          const registry = mockConfig.getBackgroundShellRegistry();
+          (registry.register as Mock).mockImplementation(() => {
+            throw new Error('boom: registry borked');
+          });
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 44444,
+          });
+
+          // Re-thrown to caller (scheduler will surface as tool error).
+          await expect(promise).rejects.toThrow('boom: registry borked');
+
+          // The catch path fired entryAc.abort() → cancelChild → SIGTERM.
+          await Promise.resolve();
+          expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGTERM');
+          // SIGKILL fires after the 200ms timer; advance + assert.
+          await vi.advanceTimersByTimeAsync(250);
+          expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGKILL');
+        } finally {
+          processKillSpy.mockRestore();
+          vi.useRealTimers();
+        }
       });
     });
   });

@@ -69,6 +69,13 @@ export interface RunConfig {
   max_turns?: number;
 }
 
+export type AgentExternalInput =
+  | string
+  | {
+      kind: 'notification';
+      text: string;
+    };
+
 /**
  * Configures the tools available to an agent during its execution.
  */

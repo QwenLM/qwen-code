@@ -15,6 +15,7 @@ import {
   DeepSeekOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
+  MistralOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
@@ -29,6 +30,7 @@ export {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
+  MistralOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
 } from './provider/index.js';
 
@@ -93,6 +95,14 @@ export function determineProvider(
   // Check for MiniMax provider
   if (MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config)) {
     return new MiniMaxOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Check for Mistral provider
+  if (MistralOpenAICompatibleProvider.isMistralProvider(config)) {
+    return new MistralOpenAICompatibleProvider(
       contentGeneratorConfig,
       cliConfig,
     );

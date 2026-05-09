@@ -20,6 +20,7 @@ import type {
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { AuthUiState } from '../auth/useAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import type {
   IdeContext,
@@ -33,6 +34,7 @@ import type { ExtensionUpdateState } from '../state/extensions.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
+import { type HelpTab } from './UIActionsContext.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
@@ -60,7 +62,10 @@ export interface UIState {
   isResumeDialogOpen: boolean;
   resumeMatchedSessions: SessionListItem[] | undefined;
   isDeleteDialogOpen: boolean;
+  isHelpDialogOpen: boolean;
+  activeHelpTab: HelpTab;
   slashCommands: readonly SlashCommand[];
+  recentSlashCommands: RecentSlashCommands;
   pendingSlashCommandHistoryItems: HistoryItemWithoutId[];
   commandContext: CommandContext;
   shellConfirmationRequest: ShellConfirmationRequest | null;

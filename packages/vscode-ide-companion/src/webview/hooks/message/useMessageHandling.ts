@@ -10,6 +10,7 @@ export interface TextMessage {
   role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
+  turnIndex?: number;
   kind?: 'image';
   imagePath?: string;
   imageSrc?: string;

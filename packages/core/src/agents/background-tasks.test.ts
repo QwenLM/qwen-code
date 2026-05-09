@@ -849,6 +849,97 @@ describe('BackgroundTaskRegistry', () => {
     });
   });
 
+  describe('waitForMessages', () => {
+    it('resolves with queued input when a running agent is notified', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      const waitPromise = registry.waitForMessages(
+        'test-1',
+        new AbortController().signal,
+      );
+
+      registry.queueExternalInput('test-1', {
+        kind: 'notification',
+        text: '<task-notification>event</task-notification>',
+      });
+
+      await expect(waitPromise).resolves.toEqual([
+        {
+          kind: 'notification',
+          text: '<task-notification>event</task-notification>',
+        },
+      ]);
+      expect(registry.drainMessages('test-1')).toEqual([]);
+    });
+
+    it('resolves empty when the wait signal is aborted', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      const waitAbort = new AbortController();
+      const waitPromise = registry.waitForMessages('test-1', waitAbort.signal);
+
+      waitAbort.abort();
+
+      await expect(waitPromise).resolves.toEqual([]);
+    });
+
+    it('resolves empty if the signal aborts immediately after listener registration', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      let aborted = false;
+      const signal = {
+        get aborted() {
+          return aborted;
+        },
+        addEventListener: vi.fn(() => {
+          aborted = true;
+        }),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+
+      await expect(registry.waitForMessages('test-1', signal)).resolves.toEqual(
+        [],
+      );
+      expect(signal.removeEventListener).toHaveBeenCalled();
+    });
+
+    it('wakes external input waiters without queueing input', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      const waitPromise = registry.waitForMessages(
+        'test-1',
+        new AbortController().signal,
+      );
+
+      registry.wakeExternalInputWaiters('test-1');
+
+      await expect(waitPromise).resolves.toEqual([]);
+      expect(registry.drainMessages('test-1')).toEqual([]);
+    });
+  });
+
   describe('session switch helpers', () => {
     it('reset clears tracked entries without touching persisted sidecars', () => {
       registry.register({

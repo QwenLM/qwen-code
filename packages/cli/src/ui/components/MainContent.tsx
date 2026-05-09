@@ -5,7 +5,7 @@
  */
 
 import { Box, Static } from 'ink';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
@@ -58,6 +58,28 @@ function addSourceBlockCounts(
     offsets.codeBlockLanguageCounts.set(lang, current + count);
   }
   offsets.mathBlockCount += counts.mathBlockCount;
+}
+
+// Issue #3899: Ink's <Static> renders all items synchronously on (re)mount.
+// For long histories that's O(N) blocking work — bad on Ctrl+O which clears
+// the terminal and forces a full remount. To keep input responsive, we
+// progressively grow the slice of history fed to <Static> when the catch-up
+// gap is large (initial mount of a resumed session, or post-Ctrl+O remount).
+// Below the threshold the slice jumps to full length in one render so normal
+// runtime appends are bit-identical to the previous behavior.
+//
+// TODO(#3899 follow-up): the thresholds below are unbenchmarked. Per-item
+// render cost varies hugely (a one-line user message vs. thousands of lines
+// of tool stdout), so an item-count budget over-yields for tiny items and
+// under-yields for big ones. Consider switching to a *line-budget* per
+// chunk once we have telemetry on actual render times.
+const PROGRESSIVE_REPLAY_THRESHOLD = 100;
+const PROGRESSIVE_REPLAY_CHUNK_SIZE = 50;
+
+function initialReplayCount(length: number): number {
+  return length <= PROGRESSIVE_REPLAY_THRESHOLD
+    ? length
+    : Math.min(PROGRESSIVE_REPLAY_CHUNK_SIZE, length);
 }
 
 export const MainContent = () => {
@@ -265,6 +287,64 @@ export const MainContent = () => {
     });
   }, [pendingHistoryItems, pendingStartSourceCopyOffsets]);
 
+  // Progressive Static replay (issue #3899). `replayCount` is the number of
+  // history items currently passed to <Static>. It catches up to
+  // mergedHistory.length either in one shot (small lag) or chunk-by-chunk
+  // through setImmediate (large lag, e.g., post-Ctrl+O remount of a 500-item
+  // session).
+  //
+  // Note: source-copy offsets are computed across the FULL mergedHistory
+  // above so each code block keeps its stable copy index even when only a
+  // prefix is visible; we slice the post-offset array here.
+  const [replayCount, setReplayCount] = useState(() =>
+    initialReplayCount(mergedHistory.length),
+  );
+  const mergedLengthRef = useRef(mergedHistory.length);
+  mergedLengthRef.current = mergedHistory.length;
+
+  // The reset MUST happen during render (not in an effect): historyRemountKey
+  // also drives the <Static> key below, and Ink remounts Static synchronously
+  // on its first render with the new key. If we reset replayCount in a
+  // useEffect, that first render would already feed the full history to the
+  // new <Static> and we'd hit the freeze the PR is trying to avoid. The
+  // canonical "store previous prop in state" pattern queues a re-render
+  // that discards this one before commit, so <Static> never sees the
+  // stale full slice. Refs alone won't work — they don't trigger a re-render.
+  // See: https://react.dev/reference/react/useState#storing-information-from-previous-renders
+  const [lastRemountKey, setLastRemountKey] = useState(historyRemountKey);
+  if (lastRemountKey !== historyRemountKey) {
+    setLastRemountKey(historyRemountKey);
+    setReplayCount(initialReplayCount(mergedLengthRef.current));
+  }
+
+  useEffect(() => {
+    if (replayCount >= mergedHistory.length) return;
+    const remaining = mergedHistory.length - replayCount;
+    if (remaining <= PROGRESSIVE_REPLAY_CHUNK_SIZE) {
+      setReplayCount(mergedHistory.length);
+      return;
+    }
+    const handle = setImmediate(() => {
+      setReplayCount((c) =>
+        Math.min(c + PROGRESSIVE_REPLAY_CHUNK_SIZE, mergedLengthRef.current),
+      );
+    });
+    return () => clearImmediate(handle);
+  }, [replayCount, mergedHistory.length]);
+
+  // Render the full list when the tail gap is small (≤ CHUNK_SIZE). This
+  // covers the normal append path: a pending item finalizes, replayCount is
+  // already close to the new length, so we skip one useless slice frame.
+  // Without this, a just-finalized item could briefly disappear for one tick
+  // because it is gone from pendingHistoryItems but not yet in the Static
+  // slice. Chunked replay is still used for large remount gaps (Ctrl+O on a
+  // long session) where the gap is >> CHUNK_SIZE.
+  const visibleHistoryItemsWithSourceCopyOffsets =
+    historyItemsWithSourceCopyOffsets.length - replayCount <=
+    PROGRESSIVE_REPLAY_CHUNK_SIZE
+      ? historyItemsWithSourceCopyOffsets
+      : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
+
   return (
     <>
       {/*
@@ -278,7 +358,7 @@ export const MainContent = () => {
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,
           <Notifications key="notifications" />,
-          ...historyItemsWithSourceCopyOffsets.map(
+          ...visibleHistoryItemsWithSourceCopyOffsets.map(
             ({ item: h, sourceCopyIndexOffsets }) => (
               <HistoryItemDisplay
                 terminalWidth={terminalWidth}
