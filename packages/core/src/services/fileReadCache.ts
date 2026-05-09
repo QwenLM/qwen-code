@@ -56,22 +56,39 @@ export interface FileReadEntry {
   /** ms epoch of the last successful write. Undefined if never written. */
   lastWriteAt?: number;
   /**
-   * True iff the most recent Read consumed the whole file (no offset /
-   * limit / pages). Used by the Read fast-path to decide whether a
-   * follow-up "no-args" Read can return a `file_unchanged` placeholder
-   * instead of re-emitting the full content. Range-scoped Reads never
-   * trigger the placeholder, since the model may legitimately ask for a
-   * different range next time.
+   * True iff the most recent Read produced the whole file's current
+   * content: no offset / limit / pages on the request AND the content
+   * was not truncated by the truncate-tool-output limit. Used both by
+   * the Read fast-path (to decide whether a follow-up "no-args" Read
+   * can return a `file_unchanged` placeholder) and by WriteFile's
+   * prior-read enforcement (to require "saw all bytes" before an
+   * overwrite). A truncated full read records `false` here because
+   * the model only saw the head of the file.
    */
   lastReadWasFull: boolean;
   /**
-   * True iff the content the most recent Read produced is one we are
-   * willing to substitute with a `file_unchanged` placeholder. Plain
-   * text reads set this to true; binary, image, audio, video, PDF, and
-   * notebook reads set it to false, because the model will likely need
-   * the structured / multi-modal payload again rather than a stub. The
-   * cache itself does not interpret this flag — it is a hint produced
-   * and consumed by the Read tool.
+   * True iff the most recent Read produced plain-text content — i.e.
+   * a text payload the Edit / WriteFile tools can mutate as text.
+   * False for binary, image, audio, video, PDF, and notebook reads,
+   * which produce structured payloads the mutating tools cannot
+   * safely alter.
+   *
+   * Note: this flag is purely about *content type* (text vs.
+   * non-text), not about whether the read was complete. Truncation
+   * is tracked separately on {@link lastReadWasFull}; conflating
+   * the two caused the issue #3964 regression where a partial /
+   * truncated text read caused the next Edit to be rejected with
+   * the misleading "binary / image / audio / video / PDF / notebook
+   * payload" error.
+   *
+   * Two independent consumers read this flag:
+   *  - the ReadFile fast-path uses it (combined with
+   *    `lastReadWasFull`) to decide whether to serve the
+   *    `file_unchanged` placeholder.
+   *  - `priorReadEnforcement.ts` uses it to detect non-text payloads
+   *    and reject Edit / WriteFile against them (re-reading would
+   *    produce the same non-text payload, so the message tells the
+   *    model to use a different mechanism rather than re-read).
    */
   lastReadCacheable: boolean;
 }
@@ -93,12 +110,21 @@ export class FileReadCache {
   /**
    * Record a successful Read of `absPath`.
    *
-   *  - `full`      — the Read covered the entire file (no offset / limit
-   *    / pages). Only full Reads enable the `file_unchanged` fast-path
-   *    on subsequent reads.
-   *  - `cacheable` — the produced content is suitable for substitution
-   *    with a `file_unchanged` placeholder. Set true for plain text,
-   *    false for binary / image / audio / video / PDF / notebook.
+   *  - `full`      — the Read produced the entire current content of
+   *    the file: no offset / limit / pages on the request AND the
+   *    output was not truncated. Pass `false` for ranged reads OR
+   *    for full-request reads whose content was truncated by the
+   *    truncate-tool-output limit; both leave the model without
+   *    sight of every current byte.
+   *  - `cacheable` — the produced content is plain text (vs. binary /
+   *    image / audio / video / PDF / notebook). This flag is purely
+   *    about content type, not about whether the read was complete:
+   *    a partial / truncated text read still records `cacheable: true`
+   *    because the bytes the model saw were text. (Bundling
+   *    truncation into `cacheable` was the issue #3964 regression
+   *    that caused partial reads of `.kt` / `.cpp` / `.py` files to
+   *    be rejected on the next Edit with a misleading "binary
+   *    payload" message.)
    *
    * The `lastReadWasFull` and `lastReadCacheable` flags are
    * **sticky-on-true** when the recorded fingerprint matches the

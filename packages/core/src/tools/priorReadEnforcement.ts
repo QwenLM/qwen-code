@@ -110,6 +110,16 @@ export interface CheckPriorReadOptions {
  * audio / video / PDF / notebook — those return a structured payload
  * the Edit / WriteFile tools cannot mutate as text).
  *
+ * `lastReadCacheable` is purely about content type, not completeness.
+ * A truncated or partial text read still records `lastReadCacheable:
+ * true` because the bytes the model saw were text. Whether the model
+ * has seen *every* byte is tracked separately on `lastReadWasFull`,
+ * which `requireFullRead` consumes below. Decoupling those two
+ * concerns is what fixed the issue #3964 regression where partial
+ * reads of regular `.kt` / `.cpp` / `.py` files caused the next Edit
+ * to be rejected with the misleading "binary / image / audio /
+ * video / PDF / notebook payload" error.
+ *
  * Partial vs full read policy depends on `options.requireFullRead`:
  *  - default (`requireFullRead !== true`, i.e. EditTool): a partial
  *    read (offset / limit / pages) counts. The `0 occurrences`
