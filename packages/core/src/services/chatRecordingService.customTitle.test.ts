@@ -214,6 +214,38 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       });
     });
 
+    it('does not let threshold re-anchor records become the active parent tail', async () => {
+      chatRecordingService.recordCustomTitle('long-running-task');
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.recordUserMessage([{ text: 'before bulk' }]);
+      chatRecordingService.recordUserMessage([{ text: 'x'.repeat(40 * 1024) }]);
+      chatRecordingService.recordUserMessage([{ text: 'after re-anchor' }]);
+      await chatRecordingService.flush();
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map(([, record]) => record as ChatRecord);
+      const reanchorIndex = records.findIndex(
+        (record) =>
+          record.type === 'system' && record.subtype === 'custom_title',
+      );
+
+      expect(reanchorIndex).toBeGreaterThan(0);
+
+      const triggeringUser = records[reanchorIndex - 1];
+      const nextUser = records
+        .slice(reanchorIndex + 1)
+        .find((record) => record.type === 'user');
+      const reanchor = records[reanchorIndex];
+
+      expect(triggeringUser.type).toBe('user');
+      expect(nextUser).toBeDefined();
+      expect(nextUser?.parentUuid).toBe(triggeringUser.uuid);
+      expect(nextUser?.parentUuid).not.toBe(reanchor.uuid);
+    });
+
     it('does not re-anchor when no title has been set', async () => {
       // The counter only matters when there's a title to keep alive;
       // sessions that never set one shouldn't pay for spurious writes.

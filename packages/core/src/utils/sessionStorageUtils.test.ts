@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -385,6 +385,31 @@ describe('sessionStorageUtils', () => {
         ),
       ).toBe('x');
     });
+
+    it('re-reads the latest tail once when the file grows during a tail miss', () => {
+      const p = writeFile(
+        'grows-during-tail-miss.jsonl',
+        '{"subtype":"custom_title","customTitle":"old"}\n' +
+          'x'.repeat(LITE_READ_BUF_SIZE + 16 * 1024) +
+          '\n',
+      );
+      const latestTitle = '{"subtype":"custom_title","customTitle":"new"}\n';
+      const originalReadSync = fs.readSync;
+      let readCount = 0;
+      vi.spyOn(fs, 'readSync').mockImplementation(((
+        ...args: Parameters<typeof fs.readSync>
+      ) => {
+        readCount++;
+        if (readCount === 1) {
+          fs.appendFileSync(p, latestTitle);
+        }
+        return originalReadSync(...args);
+      }) as typeof fs.readSync);
+
+      expect(
+        readLastJsonStringFieldSync(p, 'customTitle', 'custom_title'),
+      ).toBe('new');
+    });
   });
 
   describe('extractLastJsonStringFields', () => {
@@ -623,6 +648,37 @@ describe('sessionStorageUtils', () => {
           scratch,
         ),
       ).toEqual({ customTitle: 'x', titleSource: 'auto' });
+    });
+
+    it('re-reads the latest tail once when the file grows during a tail miss', () => {
+      const p = writeFile(
+        'grows-during-tail-miss-pair.jsonl',
+        '{"subtype":"custom_title","customTitle":"old","titleSource":"manual"}\n' +
+          'x'.repeat(LITE_READ_BUF_SIZE + 16 * 1024) +
+          '\n',
+      );
+      const latestTitle =
+        '{"subtype":"custom_title","customTitle":"new","titleSource":"auto"}\n';
+      const originalReadSync = fs.readSync;
+      let readCount = 0;
+      vi.spyOn(fs, 'readSync').mockImplementation(((
+        ...args: Parameters<typeof fs.readSync>
+      ) => {
+        readCount++;
+        if (readCount === 1) {
+          fs.appendFileSync(p, latestTitle);
+        }
+        return originalReadSync(...args);
+      }) as typeof fs.readSync);
+
+      expect(
+        readLastJsonStringFieldsSync(
+          p,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+        ),
+      ).toEqual({ customTitle: 'new', titleSource: 'auto' });
     });
   });
 });

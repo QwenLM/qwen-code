@@ -33,6 +33,25 @@ function getReadOpenFlags(): number {
   return (constants.O_RDONLY ?? 0) | (constants.O_NOFOLLOW ?? 0);
 }
 
+function readLatestTailIfGrown(
+  fd: number,
+  previousSize: number,
+  buffer: Buffer,
+): { text: string; size: number } | undefined {
+  const currentSize = fs.fstatSync(fd).size;
+  if (currentSize <= previousSize) return undefined;
+
+  const tailLength = Math.min(currentSize, LITE_READ_BUF_SIZE);
+  const tailOffset = currentSize - tailLength;
+  const tailBytes = fs.readSync(fd, buffer, 0, tailLength, tailOffset);
+  if (tailBytes <= 0) return undefined;
+
+  return {
+    text: buffer.toString('utf-8', 0, tailBytes),
+    size: currentSize,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // JSON string field extraction — no full parse, works on truncated lines
 // ---------------------------------------------------------------------------
@@ -294,6 +313,18 @@ export function readLastJsonStringFieldSync(
       }
     }
 
+    const grownTail = readLatestTailIfGrown(fd, fileSize, buffer);
+    if (grownTail !== undefined) {
+      const grownHit = extractLastJsonStringField(
+        grownTail.text,
+        key,
+        lineContains,
+      );
+      if (grownHit !== undefined) {
+        return grownHit;
+      }
+    }
+
     // If the whole file fit in the tail window, head == tail; nothing more
     // to do.
     if (tailOffset === 0) return undefined;
@@ -380,6 +411,17 @@ export function readLastJsonStringFieldsSync(
       const tailText = buffer.toString('utf-8', 0, tailBytes);
       const hit = extractLastJsonStringFields(
         tailText,
+        primaryKey,
+        otherKeys,
+        lineContains,
+      );
+      if (hit[primaryKey] !== undefined) return hit;
+    }
+
+    const grownTail = readLatestTailIfGrown(fd, fileSize, buffer);
+    if (grownTail !== undefined) {
+      const hit = extractLastJsonStringFields(
+        grownTail.text,
         primaryKey,
         otherKeys,
         lineContains,

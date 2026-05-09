@@ -694,6 +694,7 @@ export class ChatRecordingService {
   private appendRecord(
     record: ChatRecord,
     onError?: (err: unknown) => void,
+    options?: { updateActiveTail?: boolean },
   ): void {
     let conversationFile: string;
     try {
@@ -702,7 +703,9 @@ export class ChatRecordingService {
       debugLogger.error('Error appending record:', error);
       throw error;
     }
-    this.lastRecordUuid = record.uuid;
+    if (options?.updateActiveTail !== false) {
+      this.lastRecordUuid = record.uuid;
+    }
     this.writeChain = this.writeChain
       .catch(() => {})
       .then(() => jsonl.writeLine(conversationFile, record))
@@ -779,7 +782,7 @@ export class ChatRecordingService {
             : {}),
         },
       };
-      this.appendRecord(record);
+      this.appendRecord(record, undefined, { updateActiveTail: false });
     } catch (error) {
       // Reset the counter even on failure: otherwise every subsequent
       // appendRecord re-fires reanchorTitle (counter still ≥ threshold)
