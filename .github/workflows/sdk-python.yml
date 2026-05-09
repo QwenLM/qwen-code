@@ -27,9 +27,9 @@ jobs:
         id: 'release_sync'
         env:
           # Repository variables can override these defaults if release naming changes.
-          HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}'
-          HEAD_REF: '${{ github.head_ref }}'
-          PR_TITLE: '${{ github.event.pull_request.title }}'
+          HEAD_REPO: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || '' }}"
+          HEAD_REF: "${{ github.event_name == 'pull_request' && github.head_ref || '' }}"
+          PR_TITLE: "${{ github.event_name == 'pull_request' && github.event.pull_request.title || '' }}"
           RELEASE_SYNC_HEAD_PREFIX: "${{ vars.RELEASE_SYNC_HEAD_PREFIX || 'release/' }}"
           RELEASE_SYNC_TITLE_PREFIX: "${{ vars.RELEASE_SYNC_TITLE_PREFIX || 'chore(release):' }}"
         run: |-
