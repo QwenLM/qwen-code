@@ -933,6 +933,53 @@ describe('crawler', () => {
       expect(results).not.toContain('skip.txt');
     });
 
+    it('should preserve leading and trailing spaces in tracked filenames', async () => {
+      tmpDir = await createTmpDir({
+        ' leading.txt': '',
+        'trailing.txt ': '',
+      });
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+        if (args.includes('ls-files') && args.includes('--others')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--deleted')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--cached')) {
+          return {
+            success: true,
+            lines: ['H  leading.txt', 'H trailing.txt '],
+          };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain(' leading.txt');
+      expect(results).toContain('trailing.txt ');
+    });
+
     it('should fall back to fdir when not in a git repo and ripgrep unavailable', async () => {
       __setCommandRunnerForTests(async (command) => {
         if (command === 'git' || command === 'rg') {

@@ -865,16 +865,15 @@ async function crawlWithGitLsFiles(
   const parseTrackedLine = (
     line: string,
   ): { status: string | null; filePath: string } | null => {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
+    if (line.length === 0) {
       return null;
     }
-    // `git ls-files -t` emits "<status> <path>" (e.g., "H foo.ts", "S bar.ts").
-    const statusMatch = trimmed.match(/^([A-Z])\s+(.+)$/);
-    if (statusMatch) {
-      return { status: statusMatch[1], filePath: statusMatch[2] };
+    // `git ls-files -t` emits "<status><space><path>".
+    // Preserve the path portion verbatim; tracked filenames may begin/end with spaces.
+    if (line.length >= 3 && /\s/.test(line[1]) && /[A-Za-z]/.test(line[0])) {
+      return { status: line[0].toUpperCase(), filePath: line.slice(2) };
     }
-    return { status: null, filePath: trimmed };
+    return { status: null, filePath: line };
   };
   const processTrackedFile = (file: string): boolean => {
     if (hasReachedFileBudget(budgetedFileCount, options.maxFiles)) {
