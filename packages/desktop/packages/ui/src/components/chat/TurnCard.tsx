@@ -2939,7 +2939,7 @@ interface ActivitySectionProps {
   totalActivityCount: number
   isExpanded: boolean
   onToggleExpanded: () => void
-  activitiesContainerRef: React.RefObject<HTMLDivElement | null>
+  activitiesContainerRef: React.Ref<HTMLDivElement>
   hasUserToggled: React.MutableRefObject<boolean>
   hasMounted: React.MutableRefObject<boolean>
   renderActionsMenu?: () => React.ReactNode

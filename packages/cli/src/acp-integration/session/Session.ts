@@ -1448,15 +1448,49 @@ export class Session implements SessionContext {
       });
 
       let availableSkills: string[] | undefined;
+      let availableSkillDetails:
+        | Array<{
+            name: string;
+            description?: string;
+            body?: string;
+            filePath?: string;
+            level?: string;
+          }>
+        | undefined;
+      const skillDetailsByName = new Map<
+        string,
+        NonNullable<typeof availableSkillDetails>[number]
+      >();
       try {
         const skillManager = this.config.getSkillManager();
         if (skillManager) {
           const skills = await skillManager.listSkills();
           availableSkills = skills.map((skill) => skill.name);
+          for (const skill of skills) {
+            skillDetailsByName.set(skill.name, {
+              name: skill.name,
+              description: skill.description,
+              body: skill.body,
+              filePath: skill.filePath,
+              level: skill.level,
+            });
+          }
         }
       } catch (error) {
         debugLogger.error('Error loading available skills:', error);
       }
+
+      for (const command of slashCommands) {
+        if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
+          continue;
+        }
+        skillDetailsByName.set(command.skillDetail.name, command.skillDetail);
+      }
+      availableSkillDetails =
+        skillDetailsByName.size > 0
+          ? Array.from(skillDetailsByName.values())
+          : undefined;
+      availableSkills ??= availableSkillDetails?.map((skill) => skill.name);
 
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
@@ -1465,6 +1499,7 @@ export class Session implements SessionContext {
           ? {
               _meta: {
                 availableSkills,
+                ...(availableSkillDetails ? { availableSkillDetails } : {}),
               },
             }
           : {}),

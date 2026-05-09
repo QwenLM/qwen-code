@@ -656,6 +656,8 @@ interface ManagedSession {
   availableCommands?: AvailableSlashCommand[]
   // Provider-advertised skill command names for the current session.
   availableSkills?: string[]
+  // Provider-advertised skill metadata for the current session.
+  availableSkillDetails?: import('@craft-agent/core/types').AvailableSkillDetail[]
   // Session status (user-controlled) - determines open vs closed
   // Dynamic status ID referencing workspace status config
   sessionStatus?: string
@@ -903,6 +905,7 @@ function managedToSession(m: ManagedSession, overrides?: Partial<Session>): Sess
     supportsBranching: resolveSupportsBranching(m),
     availableCommands: m.availableCommands,
     availableSkills: m.availableSkills,
+    availableSkillDetails: m.availableSkillDetails,
     ...overrides,
   } as Session
 }
@@ -1975,11 +1978,13 @@ export class SessionManager implements ISessionManager {
 
     managed.availableCommands = snapshot.availableCommands
     managed.availableSkills = snapshot.availableSkills
+    managed.availableSkillDetails = snapshot.availableSkillDetails
     sessionLog.info('Available commands updated', {
       sessionId: managed.id,
       source,
       commandCount: snapshot.availableCommands.length,
       skillCount: snapshot.availableSkills?.length ?? 0,
+      skillDetailCount: snapshot.availableSkillDetails?.length ?? 0,
       commandNames: snapshot.availableCommands.map(command => command.name),
       skillNames: snapshot.availableSkills ?? [],
     })
@@ -1987,7 +1992,12 @@ export class SessionManager implements ISessionManager {
       type: 'available_commands_update',
       sessionId: managed.id,
       availableCommands: snapshot.availableCommands,
-      availableSkills: snapshot.availableSkills,
+      ...(snapshot.availableSkills
+        ? { availableSkills: snapshot.availableSkills }
+        : {}),
+      ...(snapshot.availableSkillDetails
+        ? { availableSkillDetails: snapshot.availableSkillDetails }
+        : {}),
     }, managed.workspace.id)
   }
 
@@ -1995,7 +2005,8 @@ export class SessionManager implements ISessionManager {
     if (!result || (!result.availableCommands?.length && !result.availableSkills?.length)) return
     this.applyAvailableCommandsSnapshot(managed, {
       availableCommands: result.availableCommands ?? [],
-      availableSkills: result.availableSkills,
+      ...(result.availableSkills ? { availableSkills: result.availableSkills } : {}),
+      ...(result.availableSkillDetails ? { availableSkillDetails: result.availableSkillDetails } : {}),
     }, source)
   }
 
@@ -6954,7 +6965,7 @@ export class SessionManager implements ISessionManager {
     }
   }
 
-  private async refreshDraftAvailableCommands(options: RefreshAvailableCommandsOptions): Promise<{ success: boolean; availableCommands?: AvailableCommandsSnapshot['availableCommands']; availableSkills?: string[]; error?: string }> {
+  private async refreshDraftAvailableCommands(options: RefreshAvailableCommandsOptions): Promise<{ success: boolean; availableCommands?: AvailableCommandsSnapshot['availableCommands']; availableSkills?: string[]; availableSkillDetails?: AvailableCommandsSnapshot['availableSkillDetails']; error?: string }> {
     if (!options.workspaceId) {
       return { success: false, error: 'Workspace is required for draft slash command discovery' }
     }
@@ -7023,6 +7034,7 @@ export class SessionManager implements ISessionManager {
         sessionId: agent.getSessionId(),
         commandCount: snapshot.availableCommands.length,
         skillCount: snapshot.availableSkills?.length ?? 0,
+        skillDetailCount: snapshot.availableSkillDetails?.length ?? 0,
         commandNames: snapshot.availableCommands.map(command => command.name),
         skillNames: snapshot.availableSkills ?? [],
       })
@@ -7035,7 +7047,7 @@ export class SessionManager implements ISessionManager {
     }
   }
 
-  async refreshAvailableCommands(sessionId: string, options?: RefreshAvailableCommandsOptions): Promise<{ success: boolean; availableCommands?: AvailableCommandsSnapshot['availableCommands']; availableSkills?: string[]; error?: string }> {
+  async refreshAvailableCommands(sessionId: string, options?: RefreshAvailableCommandsOptions): Promise<{ success: boolean; availableCommands?: AvailableCommandsSnapshot['availableCommands']; availableSkills?: string[]; availableSkillDetails?: AvailableCommandsSnapshot['availableSkillDetails']; error?: string }> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       if (options?.workspaceId) {
@@ -7052,6 +7064,7 @@ export class SessionManager implements ISessionManager {
       workingDirectory: managed.workingDirectory,
       existingCommandCount: managed.availableCommands?.length ?? 0,
       existingSkillCount: managed.availableSkills?.length ?? 0,
+      existingSkillDetailCount: managed.availableSkillDetails?.length ?? 0,
     })
 
     try {
@@ -7083,6 +7096,7 @@ export class SessionManager implements ISessionManager {
         sessionId,
         commandCount: snapshot.availableCommands.length,
         skillCount: snapshot.availableSkills?.length ?? 0,
+        skillDetailCount: snapshot.availableSkillDetails?.length ?? 0,
         commandNames: snapshot.availableCommands.map(command => command.name),
         skillNames: snapshot.availableSkills ?? [],
       })
@@ -7778,7 +7792,8 @@ export class SessionManager implements ISessionManager {
       case 'available_commands_update':
         this.applyAvailableCommandsSnapshot(managed, {
           availableCommands: event.availableCommands,
-          availableSkills: event.availableSkills,
+          ...(event.availableSkills ? { availableSkills: event.availableSkills } : {}),
+          ...(event.availableSkillDetails ? { availableSkillDetails: event.availableSkillDetails } : {}),
         }, 'agent event')
         break
 

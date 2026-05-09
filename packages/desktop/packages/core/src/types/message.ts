@@ -568,6 +568,17 @@ export interface AvailableSlashCommand {
 }
 
 /**
+ * Skill metadata advertised by a provider runtime.
+ */
+export interface AvailableSkillDetail {
+  name: string;
+  description?: string;
+  body?: string;
+  filePath?: string;
+  level?: string;
+}
+
+/**
  * Events emitted by CraftAgent during chat
  * turnId: Correlation ID from the API's message.id, groups all events in an assistant turn
  */
@@ -604,7 +615,7 @@ export type AgentEvent =
   | { type: 'shell_killed'; shellId: string; turnId?: string }
   | { type: 'source_activated'; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; usage: Pick<AgentEventUsage, 'inputTokens' | 'contextWindow'> }
-  | { type: 'available_commands_update'; availableCommands: AvailableSlashCommand[]; availableSkills?: string[] }
+  | { type: 'available_commands_update'; availableCommands: AvailableSlashCommand[]; availableSkills?: string[]; availableSkillDetails?: AvailableSkillDetail[] }
   | { type: 'steer_undelivered'; message: string };
 
 /**

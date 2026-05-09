@@ -560,6 +560,7 @@ export function handleAvailableCommandsUpdate(
         ...session,
         availableCommands: event.availableCommands,
         availableSkills: event.availableSkills,
+        availableSkillDetails: event.availableSkillDetails,
       },
       streaming,
     },

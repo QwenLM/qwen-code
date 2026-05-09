@@ -47,6 +47,7 @@ export type {
   TokenUsage,
   AgentEventUsage,
   AvailableSlashCommand,
+  AvailableSkillDetail,
   RecoveryAction,
   TypedError,
   PermissionRequest,

@@ -15,6 +15,7 @@ import type {
   WorkspaceKind,
   PermissionRequest as BasePermissionRequest,
   AvailableSlashCommand as BaseAvailableSlashCommand,
+  AvailableSkillDetail as BaseAvailableSkillDetail,
 } from '@craft-agent/core/types'
 import type { PermissionMode } from '../agent/mode-types'
 import type { ThinkingLevel } from '../agent/thinking-levels'
@@ -27,6 +28,7 @@ import type {
 // Re-export generateMessageId for handler convenience
 export { generateMessageId } from '@craft-agent/core/types'
 export type AvailableSlashCommand = BaseAvailableSlashCommand
+export type AvailableSkillDetail = BaseAvailableSkillDetail
 
 // ---------------------------------------------------------------------------
 // Session types
@@ -107,6 +109,8 @@ export interface Session {
   availableCommands?: AvailableSlashCommand[]
   /** Provider-advertised skill command names for the current session. Runtime-only. */
   availableSkills?: string[]
+  /** Provider-advertised skill metadata for the current session. Runtime-only. */
+  availableSkillDetails?: AvailableSkillDetail[]
 }
 
 export interface CreateSessionOptions {
@@ -225,7 +229,7 @@ export type SessionEvent =
   | { type: 'auth_completed'; sessionId: string; requestId: string; success: boolean; cancelled?: boolean; error?: string }
   | { type: 'source_activated'; sessionId: string; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; sessionId: string; tokenUsage: { inputTokens: number; contextWindow?: number } }
-  | { type: 'available_commands_update'; sessionId: string; availableCommands: AvailableSlashCommand[]; availableSkills?: string[] }
+  | { type: 'available_commands_update'; sessionId: string; availableCommands: AvailableSlashCommand[]; availableSkills?: string[]; availableSkillDetails?: AvailableSkillDetail[] }
   | { type: 'message_content_updated'; sessionId: string; message: Message; truncateAfterMessageId?: string }
   | { type: 'message_annotations_updated'; sessionId: string; messageId: string; annotations: AnnotationV1[] }
   | { type: 'working_directory_error'; sessionId: string; error: string }

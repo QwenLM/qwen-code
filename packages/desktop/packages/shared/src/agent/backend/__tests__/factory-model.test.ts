@@ -30,6 +30,7 @@ describe('backend model resolution', () => {
       workspace: {
         id: 'ws',
         name: 'Workspace',
+        slug: 'workspace',
         rootPath: '/tmp/ws',
         createdAt: 1,
       },

@@ -22,7 +22,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type { AgentEvent, AvailableSlashCommand, IntermediateMessageKind, Message, MessageTextElement } from '@craft-agent/core/types';
+import type { AgentEvent, AvailableSkillDetail, AvailableSlashCommand, IntermediateMessageKind, Message, MessageTextElement } from '@craft-agent/core/types';
 import { utf16IndexToByteOffset } from '@craft-agent/core/utils';
 import type { FileAttachment } from '../utils/files.ts';
 import type { ModelDefinition } from '../config/models.ts';
@@ -226,6 +226,35 @@ function toAvailableSkills(value: unknown): string[] | undefined {
   }
 
   return skills.length > 0 ? skills : undefined;
+}
+
+function toAvailableSkillDetails(value: unknown): AvailableSkillDetail[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const seen = new Set<string>();
+  const details: AvailableSkillDetail[] = [];
+
+  for (const item of value) {
+    const record = toRecord(item);
+    const name = asString(record.name)?.trim().replace(/^\/+/, '');
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+
+    const description = asString(record.description);
+    const body = asString(record.body);
+    const filePath = asString(record.filePath);
+    const level = asString(record.level);
+
+    details.push({
+      name,
+      ...(description !== undefined && { description }),
+      ...(body !== undefined && { body }),
+      ...(filePath !== undefined && { filePath }),
+      ...(level !== undefined && { level }),
+    });
+  }
+
+  return details.length > 0 ? details : undefined;
 }
 
 function formatDebugNames(values: string[] | undefined, max = 40): string {
@@ -2375,13 +2404,19 @@ export class QwenAgent extends BaseAgent {
   private parseAvailableCommandsUpdate(update: JsonRecord): AvailableCommandsSnapshot | null {
     const availableCommands = toAvailableSlashCommands(update.availableCommands);
     const meta = toRecord(update._meta);
-    const availableSkills = toAvailableSkills(meta.availableSkills);
+    const availableSkillDetails = toAvailableSkillDetails(meta.availableSkillDetails);
+    const availableSkills = toAvailableSkills(meta.availableSkills)
+      ?? availableSkillDetails?.map(skill => skill.name);
 
     if (availableCommands.length === 0 && (!availableSkills || availableSkills.length === 0)) {
       return null;
     }
 
-    return { availableCommands, availableSkills };
+    return {
+      availableCommands,
+      ...(availableSkills ? { availableSkills } : {}),
+      ...(availableSkillDetails ? { availableSkillDetails } : {}),
+    };
   }
 
   private extractAvailableCommandsSnapshot(updates: JsonRecord[]): AvailableCommandsSnapshot | null {
@@ -2398,6 +2433,7 @@ export class QwenAgent extends BaseAgent {
       this.debug(
         `Qwen loadSessionMessages captured available commands: commands=${latest.availableCommands.length} ` +
         `skills=${latest.availableSkills?.length ?? 0} ` +
+        `skillDetails=${latest.availableSkillDetails?.length ?? 0} ` +
         `names=${formatDebugNames(latest.availableCommands.map(command => command.name))} ` +
         `skillNames=${formatDebugNames(latest.availableSkills)}`,
       );
@@ -2417,6 +2453,7 @@ export class QwenAgent extends BaseAgent {
     this.debug(
       `Qwen available_commands_update parsed: commands=${snapshot.availableCommands.length} ` +
       `skills=${snapshot.availableSkills?.length ?? 0} ` +
+      `skillDetails=${snapshot.availableSkillDetails?.length ?? 0} ` +
       `names=${formatDebugNames(snapshot.availableCommands.map(command => command.name))} ` +
       `skillNames=${formatDebugNames(snapshot.availableSkills)}`,
     );
@@ -2428,6 +2465,9 @@ export class QwenAgent extends BaseAgent {
       type: 'available_commands_update',
       availableCommands: snapshot.availableCommands,
       availableSkills: snapshot.availableSkills,
+      ...(snapshot.availableSkillDetails
+        ? { availableSkillDetails: snapshot.availableSkillDetails }
+        : {}),
     });
   }
 

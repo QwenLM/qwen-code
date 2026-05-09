@@ -40,6 +40,13 @@ export interface SessionUpdateMeta {
   durationMs?: number | null;
   timestamp?: number | null;
   availableSkills?: string[] | null;
+  availableSkillDetails?: Array<{
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+  }> | null;
 }
 
 export {

@@ -68,6 +68,13 @@ export class BundledSkillLoader implements ICommandLoader {
         modelInvocable: !skill.disableModelInvocation,
         argumentHint: skill.argumentHint,
         whenToUse: skill.whenToUse,
+        skillDetail: {
+          name: skill.name,
+          description: skill.description,
+          body: skill.body,
+          filePath: skill.filePath,
+          level: skill.level,
+        },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
           // Resolve template variables in skill body
           let body = skill.body;

@@ -1101,6 +1101,7 @@ async function loadSessionMessages(
               : loadedSession.messages,
           availableCommands: loadedSession.availableCommands ?? existingSession.availableCommands,
           availableSkills: loadedSession.availableSkills ?? existingSession.availableSkills,
+          availableSkillDetails: loadedSession.availableSkillDetails ?? existingSession.availableSkillDetails,
           tokenUsage: loadedSession.tokenUsage ?? existingSession.tokenUsage,
           sessionFolderPath: loadedSession.sessionFolderPath ?? existingSession.sessionFolderPath,
         }

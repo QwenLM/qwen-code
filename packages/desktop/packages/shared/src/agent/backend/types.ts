@@ -12,7 +12,7 @@
  * - AsyncGenerator for streaming: Consistent with existing CraftAgent API
  */
 
-import type { AgentEvent, AvailableSlashCommand, Message, MessageTextElement } from '@craft-agent/core/types';
+import type { AgentEvent, AvailableSlashCommand, AvailableSkillDetail, Message, MessageTextElement } from '@craft-agent/core/types';
 import type { FileAttachment } from '../../utils/files.ts';
 import type { ThinkingLevel } from '../thinking-levels.ts';
 import type { PermissionMode } from '../mode-manager.ts';
@@ -113,6 +113,7 @@ export interface PostInitResult {
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableSlashCommand[];
   availableSkills?: string[];
+  availableSkillDetails?: AvailableSkillDetail[];
 }
 
 export interface BackendSessionMessagesResult extends Partial<AvailableCommandsSnapshot> {

@@ -624,7 +624,18 @@ describe('QwenAgent slash command history', () => {
           { name: 'review', description: 'Review code' },
           { name: 'git:commit', description: 'Commit changes' },
         ],
-        _meta: { availableSkills: ['commit'] },
+        _meta: {
+          availableSkills: ['commit'],
+          availableSkillDetails: [
+            {
+              name: 'commit',
+              description: 'Commit changes',
+              body: 'Commit instructions',
+              filePath: '/skills/commit/SKILL.md',
+              level: 'user',
+            },
+          ],
+        },
       },
     });
 
@@ -643,6 +654,15 @@ describe('QwenAgent slash command history', () => {
         { name: 'git:commit', description: 'Commit changes' },
       ],
       availableSkills: ['commit'],
+      availableSkillDetails: [
+        {
+          name: 'commit',
+          description: 'Commit changes',
+          body: 'Commit instructions',
+          filePath: '/skills/commit/SKILL.md',
+          level: 'user',
+        },
+      ],
     });
   });
 

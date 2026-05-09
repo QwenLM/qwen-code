@@ -488,6 +488,7 @@ export interface AvailableCommandsUpdateEvent {
   sessionId: string
   availableCommands: AvailableSlashCommand[]
   availableSkills?: string[]
+  availableSkillDetails?: import('@craft-agent/core/types').AvailableSkillDetail[]
 }
 
 /**

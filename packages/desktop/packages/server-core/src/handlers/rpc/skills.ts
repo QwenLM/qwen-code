@@ -1,10 +1,11 @@
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { existsSync, readdirSync, statSync } from 'fs'
 import { RPC_CHANNELS, type SkillFile } from '@craft-agent/shared/protocol'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 import type { LoadedSkill } from '@craft-agent/shared/skills/types'
+import type { AvailableSkillDetail } from '@craft-agent/core/types'
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.skills.GET,
@@ -14,17 +15,26 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.skills.OPEN_FINDER,
 ] as const
 
-function providerSkillFromName(name: string): LoadedSkill {
+function providerSkillFromDetail(detail: AvailableSkillDetail): LoadedSkill {
+  const skillDir = detail.filePath ? dirname(detail.filePath) : ''
+
   return {
-    slug: name,
+    slug: detail.name,
     metadata: {
-      name,
-      description: 'Qwen Code skill',
+      name: detail.name,
+      description: detail.description ?? 'Qwen Code skill',
     },
-    content: '',
-    path: '',
+    content: detail.body ?? '',
+    path: skillDir,
     source: 'provider',
   }
+}
+
+function providerSkillFromName(name: string, description?: string): LoadedSkill {
+  return providerSkillFromDetail({
+    name,
+    ...(description !== undefined ? { description } : {}),
+  })
 }
 
 async function shouldLoadSkillsFromQwenAcp(workspaceRootPath: string): Promise<boolean> {
@@ -64,7 +74,14 @@ export function registerSkillsHandlers(server: RpcServer, deps: HandlerDeps): vo
         return []
       }
 
-      const skills = (result.availableSkills ?? []).map(providerSkillFromName)
+      const commandDescriptions = new Map(
+        (result.availableCommands ?? []).map(command => [command.name, command.description]),
+      )
+      const skills = result.availableSkillDetails?.length
+        ? result.availableSkillDetails.map(providerSkillFromDetail)
+        : (result.availableSkills ?? []).map(name =>
+          providerSkillFromName(name, commandDescriptions.get(name)),
+        )
       deps.platform.logger?.info(`SKILLS_GET: Loaded ${skills.length} skills from Qwen ACP for ${workspaceId}`)
       return skills
     }

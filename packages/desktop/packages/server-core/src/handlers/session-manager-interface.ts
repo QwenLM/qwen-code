@@ -190,7 +190,7 @@ export interface ISessionManager {
 
   getSessionPath(sessionId: string): string | null
   refreshTitle(sessionId: string): Promise<{ success: boolean; title?: string; error?: string }>
-  refreshAvailableCommands(sessionId: string, options?: RefreshAvailableCommandsOptions): Promise<{ success: boolean; availableCommands?: AvailableSlashCommand[]; availableSkills?: string[]; error?: string }>
+  refreshAvailableCommands(sessionId: string, options?: RefreshAvailableCommandsOptions): Promise<{ success: boolean; availableCommands?: AvailableSlashCommand[]; availableSkills?: string[]; availableSkillDetails?: import('@craft-agent/core/types').AvailableSkillDetail[]; error?: string }>
   refreshBadge(): void
   getUnreadSummary(): UnreadSummary
 

@@ -525,12 +525,22 @@ describe('Session', () => {
         },
       ]);
       mockConfig.getSkillManager = vi.fn().mockReturnValue({
-        listSkills: vi
-          .fn()
-          .mockResolvedValue([
-            { name: 'code-review-expert' },
-            { name: 'verification-pack' },
-          ]),
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'code-review-expert',
+            description: 'Review code changes',
+            body: 'Review instructions',
+            filePath: '/skills/code-review-expert/SKILL.md',
+            level: 'user',
+          },
+          {
+            name: 'verification-pack',
+            description: 'Verify changes',
+            body: 'Verification instructions',
+            filePath: '/skills/verification-pack/SKILL.md',
+            level: 'project',
+          },
+        ]),
       });
 
       await session.sendAvailableCommandsUpdate();
@@ -557,6 +567,77 @@ describe('Session', () => {
           ],
           _meta: {
             availableSkills: ['code-review-expert', 'verification-pack'],
+            availableSkillDetails: [
+              {
+                name: 'code-review-expert',
+                description: 'Review code changes',
+                body: 'Review instructions',
+                filePath: '/skills/code-review-expert/SKILL.md',
+                level: 'user',
+              },
+              {
+                name: 'verification-pack',
+                description: 'Verify changes',
+                body: 'Verification instructions',
+                filePath: '/skills/verification-pack/SKILL.md',
+                level: 'project',
+              },
+            ],
+          },
+        },
+      });
+    });
+
+    it('derives skill details from skill slash commands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'batch',
+          description: 'Run a batch operation',
+          kind: 'skill',
+          argumentHint: '<operation> <file-pattern>',
+          skillDetail: {
+            name: 'batch',
+            description: 'Run a batch operation',
+            body: 'Batch instructions',
+            filePath: '/skills/batch/SKILL.md',
+            level: 'bundled',
+          },
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'batch',
+              description: 'Run a batch operation',
+              input: { hint: '<operation> <file-pattern>' },
+              _meta: {
+                argumentHint: '<operation> <file-pattern>',
+                source: undefined,
+                sourceLabel: undefined,
+                supportedModes: ['interactive', 'non_interactive', 'acp'],
+                subcommands: [],
+                modelInvocable: false,
+              },
+            },
+          ],
+          _meta: {
+            availableSkills: ['batch'],
+            availableSkillDetails: [
+              {
+                name: 'batch',
+                description: 'Run a batch operation',
+                body: 'Batch instructions',
+                filePath: '/skills/batch/SKILL.md',
+                level: 'bundled',
+              },
+            ],
           },
         },
       });
