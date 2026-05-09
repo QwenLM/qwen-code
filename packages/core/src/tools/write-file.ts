@@ -136,6 +136,17 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     // here, a race window the pre-fix gating left wide open) means
     // the model is about to clobber bytes it never read → reject.
     if (!this.config.getFileReadCacheDisabled()) {
+      // No `requireFullRead`-style option is passed — by design,
+      // and applies to all 5 checkPriorRead call sites in this file.
+      // PR #3932 added that option to require a full read before
+      // overwrite; PR #4002 removed it because the truncate-tool-
+      // output limit makes "fully read" an impossible precondition
+      // on large files (issue #3945 deadlock). WriteFile and Edit
+      // now share the same contract — any prior read clears
+      // enforcement, mtime/size drift is the safety net,
+      // `fileReadCacheDisabled: true` is the escape hatch. See
+      // the docstring on `checkPriorRead` for the full rationale
+      // and the residual #2499 risk this stance accepts.
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         this.params.file_path,

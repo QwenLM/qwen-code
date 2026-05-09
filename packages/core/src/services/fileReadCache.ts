@@ -58,13 +58,25 @@ export interface FileReadEntry {
   /**
    * True iff the most recent Read produced the whole file's current
    * content: no offset / limit / pages on the request AND the content
-   * was not truncated by the truncate-tool-output limit. Used by the
-   * Read fast-path (to decide whether a follow-up "no-args" Read can
-   * return a `file_unchanged` placeholder) — `priorReadEnforcement`
-   * does not consult this flag, since "fully read" cannot be made
-   * a precondition without deadlocking on files larger than the
-   * truncation limit (issue #3945). A truncated full read records
-   * `false` here because the model only saw the head of the file.
+   * was not truncated by the truncate-tool-output limit. A truncated
+   * full read records `false` here because the model only saw the
+   * head of the file.
+   *
+   * Sole consumer is the Read fast-path, which uses this flag
+   * (combined with `lastReadCacheable` and a write-newer-than-read
+   * check) to decide whether a follow-up "no-args" Read can return
+   * a `file_unchanged` placeholder.
+   *
+   * **`priorReadEnforcement.ts` does NOT consult this flag and must
+   * not start.** PR #3932 wired it into a `requireFullRead` option
+   * for WriteFile's overwrite path; PR #4002 removed that wiring
+   * because the truncate-tool-output limit makes "fully read" an
+   * impossible precondition on files larger than the limit (issue
+   * #3945 deadlock). The current contract aligns with Claude Code's
+   * `readFileState`: any prior read clears enforcement, the
+   * mtime/size drift check is the safety net, and
+   * `fileReadCacheDisabled: true` is the escape hatch for users who
+   * want stricter behaviour.
    */
   lastReadWasFull: boolean;
   /**

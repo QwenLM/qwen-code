@@ -82,6 +82,19 @@ export type PriorReadVerb = 'editing' | 'overwriting';
  *    drift, not a "the file genuinely never existed" disappearance
  *    race. The default (`expectExisting: false`) is the pre-read
  *    behaviour: ENOENT means "go ahead and create".
+ *
+ * **Do not re-introduce a `requireFullRead` (or any "stricter for
+ * WriteFile than Edit") option here.** PR #3932 added one with the
+ * rationale that WriteFile's overwrite path needs more evidence than
+ * Edit's `old_string`-matched in-place change; PR #4002 removed it
+ * because the truncate-tool-output limit makes "fully read" an
+ * impossible precondition on files larger than the limit, producing
+ * the deadlock issue #3945 reported. The contract now matches Claude
+ * Code's `readFileState`: any prior read clears enforcement for both
+ * tools, the mtime/size drift check is the safety net, and
+ * `fileReadCacheDisabled: true` is the escape hatch for users who
+ * want stricter behaviour. See the docstring on {@link checkPriorRead}
+ * for the full rationale and the residual #2499 risk it accepts.
  */
 export interface CheckPriorReadOptions {
   expectExisting?: boolean;
