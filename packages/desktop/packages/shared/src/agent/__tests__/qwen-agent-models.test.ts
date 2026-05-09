@@ -1,3 +1,4 @@
+/* eslint-disable import/no-internal-modules */
 import { describe, expect, it } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -5,7 +6,11 @@ import { join } from 'node:path';
 
 import type { ModelDefinition } from '../../config/models.ts';
 import type { BackendConfig } from '../backend/types.ts';
-import { QwenAgent } from '../qwen-agent.ts';
+import {
+  QwenAgent,
+  extractQwenParentToolUseId,
+  resolveQwenParentToolUseId,
+} from '../qwen-agent.ts';
 
 type QwenModelInternals = {
   recordSessionModels: (result: Record<string, unknown>) => void;
@@ -39,7 +44,10 @@ type QwenModelInternals = {
   } | null;
 };
 
-function createAgent(cwd: string, onAvailableModelsUpdate: BackendConfig['onAvailableModelsUpdate']): QwenAgent {
+function createAgent(
+  cwd: string,
+  onAvailableModelsUpdate: BackendConfig['onAvailableModelsUpdate'],
+): QwenAgent {
   return new QwenAgent({
     provider: 'qwen',
     workspace: {
@@ -71,6 +79,35 @@ async function readNextQueuedEvent(agent: QwenAgent): Promise<unknown> {
 }
 
 describe('QwenAgent model metadata', () => {
+  it('extracts subagent parent metadata from Qwen ACP updates', () => {
+    expect(
+      extractQwenParentToolUseId({
+        _meta: {
+          parentToolCallId: 'agent-parent-1',
+          subagentType: 'general-purpose',
+        },
+      }),
+    ).toBe('agent-parent-1');
+  });
+
+  it('falls back to the only active parent tool without self-referencing', () => {
+    expect(
+      resolveQwenParentToolUseId({
+        update: {},
+        toolUseId: 'read-child-1',
+        activeParentToolUseIds: new Set(['agent-parent-1']),
+      }),
+    ).toBe('agent-parent-1');
+
+    expect(
+      resolveQwenParentToolUseId({
+        update: {},
+        toolUseId: 'agent-parent-1',
+        activeParentToolUseIds: new Set(['agent-parent-1']),
+      }),
+    ).toBeUndefined();
+  });
+
   it('uses ACP-reported context and thinking metadata without a hardcoded context fallback', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     let capturedModels: ModelDefinition[] = [];
@@ -164,12 +201,8 @@ describe('QwenAgent model metadata', () => {
           setModelParams.push(params);
           return undefined as Awaited<ReturnType<typeof execute>>;
         },
-        setSessionConfigOption: async () => {
-          return undefined as Awaited<ReturnType<typeof execute>>;
-        },
-        setSessionMode: async () => {
-          return undefined as Awaited<ReturnType<typeof execute>>;
-        },
+        setSessionConfigOption: async () => undefined as Awaited<ReturnType<typeof execute>>,
+        setSessionMode: async () => undefined as Awaited<ReturnType<typeof execute>>,
       });
     };
 

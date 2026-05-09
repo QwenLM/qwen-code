@@ -276,6 +276,8 @@ export class SubAgentTracker {
         event.text,
         'assistant',
         event.thought ?? false,
+        undefined,
+        this.getSubagentMeta(),
       );
     };
   }

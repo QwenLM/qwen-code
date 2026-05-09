@@ -43,6 +43,7 @@ import {
   resolveFileMentions,
   resolveSourceMentions,
 } from '../mentions/index.ts';
+import { isParentTaskTool } from '../utils/toolNames.ts';
 
 import { BaseAgent } from './base-agent.ts';
 import type {
@@ -461,6 +462,41 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+export function extractQwenParentToolUseId(
+  update: Record<string, unknown>,
+): string | undefined {
+  const meta = toRecord(update._meta);
+  return (
+    asString(update.parentToolCallId) ||
+    asString(update.parentToolUseId) ||
+    asString(update.parent_tool_use_id) ||
+    asString(meta.parentToolCallId) ||
+    asString(meta.parentToolUseId) ||
+    asString(meta.parent_tool_use_id)
+  );
+}
+
+export function resolveQwenParentToolUseId(args: {
+  update: Record<string, unknown>;
+  toolUseId?: string;
+  activeParentToolUseIds?: ReadonlySet<string>;
+}): string | undefined {
+  const explicitParentToolUseId = extractQwenParentToolUseId(args.update);
+  if (explicitParentToolUseId && explicitParentToolUseId !== args.toolUseId) {
+    return explicitParentToolUseId;
+  }
+
+  const activeParentToolUseIds = args.activeParentToolUseIds;
+  if (activeParentToolUseIds?.size === 1) {
+    const [activeParentToolUseId] = activeParentToolUseIds;
+    if (activeParentToolUseId !== args.toolUseId) {
+      return activeParentToolUseId;
+    }
+  }
+
+  return undefined;
 }
 
 function asNumber(value: unknown): number | undefined {
@@ -1123,9 +1159,12 @@ export class QwenAgent extends BaseAgent {
   private currentTurnId: string | undefined;
   private currentAssistantText = '';
   private currentThoughtText = '';
+  private currentAssistantParentToolUseId: string | undefined;
+  private currentThoughtParentToolUseId: string | undefined;
   private currentIsSlashCommand = false;
   private toolNames = new Map<string, string>();
   private toolInputs = new Map<string, Record<string, unknown>>();
+  private activeParentToolUseIds = new Set<string>();
   private midTurnMessageQueue: string[] = [];
 
   constructor(config: BackendConfig) {
@@ -1235,10 +1274,13 @@ export class QwenAgent extends BaseAgent {
     this.eventQueue.reset();
     this.currentAssistantText = '';
     this.currentThoughtText = '';
+    this.currentAssistantParentToolUseId = undefined;
+    this.currentThoughtParentToolUseId = undefined;
     this.currentIsSlashCommand = isSlashCommandPrompt(message, attachments);
     this.currentTurnId = `qwen-turn-${promptRunId}`;
     this.toolNames.clear();
     this.toolInputs.clear();
+    this.activeParentToolUseIds.clear();
     this.midTurnMessageQueue = [];
 
     this.emitAutomationEvent('UserPromptSubmit', {
@@ -2700,6 +2742,7 @@ export class QwenAgent extends BaseAgent {
   ): Message[] {
     const messages: Message[] = [];
     const toolMessages = new Map<string, Message>();
+    const activeParentToolUseIds = new Set<string>();
     let idCounter = 0;
     let fallbackTimestamp = Date.now();
 
@@ -2718,6 +2761,7 @@ export class QwenAgent extends BaseAgent {
       timestamp: number,
       isIntermediate?: boolean,
       intermediateKind?: IntermediateMessageKind,
+      parentToolUseId?: string,
     ) => {
       if (!text) return;
       const messageText =
@@ -2729,7 +2773,8 @@ export class QwenAgent extends BaseAgent {
         previous.timestamp === timestamp &&
         !previous.toolUseId &&
         previous.isIntermediate === isIntermediate &&
-        previous.intermediateKind === intermediateKind
+        previous.intermediateKind === intermediateKind &&
+        previous.parentToolUseId === parentToolUseId
       ) {
         const nextContent = previous.content + text;
         previous.content =
@@ -2747,6 +2792,7 @@ export class QwenAgent extends BaseAgent {
         timestamp,
         isIntermediate,
         intermediateKind,
+        parentToolUseId,
       });
     };
 
@@ -2767,6 +2813,10 @@ export class QwenAgent extends BaseAgent {
       const timestamp = timestampFor(update);
       const content = toRecord(update.content);
       const text = content.type === 'text' ? asString(content.text) : undefined;
+      const parentToolUseId = resolveQwenParentToolUseId({
+        update,
+        activeParentToolUseIds,
+      });
 
       switch (update.sessionUpdate) {
         case 'user_message_chunk':
@@ -2774,7 +2824,14 @@ export class QwenAgent extends BaseAgent {
           break;
 
         case 'agent_message_chunk':
-          appendTextMessage('assistant', text || '', timestamp);
+          appendTextMessage(
+            'assistant',
+            text || '',
+            timestamp,
+            undefined,
+            undefined,
+            parentToolUseId,
+          );
           break;
 
         case 'agent_thought_chunk':
@@ -2784,6 +2841,7 @@ export class QwenAgent extends BaseAgent {
             timestamp,
             true,
             'thought',
+            parentToolUseId,
           );
           break;
 
@@ -2798,6 +2856,11 @@ export class QwenAgent extends BaseAgent {
             asString(meta.toolName) || asString(update.title),
             kind,
           );
+          const toolParentUseId = resolveQwenParentToolUseId({
+            update,
+            toolUseId,
+            activeParentToolUseIds,
+          });
           const toolMessage: Message = {
             id: nextId(),
             role: 'tool',
@@ -2809,9 +2872,13 @@ export class QwenAgent extends BaseAgent {
             toolStatus: 'executing',
             toolIntent: asString(update.title),
             toolDisplayName: displayNameForTool(toolName, kind),
+            parentToolUseId: toolParentUseId,
           };
           messages.push(toolMessage);
           toolMessages.set(toolUseId, toolMessage);
+          if (isParentTaskTool(toolName)) {
+            activeParentToolUseIds.add(toolUseId);
+          }
           break;
         }
 
@@ -2819,20 +2886,27 @@ export class QwenAgent extends BaseAgent {
           markTrailingAssistantAsCommentary();
           const toolUseId =
             asString(update.toolCallId) || `qwen-history-tool-${++idCounter}`;
+          const existing = toolMessages.get(toolUseId);
           const meta = toRecord(update._meta);
           const toolName = normalizeToolName(
-            asString(meta.toolName),
+            asString(meta.toolName) || existing?.toolName,
             asString(update.kind),
           );
+          const toolParentUseId = resolveQwenParentToolUseId({
+            update,
+            toolUseId,
+            activeParentToolUseIds,
+          });
           const result = this.formatToolResult(update);
           const isError = update.status === 'failed';
-          const existing = toolMessages.get(toolUseId);
 
           if (existing) {
             existing.toolName = existing.toolName || toolName;
             existing.toolResult = result;
             existing.toolStatus = isError ? 'error' : 'completed';
             existing.isError = isError;
+            existing.parentToolUseId =
+              existing.parentToolUseId || toolParentUseId;
           } else {
             const toolMessage: Message = {
               id: nextId(),
@@ -2844,9 +2918,13 @@ export class QwenAgent extends BaseAgent {
               toolResult: result,
               toolStatus: isError ? 'error' : 'completed',
               isError,
+              parentToolUseId: toolParentUseId,
             };
             messages.push(toolMessage);
             toolMessages.set(toolUseId, toolMessage);
+          }
+          if (isParentTaskTool(toolName)) {
+            activeParentToolUseIds.delete(toolUseId);
           }
           break;
         }
@@ -3018,11 +3096,23 @@ export class QwenAgent extends BaseAgent {
     if (content.type !== 'text') return;
     const text = asString(content.text);
     if (!text) return;
+    const parentToolUseId = resolveQwenParentToolUseId({
+      update,
+      activeParentToolUseIds: this.activeParentToolUseIds,
+    });
+    if (
+      this.currentAssistantText &&
+      this.currentAssistantParentToolUseId !== parentToolUseId
+    ) {
+      this.flushAssistantText(true);
+    }
+    this.currentAssistantParentToolUseId = parentToolUseId;
     this.currentAssistantText += text;
     this.eventQueue.enqueue({
       type: 'text_delta',
       text,
       turnId: this.currentTurnId,
+      parentToolUseId,
     });
   }
 
@@ -3031,11 +3121,23 @@ export class QwenAgent extends BaseAgent {
     if (content.type !== 'text') return;
     const text = asString(content.text);
     if (!text) return;
+    const parentToolUseId = resolveQwenParentToolUseId({
+      update,
+      activeParentToolUseIds: this.activeParentToolUseIds,
+    });
+    if (
+      this.currentThoughtText &&
+      this.currentThoughtParentToolUseId !== parentToolUseId
+    ) {
+      this.flushThoughtText();
+    }
+    this.currentThoughtParentToolUseId = parentToolUseId;
     this.currentThoughtText += text;
     this.eventQueue.enqueue({
       type: 'text_delta',
       text,
       turnId: this.currentTurnId,
+      parentToolUseId,
     });
   }
 
@@ -3052,8 +3154,10 @@ export class QwenAgent extends BaseAgent {
       isIntermediate: true,
       intermediateKind: 'thought',
       turnId: this.currentTurnId,
+      parentToolUseId: this.currentThoughtParentToolUseId,
     });
     this.currentThoughtText = '';
+    this.currentThoughtParentToolUseId = undefined;
   }
 
   private flushAssistantText(isIntermediate?: boolean): void {
@@ -3067,8 +3171,10 @@ export class QwenAgent extends BaseAgent {
       ...(isIntermediate !== undefined ? { isIntermediate } : {}),
       ...(isIntermediate ? { intermediateKind: 'commentary' as const } : {}),
       turnId: this.currentTurnId,
+      parentToolUseId: this.currentAssistantParentToolUseId,
     });
     this.currentAssistantText = '';
+    this.currentAssistantParentToolUseId = undefined;
   }
 
   private handleToolCall(update: JsonRecord): void {
@@ -3082,6 +3188,11 @@ export class QwenAgent extends BaseAgent {
       kind,
     );
     const title = asString(update.title);
+    const parentToolUseId = resolveQwenParentToolUseId({
+      update,
+      toolUseId,
+      activeParentToolUseIds: this.activeParentToolUseIds,
+    });
 
     this.toolNames.set(toolUseId, toolName);
     this.toolInputs.set(toolUseId, rawInput);
@@ -3094,7 +3205,12 @@ export class QwenAgent extends BaseAgent {
       intent: title,
       displayName: displayNameForTool(toolName, kind),
       turnId: this.currentTurnId,
+      parentToolUseId,
     });
+
+    if (isParentTaskTool(toolName)) {
+      this.activeParentToolUseIds.add(toolUseId);
+    }
   }
 
   private handleToolCallUpdate(update: JsonRecord): void {
@@ -3104,6 +3220,11 @@ export class QwenAgent extends BaseAgent {
     const toolName =
       this.toolNames.get(toolUseId) ||
       normalizeToolName(asString(meta.toolName), asString(update.kind));
+    const parentToolUseId = resolveQwenParentToolUseId({
+      update,
+      toolUseId,
+      activeParentToolUseIds: this.activeParentToolUseIds,
+    });
     const result = this.formatToolResult(update);
     const isError = update.status === 'failed';
 
@@ -3115,7 +3236,12 @@ export class QwenAgent extends BaseAgent {
       isError,
       input: this.toolInputs.get(toolUseId),
       turnId: this.currentTurnId,
+      parentToolUseId,
     });
+
+    if (isParentTaskTool(toolName)) {
+      this.activeParentToolUseIds.delete(toolUseId);
+    }
   }
 
   private handlePlanUpdate(update: JsonRecord): void {
