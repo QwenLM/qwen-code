@@ -6,25 +6,34 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TaskStopTool } from './task-stop.js';
-import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
-import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
-import { MonitorRegistry } from '../services/monitorRegistry.js';
+import { TaskRegistry } from '../agents/tasks/registry.js';
+import {
+  agentComplete,
+  agentRegister,
+  getAgentTask,
+} from '../agents/tasks/agent-task.js';
+import {
+  getShellTask,
+  shellComplete,
+  shellRegister,
+} from '../agents/tasks/shell-task.js';
+import {
+  getMonitorTask,
+  monitorComplete,
+  monitorRegister,
+} from '../agents/tasks/monitor-task.js';
 import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
 
 describe('TaskStopTool', () => {
-  let registry: BackgroundTaskRegistry;
-  let shellRegistry: BackgroundShellRegistry;
-  let monitorRegistry: MonitorRegistry;
+  let registry: TaskRegistry;
   let config: Config;
   let tool: TaskStopTool;
   let abandonBackgroundAgent: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    registry = new BackgroundTaskRegistry();
+    registry = new TaskRegistry();
     abandonBackgroundAgent = vi.fn();
-    shellRegistry = new BackgroundShellRegistry();
-    monitorRegistry = new MonitorRegistry();
     // Default fake MemoryManager — every test that doesn't care about
     // dream gets an empty stub so the 4th-route lookup falls through to
     // the not-found branch instead of crashing on undefined.
@@ -33,10 +42,8 @@ describe('TaskStopTool', () => {
       cancelTask: vi.fn(() => false),
     };
     config = {
-      getBackgroundTaskRegistry: () => registry,
+      getTaskRegistry: () => registry,
       abandonBackgroundAgent,
-      getBackgroundShellRegistry: () => shellRegistry,
-      getMonitorRegistry: () => monitorRegistry,
       getMemoryManager: () => memoryManager,
     } as unknown as Config;
     tool = new TaskStopTool(config);
@@ -44,7 +51,7 @@ describe('TaskStopTool', () => {
 
   it('cancels a running agent', async () => {
     const ac = new AbortController();
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'test agent',
       status: 'running',
@@ -62,7 +69,7 @@ describe('TaskStopTool', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Cancellation requested');
     expect(result.llmContent).toContain('agent-1');
-    expect(registry.get('agent-1')!.status).toBe('cancelled');
+    expect(getAgentTask(registry, 'agent-1')!.status).toBe('cancelled');
     expect(ac.signal.aborted).toBe(true);
   });
 
@@ -77,7 +84,7 @@ describe('TaskStopTool', () => {
   });
 
   it('returns error for non-running task', async () => {
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'test agent',
       status: 'running',
@@ -86,7 +93,7 @@ describe('TaskStopTool', () => {
       isBackgrounded: true,
       outputFile: '/tmp/test.jsonl',
     });
-    registry.complete('agent-1', 'done');
+    agentComplete(registry, 'agent-1', 'done');
 
     const result = await tool.validateBuildAndExecute(
       { task_id: 'agent-1' },
@@ -98,7 +105,7 @@ describe('TaskStopTool', () => {
   });
 
   it('includes description in success response', async () => {
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'Search for auth code',
       status: 'running',
@@ -118,7 +125,7 @@ describe('TaskStopTool', () => {
   });
 
   it('cancels a paused agent through the resume service', async () => {
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'Paused agent',
       status: 'paused',
@@ -142,7 +149,7 @@ describe('TaskStopTool', () => {
   describe('background shell support', () => {
     it('cancels a running background shell', async () => {
       const ac = new AbortController();
-      shellRegistry.register({
+      shellRegister(registry, {
         shellId: 'bg_a1b2c3d4',
         command: 'npm run dev',
         cwd: '/work',
@@ -167,13 +174,13 @@ describe('TaskStopTool', () => {
       // until the spawn handler observes the abort and settles the entry
       // with the real exit moment. Without this guarantee, /tasks would
       // report a terminal-but-still-draining shell.
-      expect(shellRegistry.get('bg_a1b2c3d4')!.status).toBe('running');
-      expect(shellRegistry.get('bg_a1b2c3d4')!.endTime).toBeUndefined();
+      expect(getShellTask(registry, 'bg_a1b2c3d4')!.status).toBe('running');
+      expect(getShellTask(registry, 'bg_a1b2c3d4')!.endTime).toBeUndefined();
       expect(ac.signal.aborted).toBe(true);
     });
 
     it('returns NOT_RUNNING when the shell already exited', async () => {
-      shellRegistry.register({
+      shellRegister(registry, {
         shellId: 'bg_done',
         command: 'true',
         cwd: '/work',
@@ -182,7 +189,7 @@ describe('TaskStopTool', () => {
         outputPath: '/tmp/bg-out/shell-bg_done.output',
         abortController: new AbortController(),
       });
-      shellRegistry.complete('bg_done', 0, Date.now());
+      shellComplete(registry, 'bg_done', 0, Date.now());
 
       const result = await tool.validateBuildAndExecute(
         { task_id: 'bg_done' },
@@ -194,46 +201,18 @@ describe('TaskStopTool', () => {
       expect(result.llmContent).toContain('completed');
     });
 
-    it('prefers an agent over a shell when both have the same id (defensive)', async () => {
-      // IDs cannot collide in practice (different naming schemes), but the
-      // tool's lookup order should still be deterministic if they ever do.
-      const agentAc = new AbortController();
-      const shellAc = new AbortController();
-      registry.register({
-        agentId: 'shared-id',
-        description: 'agent',
-        status: 'running',
-        startTime: Date.now(),
-        abortController: agentAc,
-        isBackgrounded: true,
-        outputFile: '/tmp/test.jsonl',
-      });
-      shellRegistry.register({
-        shellId: 'shared-id',
-        command: 'shell-cmd',
-        cwd: '/work',
-        status: 'running',
-        startTime: Date.now(),
-        outputPath: '/tmp/x.out',
-        abortController: shellAc,
-      });
-
-      const result = await tool.validateBuildAndExecute(
-        { task_id: 'shared-id' },
-        new AbortController().signal,
-      );
-
-      expect(result.llmContent).toContain('background agent');
-      expect(agentAc.signal.aborted).toBe(true);
-      expect(shellAc.signal.aborted).toBe(false);
-      expect(shellRegistry.get('shared-id')!.status).toBe('running');
-    });
+    // The original "prefer agent over shell when ids collide" defensive
+    // test is gone after PR 2: the unified TaskRegistry holds one entry
+    // per id (Map keyed by id), so two register calls with the same id
+    // overwrite, not coexist. ID collision is now physically impossible
+    // — the lookup-order question that test guarded against doesn't
+    // exist in the new model.
   });
 
   describe('monitor support', () => {
     it('cancels a running monitor', async () => {
       const ac = new AbortController();
-      monitorRegistry.register({
+      monitorRegister(registry, {
         monitorId: 'mon_123',
         command: 'tail -f app.log',
         description: 'watch app log',
@@ -257,12 +236,12 @@ describe('TaskStopTool', () => {
       expect(result.llmContent).toContain('Monitor "mon_123" cancelled');
       expect(result.llmContent).toContain('tail -f app.log');
       expect(result.returnDisplay).toContain('watch app log');
-      expect(monitorRegistry.get('mon_123')!.status).toBe('cancelled');
+      expect(getMonitorTask(registry, 'mon_123')!.status).toBe('cancelled');
       expect(ac.signal.aborted).toBe(true);
     });
 
     it('returns NOT_RUNNING when the monitor already completed', async () => {
-      monitorRegistry.register({
+      monitorRegister(registry, {
         monitorId: 'mon_done',
         command: 'true',
         description: 'completed monitor',
@@ -276,7 +255,7 @@ describe('TaskStopTool', () => {
         droppedLines: 0,
         outputFile: '/tmp/test.jsonl',
       });
-      monitorRegistry.complete('mon_done', 0);
+      monitorComplete(registry, 'mon_done', 0);
 
       const result = await tool.validateBuildAndExecute(
         { task_id: 'mon_done' },
@@ -307,10 +286,9 @@ describe('TaskStopTool', () => {
         cancelTask,
       };
       const localConfig = {
-        getBackgroundTaskRegistry: () => registry,
+        getTaskRegistry: () => registry,
         abandonBackgroundAgent,
-        getBackgroundShellRegistry: () => shellRegistry,
-        getMonitorRegistry: () => monitorRegistry,
+
         getMemoryManager: () => memoryManager,
       } as unknown as Config;
       const localTool = new TaskStopTool(localConfig);
@@ -344,10 +322,9 @@ describe('TaskStopTool', () => {
         cancelTask,
       };
       const localConfig = {
-        getBackgroundTaskRegistry: () => registry,
+        getTaskRegistry: () => registry,
         abandonBackgroundAgent,
-        getBackgroundShellRegistry: () => shellRegistry,
-        getMonitorRegistry: () => monitorRegistry,
+
         getMemoryManager: () => memoryManager,
       } as unknown as Config;
       const localTool = new TaskStopTool(localConfig);
@@ -384,10 +361,9 @@ describe('TaskStopTool', () => {
         cancelTask,
       };
       const localConfig = {
-        getBackgroundTaskRegistry: () => registry,
+        getTaskRegistry: () => registry,
         abandonBackgroundAgent,
-        getBackgroundShellRegistry: () => shellRegistry,
-        getMonitorRegistry: () => monitorRegistry,
+
         getMemoryManager: () => memoryManager,
       } as unknown as Config;
       const localTool = new TaskStopTool(localConfig);
@@ -423,10 +399,9 @@ describe('TaskStopTool', () => {
         cancelTask: vi.fn(() => false),
       };
       const localConfig = {
-        getBackgroundTaskRegistry: () => registry,
+        getTaskRegistry: () => registry,
         abandonBackgroundAgent,
-        getBackgroundShellRegistry: () => shellRegistry,
-        getMonitorRegistry: () => monitorRegistry,
+
         getMemoryManager: () => memoryManager,
       } as unknown as Config;
       const localTool = new TaskStopTool(localConfig);

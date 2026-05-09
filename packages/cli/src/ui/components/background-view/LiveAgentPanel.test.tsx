@@ -98,8 +98,18 @@ function makeRegistryConfig(agents: readonly AgentDialogEntry[]): {
   const store = new Map<string, AgentDialogEntry>();
   for (const a of agents) store.set(a.agentId, a);
   const config = {
-    getBackgroundTaskRegistry: () => ({
+    getTaskRegistry: () => ({
       get: (id: string) => store.get(id),
+      // The panel uses `getAgentTask(registry, id)` which calls
+      // `registry.get(id)` and narrows by kind. The stub entries
+      // already carry `kind: 'agent'`, so the narrowing succeeds.
+      getAll: () => Array.from(store.values()),
+      getByKind: () => Array.from(store.values()),
+      register: () => undefined,
+      update: () => undefined,
+      evict: () => undefined,
+      kill: () => undefined,
+      subscribe: () => () => {},
     }),
   } as unknown as Config;
   return { config, store };

@@ -25,9 +25,10 @@ import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   buildBackgroundEntryLabel,
+  getAgentTask,
+  getMonitorTask,
   ToolDisplayNames,
   ToolNames,
-  type AgentTask,
   type MonitorTask,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -933,12 +934,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     // Shells don't mutate detail-visible fields between statusChange
     // events, so the snapshot stays correct for them.
     if (fromSnapshot.kind === 'agent') {
-      const live = config.getBackgroundTaskRegistry().get(fromSnapshot.agentId);
-      return live ? { ...live, kind: 'agent' as const } : fromSnapshot;
+      const live = getAgentTask(config.getTaskRegistry(), fromSnapshot.agentId);
+      return live ?? fromSnapshot;
     }
     if (fromSnapshot.kind === 'monitor') {
-      const live = config.getMonitorRegistry().get(fromSnapshot.monitorId);
-      return live ? { ...live, kind: 'monitor' as const } : fromSnapshot;
+      const live = getMonitorTask(
+        config.getTaskRegistry(),
+        fromSnapshot.monitorId,
+      );
+      return live ?? fromSnapshot;
     }
     return fromSnapshot;
     // activityTick is a dep on purpose: the registry mutation is invisible
@@ -947,25 +951,38 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   }, [entries, selectedIndex, config, activityTick]);
 
   const selectedEntryId = selectedEntry ? entryId(selectedEntry) : undefined;
-  // Activity callback is agent-only — shells don't emit per-tool events.
-  const selectedAgentIdForActivity =
-    selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
+  // Live in-place updates (agent activity bursts, monitor event count)
+  // don't change the snapshot's shape signature, so useBackgroundTaskView
+  // skips its setEntries fan-out for them. The detail view subscribes
+  // directly to the selected agent / monitor so its per-entry display
+  // still reflects them.
+  const selectedLiveEntityId =
+    selectedEntry?.kind === 'agent'
+      ? selectedEntry.agentId
+      : selectedEntry?.kind === 'monitor'
+        ? selectedEntry.monitorId
+        : undefined;
   useEffect(() => {
-    if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity) return;
-    const registry = config.getBackgroundTaskRegistry();
-    const onActivity = (entry: AgentTask) => {
-      if (entry.agentId !== selectedAgentIdForActivity) return;
+    // `isDetailMode` covers both `dialogMode === 'detail'` (entered from
+    // the list) and `dialogMode === 'detail-from-panel'` (entered from
+    // the LiveAgentPanel). The detail body renders in both modes and
+    // every sibling effect (below) uses the same predicate; narrowing
+    // to just `'detail'` would silently drop live-refresh on the
+    // panel-entered path.
+    if (!dialogOpen || !isDetailMode || !selectedLiveEntityId) return;
+    const registry = config.getTaskRegistry();
+    return registry.subscribe((entry) => {
+      if (!entry) return;
+      const id =
+        entry.kind === 'agent'
+          ? entry.agentId
+          : entry.kind === 'monitor'
+            ? entry.monitorId
+            : undefined;
+      if (id !== selectedLiveEntityId) return;
       setActivityTick((n) => n + 1);
-    };
-    registry.setActivityChangeCallback(onActivity);
-    return () => registry.setActivityChangeCallback(undefined);
-  }, [
-    dialogOpen,
-    dialogMode,
-    isDetailMode,
-    config,
-    selectedAgentIdForActivity,
-  ]);
+    });
+  }, [dialogOpen, isDetailMode, config, selectedLiveEntityId]);
 
   // Wall-clock tick for the running agent's duration. Activity callbacks
   // fire when tools run, but duration needs to advance even when the agent

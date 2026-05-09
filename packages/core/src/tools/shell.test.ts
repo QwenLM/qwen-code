@@ -27,6 +27,7 @@ import { ShellTool, type ShellToolInvocation } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { type Config } from '../config/config.js';
+import * as shellTaskModule from '../agents/tasks/shell-task.js';
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,
@@ -90,15 +91,31 @@ describe('ShellTool', () => {
         email: 'qwen-coder@alibabacloud.com',
       }),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
-      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+      // Real TaskRegistry — shell-task helpers operate on it directly.
+      // Tests use vi.spyOn against the shell-task module to assert
+      // register/complete/fail/cancel calls.
+      getTaskRegistry: vi.fn().mockReturnValue({
         register: vi.fn(),
         get: vi.fn(),
         getAll: vi.fn().mockReturnValue([]),
-        cancel: vi.fn(),
-        complete: vi.fn(),
-        fail: vi.fn(),
+        getByKind: vi.fn().mockReturnValue([]),
+        update: vi.fn((id: string, updater: (t: unknown) => unknown) =>
+          updater({}),
+        ),
+        evict: vi.fn(),
+        kill: vi.fn(),
+        subscribe: vi.fn(() => () => {}),
       }),
     } as unknown as Config;
+
+    // Reset shell-task module spies between tests
+    vi.spyOn(shellTaskModule, 'shellRegister').mockImplementation(
+      (_reg, e) => e as never,
+    );
+    vi.spyOn(shellTaskModule, 'shellComplete').mockImplementation(() => {});
+    vi.spyOn(shellTaskModule, 'shellFail').mockImplementation(() => {});
+    vi.spyOn(shellTaskModule, 'shellCancel').mockImplementation(() => {});
+    vi.spyOn(shellTaskModule, 'getShellTask').mockReturnValue(undefined);
 
     // executeBackground writes to disk; stub mkdirSync + createWriteStream.
     vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
@@ -309,7 +326,6 @@ describe('ShellTool', () => {
     };
 
     it('runs background commands as managed pool entries (no & / pgrep wrap)', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
         command: 'npm start',
         is_background: true,
@@ -330,8 +346,8 @@ describe('ShellTool', () => {
         { streamStdout: true },
       );
       // Entry registered with the spawn pid.
-      expect(registry.register).toHaveBeenCalledTimes(1);
-      const entry = (registry.register as Mock).mock.calls[0][0];
+      expect(shellTaskModule.shellRegister).toHaveBeenCalledTimes(1);
+      const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
       expect(entry.command).toBe('npm start');
       expect(entry.cwd).toBe('/test/dir');
       expect(entry.status).toBe('running');
@@ -344,13 +360,12 @@ describe('ShellTool', () => {
     });
 
     it('settles a background entry as completed when the process exits cleanly', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
         command: 'true',
         is_background: true,
       });
       await invocation.execute(mockAbortSignal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
+      const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
       resolveExecutionPromise({
         rawOutput: Buffer.from(''),
@@ -365,23 +380,23 @@ describe('ShellTool', () => {
       // Flush the .then() microtask attached to resultPromise.
       await new Promise((r) => setImmediate(r));
 
-      expect(registry.complete).toHaveBeenCalledWith(
+      expect(shellTaskModule.shellComplete).toHaveBeenCalledWith(
+        expect.anything(),
         entry.shellId,
         0,
         expect.any(Number),
       );
-      expect(registry.fail).not.toHaveBeenCalled();
-      expect(registry.cancel).not.toHaveBeenCalled();
+      expect(shellTaskModule.shellFail).not.toHaveBeenCalled();
+      expect(shellTaskModule.shellCancel).not.toHaveBeenCalled();
     });
 
     it('settles a background entry as failed when ShellExecutionService reports error', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
         command: 'no-such-command',
         is_background: true,
       });
       await invocation.execute(mockAbortSignal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
+      const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
       resolveExecutionPromise({
         rawOutput: Buffer.from(''),
@@ -395,22 +410,22 @@ describe('ShellTool', () => {
       });
       await new Promise((r) => setImmediate(r));
 
-      expect(registry.fail).toHaveBeenCalledWith(
+      expect(shellTaskModule.shellFail).toHaveBeenCalledWith(
+        expect.anything(),
         entry.shellId,
         'spawn ENOENT',
         expect.any(Number),
       );
-      expect(registry.complete).not.toHaveBeenCalled();
+      expect(shellTaskModule.shellComplete).not.toHaveBeenCalled();
     });
 
     it('settles a background entry as failed on non-zero exit code (no error object)', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
         command: 'false',
         is_background: true,
       });
       await invocation.execute(mockAbortSignal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
+      const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
       // ShellExecutionService reports a clean non-zero exit (no error object,
       // no signal) — historically this got bucketed as `completed`, which
@@ -427,12 +442,13 @@ describe('ShellTool', () => {
       });
       await new Promise((r) => setImmediate(r));
 
-      expect(registry.fail).toHaveBeenCalledWith(
+      expect(shellTaskModule.shellFail).toHaveBeenCalledWith(
+        expect.anything(),
         entry.shellId,
         expect.stringContaining('exited with code 1'),
         expect.any(Number),
       );
-      expect(registry.complete).not.toHaveBeenCalled();
+      expect(shellTaskModule.shellComplete).not.toHaveBeenCalled();
     });
 
     it('rejects a bare trailing & in managed background mode', async () => {
@@ -3575,7 +3591,7 @@ describe('ShellTool', () => {
       it('registers a bg_xxx entry on `result.promoted: true` and returns promote-flavored ToolResult', async () => {
         const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
         writeFileSyncSpy.mockReturnValue(undefined);
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
         const invocation = shellTool.build({
           command: 'tail -f /tmp/never.log',
           is_background: false,
@@ -3646,7 +3662,7 @@ describe('ShellTool', () => {
         try {
           const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
           writeFileSyncSpy.mockReturnValue(undefined);
-          const registry = mockConfig.getBackgroundShellRegistry();
+          const registry = mockConfig.getTaskRegistry();
           const invocation = shellTool.build({
             command: 'tail -f /tmp/never.log',
             is_background: false,
@@ -3700,7 +3716,7 @@ describe('ShellTool', () => {
         // registration.
         const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
         writeFileSyncSpy.mockReturnValue(undefined);
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
         const invocation = shellTool.build({
           command: 'tail -f /tmp/never.log',
           is_background: false,
@@ -3725,7 +3741,7 @@ describe('ShellTool', () => {
         writeFileSyncSpy.mockImplementation(() => {
           throw new Error('ENOSPC: no space left on device');
         });
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
         const invocation = shellTool.build({
           command: 'tail -f /tmp/never.log',
           is_background: false,
@@ -3758,7 +3774,7 @@ describe('ShellTool', () => {
         // actually executed.
         const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
         writeFileSyncSpy.mockReturnValue(undefined);
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
         const rawCommand = 'git commit -m "feat: ship promote"';
         const invocation = shellTool.build({
           command: rawCommand,
@@ -3895,7 +3911,7 @@ describe('ShellTool', () => {
         try {
           const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
           writeFileSyncSpy.mockReturnValue(undefined);
-          const registry = mockConfig.getBackgroundShellRegistry();
+          const registry = mockConfig.getTaskRegistry();
           (registry.register as Mock).mockImplementation(() => {
             throw new Error('boom: registry borked');
           });
@@ -3951,7 +3967,7 @@ describe('ShellTool', () => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
         );
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
         const invocation = shellTool.build({
           command: 'tail -f /tmp/never.log',
           is_background: false,
@@ -4003,7 +4019,7 @@ describe('ShellTool', () => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
         );
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
         // Capture the postPromote options passed to the service so
         // we can drive its onSettle handler directly (the mocked
         // service doesn't fire it on its own).
@@ -4054,7 +4070,7 @@ describe('ShellTool', () => {
 
       it('non-zero exit / signal / error all transition entry to "failed" with descriptive message', async () => {
         // Pin the failure-mode decision table.
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
         const invocation = shellTool.build({
           command: 'cmd',
           is_background: false,
@@ -4131,7 +4147,7 @@ describe('ShellTool', () => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
         );
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
 
         // Custom one-shot service impl that captures postPromote and
         // FIRES onSettle BEFORE resolving the promise — simulates the
@@ -4211,7 +4227,7 @@ describe('ShellTool', () => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
         );
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
 
         let capturedPostPromote:
           | {
@@ -4300,7 +4316,7 @@ describe('ShellTool', () => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
         );
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
 
         let capturedPostPromote:
           | {
@@ -4402,7 +4418,7 @@ describe('ShellTool', () => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
         );
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
 
         const invocation = shellTool.build({
           command: 'sleep 1',
@@ -4505,7 +4521,7 @@ describe('ShellTool', () => {
           vi.mocked(fs.createWriteStream).mockReturnValueOnce(
             writeStreamMock as unknown as fs.WriteStream,
           );
-          const registry = mockConfig.getBackgroundShellRegistry();
+          const registry = mockConfig.getTaskRegistry();
 
           const invocation = shellTool.build({
             command: 'sleep 1',
@@ -4694,7 +4710,7 @@ describe('ShellTool', () => {
           .mocked(fs.writeFileSync)
           .mockImplementationOnce(() => undefined);
 
-        const registry = mockConfig.getBackgroundShellRegistry();
+        const registry = mockConfig.getTaskRegistry();
         let capturedPostPromote:
           | {
               onData?: (event: { type: string; chunk: unknown }) => void;

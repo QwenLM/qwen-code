@@ -29,15 +29,23 @@
  */
 
 /**
- * Discriminator over the task kinds tracked by the three task registries.
- * Each kind's per-kind state intersects with `TaskBase` to form the
- * union member; see `TaskState`.
- *
- * Dream tasks (`MemoryManager`) are intentionally outside this union
- * for now — they have a separate lifecycle and their inclusion is
- * deferred to a follow-up.
+ * Discriminator over the task kinds the unified `TaskRegistry` and the
+ * polymorphic `kill` dispatcher route over. Three of the four kinds —
+ * `agent`, `shell`, `monitor` — live inside `TaskRegistry`'s map; the
+ * fourth, `dream`, lives in `MemoryManager` and is bridged in via the
+ * dream adapter (`tasks/dream-task.ts`). The dispatcher carries `dream`
+ * so `cancelSelected` and other consumers can dispatch uniformly across
+ * all four without a kind-switch.
  */
-export type TaskKind = 'agent' | 'shell' | 'monitor';
+export type TaskKind = 'agent' | 'shell' | 'monitor' | 'dream';
+
+/**
+ * Subset of `TaskKind` for entries actually held by `TaskRegistry`.
+ * Excludes `dream`, which is adapted from `MemoryManager` rather than
+ * registered. Used internally by the registry's `getByKind` and
+ * `getAll` typings.
+ */
+export type RegistryTaskKind = Exclude<TaskKind, 'dream'>;
 
 /**
  * Lifecycle states a task can occupy. `paused` and `cancelled` are
@@ -107,15 +115,18 @@ export type TaskRegistration<T extends TaskBase> = Omit<
   'id' | 'kind' | 'outputOffset' | 'notified'
 >;
 
-// Per-kind types live in their owning modules to keep the rename surface
-// small; the union is composed here so consumers can switch on `kind`.
-import type { AgentTask } from '../background-tasks.js';
-import type { ShellTask } from '../../services/backgroundShellRegistry.js';
-import type { MonitorTask } from '../../services/monitorRegistry.js';
+// Per-kind types live in their owning modules; the union is composed
+// here so consumers can switch on `kind`.
+import type { AgentTask } from './agent-task.js';
+import type { ShellTask } from './shell-task.js';
+import type { MonitorTask } from './monitor-task.js';
 
 /**
- * Discriminated union over every task kind tracked by the three
- * registries. Switch on `kind` to narrow to the per-kind shape.
+ * Discriminated union over every task kind held by the unified
+ * `TaskRegistry`. Dream tasks are not in this union — they live in
+ * `MemoryManager` and are surfaced via the dream adapter
+ * (`tasks/dream-task.ts`). Switch on `kind` to narrow to the per-kind
+ * shape.
  */
 export type TaskState = AgentTask | ShellTask | MonitorTask;
 

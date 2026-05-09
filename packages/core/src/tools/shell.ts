@@ -38,7 +38,14 @@ import type {
   ShellPostPromoteSettleInfo,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
-import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.js';
+import {
+  getShellTask,
+  shellCancel,
+  shellComplete,
+  shellFail,
+  shellRegister,
+  type ShellTaskRegistration,
+} from '../agents/tasks/shell-task.js';
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
@@ -2374,7 +2381,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     const startTime = Date.now();
-    const registry = this.config.getBackgroundShellRegistry();
+    const registry = this.config.getTaskRegistry();
     // Create a FRESH AbortController for the registry entry. Using the
     // promote AbortController directly (which is already in the
     // `aborted` state — that's what triggered the promote) would be
@@ -2445,7 +2452,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // entryAc is already aborted by the time we got here, so that
       // call is a no-op + our listener was `{ once: true }` and has
       // already detached.)
-      registry.cancel(shellId, Date.now());
+      shellCancel(registry, shellId, Date.now());
     };
     entryAc.signal.addEventListener('abort', () => void cancelChild(), {
       once: true,
@@ -2477,7 +2484,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // child and re-throw so the scheduler surfaces the failure instead
     // of pretending promote succeeded.
     try {
-      registry.register(entry);
+      shellRegister(registry, entry);
     } catch (e) {
       debugLogger.warn(
         `promote: registry.register threw for ${shellId} (pid=${result.pid}) — killing orphan child: ${
@@ -2581,9 +2588,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
       const cls = classifySettle(info);
       if (cls.status === 'completed') {
-        registry.complete(shellId, info.exitCode as number, info.endTime);
+        shellComplete(registry, shellId, info.exitCode as number, info.endTime);
       } else {
-        registry.fail(shellId, cls.failMsg as string, info.endTime);
+        shellFail(registry, shellId, cls.failMsg as string, info.endTime);
       }
     };
     promoteArtifacts.onSettleWired = (info) => {
@@ -2848,7 +2855,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     );
 
     if (pid !== undefined) registration.pid = pid;
-    const registry = this.config.getBackgroundShellRegistry();
+    const registry = this.config.getTaskRegistry();
     // Symmetric with the promote path above: `register` is internally
     // safe today (Map.set + emit), but a throwing subscriber would
     // propagate here and leave the already-spawned child + open output
@@ -2856,7 +2863,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // the child, tear down the stream, and re-throw so the launch fails
     // visibly instead of leaking.
     try {
-      registry.register(registration);
+      shellRegister(registry, registration);
     } catch (e) {
       debugLogger.warn(
         `background shell ${shellId} register threw (pid=${pid}) — aborting orphan child: ${
@@ -2883,8 +2890,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         outputStream.end();
         const endTime = Date.now();
         if (entryAc.signal.aborted) {
-          if (registry.get(shellId)?.status === 'running') {
-            registry.cancel(shellId, endTime);
+          if (getShellTask(registry, shellId)?.status === 'running') {
+            shellCancel(registry, shellId, endTime);
           }
         } else if (
           result.error ||
@@ -2900,14 +2907,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
             : result.signal !== null
               ? `terminated by signal ${result.signal}`
               : `exited with code ${result.exitCode}`;
-          registry.fail(shellId, reason, endTime);
+          shellFail(registry, shellId, reason, endTime);
         } else {
-          registry.complete(shellId, result.exitCode ?? 0, endTime);
+          shellComplete(registry, shellId, result.exitCode ?? 0, endTime);
         }
       },
       (err) => {
         outputStream.end();
-        registry.fail(shellId, getErrorMessage(err), Date.now());
+        shellFail(registry, shellId, getErrorMessage(err), Date.now());
       },
     );
 

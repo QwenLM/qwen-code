@@ -24,6 +24,34 @@ import {
 } from '../../hooks/useBackgroundTaskView.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 
+// Hoisted spies for the kind-local kill dispatch. The dialog's
+// cancelSelected path now calls `getTaskByType(target.kind).kill(...)`;
+// each mock here lets the test assert against a kind without wiring
+// the real per-kind module.
+const mockAgentKill = vi.hoisted(() => vi.fn());
+const mockShellKill = vi.hoisted(() => vi.fn());
+const mockMonitorKill = vi.hoisted(() => vi.fn());
+const mockDreamKill = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async () => {
+  const actual = await vi.importActual('@qwen-code/qwen-code-core');
+  return {
+    ...actual,
+    getTaskByType: (kind: 'agent' | 'shell' | 'monitor' | 'dream') => ({
+      kind,
+      name: `${kind} (mock)`,
+      kill:
+        kind === 'agent'
+          ? mockAgentKill
+          : kind === 'shell'
+            ? mockShellKill
+            : kind === 'monitor'
+              ? mockMonitorKill
+              : mockDreamKill,
+    }),
+  };
+});
+
 vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
   useBackgroundTaskView: vi.fn(),
   // Re-export the helper so Dialog renderers can still resolve it under the
@@ -141,27 +169,33 @@ function setup(initial: readonly DialogEntry[]): Harness {
   // live activity/stats mutations the snapshot misses.
   let currentEntries: readonly DialogEntry[] = initial;
   const config = {
-    getBackgroundTaskRegistry: () => ({
-      cancel,
-      setActivityChangeCallback: vi.fn(),
+    getTaskRegistry: () => ({
       get: (id: string) => {
+        // Tests reach in for both agent and monitor kinds via the
+        // unified `get(id)` shape; resolve from the snapshot using
+        // each kind's id field. Shells aren't exercised in this dialog
+        // suite, so they fall through.
         const match = currentEntries.find(
-          (e) => e.kind === 'agent' && e.agentId === id,
+          (e) =>
+            (e.kind === 'agent' && e.agentId === id) ||
+            (e.kind === 'monitor' && e.monitorId === id),
         );
         return match;
       },
+      getAll: () => currentEntries,
+      getByKind: () => [],
+      register: () => undefined,
+      update: () => undefined,
+      evict: () => undefined,
+      kill: () => undefined,
+      subscribe: () => () => {},
     }),
-    getMonitorRegistry: () => ({
-      cancel: monitorCancel,
-      // Resolve `.get(monitorId)` against the snapshot so the dialog's
-      // `selectedEntry` re-resolution path works for monitor kind too.
-      get: (id: string) => {
-        const match = currentEntries.find(
-          (e) => e.kind === 'monitor' && e.monitorId === id,
-        );
-        return match;
-      },
-    }),
+    // Replaces the old per-kind cancel mocks. The dialog now dispatches
+    // through `getTaskByType(target.kind).kill(...)`, but the dispatcher
+    // is exercised in the registry's own tests; here we just verify the
+    // dialog routes through ConfigContext correctly.
+    _agentCancel: cancel,
+    _monitorCancel: monitorCancel,
     getMemoryManager: () => ({
       cancelTask: dreamCancelTask,
     }),
@@ -265,7 +299,7 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.dialogMode).toBe('detail');
 
     h.pressKey({ sequence: 'x' });
-    expect(h.cancel).toHaveBeenCalledWith('a');
+    expect(mockAgentKill).toHaveBeenCalledWith('a', expect.anything());
 
     // Registry would push the cancelled status; simulate that update.
     h.setEntries([{ ...running, status: 'cancelled' }]);
@@ -286,10 +320,10 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.dialogMode).toBe('detail');
 
     h.pressKey({ sequence: 'x' });
-    expect(h.monitorCancel).toHaveBeenCalledWith('mon-zzz');
+    expect(mockMonitorKill).toHaveBeenCalledWith('mon-zzz', expect.anything());
     // Agent registry's cancel must NOT be called for a monitor entry —
     // belt-and-braces guard against the kind switch falling through.
-    expect(h.cancel).not.toHaveBeenCalled();
+    expect(mockAgentKill).not.toHaveBeenCalled();
   });
 
   it('keeps detail mode when an already-terminal entry is opened (no spurious fallback)', () => {
@@ -322,10 +356,10 @@ describe('BackgroundTasksDialog', () => {
     h.call(() => h.probe.current!.actions.openDialog());
 
     h.pressKey({ sequence: 'x' });
-    expect(h.cancel).not.toHaveBeenCalled();
+    expect(mockAgentKill).not.toHaveBeenCalled();
 
     h.pressKey({ sequence: 'x' });
-    expect(h.cancel).toHaveBeenCalledWith('fg-1');
+    expect(mockAgentKill).toHaveBeenCalledWith('fg-1', expect.anything());
   });
 
   it('background cancel still fires on the first `x` press (no confirm)', () => {
@@ -342,7 +376,7 @@ describe('BackgroundTasksDialog', () => {
     h.call(() => h.probe.current!.actions.openDialog());
 
     h.pressKey({ sequence: 'x' });
-    expect(h.cancel).toHaveBeenCalledWith('bg-1');
+    expect(mockAgentKill).toHaveBeenCalledWith('bg-1', expect.anything());
   });
 
   it('ignores `x` on a terminal foreground entry (no arm, no cancel call)', () => {
@@ -365,7 +399,7 @@ describe('BackgroundTasksDialog', () => {
     expect(h.lastFrame()).not.toContain('x again to confirm stop');
 
     h.pressKey({ sequence: 'x' });
-    expect(h.cancel).not.toHaveBeenCalled();
+    expect(mockAgentKill).not.toHaveBeenCalled();
   });
 
   it('detail-mode left clears any armed foreground cancel before exiting', () => {
@@ -391,7 +425,7 @@ describe('BackgroundTasksDialog', () => {
     // Back in list mode, the next `x` arms again rather than confirming
     // a stale armed state inherited from detail mode.
     h.pressKey({ sequence: 'x' });
-    expect(h.cancel).not.toHaveBeenCalled();
+    expect(mockAgentKill).not.toHaveBeenCalled();
   });
 
   it('Esc backs out of an armed foreground cancel without closing the dialog', () => {
@@ -412,7 +446,7 @@ describe('BackgroundTasksDialog', () => {
 
     // After the Esc reset, the next `x` arms again rather than confirming.
     h.pressKey({ sequence: 'x' });
-    expect(h.cancel).not.toHaveBeenCalled();
+    expect(mockAgentKill).not.toHaveBeenCalled();
   });
 
   it('clamps selectedIndex when entries shrink', () => {
@@ -661,12 +695,12 @@ describe('BackgroundTasksDialog', () => {
       const h = setup([dreamEntry({ dreamId: 'd-zzz', status: 'running' })]);
       h.call(() => h.probe.current!.actions.openDialog());
       h.pressKey({ sequence: 'x' });
-      expect(h.dreamCancelTask).toHaveBeenCalledWith('d-zzz');
+      expect(mockDreamKill).toHaveBeenCalledWith('d-zzz', expect.anything());
       // Belt-and-braces — the registry-side cancel paths must not fire
       // for a dream entry, otherwise the wrong AbortController gets
       // signalled.
-      expect(h.cancel).not.toHaveBeenCalled();
-      expect(h.monitorCancel).not.toHaveBeenCalled();
+      expect(mockAgentKill).not.toHaveBeenCalled();
+      expect(mockMonitorKill).not.toHaveBeenCalled();
     });
 
     it('omits the topics block entirely while the dream is still running', () => {

@@ -18,6 +18,12 @@ import {
   type ToolInvocation,
   type ToolResult,
 } from './tools.js';
+import { agentCancel, getAgentTask } from '../agents/tasks/agent-task.js';
+import { monitorCancel, getMonitorTask } from '../agents/tasks/monitor-task.js';
+import {
+  getShellTask,
+  shellRequestCancel,
+} from '../agents/tasks/shell-task.js';
 
 export interface TaskStopParams {
   /** The ID of the background task to stop. */
@@ -42,11 +48,12 @@ class TaskStopInvocation extends BaseToolInvocation<
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     const taskId = this.params.task_id;
 
-    // Subagent registry first (Phase A control plane). Agent IDs follow the
+    const registry = this.config.getTaskRegistry();
+
+    // Subagent kind first (Phase A control plane). Agent IDs follow the
     // pattern `<subagentName>-<suffix>`, so they cannot collide with shell
     // IDs (which are `bg_<8 hex chars>` from the background shell pool).
-    const agentRegistry = this.config.getBackgroundTaskRegistry();
-    const agentEntry = agentRegistry.get(taskId);
+    const agentEntry = getAgentTask(registry, taskId);
     if (agentEntry) {
       if (agentEntry.status === 'paused') {
         const abandoned = this.config.abandonBackgroundAgent(taskId);
@@ -74,7 +81,7 @@ class TaskStopInvocation extends BaseToolInvocation<
       if (agentEntry.status !== 'running') {
         return notRunningError('agent', taskId, agentEntry.status);
       }
-      agentRegistry.cancel(taskId);
+      agentCancel(registry, taskId);
       // The terminal task-notification is emitted by the agent's own handler
       // (via registry.complete/fail) rather than cancel(), so the parent
       // model still receives the agent's real partial/final result — not just
@@ -95,17 +102,17 @@ class TaskStopInvocation extends BaseToolInvocation<
     // observable via `/tasks` (text), the interactive Background tasks
     // dialog (focus the footer Background tasks pill, then Enter), and
     // the on-disk output file.
-    const shellRegistry = this.config.getBackgroundShellRegistry();
-    const shellEntry = shellRegistry.get(taskId);
+    const shellEntry = getShellTask(registry, taskId);
     if (shellEntry) {
       if (shellEntry.status !== 'running') {
         return notRunningError('shell', taskId, shellEntry.status);
       }
-      // requestCancel triggers the AbortController only — the registry's
+      // requestCancel triggers the AbortController only — the spawn's
       // settle path records the real terminal status + endTime once the
-      // process actually drains. Calling cancel(id, Date.now()) here would
-      // mark the entry terminal immediately and lose the real exit info.
-      shellRegistry.requestCancel(taskId);
+      // process actually drains. Calling shellCancel(id, Date.now()) here
+      // would mark the entry terminal immediately and lose the real exit
+      // info.
+      shellRequestCancel(registry, taskId);
       return {
         llmContent:
           `Cancellation requested for background shell "${taskId}". ` +
@@ -116,19 +123,18 @@ class TaskStopInvocation extends BaseToolInvocation<
       };
     }
 
-    const monitorRegistry = this.config.getMonitorRegistry();
-    const monitorEntry = monitorRegistry.get(taskId);
+    const monitorEntry = getMonitorTask(registry, taskId);
     if (monitorEntry) {
       if (monitorEntry.status !== 'running') {
         return notRunningError('monitor', taskId, monitorEntry.status);
       }
-      monitorRegistry.cancel(taskId);
+      monitorCancel(registry, taskId);
       return {
         llmContent:
           // Unlike background shells (which settle asynchronously when the
-          // child process exits), `monitorRegistry.cancel()` settles the
-          // entry synchronously — the cancelled state is observable right
-          // now, no drain phrasing.
+          // child process exits), `monitorCancel()` settles the entry
+          // synchronously — the cancelled state is observable right now,
+          // no drain phrasing.
           `Monitor "${taskId}" cancelled. ` +
           `Status is visible via /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter).\n` +
           `Command: ${monitorEntry.command}`,

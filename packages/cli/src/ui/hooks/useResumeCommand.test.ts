@@ -66,6 +66,16 @@ vi.mock('@qwen-code/qwen-code-core', () => {
 
   return {
     SessionService,
+    // The unified-registry helpers backgroundWorkUtils.ts now imports
+    // from core. Default to "no work" for the resume tests that don't
+    // exercise the blocking path; the resume-blocking tests below
+    // override these via vi.mocked(...).
+    agentHasUnfinalizedTasks: vi.fn(() => false),
+    agentReset: vi.fn(),
+    monitorReset: vi.fn(),
+    shellReset: vi.fn(),
+    getRunningMonitorTasks: vi.fn(() => []),
+    shellHasRunningEntries: vi.fn(() => false),
   };
 });
 
@@ -156,24 +166,24 @@ describe('useResumeCommand', () => {
     const geminiClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
-    const resetMonitorRegistry = vi.fn();
+    // resetBackgroundStateForSessionSwitch dispatches to the kind-local
+    // reset helpers in core; we assert against those module-level mocks.
+    const core = await import('@qwen-code/qwen-code-core');
+    vi.mocked(core.monitorReset).mockClear();
 
     const config = {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
-      getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getBackgroundShellRegistry: () => ({
-        getAll: vi.fn().mockReturnValue([]),
-        hasRunningEntries: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getMonitorRegistry: () => ({
-        getRunning: vi.fn().mockReturnValue([]),
-        reset: resetMonitorRegistry,
+      getTaskRegistry: () => ({
+        getAll: () => [],
+        getByKind: () => [],
+        get: () => undefined,
+        register: () => undefined,
+        update: () => undefined,
+        evict: () => undefined,
+        kill: () => undefined,
+        subscribe: () => () => {},
       }),
       loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
       getBackgroundAgentResumeService: () => ({
@@ -228,7 +238,7 @@ describe('useResumeCommand', () => {
     expect(geminiClient.initialize).toHaveBeenCalledWith();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
-    expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
+    expect(core.monitorReset).toHaveBeenCalledTimes(1);
     // Goal must be re-armed under the resumed sessionId so the in-memory
     // activeGoalStore entry (potentially stale across /new + /resume) gets
     // a fresh setAt / hookId / observer — otherwise the footer pill ticks
@@ -258,18 +268,15 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
-      getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getBackgroundShellRegistry: () => ({
-        getAll: vi.fn().mockReturnValue([]),
-        hasRunningEntries: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getMonitorRegistry: () => ({
-        getRunning: vi.fn().mockReturnValue([]),
-        reset: vi.fn(),
+      getTaskRegistry: () => ({
+        getAll: () => [],
+        getByKind: () => [],
+        get: () => undefined,
+        register: () => undefined,
+        update: () => undefined,
+        evict: () => undefined,
+        kill: () => undefined,
+        subscribe: () => () => {},
       }),
       loadPausedBackgroundAgents: vi
         .fn()
@@ -309,6 +316,9 @@ describe('useResumeCommand', () => {
   });
 
   it('blocks resume when the current session still has running background work', async () => {
+    const core = await import('@qwen-code/qwen-code-core');
+    vi.mocked(core.agentHasUnfinalizedTasks).mockReturnValueOnce(true);
+
     const historyManager = {
       addItem: vi.fn(),
       clearItems: vi.fn(),
@@ -317,18 +327,15 @@ describe('useResumeCommand', () => {
     const startNewSession = vi.fn();
 
     const config = {
-      getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(true),
-        reset: vi.fn(),
-      }),
-      getBackgroundShellRegistry: () => ({
-        getAll: vi.fn().mockReturnValue([]),
-        hasRunningEntries: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getMonitorRegistry: () => ({
-        getRunning: vi.fn().mockReturnValue([]),
-        reset: vi.fn(),
+      getTaskRegistry: () => ({
+        getAll: () => [],
+        getByKind: () => [],
+        get: () => undefined,
+        register: () => undefined,
+        update: () => undefined,
+        evict: () => undefined,
+        kill: () => undefined,
+        subscribe: () => () => {},
       }),
       getTargetDir: () => '/tmp',
       getDebugLogger: () => ({
@@ -368,6 +375,14 @@ describe('useResumeCommand', () => {
   });
 
   it('blocks resume when the current session still has a running monitor', async () => {
+    const core = await import('@qwen-code/qwen-code-core');
+    vi.mocked(core.getRunningMonitorTasks).mockReturnValueOnce([
+      // Just need length > 0; the helper's other fields aren't read by
+      // hasBlockingBackgroundWork.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { monitorId: 'mon_123', status: 'running' } as any,
+    ]);
+
     const historyManager = {
       addItem: vi.fn(),
       clearItems: vi.fn(),
@@ -376,23 +391,15 @@ describe('useResumeCommand', () => {
     const startNewSession = vi.fn();
 
     const config = {
-      getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getBackgroundShellRegistry: () => ({
-        getAll: vi.fn().mockReturnValue([]),
-        hasRunningEntries: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getMonitorRegistry: () => ({
-        getRunning: vi.fn().mockReturnValue([
-          {
-            monitorId: 'mon_123',
-            status: 'running',
-          },
-        ]),
-        reset: vi.fn(),
+      getTaskRegistry: () => ({
+        getAll: () => [],
+        getByKind: () => [],
+        get: () => undefined,
+        register: () => undefined,
+        update: () => undefined,
+        evict: () => undefined,
+        kill: () => undefined,
+        subscribe: () => () => {},
       }),
       getTargetDir: () => '/tmp',
       getDebugLogger: () => ({

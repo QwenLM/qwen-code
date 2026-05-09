@@ -176,22 +176,11 @@ export const tasksCommand: SlashCommand = {
       };
     }
 
-    // Each registry already tags entries with `kind`, so no per-entry
-    // mapping is needed here — just spread into a single sorted list.
-    const agentEntries: AgentTask[] = [
-      ...config.getBackgroundTaskRegistry().getAll(),
-    ];
-    const shellEntries: ShellTask[] = [
-      ...config.getBackgroundShellRegistry().getAll(),
-    ];
-    const monitorEntries: MonitorTask[] = [
-      ...config.getMonitorRegistry().getAll(),
-    ];
-    const entries: TaskEntry[] = [
-      ...agentEntries,
-      ...shellEntries,
-      ...monitorEntries,
-    ].sort((a, b) => a.startTime - b.startTime);
+    // Every entry in the registry carries `kind` already; one
+    // `getAll()` is enough to render the full mix in launch order.
+    const entries: TaskEntry[] = [...config.getTaskRegistry().getAll()].sort(
+      (a, b) => a.startTime - b.startTime,
+    );
 
     if (entries.length === 0) {
       return {

@@ -31,6 +31,7 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE,
+  getAgentTask,
   ToolDisplayNames,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
@@ -281,7 +282,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   const liveAgentSnapshots: AgentDialogEntry[] = useMemo(() => {
     const snapshots = entries.filter(isAgentEntry);
     if (!config) return snapshots;
-    const registry = config.getBackgroundTaskRegistry();
+    const registry = config.getTaskRegistry();
     // `now` participates in the dependency array so the memo recomputes
     // each tick and picks up `recentActivities` the registry mutated in
     // place via appendActivity. Reading it here makes the dependency
@@ -293,13 +294,13 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
     const next = snapshots
       .map((snap) => {
         seenIds.add(snap.agentId);
-        const live = registry.get(snap.agentId);
+        const live = getAgentTask(registry, snap.agentId);
         if (live) {
           // Recovered (or never went missing) — drop any stale
           // missing-since record so a future re-disappearance
           // gets a fresh timestamp.
           missingSinceRef.current.delete(snap.agentId);
-          return { ...live, kind: 'agent' as const };
+          return live;
         }
         if (snap.status === 'running' || snap.status === 'paused') {
           // Pin the disappearance time on first observation so

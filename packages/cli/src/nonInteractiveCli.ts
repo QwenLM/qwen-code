@@ -12,7 +12,14 @@ import type {
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
+  agentAbortAll,
+  agentHasUnfinalizedTasks,
   executeToolCall,
+  monitorAbortAll,
+  setAgentNotificationCallback,
+  setAgentRegisterCallback,
+  setMonitorNotificationCallback,
+  setMonitorRegisterCallback,
   shutdownTelemetry,
   isTelemetrySdkInitialized,
   GeminiEventType,
@@ -299,7 +306,7 @@ export async function runNonInteractive(
         return;
       oneShotMonitorsFinalized = true;
       captureMonitorTurnsInLocalQueue = false;
-      config.getMonitorRegistry().abortAll();
+      monitorAbortAll(config.getTaskRegistry());
       flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
     };
 
@@ -468,8 +475,8 @@ export async function runNonInteractive(
 
       // Register the callback early so background agents launched during the main
       // tool-call chain can push completions onto the queue.
-      const registry = config.getBackgroundTaskRegistry();
-      registry.setNotificationCallback((displayText, modelText, meta) => {
+      const registry = config.getTaskRegistry();
+      setAgentNotificationCallback((displayText, modelText, meta) => {
         localQueue.push({
           displayText,
           modelText,
@@ -489,7 +496,7 @@ export async function runNonInteractive(
         });
       });
 
-      registry.setRegisterCallback((entry) => {
+      setAgentRegisterCallback((entry) => {
         adapter.emitSystemMessage('task_started', {
           task_id: entry.agentId,
           tool_use_id: entry.toolUseId,
@@ -498,38 +505,35 @@ export async function runNonInteractive(
         });
       });
 
-      const monitorRegistry = config.getMonitorRegistry();
       if (options.captureMonitorNotifications !== false) {
         // One-shot headless runs capture monitor notifications locally so any
         // events already emitted before exit can be surfaced to the SDK/model.
         // Persistent stream-json sessions own this callback at the Session
         // layer instead, so future monitor events can continue after the
         // originating turn has already completed.
-        monitorRegistry.setNotificationCallback(
-          (displayText, modelText, meta) => {
-            const queueItem = {
-              displayText,
-              modelText,
-              sendMessageType: SendMessageType.Notification,
-              sdkNotification: {
-                task_id: meta.monitorId,
-                tool_use_id: meta.toolUseId,
-                status: meta.status,
-              },
-            };
+        setMonitorNotificationCallback((displayText, modelText, meta) => {
+          const queueItem = {
+            displayText,
+            modelText,
+            sendMessageType: SendMessageType.Notification,
+            sdkNotification: {
+              task_id: meta.monitorId,
+              tool_use_id: meta.toolUseId,
+              status: meta.status,
+            },
+          };
 
-            if (captureMonitorTurnsInLocalQueue) {
-              localQueue.push(queueItem);
-            } else {
-              sdkOnlyMonitorQueue.push(queueItem);
-              flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
-            }
-          },
-        );
+          if (captureMonitorTurnsInLocalQueue) {
+            localQueue.push(queueItem);
+          } else {
+            sdkOnlyMonitorQueue.push(queueItem);
+            flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
+          }
+        });
       }
 
       if (options.captureMonitorRegistrations !== false) {
-        monitorRegistry.setRegisterCallback((entry) => {
+        setMonitorRegisterCallback((entry) => {
           adapter.emitSystemMessage('task_started', {
             task_id: entry.monitorId,
             tool_use_id: entry.toolUseId,
@@ -564,8 +568,8 @@ export async function runNonInteractive(
       // no-op), so unconditional invocation is safe even when the drain
       // path already finalized monitors before reaching here.
       const emitStructuredSuccess = async (): Promise<0> => {
-        registry.abortAll();
-        // `abortAll()` marks each task `cancelled` synchronously, but
+        agentAbortAll(registry);
+        // `agentAbortAll()` marks each task `cancelled` synchronously, but
         // the matching `task_notification` is emitted later by the
         // task's natural handler. Hold back briefly (capped at
         // STRUCTURED_SHUTDOWN_HOLDBACK_MS) so consumers see every
@@ -575,7 +579,7 @@ export async function runNonInteractive(
         const holdbackDeadline = Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
         while (
           Date.now() < holdbackDeadline &&
-          registry.hasUnfinalizedTasks()
+          agentHasUnfinalizedTasks(registry)
         ) {
           await new Promise((r) => setTimeout(r, 50));
         }
@@ -1119,7 +1123,7 @@ export async function runNonInteractive(
           // silently convert a cancellation into a completion.
           while (true) {
             if (abortController.signal.aborted) {
-              registry.abortAll();
+              agentAbortAll(registry);
               // Flush queued terminal notifications before routeAbort
               // exits so stream-json consumers always see a task_notification
               // paired with every task_started.
@@ -1143,7 +1147,7 @@ export async function runNonInteractive(
             // paired with one. Monitors are different: they intentionally
             // continue in the background, so final result emission is not
             // gated on monitor lifetime.
-            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
+            if (!agentHasUnfinalizedTasks(registry) && localQueue.length === 0)
               break;
             await new Promise((r) => setTimeout(r, 100));
           }
@@ -1305,21 +1309,20 @@ export async function runNonInteractive(
       // daemon, SDK) that reuse a single process across many runs.
       budgetEnforcer.stop();
 
-      const reg = config.getBackgroundTaskRegistry();
-      reg.setNotificationCallback(undefined);
-      reg.setRegisterCallback(undefined);
-      const monReg = config.getMonitorRegistry();
+      setAgentNotificationCallback(undefined);
+      setAgentRegisterCallback(undefined);
+      const taskRegistry = config.getTaskRegistry();
       // In one-shot (non-Session) runs, abort all running monitors so their
       // piped stdio refs don't keep the Node event loop alive after the result
       // is emitted. Session runs manage monitor lifecycle independently.
       if (options.captureMonitorNotifications !== false) {
         if (!oneShotMonitorsFinalized) {
-          monReg.abortAll({ notify: false });
+          monitorAbortAll(taskRegistry, { notify: false });
         }
-        monReg.setNotificationCallback(undefined);
+        setMonitorNotificationCallback(undefined);
       }
       if (options.captureMonitorRegistrations !== false) {
-        monReg.setRegisterCallback(undefined);
+        setMonitorRegisterCallback(undefined);
       }
 
       process.stdout.removeListener('error', stdoutErrorHandler);

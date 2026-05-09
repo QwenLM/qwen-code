@@ -11,6 +11,71 @@ import type {
   SessionMetrics,
 } from '@qwen-code/qwen-code-core';
 import type { CLIUserMessage } from './nonInteractive/types.js';
+
+// Hoisted mocks for the kind-local helpers nonInteractiveCli now imports
+// from core. The set*Callback mocks store the callback so tests can
+// invoke it with synthetic notification/register events. The abortAll
+// mocks let tests assert call counts and order across the three kinds.
+const monitorRegisterCb = vi.hoisted(() => ({
+  current: undefined as ((entry: unknown) => void) | undefined,
+}));
+const monitorNotificationCb = vi.hoisted(() => ({
+  current: undefined as
+    | ((displayText: string, modelText: string, meta: unknown) => void)
+    | undefined,
+}));
+const agentRegisterCb = vi.hoisted(() => ({
+  current: undefined as ((entry: unknown) => void) | undefined,
+}));
+const agentNotificationCb = vi.hoisted(() => ({
+  current: undefined as
+    | ((displayText: string, modelText: string, meta: unknown) => void)
+    | undefined,
+}));
+const mockSetMonitorRegisterCallback = vi.hoisted(() =>
+  vi.fn((cb: ((entry: unknown) => void) | undefined) => {
+    monitorRegisterCb.current = cb ?? undefined;
+  }),
+);
+const mockSetMonitorNotificationCallback = vi.hoisted(() =>
+  vi.fn(
+    (
+      cb:
+        | ((displayText: string, modelText: string, meta: unknown) => void)
+        | undefined,
+    ) => {
+      monitorNotificationCb.current = cb ?? undefined;
+    },
+  ),
+);
+const mockSetAgentRegisterCallback = vi.hoisted(() =>
+  vi.fn((cb: ((entry: unknown) => void) | undefined) => {
+    agentRegisterCb.current = cb ?? undefined;
+  }),
+);
+const mockSetAgentNotificationCallback = vi.hoisted(() =>
+  vi.fn(
+    (
+      cb:
+        | ((displayText: string, modelText: string, meta: unknown) => void)
+        | undefined,
+    ) => {
+      agentNotificationCb.current = cb ?? undefined;
+    },
+  ),
+);
+const mockMonitorAbortAll = vi.hoisted(() => vi.fn());
+const mockShellAbortAll = vi.hoisted(() => vi.fn());
+const mockAgentAbortAll = vi.hoisted(() => vi.fn());
+const mockAgentHasUnfinalizedTasks = vi.hoisted(() =>
+  vi.fn().mockReturnValue(false),
+);
+const mockGetRunningMonitorTasks = vi.hoisted(() =>
+  vi.fn().mockReturnValue([]),
+);
+
+import { vi, type Mock, type MockInstance } from 'vitest';
+
 import {
   executeToolCall,
   ToolErrorType,
@@ -59,6 +124,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     uiTelemetryService: {
       getMetrics: vi.fn(),
     },
+    setMonitorRegisterCallback: mockSetMonitorRegisterCallback,
+    setMonitorNotificationCallback: mockSetMonitorNotificationCallback,
+    setAgentRegisterCallback: mockSetAgentRegisterCallback,
+    setAgentNotificationCallback: mockSetAgentNotificationCallback,
+    monitorAbortAll: mockMonitorAbortAll,
+    shellAbortAll: mockShellAbortAll,
+    agentAbortAll: mockAgentAbortAll,
+    agentHasUnfinalizedTasks: mockAgentHasUnfinalizedTasks,
+    getRunningMonitorTasks: mockGetRunningMonitorTasks,
   };
 });
 
@@ -75,18 +149,15 @@ describe('runNonInteractive', () => {
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
   let mockToolRegistry: ToolRegistry;
-  let mockBackgroundTaskRegistry: {
-    setNotificationCallback: ReturnType<typeof vi.fn>;
-    setRegisterCallback: ReturnType<typeof vi.fn>;
+  let mockTaskRegistry: {
     getAll: ReturnType<typeof vi.fn>;
-    hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
-    abortAll: ReturnType<typeof vi.fn>;
-  };
-  let mockMonitorRegistry: {
-    setNotificationCallback: ReturnType<typeof vi.fn>;
-    setRegisterCallback: ReturnType<typeof vi.fn>;
-    getRunning: ReturnType<typeof vi.fn>;
-    abortAll: ReturnType<typeof vi.fn>;
+    getByKind: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
+    register: ReturnType<typeof vi.fn>;
+    update: ReturnType<typeof vi.fn>;
+    evict: ReturnType<typeof vi.fn>;
+    kill: ReturnType<typeof vi.fn>;
+    subscribe: ReturnType<typeof vi.fn>;
   };
   let mockCoreExecuteToolCall: Mock;
   let mockShutdownTelemetry: Mock;
@@ -134,20 +205,31 @@ describe('runNonInteractive', () => {
       getAllToolNames: vi.fn().mockReturnValue([]),
     } as unknown as ToolRegistry;
 
-    mockBackgroundTaskRegistry = {
-      setNotificationCallback: vi.fn(),
-      setRegisterCallback: vi.fn(),
+    mockTaskRegistry = {
       getAll: vi.fn().mockReturnValue([]),
-      hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-      abortAll: vi.fn(),
+      getByKind: vi.fn().mockReturnValue([]),
+      get: vi.fn(),
+      register: vi.fn(),
+      update: vi.fn(),
+      evict: vi.fn(),
+      kill: vi.fn(),
+      subscribe: vi.fn(() => () => {}),
     };
-
-    mockMonitorRegistry = {
-      setNotificationCallback: vi.fn(),
-      setRegisterCallback: vi.fn(),
-      getRunning: vi.fn().mockReturnValue([]),
-      abortAll: vi.fn(),
-    };
+    // Reset module-level helpers between tests so callback storage and
+    // call counts don't leak across the suite.
+    mockSetMonitorRegisterCallback.mockClear();
+    mockSetMonitorNotificationCallback.mockClear();
+    mockSetAgentRegisterCallback.mockClear();
+    mockSetAgentNotificationCallback.mockClear();
+    mockMonitorAbortAll.mockClear();
+    mockShellAbortAll.mockClear();
+    mockAgentAbortAll.mockClear();
+    mockAgentHasUnfinalizedTasks.mockReset().mockReturnValue(false);
+    mockGetRunningMonitorTasks.mockReset().mockReturnValue([]);
+    monitorRegisterCb.current = undefined;
+    monitorNotificationCb.current = undefined;
+    agentRegisterCb.current = undefined;
+    agentNotificationCb.current = undefined;
 
     mockGetDebugResponses = vi.fn(() => []);
 
@@ -206,10 +288,7 @@ describe('runNonInteractive', () => {
       setModelInvocableCommandsExecutor: vi.fn(),
       getAutoSkillEnabled: vi.fn().mockReturnValue(false),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
-      getBackgroundTaskRegistry: vi
-        .fn()
-        .mockReturnValue(mockBackgroundTaskRegistry),
-      getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      getTaskRegistry: vi.fn().mockReturnValue(mockTaskRegistry),
       // Phase C: headless --resume reads the resumed session + sidecar to
       // restore worktree context. These tests don't exercise resume, so
       // return undefined to short-circuit the helper.
@@ -1318,7 +1397,7 @@ describe('runNonInteractive', () => {
         ) => void)
       | undefined;
 
-    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
       monitorNotificationCallback = cb ?? undefined;
       if (!cb) {
         return;
@@ -1330,7 +1409,7 @@ describe('runNonInteractive', () => {
         eventCount: 1,
       });
     });
-    mockMonitorRegistry.abortAll.mockImplementation(() => {
+    mockMonitorAbortAll.mockImplementation(() => {
       monitorNotificationCallback?.(
         'Monitor "logs" was cancelled.',
         cancelledXml,
@@ -1412,7 +1491,7 @@ describe('runNonInteractive', () => {
     const resultIndex = envelopes.findIndex((env) => env.type === 'result');
     expect(cancelledNotificationIndex).toBeGreaterThanOrEqual(0);
     expect(resultIndex).toBeGreaterThan(cancelledNotificationIndex);
-    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(mockMonitorAbortAll).toHaveBeenCalledTimes(1);
     expect(envelopes.at(-1)).toMatchObject({
       type: 'result',
       is_error: false,
@@ -1530,7 +1609,7 @@ describe('runNonInteractive', () => {
         ) => void)
       | undefined;
 
-    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
       monitorNotificationCallback = cb ?? undefined;
       if (!cb) {
         return;
@@ -1542,7 +1621,7 @@ describe('runNonInteractive', () => {
         eventCount: 1,
       });
     });
-    mockMonitorRegistry.abortAll.mockImplementation(() => {
+    mockMonitorAbortAll.mockImplementation(() => {
       monitorNotificationCallback?.(
         'Monitor "logs" was cancelled.',
         cancelledXml,
@@ -1642,7 +1721,7 @@ describe('runNonInteractive', () => {
 
     let keepBackgroundTaskOpen = true;
     let lateMonitorEventEmitted = false;
-    mockBackgroundTaskRegistry.hasUnfinalizedTasks.mockImplementation(() => {
+    mockAgentHasUnfinalizedTasks.mockImplementation(() => {
       if (keepBackgroundTaskOpen && !lateMonitorEventEmitted) {
         lateMonitorEventEmitted = true;
         monitorNotificationCallback?.(
@@ -1696,7 +1775,7 @@ describe('runNonInteractive', () => {
         ) => void)
       | undefined;
 
-    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
       monitorNotificationCallback = cb ?? undefined;
       if (!cb) {
         return;
@@ -1708,7 +1787,7 @@ describe('runNonInteractive', () => {
         eventCount: 1,
       });
     });
-    mockMonitorRegistry.abortAll.mockImplementation(() => {
+    mockMonitorAbortAll.mockImplementation(() => {
       monitorNotificationCallback?.(
         'Monitor "logs" was cancelled.',
         cancelledXml,
@@ -2478,17 +2557,10 @@ describe('runNonInteractive', () => {
       (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
       setupMetricsMock();
 
-      // Spy on the registry returned by getBackgroundTaskRegistry so we can
-      // assert abortAll() is called as part of the deterministic shutdown
-      // contract for structured-output mode.
-      const abortAllSpy = vi.fn();
-      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
-        setNotificationCallback: vi.fn(),
-        setRegisterCallback: vi.fn(),
-        getAll: vi.fn().mockReturnValue([]),
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-        abortAll: abortAllSpy,
-      });
+      // Spy on agentAbortAll so we can assert it is called as part of the
+      // deterministic shutdown contract for structured-output mode.
+      const abortAllSpy = mockAgentAbortAll;
+      abortAllSpy.mockClear();
 
       const writes: string[] = [];
       processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -2597,14 +2669,8 @@ describe('runNonInteractive', () => {
       (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
       setupMetricsMock();
 
-      const abortAllSpy = vi.fn();
-      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
-        setNotificationCallback: vi.fn(),
-        setRegisterCallback: vi.fn(),
-        getAll: vi.fn().mockReturnValue([]),
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-        abortAll: abortAllSpy,
-      });
+      const abortAllSpy = mockAgentAbortAll;
+      abortAllSpy.mockClear();
 
       const writes: string[] = [];
       processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -2721,14 +2787,8 @@ describe('runNonInteractive', () => {
       (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
       setupMetricsMock();
 
-      const abortAllSpy = vi.fn();
-      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
-        setNotificationCallback: vi.fn(),
-        setRegisterCallback: vi.fn(),
-        getAll: vi.fn().mockReturnValue([]),
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-        abortAll: abortAllSpy,
-      });
+      const abortAllSpy = mockAgentAbortAll;
+      abortAllSpy.mockClear();
 
       const writes: string[] = [];
       processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -3142,7 +3202,7 @@ describe('runNonInteractive', () => {
         '<summary>Monitor emitted event #1.</summary>\n' +
         '<result>ready</result>\n' +
         '</task-notification>';
-      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      mockSetMonitorNotificationCallback.mockImplementation((cb) => {
         if (!cb) return;
         cb('Monitor "logs" event #1: ready', notificationXml, {
           monitorId: 'mon_1',
@@ -3244,12 +3304,13 @@ describe('runNonInteractive', () => {
       );
       setupMetricsMock();
 
-      const abortAllSpy = vi.fn();
-      // Returns true once, then false. After abortAll() is called the
+      const abortAllSpy = mockAgentAbortAll;
+      abortAllSpy.mockClear();
+      // Returns true once, then false. After agentAbortAll() is called the
       // holdback's `while` body executes one iteration of `setTimeout(50)`
       // and re-checks; on the second call we report tasks finalized.
       let unfinalizedCalls = 0;
-      const hasUnfinalizedTasksSpy = vi.fn(() => {
+      mockAgentHasUnfinalizedTasks.mockReset().mockImplementation(() => {
         unfinalizedCalls++;
         return unfinalizedCalls === 1;
       });
@@ -3269,29 +3330,23 @@ describe('runNonInteractive', () => {
             },
           ) => void)
         | null = null;
-      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
-        setNotificationCallback: vi.fn((cb) => {
-          notificationCallback = cb;
-        }),
-        setRegisterCallback: vi.fn(),
-        getAll: vi.fn().mockReturnValue([]),
-        hasUnfinalizedTasks: hasUnfinalizedTasksSpy,
-        abortAll: vi.fn(() => {
-          abortAllSpy();
-          // The natural cancel-handler enqueues the terminal
-          // task_notification synchronously when abortAll is invoked.
-          // Fire the captured callback immediately so it lands in
-          // localQueue before the holdback flush runs.
-          notificationCallback?.(
-            'Agent cancelled: bg-task-1',
-            'Agent bg-task-1 was cancelled',
-            {
-              agentId: 'bg-task-1',
-              toolUseId: 'tool-bg-1',
-              status: 'cancelled' as never,
-            },
-          );
-        }),
+      mockSetAgentNotificationCallback.mockImplementation((cb) => {
+        notificationCallback = cb ?? null;
+      });
+      abortAllSpy.mockImplementation(() => {
+        // The natural cancel-handler enqueues the terminal
+        // task_notification synchronously when agentAbortAll is invoked.
+        // Fire the captured callback immediately so it lands in
+        // localQueue before the holdback flush runs.
+        notificationCallback?.(
+          'Agent cancelled: bg-task-1',
+          'Agent bg-task-1 was cancelled',
+          {
+            agentId: 'bg-task-1',
+            toolUseId: 'tool-bg-1',
+            status: 'cancelled' as never,
+          },
+        );
       });
 
       const writes: string[] = [];
@@ -3382,13 +3437,7 @@ describe('runNonInteractive', () => {
       (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
       setupMetricsMock();
 
-      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
-        setNotificationCallback: vi.fn(),
-        setRegisterCallback: vi.fn(),
-        getAll: vi.fn().mockReturnValue([]),
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-        abortAll: vi.fn(),
-      });
+      mockAgentAbortAll.mockClear();
 
       const writes: string[] = [];
       processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {

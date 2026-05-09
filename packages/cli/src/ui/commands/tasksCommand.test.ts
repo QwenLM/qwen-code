@@ -97,9 +97,9 @@ describe('tasksCommand', () => {
       executionMode: 'non_interactive',
       services: {
         config: {
-          getBackgroundShellRegistry: () => ({ getAll: getShells }),
-          getBackgroundTaskRegistry: () => ({ getAll: getAgents }),
-          getMonitorRegistry: () => ({ getAll: getMonitors }),
+          getTaskRegistry: () => ({
+            getAll: () => [...getAgents(), ...getShells(), ...getMonitors()],
+          }),
         },
       },
     } as unknown as Parameters<typeof createMockCommandContext>[0]);
@@ -304,9 +304,9 @@ describe('tasksCommand', () => {
       executionMode: 'interactive',
       services: {
         config: {
-          getBackgroundShellRegistry: () => ({ getAll: getShells }),
-          getBackgroundTaskRegistry: () => ({ getAll: getAgents }),
-          getMonitorRegistry: () => ({ getAll: getMonitors }),
+          getTaskRegistry: () => ({
+            getAll: () => [...getAgents(), ...getShells(), ...getMonitors()],
+          }),
         },
       },
     } as unknown as Parameters<typeof createMockCommandContext>[0]);
@@ -332,9 +332,9 @@ describe('tasksCommand', () => {
       executionMode: 'acp',
       services: {
         config: {
-          getBackgroundShellRegistry: () => ({ getAll: getShells }),
-          getBackgroundTaskRegistry: () => ({ getAll: getAgents }),
-          getMonitorRegistry: () => ({ getAll: getMonitors }),
+          getTaskRegistry: () => ({
+            getAll: () => [...getAgents(), ...getShells(), ...getMonitors()],
+          }),
         },
       },
     } as unknown as Parameters<typeof createMockCommandContext>[0]);

@@ -8,6 +8,9 @@ import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import {
+  agentAbortAll,
+  monitorAbortAll,
+  shellAbortAll,
   uiTelemetryService,
   SessionEndReason,
   ToolNames,
@@ -53,9 +56,10 @@ export const clearCommand: SlashCommand = {
 
       // Abort old-session async work before creating the new session so
       // cancellation notifications cannot leak across the reset boundary.
-      config.getBackgroundTaskRegistry().abortAll({ notify: false });
-      config.getMonitorRegistry().abortAll({ notify: false });
-      config.getBackgroundShellRegistry().abortAll();
+      const taskRegistry = config.getTaskRegistry();
+      agentAbortAll(taskRegistry, { notify: false });
+      monitorAbortAll(taskRegistry, { notify: false });
+      shellAbortAll(taskRegistry);
       resetBackgroundStateForSessionSwitch(config);
 
       const newSessionId = config.startNewSession();

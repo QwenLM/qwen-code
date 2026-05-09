@@ -6,28 +6,34 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { SendMessageTool } from './send-message.js';
-import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { TaskRegistry } from '../agents/tasks/registry.js';
+import {
+  agentCancel,
+  agentComplete,
+  agentRegister,
+  getAgentTask,
+} from '../agents/tasks/agent-task.js';
 import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
 
 describe('SendMessageTool', () => {
-  let registry: BackgroundTaskRegistry;
+  let registry: TaskRegistry;
   let config: Config;
   let tool: SendMessageTool;
   let resumeBackgroundAgent: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    registry = new BackgroundTaskRegistry();
+    registry = new TaskRegistry();
     resumeBackgroundAgent = vi.fn();
     config = {
-      getBackgroundTaskRegistry: () => registry,
+      getTaskRegistry: () => registry,
       resumeBackgroundAgent,
     } as unknown as Config;
     tool = new SendMessageTool(config);
   });
 
   it('queues a message for a running task', async () => {
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'test agent',
       status: 'running',
@@ -44,11 +50,13 @@ describe('SendMessageTool', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Message queued');
-    expect(registry.get('agent-1')!.pendingMessages).toEqual(['do more work']);
+    expect(getAgentTask(registry, 'agent-1')!.pendingMessages).toEqual([
+      'do more work',
+    ]);
   });
 
   it('queues multiple messages in order', async () => {
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'test agent',
       status: 'running',
@@ -67,7 +75,7 @@ describe('SendMessageTool', () => {
       new AbortController().signal,
     );
 
-    expect(registry.get('agent-1')!.pendingMessages).toEqual([
+    expect(getAgentTask(registry, 'agent-1')!.pendingMessages).toEqual([
       'first',
       'second',
     ]);
@@ -84,7 +92,7 @@ describe('SendMessageTool', () => {
   });
 
   it('returns error for non-running task', async () => {
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'test agent',
       status: 'running',
@@ -93,7 +101,7 @@ describe('SendMessageTool', () => {
       isBackgrounded: true,
       outputFile: '/tmp/test.jsonl',
     });
-    registry.complete('agent-1', 'done');
+    agentComplete(registry, 'agent-1', 'done');
 
     const result = await tool.validateBuildAndExecute(
       { task_id: 'agent-1', message: 'hello' },
@@ -109,7 +117,7 @@ describe('SendMessageTool', () => {
     // no next tool-round boundary to drain into, so the message would be
     // silently dropped. Reject instead of accepting a message that will
     // never be delivered.
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'test agent',
       status: 'running',
@@ -118,7 +126,7 @@ describe('SendMessageTool', () => {
       isBackgrounded: true,
       outputFile: '/tmp/test.jsonl',
     });
-    registry.cancel('agent-1');
+    agentCancel(registry, 'agent-1');
 
     const result = await tool.validateBuildAndExecute(
       { task_id: 'agent-1', message: 'too late' },
@@ -126,11 +134,11 @@ describe('SendMessageTool', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
-    expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
+    expect(getAgentTask(registry, 'agent-1')!.pendingMessages).toEqual([]);
   });
 
   it('resumes a paused task and injects the message as continuation input', async () => {
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'test agent',
       status: 'paused',
@@ -155,7 +163,7 @@ describe('SendMessageTool', () => {
   });
 
   it('includes task description in success display', async () => {
-    registry.register({
+    agentRegister(registry, {
       agentId: 'agent-1',
       description: 'Search for auth code',
       status: 'running',

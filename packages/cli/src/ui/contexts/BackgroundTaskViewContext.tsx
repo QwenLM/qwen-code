@@ -19,8 +19,13 @@ import {
   useMemo,
   useState,
 } from 'react';
-import { type Config, createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
+  getTaskByType,
+  type Config,
+  createDebugLogger,
+} from '@qwen-code/qwen-code-core';
+import {
+  entryId,
   type DialogEntry,
   useBackgroundTaskView,
 } from '../hooks/useBackgroundTaskView.js';
@@ -220,52 +225,21 @@ export function BackgroundTaskViewProvider({
       config.abandonBackgroundAgent(target.agentId);
       return;
     }
-    // All three registries' cancel paths are no-ops on non-running
-    // entries, so no pre-check here. Shell cancel goes through
-    // requestCancel — it triggers the AbortController only and lets the
-    // spawn's settle path record the real terminal moment + outcome
-    // (mirrors the task_stop tool path in #3687). Monitor cancel is
-    // synchronous: settle + abort happen inside the registry's cancel(),
-    // matching its own task_stop path.
-    switch (target.kind) {
-      case 'agent':
-        config.getBackgroundTaskRegistry().cancel(target.agentId);
-        break;
-      case 'shell':
-        config.getBackgroundShellRegistry().requestCancel(target.shellId);
-        break;
-      case 'monitor':
-        config.getMonitorRegistry().cancel(target.monitorId);
-        break;
-      case 'dream': {
-        // Aborts the dream fork-agent via MemoryManager.cancelTask;
-        // the manager flips status to 'cancelled' before aborting, and
-        // the runDream finally block releases the consolidation lock as
-        // the agent unwinds. Same one-shot fire-and-forget shape as
-        // shell.requestCancel above.
-        //
-        // cancelTask returns false in the contract-violation path
-        // (running record without an AbortController). Today this is
-        // unreachable because the controller is registered before
-        // storeWith fires the notify, but if a future refactor
-        // breaks the invariant a silent ignore here would let the
-        // user think the cancel took. Log + leave the dialog open.
-        const ok = config.getMemoryManager().cancelTask(target.dreamId);
-        if (!ok) {
-          debugLogger.warn(
-            `cancelSelected: dream task ${target.dreamId} could not be cancelled ` +
-              `(internal state inconsistency — see MemoryManager.cancelTask warn).`,
-          );
-        }
-        break;
-      }
-      default: {
-        const _exhaustive: never = target;
-        throw new Error(
-          `cancelSelected: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
-        );
-      }
-    }
+    // Fire-and-forget: the dialog re-renders from the registry/dream
+    // subscription once kill updates state.
+    const ctx = {
+      registry: config.getTaskRegistry(),
+      memoryManager: config.getMemoryManager(),
+    };
+    void Promise.resolve(
+      getTaskByType(target.kind).kill(entryId(target), ctx),
+    ).catch((err) => {
+      debugLogger.warn(
+        `cancelSelected: kill for ${target.kind} task ${entryId(target)} failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
   }, [config, entries, selectedIndex]);
 
   const resumeSelected = useCallback(async () => {

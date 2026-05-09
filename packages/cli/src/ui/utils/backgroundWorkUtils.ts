@@ -4,18 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  agentHasUnfinalizedTasks,
+  agentReset,
+  getRunningMonitorTasks,
+  monitorReset,
+  shellHasRunningEntries,
+  shellReset,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 
 export function hasBlockingBackgroundWork(config: Config): boolean {
+  const registry = config.getTaskRegistry();
   return (
-    config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
-    config.getMonitorRegistry().getRunning().length > 0 ||
-    config.getBackgroundShellRegistry().hasRunningEntries()
+    agentHasUnfinalizedTasks(registry) ||
+    getRunningMonitorTasks(registry).length > 0 ||
+    shellHasRunningEntries(registry)
   );
 }
 
 export function resetBackgroundStateForSessionSwitch(config: Config): void {
-  config.getBackgroundTaskRegistry().reset();
-  config.getMonitorRegistry().reset();
-  config.getBackgroundShellRegistry().reset();
+  const registry = config.getTaskRegistry();
+  agentReset(registry);
+  monitorReset(registry);
+  shellReset(registry);
 }
