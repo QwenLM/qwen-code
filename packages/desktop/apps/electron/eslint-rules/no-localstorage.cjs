@@ -1,9 +1,9 @@
 /**
  * ESLint Rule: no-localstorage
  *
- * Warns against using localStorage in Craft Agent codebase.
+ * Warns against using localStorage in Qwen Code codebase.
  * All persistent user settings should be stored in file-based configs
- * (preferences.json, workspace configs) for consistency with Craft Agent
+ * (preferences.json, workspace configs) for consistency with Qwen Code
  * architecture principles.
  *
  * Bad:
@@ -34,7 +34,7 @@ module.exports = {
     },
     messages: {
       noLocalStorage:
-        "Avoid localStorage in Craft Agent. Store settings in ~/.craft-agent/preferences.json using window.electronAPI.readPreferences/writePreferences. See packages/shared/src/config/preferences.ts for the preferences API.",
+        "Avoid localStorage in Qwen Code. Store settings in ~/.craft-agent/preferences.json using window.electronAPI.readPreferences/writePreferences. See packages/shared/src/config/preferences.ts for the preferences API.",
     },
     schema: [],
   },

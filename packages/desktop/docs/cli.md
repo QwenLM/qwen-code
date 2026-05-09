@@ -1,6 +1,6 @@
 # craft-cli
 
-Terminal client for Craft Agent. It can connect to a running server or run a self-contained Qwen-backed session.
+Terminal client for Qwen Code. It can connect to a running server or run a self-contained Qwen-backed session.
 
 ## Quick Start
 

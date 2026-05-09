@@ -1,7 +1,7 @@
 /**
  * Config Validate Handler
  *
- * Validates Craft Agent configuration files.
+ * Validates Qwen Code configuration files.
  * Uses full validators if available, otherwise basic validation.
  */
 

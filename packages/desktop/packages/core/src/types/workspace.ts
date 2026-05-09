@@ -11,7 +11,7 @@ export type McpAuthType = 'workspace_oauth' | 'workspace_bearer' | 'public';
 export type WorkspaceKind = 'project' | 'conversation';
 
 /**
- * Configuration for a remote Craft Agent Server.
+ * Configuration for a remote Qwen Code Server.
  * When set on a workspace, handler calls are proxied over WebSocket.
  */
 export interface RemoteServerConfig {

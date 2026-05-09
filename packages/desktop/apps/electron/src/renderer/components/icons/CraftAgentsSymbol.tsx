@@ -3,7 +3,7 @@ interface CraftAgentsSymbolProps {
 }
 
 /**
- * Craft Agents "E" symbol - the small pixel art icon
+ * Qwen Code "E" symbol - the small pixel art icon
  * Uses accent color from theme (currentColor from className)
  */
 export function CraftAgentsSymbol({ className }: CraftAgentsSymbolProps) {

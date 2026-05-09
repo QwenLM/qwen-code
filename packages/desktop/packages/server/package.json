@@ -1,7 +1,7 @@
 {
   "name": "@craft-agent/server",
   "version": "0.8.12",
-  "description": "Standalone headless Craft Agent server (Bun runtime)",
+  "description": "Standalone headless Qwen Code server (Bun runtime)",
   "type": "module",
   "main": "src/index.ts",
   "bin": {

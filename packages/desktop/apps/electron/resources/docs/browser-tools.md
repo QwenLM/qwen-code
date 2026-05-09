@@ -1,6 +1,6 @@
 # Browser Tools
 
-Use `browser_tool` to control built-in browser windows (Chromium) inside Craft Agents.
+Use `browser_tool` to control built-in browser windows (Chromium) inside Qwen Code.
 
 > **Quick start:** Run `browser_tool --help` to see all available commands and usage examples.
 

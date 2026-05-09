@@ -2,7 +2,7 @@
   "name": "@craft-agent/core",
   "version": "0.8.12",
   "license": "Apache-2.0",
-  "description": "Core types, storage, and agent logic for Craft Agents",
+  "description": "Core types, storage, and agent logic for Qwen Code",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",

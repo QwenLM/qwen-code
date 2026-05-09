@@ -95,7 +95,7 @@ async function main(): Promise<void> {
       // Mark only Electron + Baileys' runtime-optional peers external.
       // Baileys itself and all its required transitive deps get bundled.
       //
-      // The three optional deps below are unused by Craft Agent (no link
+      // The three optional deps below are unused by Qwen Code (no link
       // previews, no terminal QR, no inline image transforms). Baileys
       // guards them with try/catch so they fail silently at runtime.
       "--external:electron",

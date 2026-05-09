@@ -1,5 +1,5 @@
 /**
- * Centralized branding assets for Craft Agent
+ * Centralized branding assets for Qwen Code
  * Used by OAuth callback pages
  */
 

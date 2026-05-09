@@ -2,7 +2,7 @@
   "name": "@craft-agent/ui",
   "version": "0.8.12",
   "license": "Apache-2.0",
-  "description": "Shared React UI components for Craft Agents - session viewer, chat display, markdown rendering",
+  "description": "Shared React UI components for Qwen Code - session viewer, chat display, markdown rendering",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",

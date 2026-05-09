@@ -261,7 +261,7 @@ export class Commands {
     if (!/^\d{6}$/.test(code)) {
       await adapter.sendText(
         msg.channelId,
-        'Usage: /pair <6-digit code>\n\nGenerate a code from the session menu in the Craft Agent app.',
+        'Usage: /pair <6-digit code>\n\nGenerate a code from the session menu in the Qwen Code app.',
       )
       return
     }

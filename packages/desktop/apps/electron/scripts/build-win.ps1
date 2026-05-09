@@ -11,7 +11,7 @@ $RootDir = Split-Path -Parent (Split-Path -Parent $ElectronDir)
 $BunVersion = "bun-v1.3.9"  # Pinned version for reproducible builds
 $QwenCodeVersion = if ($env:QWEN_CODE_VERSION) { $env:QWEN_CODE_VERSION } else { "0.15.2" }  # Pinned version for bundled ACP sessions
 
-Write-Host "=== Building Craft Agents Windows Installer using electron-builder ===" -ForegroundColor Cyan
+Write-Host "=== Building Qwen Code Windows Installer using electron-builder ===" -ForegroundColor Cyan
 
 # Debug: System information
 Write-Host ""

@@ -1,6 +1,6 @@
-# Craft Agents Electron App
+# Qwen Code Electron App
 
-Electron + React desktop interface for Craft Agents.
+Electron + React desktop interface for Qwen Code.
 
 The desktop app provides:
 

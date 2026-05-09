@@ -41,7 +41,7 @@ export type McpClientConfig = HttpMcpClientConfig | StdioMcpClientConfig;
  * If you add a new entry here, update it there too.
  */
 const BLOCKED_ENV_VARS = [
-  // Craft Agent auth (set by the app itself)
+  // Qwen Code auth (set by the app itself)
   'LLM_API_KEY',
   'QWEN_API_KEY',
 

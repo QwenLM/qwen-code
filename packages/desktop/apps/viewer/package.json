@@ -2,7 +2,7 @@
   "name": "@craft-agent/viewer",
   "version": "0.8.12",
   "license": "Apache-2.0",
-  "description": "Web viewer for Craft Agents sessions - upload and share session transcripts",
+  "description": "Web viewer for Qwen Code sessions - upload and share session transcripts",
   "private": true,
   "type": "module",
   "scripts": {

@@ -82,7 +82,7 @@ done
 BUN_VERSION="bun-v1.3.9"  # Pinned version for reproducible builds
 QWEN_CODE_VERSION="${QWEN_CODE_VERSION:-0.15.2}"  # Pinned version for bundled ACP sessions
 
-echo "=== Building Craft Agents DMG (${ARCH}) using electron-builder ==="
+echo "=== Building Qwen Code DMG (${ARCH}) using electron-builder ==="
 if [ "$UPLOAD" = true ]; then
     echo "Will upload to S3 after build"
 fi

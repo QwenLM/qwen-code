@@ -321,7 +321,7 @@ else
 
     # Kill the app if it's running
     if pgrep -f "Craft-Agent.*AppImage" >/dev/null 2>&1; then
-        info "Stopping Craft Agents..."
+        info "Stopping Qwen Code..."
         pkill -f "Craft-Agent.*AppImage" 2>/dev/null || true
         sleep 2
     fi
@@ -342,7 +342,7 @@ else
     info "Creating launcher at $WRAPPER_PATH..."
     cat > "$WRAPPER_PATH" << 'WRAPPER_EOF'
 #!/bin/bash
-# Craft Agent launcher - handles Linux-specific AppImage issues
+# Qwen Code launcher - handles Linux-specific AppImage issues
 
 APPIMAGE_PATH="$HOME/.craft-agent/app/Craft-Agents-x64.AppImage"
 ELECTRON_CACHE="$HOME/.config/@craft-agent"
@@ -350,7 +350,7 @@ ELECTRON_CACHE_ALT="$HOME/.cache/@craft-agent"
 
 # Verify AppImage exists
 if [ ! -f "$APPIMAGE_PATH" ]; then
-    echo "Error: Craft Agent not found at $APPIMAGE_PATH"
+    echo "Error: Qwen Code not found at $APPIMAGE_PATH"
     echo "Reinstall: curl -fsSL https://agents.craft.do/install-app.sh | bash"
     exit 1
 fi

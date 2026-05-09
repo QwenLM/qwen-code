@@ -1,6 +1,6 @@
 # @craft-agent/core
 
-Shared TypeScript types and utilities for Craft Agent applications.
+Shared TypeScript types and utilities for Qwen Code applications.
 
 ## Usage
 

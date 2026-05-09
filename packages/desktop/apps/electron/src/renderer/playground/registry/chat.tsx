@@ -554,7 +554,7 @@ interface InputContainerPlaygroundProps {
 function InputContainerPlayground({
   disabled = false,
   isProcessing = false,
-  placeholder = 'Message Craft Agent...',
+  placeholder = 'Message Qwen Code...',
   currentModel = 'qwen3-coder-plus',
   permissionMode = 'ask',
   workingDirectory = '/Users/demo/projects/craft-agent',
@@ -826,7 +826,7 @@ function ActiveTasksBarContext({ tasks = sampleBackgroundTasks }: ActiveTasksBar
 
         {/* Real InputContainer */}
         <InputContainer
-          placeholder="Message Craft Agent..."
+          placeholder="Message Qwen Code..."
           disabled={false}
           isProcessing={false}
           currentModel="qwen3-coder-plus"
@@ -929,7 +929,7 @@ function PermissionInputToggle({ autoToggle = false, autoToggleInterval = 3000, 
 
       {/* Real InputContainer - handles animation automatically */}
       <InputContainer
-        placeholder="Message Craft Agent..."
+        placeholder="Message Qwen Code..."
         disabled={false}
         isProcessing={false}
         currentModel="qwen3-coder-plus"
@@ -1281,7 +1281,7 @@ export const chatComponents: ComponentEntry[] = [
         name: 'placeholder',
         description: 'Textarea placeholder text',
         control: { type: 'string', placeholder: 'Message...' },
-        defaultValue: 'Message Craft Agent...',
+        defaultValue: 'Message Qwen Code...',
       },
       {
         name: 'currentModel',

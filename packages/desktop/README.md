@@ -1,6 +1,6 @@
-# Craft Agents
+# Qwen Code
 
-Craft Agents is a desktop and headless agent workspace built around the Qwen Code backend. It provides multi-session chat, source connections, skills, file previews, automations, and permission modes in a local-first application.
+Qwen Code is a desktop and headless agent workspace. It provides multi-session chat, source connections, skills, file previews, automations, and permission modes in a local-first application.
 
 ## Backend
 

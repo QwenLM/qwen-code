@@ -111,7 +111,7 @@ let configDefaultsSynced = false;
 /** Minimal config-defaults used when bundled assets aren't available (CI, standalone server). */
 const FALLBACK_CONFIG_DEFAULTS: ConfigDefaults = {
   version: '1.0',
-  description: 'Default configuration values for Craft Agents',
+  description: 'Default configuration values for Qwen Code',
   defaults: {
     notificationsEnabled: true,
     colorTheme: 'default',

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Debug script to print the full Craft Agent system prompt with annotations.
+ * Debug script to print the full Qwen Code system prompt with annotations.
  * Shows both the static system prompt and dynamic user message context components.
  *
  * Run with: bun run print:system-prompt
@@ -57,7 +57,7 @@ printAnnotation('Built once per session, passed to SDK, enables prompt caching')
 printAnnotation('');
 printAnnotation('Composed of:');
 printAnnotation('  1. User Preferences (if set) - formatPreferencesForPrompt()');
-printAnnotation('  2. Craft Agent Environment Marker - version, platform, arch');
+printAnnotation('  2. Qwen Code Environment Marker - version, platform, arch');
 printAnnotation('  3. Core Instructions - capabilities, sources, guidelines');
 printAnnotation('  4. Configuration Documentation Refs - permissions, skills, themes, statuses');
 printAnnotation('  5. Permission Modes Documentation - inlined in system prompt');
@@ -196,11 +196,11 @@ ${colors.bgMagenta}${colors.bold}                              SUMMARY          
 ${colors.bgMagenta}${colors.bold}                                                                                ${colors.reset}
 
 ${colors.bold}SDK Configuration:${colors.reset}
-  systemPrompt.append: getSystemPrompt() ${colors.dim}// Craft Agent additions (static, cacheable)${colors.reset}
+  systemPrompt.append: getSystemPrompt() ${colors.dim}// Qwen Code additions (static, cacheable)${colors.reset}
 
 ${colors.bold}Static System Prompt Components:${colors.reset}
   1. User Preferences (if set)           ${colors.dim}// formatPreferencesForPrompt()${colors.reset}
-  2. Craft Agent Environment Marker      ${colors.dim}// Version, platform, arch${colors.reset}
+  2. Qwen Code Environment Marker      ${colors.dim}// Version, platform, arch${colors.reset}
   3. Core Instructions                   ${colors.dim}// Capabilities, sources, guidelines${colors.reset}
   4. Configuration Documentation Refs    ${colors.dim}// Permissions, skills, themes, statuses${colors.reset}
   5. Permission Modes Documentation      ${colors.dim}// Inlined in system prompt${colors.reset}

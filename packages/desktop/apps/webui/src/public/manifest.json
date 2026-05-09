@@ -1,6 +1,6 @@
 {
-  "name": "Craft Agents",
-  "short_name": "Craft Agents",
+  "name": "Qwen Code",
+  "short_name": "Qwen Code",
   "description": "AI agent interface",
   "start_url": "./",
   "display": "standalone",

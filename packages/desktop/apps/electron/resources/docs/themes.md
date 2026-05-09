@@ -1,10 +1,10 @@
 # Theme Configuration Guide
 
-This guide explains how to customize the visual theme of Craft Agent.
+This guide explains how to customize the visual theme of Qwen Code.
 
 ## Overview
 
-Craft Agent uses a 6-color theme system with support for both app-level defaults and per-workspace overrides.
+Qwen Code uses a 6-color theme system with support for both app-level defaults and per-workspace overrides.
 
 ### Theme Hierarchy
 

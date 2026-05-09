@@ -49,7 +49,7 @@ export interface SessionViewerProps {
 }
 
 /**
- * CraftAgentLogo - The Craft Agent "C" logo for branding
+ * CraftAgentLogo - The Qwen Code "C" logo for branding
  */
 function CraftAgentLogo({ className }: { className?: string }) {
   return (

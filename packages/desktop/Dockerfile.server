@@ -1,5 +1,5 @@
 # =============================================================================
-# Craft Agents Server — multi-platform Docker image
+# Qwen Code Server — multi-platform Docker image
 #
 # Build:
 #   docker buildx build -f Dockerfile.server -t craft-agent-server .
@@ -26,7 +26,7 @@
 FROM oven/bun:1.3-slim
 
 LABEL org.opencontainers.image.source="https://github.com/lukilabs/craft-agents-oss"
-LABEL org.opencontainers.image.description="Craft Agents Server — headless AI workflow server"
+LABEL org.opencontainers.image.description="Qwen Code Server — headless AI workflow server"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Install system deps + Node.js (required by the WhatsApp worker subprocess;

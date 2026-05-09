@@ -1,5 +1,5 @@
 /**
- * Craft Agent Automations - Public API
+ * Qwen Code Automations - Public API
  *
  * Slim barrel file that re-exports from decomposed modules:
  * - types.ts: All type definitions

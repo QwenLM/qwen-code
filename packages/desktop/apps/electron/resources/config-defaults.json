@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "description": "Default configuration values for Craft Agents",
+  "description": "Default configuration values for Qwen Code",
   "defaults": {
     "notificationsEnabled": true,
     "colorTheme": "default",

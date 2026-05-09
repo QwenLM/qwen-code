@@ -1,5 +1,5 @@
 /**
- * Server spawner — start a headless Craft Agent server as a child process.
+ * Server spawner — start a headless Qwen Code server as a child process.
  *
  * Spawns `bun run <serverEntry>`, reads stdout for the `CRAFT_SERVER_URL=`
  * and `CRAFT_SERVER_TOKEN=` lines, and returns a handle to stop the server.

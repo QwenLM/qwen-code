@@ -1,7 +1,7 @@
 /**
  * @craft-agent/shared
  *
- * Shared business logic for Craft Agent.
+ * Shared business logic for Qwen Code.
  * Used by the Electron app.
  *
  * Import specific modules via subpath exports:

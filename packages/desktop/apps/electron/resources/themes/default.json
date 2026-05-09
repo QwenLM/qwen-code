@@ -1,7 +1,7 @@
 {
   "name": "Default",
   "description": "Clean purple-tinted neutral theme",
-  "author": "Craft Agent",
+  "author": "Qwen Code",
   "license": "MIT",
   "supportedModes": ["light", "dark"],
   "shikiTheme": {

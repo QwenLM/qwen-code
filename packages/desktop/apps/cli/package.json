@@ -2,7 +2,7 @@
   "name": "@craft-agent/cli",
   "version": "0.8.12",
   "license": "Apache-2.0",
-  "description": "Terminal client for Craft Agent server",
+  "description": "Terminal client for Qwen Code server",
   "type": "module",
   "main": "src/index.ts",
   "bin": {

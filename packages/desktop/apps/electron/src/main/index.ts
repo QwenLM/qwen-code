@@ -207,8 +207,8 @@ let messagingHandle: MessagingBootstrapHandle | null = null
 let pendingDeepLink: string | null = null
 
 // Set app name early (before app.whenReady) to ensure correct macOS menu bar title
-// Supports multi-instance dev: CRAFT_APP_NAME env var (e.g., "Craft Agents [1]")
-app.setName(process.env.CRAFT_APP_NAME || 'Craft Agents')
+// Supports multi-instance dev: CRAFT_APP_NAME env var (e.g., "Qwen Code [1]")
+app.setName(process.env.CRAFT_APP_NAME || 'Qwen Code')
 
 // Register as default protocol client for craftagents:// URLs
 // This must be done before app.whenReady() on some platforms
@@ -285,7 +285,7 @@ app.on('open-url', (event, url) => {
 // Handle deeplink on Windows/Linux (single instance check)
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
-  mainLog.warn('Another Craft Agents instance already owns the Electron single-instance lock; quitting.', {
+  mainLog.warn('Another Qwen Code instance already owns the Electron single-instance lock; quitting.', {
     userData: app.getPath('userData'),
     appName: app.getName(),
   })

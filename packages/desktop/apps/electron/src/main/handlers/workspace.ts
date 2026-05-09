@@ -55,7 +55,7 @@ export async function connectToRemote(url: string, token: string, workspaceId?: 
 export function registerWorkspaceGuiHandlers(server: RpcServer, deps: HandlerDeps): void {
   const windowManager = deps.windowManager
 
-  // Test connection to a remote Craft Agent Server.
+  // Test connection to a remote Qwen Code Server.
   // Pure discovery — returns list of existing workspaces or needsWorkspace flag.
   // Workspace creation is handled separately via invokeOnServer → server:createWorkspace.
   server.handle(RPC_CHANNELS.remote.TEST_CONNECTION, async (_ctx, url: string, token: string) => {

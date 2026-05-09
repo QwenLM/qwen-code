@@ -16,7 +16,7 @@ let cachedClientResolver: ClientResolver | null = null
 
 /**
  * Creates and sets the application menu for macOS.
- * Includes only relevant items for the Craft Agents app.
+ * Includes only relevant items for the Qwen Code app.
  *
  * Call rebuildMenu() when update state changes to refresh the menu.
  */
@@ -79,7 +79,7 @@ export async function rebuildMenu(): Promise<void> {
   const template: Electron.MenuItemConstructorOptions[] = [
     // App menu (macOS only)
     ...(isMac ? [{
-      label: 'Craft Agents',
+      label: 'Qwen Code',
       submenu: [
         { role: 'about' as const, label: i18n.t('menu.aboutCraftAgents') },
         updateMenuItem,
