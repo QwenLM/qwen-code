@@ -11,7 +11,6 @@ import util from 'node:util';
 import { trace } from '@opentelemetry/api';
 import { Storage } from '../config/storage.js';
 import { updateSymlink } from './symlink.js';
-import { deriveTraceId, randomSpanId } from '../telemetry/trace-id-utils.js';
 import { getSessionContext } from '../telemetry/session-context.js';
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
@@ -32,9 +31,6 @@ let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
 const sessionContext = new AsyncLocalStorage<DebugLogSession>();
-let cachedSessionId: string | null = null;
-let cachedTraceId: string | null = null;
-let cachedSessionSpanId: string | null = null;
 
 interface TraceContext {
   traceId: string;
@@ -111,31 +107,8 @@ function getSessionRootTraceContext(): TraceContext | null {
   }
 }
 
-function getSessionTraceContext(
-  session: DebugLogSession | null,
-): TraceContext | null {
-  if (!session) {
-    return null;
-  }
-  const sessionRootCtx = getSessionRootTraceContext();
-  if (sessionRootCtx) {
-    return sessionRootCtx;
-  }
-  try {
-    const sessionId = session.getSessionId();
-    if (cachedSessionId !== sessionId) {
-      cachedSessionId = sessionId;
-      cachedTraceId = deriveTraceId(sessionId);
-      cachedSessionSpanId = randomSpanId();
-    }
-    return { traceId: cachedTraceId!, spanId: cachedSessionSpanId! };
-  } catch {
-    return null;
-  }
-}
-
-function getTraceContext(session: DebugLogSession | null): TraceContext | null {
-  return getActiveSpanTraceContext() ?? getSessionTraceContext(session);
+function getTraceContext(): TraceContext | null {
+  return getActiveSpanTraceContext() ?? getSessionRootTraceContext();
 }
 
 /**
@@ -171,7 +144,7 @@ function writeLog(
   const sessionId = session.getSessionId();
   const logFilePath = Storage.getDebugLogPath(sessionId);
   const message = formatArgs(args);
-  const traceCtx = getTraceContext(session);
+  const traceCtx = getTraceContext();
   const line = buildLogLine(level, message, tag, traceCtx);
 
   void ensureDebugDirExists()
@@ -197,9 +170,6 @@ export function resetDebugLoggingState(): void {
   hasWriteFailure = false;
   ensureDebugDirPromise = null;
   ensuredDebugDirPath = null;
-  cachedSessionId = null;
-  cachedTraceId = null;
-  cachedSessionSpanId = null;
 }
 
 const DEBUG_LATEST_ALIAS = 'latest';

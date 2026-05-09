@@ -40,11 +40,6 @@ vi.mock('@opentelemetry/api', () => ({
   },
 }));
 
-vi.mock('../telemetry/trace-id-utils.js', () => ({
-  deriveTraceId: vi.fn().mockReturnValue('aabbccddeeff00112233445566778899'),
-  randomSpanId: vi.fn().mockReturnValue('1122334455667788'),
-}));
-
 describe('debugLogger', () => {
   const mockSession: DebugLogSession = {
     getSessionId: () => 'test-session-123',
@@ -89,7 +84,7 @@ describe('debugLogger', () => {
       expect(fs.appendFile).not.toHaveBeenCalled();
     });
 
-    it('writes debug log with trace context when session is set', async () => {
+    it('writes debug log without trace context when telemetry context is unset', async () => {
       const logger = createDebugLogger();
       logger.debug('Hello world');
 
@@ -100,7 +95,7 @@ describe('debugLogger', () => {
       });
       expect(fs.appendFile).toHaveBeenCalledWith(
         Storage.getDebugLogPath('test-session-123'),
-        '2026-01-24T10:30:00.000Z [DEBUG] [trace_id=aabbccddeeff00112233445566778899 span_id=1122334455667788] Hello world\n',
+        '2026-01-24T10:30:00.000Z [DEBUG] Hello world\n',
         'utf8',
       );
     });
@@ -113,7 +108,7 @@ describe('debugLogger', () => {
 
       expect(fs.appendFile).toHaveBeenCalledWith(
         Storage.getDebugLogPath('test-session-123'),
-        '2026-01-24T10:30:00.000Z [INFO] [STARTUP] [trace_id=aabbccddeeff00112233445566778899 span_id=1122334455667788] Server started\n',
+        '2026-01-24T10:30:00.000Z [INFO] [STARTUP] Server started\n',
         'utf8',
       );
     });
@@ -158,7 +153,7 @@ describe('debugLogger', () => {
       );
     });
 
-    it('falls back to session-derived trace when active span has zero traceId', async () => {
+    it('omits trace context when active span is noop and telemetry context is unset', async () => {
       vi.mocked(trace.getActiveSpan).mockReturnValue({
         spanContext: () => ({
           traceId: '00000000000000000000000000000000',
@@ -174,12 +169,12 @@ describe('debugLogger', () => {
 
       expect(fs.appendFile).toHaveBeenCalledWith(
         expect.any(String),
-        expect.stringContaining('trace_id=aabbccddeeff00112233445566778899'),
+        expect.not.stringContaining('trace_id='),
         'utf8',
       );
     });
 
-    it('falls back to session-derived trace when reading the active span throws', async () => {
+    it('omits trace context when reading the active span throws and telemetry context is unset', async () => {
       vi.mocked(trace.getActiveSpan).mockImplementationOnce(() => {
         throw new Error('otel unavailable');
       });
@@ -191,12 +186,12 @@ describe('debugLogger', () => {
 
       expect(fs.appendFile).toHaveBeenCalledWith(
         expect.any(String),
-        expect.stringContaining('trace_id=aabbccddeeff00112233445566778899'),
+        expect.not.stringContaining('trace_id='),
         'utf8',
       );
     });
 
-    it('uses the same fallback spanId for all log lines in the same session', async () => {
+    it('does not synthesize span ids when telemetry context is unset', async () => {
       const logger = createDebugLogger();
       logger.debug('first line');
       logger.debug('second line');
@@ -206,15 +201,8 @@ describe('debugLogger', () => {
       const calls = vi.mocked(fs.appendFile).mock.calls;
       expect(calls).toHaveLength(2);
 
-      const extractSpanId = (line: unknown) => {
-        const match = String(line).match(/span_id=([0-9a-f]+)/);
-        return match?.[1];
-      };
-
-      const spanId0 = extractSpanId(calls[0]?.[1]);
-      const spanId1 = extractSpanId(calls[1]?.[1]);
-      expect(spanId0).toBeDefined();
-      expect(spanId0).toBe(spanId1);
+      expect(calls[0]?.[1]).not.toContain('span_id=');
+      expect(calls[1]?.[1]).not.toContain('span_id=');
     });
 
     it('uses the session root span context for fallback trace context', async () => {

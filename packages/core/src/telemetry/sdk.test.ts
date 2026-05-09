@@ -31,6 +31,21 @@ import {
   setDebugLogSession,
 } from '../utils/debugLogger.js';
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function expectOtelDebugLogLine(
+  level: 'ERROR' | 'WARN',
+  message: string,
+): ReturnType<typeof expect.stringMatching> {
+  return expect.stringMatching(
+    new RegExp(
+      `\\[${level}\\] \\[OTEL\\]( \\[trace_id=[0-9a-f]{32} span_id=[0-9a-f]{16}\\])? ${escapeRegExp(message)}`,
+    ),
+  );
+}
+
 vi.mock('@opentelemetry/exporter-trace-otlp-grpc');
 vi.mock('@opentelemetry/exporter-logs-otlp-grpc');
 vi.mock('@opentelemetry/exporter-metrics-otlp-grpc');
@@ -192,21 +207,20 @@ describe('Telemetry SDK', () => {
       expect(mkdirSpy).toHaveBeenCalled();
       expect(appendFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('otel-diag-test-session'),
-        expect.stringContaining(
-          '[ERROR] [OTEL] {"message":"Error: PeriodicExportingMetricReader: metrics export failed (error Error: connect ECONNREFUSED)"}',
+        expectOtelDebugLogLine(
+          'ERROR',
+          '{"message":"Error: PeriodicExportingMetricReader: metrics export failed (error Error: connect ECONNREFUSED)"}',
         ),
         'utf8',
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('otel-diag-test-session'),
-        expect.stringContaining(
-          '[ERROR] [OTEL] A different OpenTelemetry diagnostic',
-        ),
+        expectOtelDebugLogLine('ERROR', 'A different OpenTelemetry diagnostic'),
         'utf8',
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('otel-diag-test-session'),
-        expect.stringContaining('[WARN] [OTEL] An OpenTelemetry warning'),
+        expectOtelDebugLogLine('WARN', 'An OpenTelemetry warning'),
         'utf8',
       );
     } finally {
