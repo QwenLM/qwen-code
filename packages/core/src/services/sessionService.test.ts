@@ -60,9 +60,13 @@ describe('SessionService', () => {
       .spyOn(fs, 'unlinkSync')
       .mockImplementation(() => undefined);
 
-    // Mock jsonl-utils
+    // Mock jsonl-utils. `parseLineTolerant` defaults to a no-op so any code
+    // path that streams lines through it (e.g. countSessionMessages,
+    // readLastRecordUuid) does not crash on the auto-mocked `undefined`
+    // return; tests that need recovery semantics override this explicitly.
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
+    vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
   });
 
   afterEach(() => {

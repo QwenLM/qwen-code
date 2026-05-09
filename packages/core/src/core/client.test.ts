@@ -299,6 +299,7 @@ describe('Gemini Client (client.ts)', () => {
     scheduleExtract: ReturnType<typeof vi.fn>;
     scheduleDream: ReturnType<typeof vi.fn>;
     recall: ReturnType<typeof vi.fn>;
+    scheduleSkillReview: ReturnType<typeof vi.fn>;
   };
   beforeEach(async () => {
     vi.resetAllMocks();
@@ -323,6 +324,10 @@ describe('Gemini Client (client.ts)', () => {
         prompt: '',
         selectedDocs: [],
         strategy: 'none',
+      }),
+      scheduleSkillReview: vi.fn().mockReturnValue({
+        status: 'skipped',
+        skippedReason: 'below_threshold',
       }),
     };
 
@@ -422,6 +427,7 @@ describe('Gemini Client (client.ts)', () => {
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
+      getAutoSkillEnabled: vi.fn().mockReturnValue(false),
       getModelsConfig: vi.fn().mockReturnValue({
         getResolvedModel: vi.fn().mockReturnValue(undefined),
       }),
@@ -1463,6 +1469,178 @@ hello
       expect(events).not.toContainEqual({
         type: GeminiEventType.HookSystemMessage,
         value: 'Managed auto-memory updated: user.md',
+      });
+    });
+
+    describe('autoSkill: scheduleSkillReview via runManagedAutoMemoryBackgroundTasks', () => {
+      let mockStreamFn: () => AsyncGenerator<{ type: string; value: string }>;
+      let mockChat: Partial<GeminiChat>;
+
+      beforeEach(() => {
+        vi.spyOn(client['config'], 'getAutoSkillEnabled').mockReturnValue(true);
+        mockStreamFn = async function* () {
+          yield { type: GeminiEventType.Content, value: 'Done' };
+        };
+        mockTurnRunFn.mockReturnValue(mockStreamFn());
+        mockChat = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            { role: 'user', parts: [{ text: 'hello' }] },
+            { role: 'model', parts: [{ text: 'Done' }] },
+          ]),
+        };
+        client['chat'] = mockChat as GeminiChat;
+      });
+
+      it('should call scheduleSkillReview with correct params on UserQuery', async () => {
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'below_threshold',
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'a query' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-query',
+          ),
+        );
+
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+          expect.objectContaining({
+            projectRoot: '/test/project/root',
+            sessionId: 'test-session-id',
+            config: mockConfig,
+          }),
+        );
+      });
+
+      it('should reset toolCallCount and push promise when review is scheduled', async () => {
+        let resolveFn!: (v: unknown) => void;
+        const promise = new Promise<{ metadata?: Record<string, unknown> }>(
+          (r) => {
+            resolveFn = r as (v: unknown) => void;
+          },
+        );
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'scheduled',
+          taskId: 'task-1',
+          promise,
+        });
+
+        // Artificially bump toolCallCount above 0 to verify it resets.
+        client['toolCallCount'] = 5;
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'trigger review' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-scheduled',
+          ),
+        );
+
+        // Counter should have been reset.
+        expect(client['toolCallCount']).toBe(0);
+        // Promise should have been pushed to pendingMemoryTaskPromises.
+        expect(client['pendingMemoryTaskPromises'].length).toBeGreaterThan(0);
+
+        // Resolve promise so there are no dangling promises.
+        resolveFn({ metadata: { touchedSkillFiles: ['skill.md'] } });
+      });
+
+      it('should reset toolCallCount when review is already_running and count exceeds threshold', async () => {
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'already_running',
+          taskId: 'task-inflight',
+        });
+
+        // Simulate counter above threshold.
+        const AUTO_SKILL_THRESHOLD = 20;
+        client['toolCallCount'] = AUTO_SKILL_THRESHOLD + 5;
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'trigger while in-flight' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-inflight',
+          ),
+        );
+
+        // Counter should have been reset to prevent immediate cascade.
+        expect(client['toolCallCount']).toBe(0);
+      });
+
+      it('should always reset skillsModifiedInSession after scheduleSkillReview check', async () => {
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'skills_modified_in_session',
+        });
+
+        client['skillsModifiedInSession'] = true;
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'wrote a skill file' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-modified',
+          ),
+        );
+
+        expect(client['skillsModifiedInSession']).toBe(false);
+      });
+    });
+
+    describe('recordCompletedToolCall', () => {
+      it('should increment toolCallCount on each call', () => {
+        expect(client['toolCallCount']).toBe(0);
+        client.recordCompletedToolCall('read_file');
+        expect(client['toolCallCount']).toBe(1);
+        client.recordCompletedToolCall('write_file');
+        expect(client['toolCallCount']).toBe(2);
+      });
+
+      it('should set skillsModifiedInSession=true when write_file targets a skill path', () => {
+        vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+          '/project',
+        );
+        expect(client['skillsModifiedInSession']).toBe(false);
+
+        client.recordCompletedToolCall('write_file', {
+          file_path: '/project/.qwen/skills/my-skill.md',
+        });
+
+        expect(client['skillsModifiedInSession']).toBe(true);
+      });
+
+      it('should not set skillsModifiedInSession=true for write_file outside skill path', () => {
+        vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+          '/project',
+        );
+        client.recordCompletedToolCall('write_file', {
+          file_path: '/project/src/index.ts',
+        });
+        expect(client['skillsModifiedInSession']).toBe(false);
+      });
+
+      it('should set skillsModifiedInSession=true when edit targets a skill path', () => {
+        vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+          '/project',
+        );
+        client.recordCompletedToolCall('edit', {
+          path: '/project/.qwen/skills/my-skill.md',
+        });
+        expect(client['skillsModifiedInSession']).toBe(true);
+      });
+
+      it('should not set skillsModifiedInSession=true for non-write tools', () => {
+        vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+          '/project',
+        );
+        client.recordCompletedToolCall('read_file', {
+          file_path: '/project/.qwen/skills/my-skill.md',
+        });
+        expect(client['skillsModifiedInSession']).toBe(false);
       });
     });
 
