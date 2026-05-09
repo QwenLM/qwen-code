@@ -356,6 +356,14 @@ export class BackgroundTaskRegistry {
   // case where a tool ignores AbortSignal and bgBody never settles — the
   // timeout lands on finalizeCancellationIfPending(), which is a no-op
   // once the natural handler has already emitted.
+  //
+  // Foreground entries (`isBackgrounded === false`) take a partial path
+  // through this method: status flips to 'cancelled' and the meta sidecar
+  // is patched, but the Map entry is *not* removed. Removal is the caller's
+  // responsibility via `unregisterForeground()` in the tool-call's finally
+  // path — without that follow-up, the foreground entry leaks. Callers
+  // outside `agent.ts` that invoke `cancel()` on a foreground entry must
+  // pair it with `unregisterForeground()`.
   cancel(agentId: string, options: BackgroundTaskCancelOptions = {}): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;

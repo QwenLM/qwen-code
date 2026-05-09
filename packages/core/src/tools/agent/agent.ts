@@ -69,6 +69,20 @@ import {
 } from '../../agents/agent-transcript.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
+// Memoize git branch per cwd for the agent-launch path. `getGitBranch`
+// shells out to `git rev-parse` synchronously; caching avoids the per-launch
+// execSync on a path that runs every time a subagent (foreground or
+// background) starts. Branches don't change within a process under normal
+// use; the transcript annotation is best-effort audit metadata, so a stale
+// value after a user `git checkout` mid-session is acceptable.
+const gitBranchCache = new Map<string, string | undefined>();
+function getCachedGitBranch(cwd: string): string | undefined {
+  if (gitBranchCache.has(cwd)) return gitBranchCache.get(cwd);
+  const branch = getGitBranch(cwd);
+  gitBranchCache.set(cwd, branch);
+  return branch;
+}
+
 function persistBackgroundCancellation(
   metaPath: string,
   persistedStatus: 'running' | 'cancelled',
@@ -1208,7 +1222,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             sessionId,
             cwd: projectRoot,
             version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getGitBranch(projectRoot),
+            gitBranch: getCachedGitBranch(projectRoot),
             // Seed the JSONL with the launching prompt so the transcript is
             // self-describing — readers don't need to consult .meta.json to
             // know what the agent was asked to do.
@@ -1560,13 +1574,32 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             sessionId: fgSessionId,
             cwd: fgProjectRoot,
             version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getGitBranch(fgProjectRoot),
+            gitBranch: getCachedGitBranch(fgProjectRoot),
             // Seed the JSONL with the launching prompt so the transcript
             // is self-describing — readers don't need the meta sidecar to
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
           },
         ));
+        // Register before writing the meta sidecar: if register() throws
+        // (e.g. duplicate agent id), we leave no orphaned 'running' meta
+        // file behind. writeAgentMeta is best-effort and never throws, so
+        // a failure there leaves the registry entry without a sidecar —
+        // a benign degradation (post-mortem readers miss this run) rather
+        // than a stuck meta file the cleanup path can't reach.
+        registry.register({
+          agentId: hookOpts.agentId,
+          description: this.params.description,
+          subagentType: hookOpts.agentType,
+          isBackgrounded: false,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: fgAbortController,
+          prompt: this.params.prompt,
+          toolUseId: this.callId,
+          outputFile: fgJsonlPath,
+          metaPath: fgMetaPath,
+        });
         writeAgentMeta(fgMetaPath, {
           agentId: hookOpts.agentId,
           agentType: hookOpts.agentType,
@@ -1580,19 +1613,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
-        });
-        registry.register({
-          agentId: hookOpts.agentId,
-          description: this.params.description,
-          subagentType: hookOpts.agentType,
-          isBackgrounded: false,
-          status: 'running',
-          startTime: Date.now(),
-          abortController: fgAbortController,
-          prompt: this.params.prompt,
-          toolUseId: this.callId,
-          outputFile: fgJsonlPath,
-          metaPath: fgMetaPath,
         });
 
         await runFramed();
