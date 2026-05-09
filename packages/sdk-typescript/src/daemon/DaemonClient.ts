@@ -361,7 +361,24 @@ function abortTimeout(ms: number): AbortSignal {
   ).timeout;
   if (typeof tFn === 'function') return tFn.call(AbortSignal, ms);
   const ctrl = new AbortController();
-  setTimeout(() => ctrl.abort(new DOMException('TimeoutError')), ms);
+  // `.unref()` so a fast-resolving fetch doesn't keep the event loop
+  // alive waiting for this timer to fire (the call is `await`-ed so
+  // a long-lived event loop is the caller's problem, not ours).
+  // Also clear the timer when the controller aborts via another path
+  // (the composed callerSignal aborts first) so we don't accumulate
+  // pending timers across many fast calls in the polyfill path.
+  const handle = setTimeout(
+    () => ctrl.abort(new DOMException('TimeoutError')),
+    ms,
+  );
+  if (typeof handle === 'object' && handle && 'unref' in handle) {
+    (handle as { unref: () => void }).unref();
+  }
+  ctrl.signal.addEventListener(
+    'abort',
+    () => clearTimeout(handle as Parameters<typeof clearTimeout>[0]),
+    { once: true },
+  );
   return ctrl.signal;
 }
 
@@ -383,12 +400,38 @@ function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
   ).any;
   if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
   const ctrl = new AbortController();
+  // Track per-input listener so we can detach them all on the FIRST
+  // abort (whichever input fires). Without this, callers who reuse a
+  // long-lived AbortSignal (e.g. a session-scope cancel signal that
+  // never fires for the lifetime of the SDK client) accumulate one
+  // listener per SDK call — slow leak that retains the closure +
+  // controller of every prior call.
+  const cleanups: Array<() => void> = [];
+  const detachAll = () => {
+    while (cleanups.length > 0) {
+      const fn = cleanups.pop();
+      try {
+        fn?.();
+      } catch {
+        /* swallow */
+      }
+    }
+  };
   for (const s of signals) {
     if (s.aborted) {
       ctrl.abort(s.reason);
+      detachAll();
       return ctrl.signal;
     }
-    s.addEventListener('abort', () => ctrl.abort(s.reason), { once: true });
+    const onAbort = () => {
+      ctrl.abort(s.reason);
+      detachAll();
+    };
+    s.addEventListener('abort', onAbort, { once: true });
+    cleanups.push(() => s.removeEventListener('abort', onAbort));
   }
+  // Also detach if our composed controller aborts via some other path
+  // (e.g. its consumer aborted independently — defense-in-depth).
+  ctrl.signal.addEventListener('abort', detachAll, { once: true });
   return ctrl.signal;
 }
