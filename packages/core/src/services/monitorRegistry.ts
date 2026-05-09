@@ -13,7 +13,7 @@
  * release.
  *
  * Removal: scheduled for the release after PR 2 lands. New code should
- * import from `'../agents/tasks/monitor-task.js'` directly.
+ * import from `'../tasks/monitor-task.js'` directly.
  */
 
 export {
@@ -27,4 +27,4 @@ export {
   MAX_CONCURRENT_MONITORS,
   MAX_RETAINED_TERMINAL_MONITORS,
   getMonitorOutputPath,
-} from '../agents/tasks/monitor-task.js';
+} from '../tasks/monitor-task.js';

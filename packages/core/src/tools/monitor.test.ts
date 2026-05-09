@@ -124,14 +124,14 @@ vi.mock('../utils/shellAstParser.js', () => ({
 
 import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
 import type { Config } from '../config/config.js';
-import { TaskRegistry } from '../agents/tasks/registry.js';
-import * as monitorTaskModule from '../agents/tasks/monitor-task.js';
+import { TaskRegistry } from '../tasks/registry.js';
+import * as monitorTaskModule from '../tasks/monitor-task.js';
 import {
   getRunningMonitorTasks,
   monitorAbortAll,
   setMonitorNotificationCallback,
   setMonitorRegisterCallback,
-} from '../agents/tasks/monitor-task.js';
+} from '../tasks/monitor-task.js';
 import type { ToolCallConfirmationDetails } from './tools.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 

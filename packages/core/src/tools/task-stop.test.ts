@@ -6,22 +6,22 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TaskStopTool } from './task-stop.js';
-import { TaskRegistry } from '../agents/tasks/registry.js';
+import { TaskRegistry } from '../tasks/registry.js';
 import {
   agentComplete,
   agentRegister,
   getAgentTask,
-} from '../agents/tasks/agent-task.js';
+} from '../tasks/agent-task.js';
 import {
   getShellTask,
   shellComplete,
   shellRegister,
-} from '../agents/tasks/shell-task.js';
+} from '../tasks/shell-task.js';
 import {
   getMonitorTask,
   monitorComplete,
   monitorRegister,
-} from '../agents/tasks/monitor-task.js';
+} from '../tasks/monitor-task.js';
 import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
 

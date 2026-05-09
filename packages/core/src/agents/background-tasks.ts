@@ -13,7 +13,7 @@
  * `agents/index.ts`) keep their import paths working for one release.
  *
  * Removal: scheduled for the release after PR 2 lands. New code should
- * import from `'./tasks/agent-task.js'` directly.
+ * import from `'../tasks/agent-task.js'` directly.
  */
 
 export {
@@ -31,4 +31,4 @@ export {
   DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS,
   MAX_CONCURRENT_BACKGROUND_AGENTS,
   resolveMaxConcurrentBackgroundAgents,
-} from './tasks/agent-task.js';
+} from '../tasks/agent-task.js';

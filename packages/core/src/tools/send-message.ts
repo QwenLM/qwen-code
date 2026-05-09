@@ -22,7 +22,7 @@ import {
   type ToolInvocation,
   type ToolResult,
 } from './tools.js';
-import { agentQueueMessage, getAgentTask } from '../agents/tasks/agent-task.js';
+import { agentQueueMessage, getAgentTask } from '../tasks/agent-task.js';
 
 export interface SendMessageParams {
   /** The ID of the background task to send the message to. */

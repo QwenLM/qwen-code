@@ -43,7 +43,7 @@ import type {
   AgentCompletionStats,
   AgentTask,
   AgentTaskRegistration,
-} from './tasks/agent-task.js';
+} from '../tasks/agent-task.js';
 import {
   agentAppendActivity,
   agentAbandon,
@@ -57,13 +57,13 @@ import {
   agentWaitForMessages,
   agentWakeExternalInputWaiters,
   getAgentTask,
-} from './tasks/agent-task.js';
+} from '../tasks/agent-task.js';
 import {
   monitorCancelRunningForOwner,
   monitorHasRunningForOwner,
   setMonitorAgentLifecycleCallback,
   setMonitorAgentNotificationCallback,
-} from './tasks/monitor-task.js';
+} from '../tasks/monitor-task.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import type {
   PromptConfig,

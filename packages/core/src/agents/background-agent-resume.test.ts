@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
-import { TaskRegistry } from './tasks/registry.js';
+import { TaskRegistry } from '../tasks/registry.js';
 import {
   agentAbortAll,
   agentCancel,
@@ -17,7 +17,7 @@ import {
   agentRegister,
   agentWaitForMessages,
   getAgentTask,
-} from './tasks/agent-task.js';
+} from '../tasks/agent-task.js';
 import { BackgroundAgentResumeService } from './background-agent-resume.js';
 import {
   getAgentJsonlPath,

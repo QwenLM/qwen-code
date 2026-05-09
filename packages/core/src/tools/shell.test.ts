@@ -27,7 +27,7 @@ import { ShellTool, type ShellToolInvocation } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { type Config } from '../config/config.js';
-import * as shellTaskModule from '../agents/tasks/shell-task.js';
+import * as shellTaskModule from '../tasks/shell-task.js';
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,

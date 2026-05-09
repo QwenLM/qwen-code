@@ -27,8 +27,8 @@
  *     `kill` delegates to `MemoryManager.cancelTask`.
  */
 
-import { createDebugLogger } from '../../utils/debugLogger.js';
-import type { MemoryManager, MemoryTaskRecord } from '../../memory/manager.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import type { MemoryManager, MemoryTaskRecord } from '../memory/manager.js';
 import type { Task } from './dispatcher.js';
 
 const debugLogger = createDebugLogger('DREAM_TASK');

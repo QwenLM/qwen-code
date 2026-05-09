@@ -12,7 +12,7 @@
  * working for one release.
  *
  * Removal: scheduled for the release after PR 2 lands. New code should
- * import from `'../agents/tasks/shell-task.js'` directly.
+ * import from `'../tasks/shell-task.js'` directly.
  */
 
 export {
@@ -20,4 +20,4 @@ export {
   type ShellTaskRegistration,
   type BackgroundShellEntry,
   type BackgroundShellStatus,
-} from '../agents/tasks/shell-task.js';
+} from '../tasks/shell-task.js';

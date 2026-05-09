@@ -51,8 +51,8 @@ import {
   monitorFail,
   monitorRegister,
   type MonitorTaskRegistration,
-} from '../agents/tasks/monitor-task.js';
-import { MAX_CONCURRENT_MONITORS } from '../agents/tasks/monitor-task.js';
+} from '../tasks/monitor-task.js';
+import { MAX_CONCURRENT_MONITORS } from '../tasks/monitor-task.js';
 import {
   extractCommandRules,
   isShellCommandReadOnlyAST,

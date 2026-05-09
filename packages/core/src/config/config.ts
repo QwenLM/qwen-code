@@ -82,15 +82,12 @@ import {
 } from '../permissions/denialTracking.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
-import { TaskRegistry } from '../agents/tasks/registry.js';
-import { registerTaskKind } from '../agents/tasks/dispatcher.js';
-import { AgentTaskKind, agentAbortAll } from '../agents/tasks/agent-task.js';
-import { ShellTaskKind, shellAbortAll } from '../agents/tasks/shell-task.js';
-import {
-  MonitorTaskKind,
-  monitorAbortAll,
-} from '../agents/tasks/monitor-task.js';
-import { DreamTaskKind } from '../agents/tasks/dream-task.js';
+import { TaskRegistry } from '../tasks/registry.js';
+import { registerTaskKind } from '../tasks/dispatcher.js';
+import { AgentTaskKind, agentAbortAll } from '../tasks/agent-task.js';
+import { ShellTaskKind, shellAbortAll } from '../tasks/shell-task.js';
+import { MonitorTaskKind, monitorAbortAll } from '../tasks/monitor-task.js';
+import { DreamTaskKind } from '../tasks/dream-task.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 
 // Register every task kind with the dispatcher at module load. Mirrors

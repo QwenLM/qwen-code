@@ -108,13 +108,13 @@ import {
   agentWaitForMessages,
   agentWakeExternalInputWaiters,
   getAgentTask,
-} from '../../agents/tasks/agent-task.js';
+} from '../../tasks/agent-task.js';
 import {
   monitorCancelRunningForOwner,
   monitorHasRunningForOwner,
   setMonitorAgentLifecycleCallback,
   setMonitorAgentNotificationCallback,
-} from '../../agents/tasks/monitor-task.js';
+} from '../../tasks/monitor-task.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch`

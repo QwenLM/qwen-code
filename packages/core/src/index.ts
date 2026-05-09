@@ -279,6 +279,7 @@ export * from './prompts/mcp-prompts.js';
 export * from './skills/index.js';
 export * from './subagents/index.js';
 export * from './agents/index.js';
+export * from './tasks/index.js';
 
 // ============================================================================
 // Follow-up Suggestions

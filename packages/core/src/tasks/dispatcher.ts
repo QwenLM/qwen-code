@@ -26,7 +26,7 @@
 
 import type { TaskKind } from './types.js';
 import type { TaskRegistry } from './registry.js';
-import type { MemoryManager } from '../../memory/manager.js';
+import type { MemoryManager } from '../memory/manager.js';
 
 /** Mutation handles each kind's `kill` needs. */
 export interface KillContext {

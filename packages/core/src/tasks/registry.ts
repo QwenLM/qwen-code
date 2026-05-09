@@ -51,7 +51,7 @@
  *     registry would flatten kind-specific shutdown semantics.
  */
 
-import { createDebugLogger } from '../../utils/debugLogger.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type { RegistryTaskKind, TaskState } from './types.js';
 import { getTaskByType, type KillContext } from './dispatcher.js';
 

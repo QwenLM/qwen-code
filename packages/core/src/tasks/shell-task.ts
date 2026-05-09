@@ -19,7 +19,7 @@
  * terminal status.
  */
 
-import { createDebugLogger } from '../../utils/debugLogger.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type { TaskBase, TaskRegistration } from './types.js';
 import type { TaskRegistry } from './registry.js';
 import type { Task } from './dispatcher.js';

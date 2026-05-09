@@ -18,12 +18,9 @@ import {
   type ToolInvocation,
   type ToolResult,
 } from './tools.js';
-import { agentCancel, getAgentTask } from '../agents/tasks/agent-task.js';
-import { monitorCancel, getMonitorTask } from '../agents/tasks/monitor-task.js';
-import {
-  getShellTask,
-  shellRequestCancel,
-} from '../agents/tasks/shell-task.js';
+import { agentCancel, getAgentTask } from '../tasks/agent-task.js';
+import { monitorCancel, getMonitorTask } from '../tasks/monitor-task.js';
+import { getShellTask, shellRequestCancel } from '../tasks/shell-task.js';
 
 export interface TaskStopParams {
   /** The ID of the background task to stop. */

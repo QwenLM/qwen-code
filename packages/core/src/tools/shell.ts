@@ -45,7 +45,7 @@ import {
   shellFail,
   shellRegister,
   type ShellTaskRegistration,
-} from '../agents/tasks/shell-task.js';
+} from '../tasks/shell-task.js';
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';

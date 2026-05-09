@@ -19,10 +19,10 @@
  */
 
 import * as path from 'node:path';
-import { sanitizeFilenameComponent } from '../agent-transcript.js';
-import { createDebugLogger } from '../../utils/debugLogger.js';
-import { escapeXml } from '../../utils/xml.js';
-import { stripTerminalControlSequences } from '../../utils/terminalSafe.js';
+import { sanitizeFilenameComponent } from '../agents/agent-transcript.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
+import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import type { TaskBase, TaskRegistration } from './types.js';
 import type { TaskRegistry } from './registry.js';
 import type { Task } from './dispatcher.js';

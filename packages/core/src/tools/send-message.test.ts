@@ -6,13 +6,13 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { SendMessageTool } from './send-message.js';
-import { TaskRegistry } from '../agents/tasks/registry.js';
+import { TaskRegistry } from '../tasks/registry.js';
 import {
   agentCancel,
   agentComplete,
   agentRegister,
   getAgentTask,
-} from '../agents/tasks/agent-task.js';
+} from '../tasks/agent-task.js';
 import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
 
