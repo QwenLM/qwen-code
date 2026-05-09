@@ -217,11 +217,15 @@ export class SessionRouter {
         this.toCwd.set(sessionId, entry.cwd);
         restored++;
       } catch (err: unknown) {
-        // Session can't be loaded — will create fresh on next message
+        // Session can't be loaded — remove stale in-memory mapping so
+        // subsequent resolve() / persist() don't reference a dead session.
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(
           `[SessionRouter] Failed to restore session ${entry.sessionId}: ${msg}\n`,
         );
+        this.toSession.delete(key);
+        this.toTarget.delete(entry.sessionId);
+        this.toCwd.delete(entry.sessionId);
         failed++;
       }
     }

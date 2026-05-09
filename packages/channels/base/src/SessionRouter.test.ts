@@ -399,6 +399,57 @@ describe('SessionRouter', () => {
       }
     });
 
+    it('removes stale in-memory mappings on failed restore (crash recovery)', async () => {
+      const { writeFileSync, rmSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'test-restore-crash-'));
+
+      try {
+        const persistFile = join(tmpDir, 'sessions.json');
+        const entries = {
+          'telegram:alice:chat1': {
+            sessionId: 'will-fail',
+            target: {
+              channelName: 'telegram',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/workspace',
+          },
+        };
+        writeFileSync(persistFile, JSON.stringify(entries, null, 2));
+
+        // Simulate pre-crash in-memory state: the router already has a mapping
+        // for this key from before the bridge crash.
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
+        (bridge.newSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+          'will-fail',
+        );
+        await router.resolve(
+          'telegram',
+          'alice',
+          'chat1',
+          undefined,
+          '/workspace',
+        );
+        expect(router.hasSession('telegram', 'alice', 'chat1')).toBe(true);
+
+        // Now make loadSession throw so restoreSessions hits the catch path.
+        (bridge.loadSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+          new Error('Session not found'),
+        );
+
+        const result = await router.restoreSessions();
+        expect(result.restored).toBe(0);
+        expect(result.failed).toBe(1);
+        // The stale in-memory mapping should be cleaned up
+        expect(router.hasSession('telegram', 'alice', 'chat1')).toBe(false);
+      } finally {
+        rmSync(tmpDir, { recursive: true });
+      }
+    });
+
     it('returns zeros when no persist file exists', async () => {
       const router = new SessionRouter(
         bridge,

@@ -271,10 +271,10 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         bridge = new AcpBridge(bridgeOpts);
         await bridge.start();
         router.setBridge(bridge);
-        await restoreAndLogSessions(router);
         channel.setBridge(bridge);
         registerToolCallDispatch(bridge, router, channels);
         attachDisconnectHandler(bridge);
+        await restoreAndLogSessions(router);
       } catch (err) {
         writeStderrLine(
           `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
@@ -437,12 +437,12 @@ async function startAll(proxy?: string): Promise<void> {
         bridge = new AcpBridge(bridgeOpts);
         await bridge.start();
         router.setBridge(bridge);
-        await restoreAndLogSessions(router);
         for (const channel of channels.values()) {
           channel.setBridge(bridge);
         }
         registerToolCallDispatch(bridge, router, channels);
         attachDisconnectHandler(bridge);
+        await restoreAndLogSessions(router);
       } catch (err) {
         writeStderrLine(
           `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
