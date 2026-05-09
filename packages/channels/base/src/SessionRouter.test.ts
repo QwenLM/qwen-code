@@ -219,11 +219,11 @@ describe('SessionRouter', () => {
     });
 
     it('preserves persist file for restoration on next start', async () => {
-      const { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } =
+      const { writeFileSync, rmSync, readFileSync, existsSync, mkdtempSync } =
         await import('node:fs');
       const { join } = await import('node:path');
-      const tmpDir = join('/tmp', `test-cleara11-persist-${Date.now()}`);
-      mkdirSync(tmpDir, { recursive: true });
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'test-clearAll-persist-'));
 
       const persistFile = join(tmpDir, 'sessions.json');
       const originalEntries = {
@@ -293,10 +293,10 @@ describe('SessionRouter', () => {
 
   describe('restoreSessions', () => {
     it('restores sessions from persist file', async () => {
-      const { mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+      const { writeFileSync, rmSync, mkdtempSync } = await import('node:fs');
       const { join } = await import('node:path');
-      const tmpDir = join('/tmp', `test-restore-${Date.now()}`);
-      mkdirSync(tmpDir, { recursive: true });
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'test-restore-'));
 
       try {
         const persistFile = join(tmpDir, 'sessions.json');
@@ -343,10 +343,10 @@ describe('SessionRouter', () => {
     });
 
     it('skips entries whose loadSession throws', async () => {
-      const { mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+      const { writeFileSync, rmSync, mkdtempSync } = await import('node:fs');
       const { join } = await import('node:path');
-      const tmpDir = join('/tmp', `test-restore-fail-${Date.now()}`);
-      mkdirSync(tmpDir, { recursive: true });
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'test-restore-fail-'));
 
       try {
         const persistFile = join(tmpDir, 'sessions.json');
@@ -411,10 +411,10 @@ describe('SessionRouter', () => {
     });
 
     it('returns zeros when persist file is empty', async () => {
-      const { mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+      const { writeFileSync, rmSync, mkdtempSync } = await import('node:fs');
       const { join } = await import('node:path');
-      const tmpDir = join('/tmp', `test-restore-empty-${Date.now()}`);
-      mkdirSync(tmpDir, { recursive: true });
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'test-restore-empty-'));
 
       try {
         const persistFile = join(tmpDir, 'sessions.json');

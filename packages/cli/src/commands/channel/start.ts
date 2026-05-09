@@ -271,7 +271,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         bridge = new AcpBridge(bridgeOpts);
         await bridge.start();
         router.setBridge(bridge);
-        await router.restoreSessions();
+        await restoreAndLogSessions(router);
         channel.setBridge(bridge);
         registerToolCallDispatch(bridge, router, channels);
         attachDisconnectHandler(bridge);
@@ -437,7 +437,7 @@ async function startAll(proxy?: string): Promise<void> {
         bridge = new AcpBridge(bridgeOpts);
         await bridge.start();
         router.setBridge(bridge);
-        await router.restoreSessions();
+        await restoreAndLogSessions(router);
         for (const channel of channels.values()) {
           channel.setBridge(bridge);
         }

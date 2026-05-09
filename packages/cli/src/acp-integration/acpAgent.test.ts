@@ -946,7 +946,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     } finally {
       // Restore the default mock to avoid polluting subsequent tests
       vi.mocked(SessionService).mockImplementation(
-        savedImpl as typeof vi.mocked<typeof SessionService>,
+        (savedImpl ?? vi.fn()) as (cwd: string) => SessionService,
       );
       // Also let beforeEach clearAllMocks handle the sessionExists stub
     }

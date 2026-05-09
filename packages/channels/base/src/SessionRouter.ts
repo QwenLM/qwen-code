@@ -152,7 +152,8 @@ export class SessionRouter {
   /**
    * Restore session mappings from a previous bridge.
    * Called after bridge restart — attempts loadSession for each saved mapping.
-   * Failed loads are silently dropped (new session on next message).
+   * Failed loads are logged to stderr and dropped from the persist file
+   * (a new session will be created on the next incoming message).
    */
   async restoreSessions(): Promise<{
     restored: number;
@@ -193,6 +194,19 @@ export class SessionRouter {
     let failed = 0;
 
     for (const [key, entry] of Object.entries(entries)) {
+      // Guard against malformed entries from a corrupted persist file.
+      if (
+        typeof entry?.sessionId !== 'string' ||
+        typeof entry?.cwd !== 'string' ||
+        typeof entry?.target?.channelName !== 'string'
+      ) {
+        process.stderr.write(
+          `[SessionRouter] Skipping malformed entry for key ${key}\n`,
+        );
+        failed++;
+        continue;
+      }
+
       try {
         const sessionId = await this.bridge.loadSession(
           entry.sessionId,
@@ -216,6 +230,11 @@ export class SessionRouter {
     // Only persist if at least one session was successfully restored —
     // an all-failure persist() would write empty {} and permanently delete
     // routing data that might be recoverable on a subsequent attempt.
+    //
+    // TODO: When failed > 0 && restored === 0, the persist file is never
+    // trimmed — every restart retries the same dead session IDs. Consider
+    // an escape hatch: after N consecutive all-failure cycles, force-prune
+    // entries that the ACP agent explicitly rejects (sessionExists=false).
     if (failed > 0 && restored > 0) {
       this.persist();
     }

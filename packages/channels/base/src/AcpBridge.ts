@@ -137,6 +137,8 @@ export class AcpBridge extends EventEmitter {
       cwd,
       mcpServers: [],
     });
+    // LoadSessionResponse has no sessionId field — the ACP agent loads
+    // the session under the caller-supplied ID, so we echo it back.
     return sessionId;
   }
 
