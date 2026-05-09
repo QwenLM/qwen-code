@@ -359,6 +359,26 @@ export const useSlashCommandProcessor = (
     };
   }, [config, reloadCommands]);
 
+  // SkillManager already rebuilds its own cache and notifies SkillTool
+  // (which re-runs `setTools()` so `<available_skills>` is fresh). The
+  // slash-command list is a separate consumer: SkillCommandLoader reads
+  // `listSkills()` once during CommandService.create(), so without this
+  // bridge a newly added SKILL.md never produces a `/<skill-name>` entry
+  // until restart. Bumping reloadTrigger re-runs the loader effect below
+  // and CommandService picks up the fresh skill list.
+  useEffect(() => {
+    if (!isConfigInitialized) {
+      return;
+    }
+    const skillManager = config?.getSkillManager();
+    if (!skillManager) {
+      return;
+    }
+    return skillManager.addChangeListener(() => {
+      reloadCommands();
+    });
+  }, [config, isConfigInitialized, reloadCommands]);
+
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
@@ -376,6 +396,10 @@ export const useSlashCommandProcessor = (
           controller.signal,
           disabled.length > 0 ? new Set(disabled) : undefined,
         );
+        // Avoid overwriting newer results from a subsequent effect run
+        if (controller.signal.aborted) {
+          return;
+        }
         // Register model-invocable commands provider so SkillTool can include
         // bundled skills, file commands, and MCP prompts in its description.
         if (config) {
@@ -423,10 +447,7 @@ export const useSlashCommandProcessor = (
             },
           );
         }
-        // Avoid overwriting newer results from a subsequent effect run
-        if (!controller.signal.aborted) {
-          setCommands(commandService.getCommandsForMode('interactive'));
-        }
+        setCommands(commandService.getCommandsForMode('interactive'));
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
       }
