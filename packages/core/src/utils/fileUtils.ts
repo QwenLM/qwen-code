@@ -469,13 +469,24 @@ export type FileType =
   | 'notebook';
 
 /**
- * `application/*` mime types that the `mime/lite` registry returns
- * for unambiguously text payloads. We trust these in {@link
- * detectFileType} so files bearing them skip the content-based
- * `isBinaryFile` heuristic — that 4 KB sample can produce false
- * positives on UTF-16 / UTF-32 without BOM and on encrypted /
- * DRM-protected file systems where the OS surfaces encrypted bytes
- * to `fs.open()` reads (the Windows scenario in issue #3964).
+ * `application/*` mime types that the `mime/lite` registry actually
+ * returns for some extension and that name an unambiguously text
+ * payload. Trusting these in {@link detectFileType} lets files
+ * bearing them skip the content-based `isBinaryFile` heuristic —
+ * that 4 KB sample can produce false positives on UTF-16 / UTF-32
+ * without BOM and on encrypted / DRM-protected file systems where
+ * the OS surfaces encrypted bytes to `fs.open()` reads (the Windows
+ * scenario in issue #3964).
+ *
+ * Scope rule: every entry must be a value `mime/lite` actually emits
+ * from `getType()` for some file extension. `application/x-sh`,
+ * `application/x-perl`, `application/x-yaml`, `application/x-tex`,
+ * `application/x-sql`, `application/graphql`, etc. are real mime
+ * names that show up in HTTP `Content-Type` contexts but are not in
+ * the lite registry, so listing them here would be dead code that
+ * silently activates if the registry is later expanded. The shells /
+ * tex / sql / graphql extensions reach the text fallback through
+ * {@link KNOWN_TEXT_EXTENSIONS} below instead.
  *
  * Anything not in this set still falls through to the content check.
  * Mimes ending in `+xml` / `+json` are accepted via suffix match
@@ -489,16 +500,6 @@ const KNOWN_TEXT_APPLICATION_MIMES: ReadonlySet<string> = new Set([
   'application/json',
   'application/xml',
   'application/toml',
-  'application/x-sh',
-  'application/x-csh',
-  'application/x-shellscript',
-  'application/x-perl',
-  'application/x-yaml',
-  'application/x-tex',
-  'application/x-latex',
-  'application/x-sql',
-  'application/sql',
-  'application/graphql',
 ]);
 
 /**
@@ -574,11 +575,12 @@ const KNOWN_TEXT_EXTENSIONS: ReadonlySet<string> = new Set([
   '.lhs',
   '.ml',
   '.mli',
-  // Web frontend
+  // Web frontend (`.tsx` is handled by the early-return at the top
+  // of detectFileType alongside `.ts` / `.mts` / `.cts` to keep all
+  // TypeScript-family extensions in one place).
   '.astro',
   '.jsx',
   '.svelte',
-  '.tsx',
   '.vue',
   // Scripting
   '.bash',
@@ -634,6 +636,17 @@ const KNOWN_TEXT_EXTENSIONS: ReadonlySet<string> = new Set([
  * misclassifies UTF-16 without BOM, encrypted / DRM-protected
  * volumes, and other plain-text payloads whose first 4 KB happen to
  * include nulls / non-printables.
+ *
+ * Tradeoff: returning `true` short-circuits `isBinaryFile` entirely,
+ * including the safety net it provides for *corrupted* text files
+ * (e.g. a binary blob accidentally saved with a `.txt` / `.md`
+ * extension via `cat blob.dat > notes.md`). After this fix the
+ * corrupted-text case is misclassified as text and Edit will see
+ * garbled string content from `readTextFile`; the corresponding
+ * `0 occurrences` failure on Edit's `old_string` match is the
+ * fallback for that population. The encrypted-FS population (issue
+ * #3964) is the one we are *trying* to serve here, and the
+ * extension-declared mime is the strongest signal we have for it.
  */
 function isTextMime(lookedUpMimeType: string): boolean {
   if (lookedUpMimeType.startsWith('text/')) {
@@ -655,8 +668,11 @@ export async function detectFileType(filePath: string): Promise<FileType> {
 
   // The mimetype for various TypeScript extensions (ts, mts, cts, tsx) can be
   // MPEG transport stream (a video format), but we want to assume these are
-  // TypeScript files instead.
-  if (['.ts', '.mts', '.cts'].includes(ext)) {
+  // TypeScript files instead. `.tsx` is currently absent from the mime/lite
+  // registry but listed here defensively: if a future registry update mapped
+  // it to `video/mp2t` (mirroring `.ts`), the `startsWith('video/')` guard
+  // below would fire before reaching the text fallback.
+  if (['.ts', '.mts', '.cts', '.tsx'].includes(ext)) {
     return 'text';
   }
 
