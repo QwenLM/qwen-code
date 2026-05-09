@@ -24,6 +24,7 @@ import {
 } from '@agentclientprotocol/sdk';
 import type {
   AgentEvent,
+  AskUserQuestionItem,
   AvailableSkillDetail,
   AvailableSlashCommand,
   IntermediateMessageKind,
@@ -63,6 +64,7 @@ import {
   type LLMQueryRequest,
   type LLMQueryResult,
 } from './llm-tool.ts';
+import type { PermissionResponseOptions } from '../protocol/dto.ts';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -73,7 +75,7 @@ type AcpPermissionOption = {
 };
 
 type PendingPermission = {
-  resolve: (response: RequestPermissionResponse) => void;
+  resolve: (response: RequestPermissionResponse & { answers?: Record<string, string> }) => void;
   options: AcpPermissionOption[];
 };
 
@@ -463,6 +465,36 @@ function asNumber(value: unknown): number | undefined {
 
 function asBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
+}
+
+function parseAskUserQuestions(value: unknown): AskUserQuestionItem[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const questions = value
+    .filter(isRecord)
+    .map((question) => {
+      const options = Array.isArray(question.options)
+        ? question.options
+          .filter(isRecord)
+          .map((option) => ({
+            label: asString(option.label) || '',
+            description: asString(option.description) || '',
+          }))
+          .filter((option) => option.label)
+        : [];
+
+      return {
+        question: asString(question.question) || '',
+        header: asString(question.header) || '',
+        options,
+        ...(asBoolean(question.multiSelect) !== undefined
+          ? { multiSelect: asBoolean(question.multiSelect) }
+          : {}),
+      };
+    })
+    .filter((question) => question.question && question.header && question.options.length > 0);
+
+  return questions.length > 0 ? questions : undefined;
 }
 
 function firstNumber(...values: unknown[]): number | undefined {
@@ -1369,14 +1401,18 @@ export class QwenAgent extends BaseAgent {
     requestId: string,
     allowed: boolean,
     alwaysAllow?: boolean,
+    options?: PermissionResponseOptions,
   ): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) return;
 
     this.pendingPermissions.delete(requestId);
-    pending.resolve(
-      this.createPermissionResponse(pending.options, allowed, !!alwaysAllow),
-    );
+    pending.resolve(this.createPermissionResponse(
+      pending.options,
+      allowed,
+      !!alwaysAllow,
+      options?.answers,
+    ));
   }
 
   override setPermissionMode(mode: PermissionMode): void {
@@ -3364,6 +3400,11 @@ export class QwenAgent extends BaseAgent {
       kind,
     );
     const command = asString(rawInput.command) || asString(rawInput.cmd);
+    const questions = parseAskUserQuestions(rawInput.questions);
+    const isAskUserQuestion = toolName === 'ask_user_question' || !!questions;
+    const metadata = isRecord(rawInput.metadata)
+      ? { source: asString(rawInput.metadata.source) }
+      : undefined;
 
     if (!this.onPermissionRequest) {
       const autoAllow = this.getPermissionMode() === 'allow-all';
@@ -3382,9 +3423,11 @@ export class QwenAgent extends BaseAgent {
           toolName,
           command,
           description: title,
-          type: permissionTypeForKind(kind),
+          type: isAskUserQuestion ? 'ask_user_question' : permissionTypeForKind(kind),
           reason: asString(rawInput.reason),
           impact: this.permissionImpact(toolCall),
+          questions,
+          metadata,
         });
       } catch (error) {
         this.debug(
@@ -3440,7 +3483,8 @@ export class QwenAgent extends BaseAgent {
     options: AcpPermissionOption[],
     allowed: boolean,
     alwaysAllow: boolean,
-  ): RequestPermissionResponse {
+    answers?: Record<string, string>,
+  ): RequestPermissionResponse & { answers?: Record<string, string> } {
     if (!allowed) {
       return { outcome: { outcome: 'cancelled' } };
     }
@@ -3450,6 +3494,7 @@ export class QwenAgent extends BaseAgent {
         outcome: 'selected',
         optionId: this.selectPermissionOption(options, alwaysAllow),
       },
+      ...(answers ? { answers } : {}),
     };
   }
 

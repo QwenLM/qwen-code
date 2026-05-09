@@ -296,6 +296,7 @@ export interface PermissionRequest extends BasePermissionRequest {
 
 export interface PermissionResponseOptions {
   rememberForMinutes?: number
+  answers?: Record<string, string>
 }
 
 // Re-export for handler convenience

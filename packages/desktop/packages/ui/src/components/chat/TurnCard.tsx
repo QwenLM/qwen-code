@@ -4,6 +4,7 @@ import i18n from 'i18next'
 import { useTranslation } from 'react-i18next'
 import type { ToolDisplayMeta, AnnotationV1 } from '@craft-agent/core'
 import { normalizePath, pathStartsWith, stripPathPrefix } from '@craft-agent/core/utils'
+import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { motion, AnimatePresence } from 'motion/react'
 import {
   ChevronRight,
@@ -22,6 +23,7 @@ import {
   Pencil,
   FilePenLine,
   GitBranch,
+  Bot,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { Markdown } from '../markdown'
@@ -147,7 +149,7 @@ function computeEditWriteDiffStats(
 ): { additions: number; deletions: number } | null {
   if (!toolInput) return null
 
-  if (toolName === 'Edit') {
+  if (toolName === 'Edit' || toolName === 'edit') {
     // Check for Codex format: { changes: Array<{ path, kind, diff }> }
     if (toolInput.changes && Array.isArray(toolInput.changes)) {
       let totalAdditions = 0
@@ -176,7 +178,7 @@ function computeEditWriteDiffStats(
     return getDiffStats(fileDiff)
   }
 
-  if (toolName === 'Write') {
+  if (toolName === 'Write' || toolName === 'write_file') {
     const content = (toolInput.content as string) ?? ''
     if (!content) return null
 
@@ -534,10 +536,19 @@ function getToolDisplayName(name: string): string {
   // Friendly display names for specific tools
   const displayNames: Record<string, string> = {
     'TodoWrite': 'Todo List Updated',
+    'todo_write': 'Todo List Updated',
+    'read_file': 'Reading File',
+    'write_file': 'Writing File',
+    'grep_search': 'Searching Files',
+    'run_shell_command': 'Running Command',
     'set_session_labels': 'Set Session Labels',
     'set_session_status': 'Set Session Status',
     'get_session_info': 'Get Session Info',
     'list_sessions': 'List Sessions',
+    'task': 'Running Agent',
+    'Task': 'Running Agent',
+    'agent': 'Running Agent',
+    'Agent': 'Running Agent',
   }
 
   return displayNames[stripped] || stripped
@@ -582,7 +593,7 @@ function formatToolInput(
   const parts: string[] = []
 
   // For Edit/Write tools, only show file_path (skip old_string, new_string, replace_all, content)
-  const isEditOrWrite = toolName === 'Edit' || toolName === 'Write'
+  const isEditOrWrite = toolName === 'Edit' || toolName === 'Write' || toolName === 'edit' || toolName === 'write_file'
 
   // Handle Codex format: { changes: Array<{ path, kind, diff }> }
   // Extract path from first change if present
@@ -730,9 +741,9 @@ function getPreviewText(
   if (isStreaming && hasResponse) return i18n.t('turnCard.responding')
 
   // Find running Task tools and show their description
-  const runningTask = activities.find(a => a.toolName === 'Task' && a.status === 'running')
+  const runningTask = activities.find(a => isParentTaskTool(a.toolName ?? '') && a.status === 'running')
   if (runningTask?.toolInput?.description) {
-    return runningTask.toolInput.description as string
+    return `Agent: ${runningTask.toolInput.description as string}`
   }
 
   // While still streaming, show the latest intermediate message content
@@ -759,12 +770,12 @@ function getPreviewText(
   }
 
   // When complete, show first Task's description if available
-  const firstTask = activities.find(a => a.toolName === 'Task')
+  const firstTask = activities.find(a => isParentTaskTool(a.toolName ?? ''))
   if (firstTask?.toolInput?.description) {
     const errorSuffix = errorCount > 0
       ? i18n.t('turnCard.errorCount', { count: errorCount })
       : ''
-    return `${firstTask.toolInput.description as string}${errorSuffix}`
+    return `Agent: ${firstTask.toolInput.description as string}${errorSuffix}`
   }
 
   // When complete, show summary (badge already shows count)
@@ -952,10 +963,10 @@ export function ActivityStatusIcon({
         )
       case 'completed':
         // Edit and Write tools get their own icons with accent color instead of green checkmark
-        if (toolName === 'Edit') {
+        if (toolName === 'Edit' || toolName === 'edit') {
           return <Pencil className={cn(SIZE_CONFIG.iconSize, "shrink-0 text-accent")} />
         }
-        if (toolName === 'Write') {
+        if (toolName === 'Write' || toolName === 'write_file') {
           return <FilePenLine className={cn(SIZE_CONFIG.iconSize, "shrink-0 text-accent")} />
         }
         return <CheckCircle2 className={cn(SIZE_CONFIG.iconSize, "shrink-0 text-success")} />
@@ -1241,7 +1252,7 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
           </span>
         )}
         {/* Filename badge for Read tool (no diff stats) */}
-        {!isMcpOrApiTool && !isBackgrounded && !diffStats && activity.toolName === 'Read' && typeof activity.toolInput?.file_path === 'string' && (
+        {!isMcpOrApiTool && !isBackgrounded && !diffStats && (activity.toolName === 'Read' || activity.toolName === 'read_file') && typeof activity.toolInput?.file_path === 'string' && (
           <span className="flex items-center gap-1.5 text-[10px] shrink-0">
             <span className="px-1.5 py-0.5 bg-background shadow-minimal rounded-[4px] text-[11px] text-foreground/70">
               {normalizePath(activity.toolInput.file_path).split('/').pop()}
@@ -1362,7 +1373,10 @@ function ActivityGroupRow({ group, expandedGroups: externalExpandedGroups, onExp
   }, [groupId, expandedGroups, setExpandedGroups])
 
   const description = group.parent.toolInput?.description as string | undefined
+  const prompt = group.parent.toolInput?.prompt as string | undefined
   const subagentType = group.parent.toolInput?.subagent_type as string | undefined
+  const agentTitle = description || prompt || 'Running agent'
+  const childCount = group.children.length
   const isComplete = group.parent.status === 'completed' || group.parent.status === 'error'
   const hasError = group.parent.status === 'error'
 
@@ -1371,18 +1385,30 @@ function ActivityGroupRow({ group, expandedGroups: externalExpandedGroups, onExp
       initial={{ opacity: 0, x: -8 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ delay: animationIndex < SIZE_CONFIG.staggeredAnimationLimit ? animationIndex * 0.03 : 0.3 }}
-      className="space-y-0.5"
+      className={cn(
+        "space-y-1 rounded-[7px] border px-2 py-1.5",
+        "border-info/20 bg-[color-mix(in_oklab,var(--info)_4%,transparent)]",
+        hasError && "border-destructive/25 bg-[color-mix(in_oklab,var(--destructive)_4%,transparent)]"
+      )}
     >
-      {/* Task header row - no left padding, chevron aligned with activity row icons */}
       <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={isExpanded}
         className={cn(
-          "group/row flex items-center gap-2 py-0.5 rounded-md cursor-pointer text-muted-foreground",
-          "hover:text-foreground transition-colors",
+          "group/row flex w-full items-center gap-2 rounded-[5px] px-0.5 py-0.5 text-left",
+          "text-muted-foreground hover:text-foreground transition-colors",
+          "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring",
           SIZE_CONFIG.fontSize
         )}
         onClick={toggleExpanded}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            toggleExpanded()
+          }
+        }}
       >
-        {/* Chevron for expand/collapse - aligned with activity row icons */}
         <motion.div
           initial={false}
           animate={{ rotate: isExpanded ? 90 : 0 }}
@@ -1392,23 +1418,32 @@ function ActivityGroupRow({ group, expandedGroups: externalExpandedGroups, onExp
           <ChevronRight className={SIZE_CONFIG.iconSize} />
         </motion.div>
 
-        {/* Status icon - aligned with tool call icons */}
         <ActivityStatusIcon status={group.parent.status} toolName={group.parent.toolName} />
 
-        {/* Subagent type badge */}
-        <span className="shrink-0 px-1.5 py-0.5 rounded-[4px] bg-background shadow-minimal text-[10px] font-medium">
-          {subagentType || 'Task'}
+        <span className="inline-flex shrink-0 items-center gap-1 rounded-[4px] bg-background px-1.5 py-0.5 text-[10px] font-medium text-foreground shadow-minimal">
+          <Bot className="h-3 w-3 text-info" />
+          Agent
         </span>
 
-        {/* Task description or fallback */}
+        {subagentType && (
+          <span className="shrink-0 rounded-[4px] border border-foreground/10 bg-background/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {subagentType}
+          </span>
+        )}
+
         <span className={cn(
-          "truncate",
+          "min-w-0 flex-1 truncate font-medium text-foreground/80",
           hasError && "text-destructive"
         )}>
-          {description || 'Task'}
+          {agentTitle}
         </span>
 
-        {/* Duration and token stats from TaskOutput (only when complete) */}
+        {childCount > 0 && (
+          <span className="shrink-0 rounded-[4px] bg-background/70 px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground shadow-minimal">
+            {childCount} steps
+          </span>
+        )}
+
         {isComplete && group.taskOutputData && (
           <span className="shrink-0 text-muted-foreground/60 tabular-nums">
             {group.taskOutputData.durationMs !== undefined && (
@@ -1426,12 +1461,8 @@ function ActivityGroupRow({ group, expandedGroups: externalExpandedGroups, onExp
           </span>
         )}
 
-        {/* Spacer to push details button to right */}
-        <span className="flex-1" />
-
-        {/* Open details button for the Task itself */}
         {onOpenActivityDetails && isComplete && (
-          <div
+          <span
             role="button"
             tabIndex={0}
             onClick={(e) => {
@@ -1450,7 +1481,7 @@ function ActivityGroupRow({ group, expandedGroups: externalExpandedGroups, onExp
             )}
           >
             <ArrowUpRight className={SIZE_CONFIG.iconSize} />
-          </div>
+          </span>
         )}
       </div>
 
@@ -1467,17 +1498,16 @@ function ActivityGroupRow({ group, expandedGroups: externalExpandedGroups, onExp
             }}
             className="overflow-hidden"
           >
-            <div className="pl-0 space-y-0.5 border-l-2 border-muted ml-[5px]">
+            <div className="ml-6 space-y-0.5 border-l border-info/25 pl-3">
               {group.children.map((child, idx) => (
                 <motion.div
                   key={child.id}
                   initial={{ opacity: 0, x: -4 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: idx * 0.02 }}
-                  className="ml-[-4px]"
                 >
                   <ActivityRow
-                    activity={child}
+                    activity={{ ...child, depth: 0 }}
                     onOpenDetails={onOpenActivityDetails ? () => onOpenActivityDetails(child) : undefined}
                     isLastChild={idx === group.children.length - 1}
                     sessionFolderPath={sessionFolderPath}
@@ -2984,7 +3014,7 @@ function ActivitySection({
   )
 
   const hasTaskSubagents = useMemo(
-    () => sortedActivities.some(a => a.toolName === 'Task'),
+    () => sortedActivities.some(a => isParentTaskTool(a.toolName ?? '')),
     [sortedActivities]
   )
 

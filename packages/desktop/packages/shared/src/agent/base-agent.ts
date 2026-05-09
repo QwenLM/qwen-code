@@ -28,6 +28,7 @@ import { buildCallLlmRequest, type LLMQueryRequest, type LLMQueryResult } from '
 import { getLlmConnections, getDefaultLlmConnection } from '../config/storage.ts';
 import { loadAllSources } from '../sources/storage.ts';
 import type { ApiServerConfig } from '../mcp/mcp-pool.ts';
+import type { PermissionResponseOptions } from '../protocol/dto.ts';
 
 import type {
   AgentBackend,
@@ -1096,7 +1097,12 @@ ${formattedMessages}
   /**
    * Respond to a pending permission request.
    */
-  abstract respondToPermission(requestId: string, allowed: boolean, alwaysAllow?: boolean): void;
+  abstract respondToPermission(
+    requestId: string,
+    allowed: boolean,
+    alwaysAllow?: boolean,
+    options?: PermissionResponseOptions,
+  ): void;
 
   /**
    * Run a simple text completion using the agent's auth infrastructure.

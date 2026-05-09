@@ -17,6 +17,9 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   'Edit': 'Editing File',
   'Bash': 'Running Command',
   'Task': 'Running Agent',
+  'task': 'Running Agent',
+  'Agent': 'Running Agent',
+  'agent': 'Running Agent',
   'WebFetch': 'Fetching URL',
   'WebSearch': 'Searching Web',
   'TodoWrite': 'Updating Tasks',
@@ -31,7 +34,12 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
  * The SDK renamed 'Task' to 'Agent' in v0.2.72 — both must be recognised.
  * Add future renames here instead of scattering checks across the codebase.
  */
-export const PARENT_TASK_TOOLS: ReadonlySet<string> = new Set(['Task', 'Agent']);
+export const PARENT_TASK_TOOLS: ReadonlySet<string> = new Set([
+  'Task',
+  'task',
+  'Agent',
+  'agent',
+]);
 
 /** Check whether a tool name is a parent task tool (Task or Agent). */
 export const isParentTaskTool = (name: string): boolean => PARENT_TASK_TOOLS.has(name);

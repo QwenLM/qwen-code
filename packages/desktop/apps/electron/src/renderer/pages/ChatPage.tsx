@@ -314,6 +314,16 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     onAttachmentsChange(sessionId, attachments)
   }, [sessionId, onAttachmentsChange])
 
+  const handleSendChatMessage = React.useCallback((
+    message: string,
+    attachments?: import('../../shared/types').FileAttachment[],
+    skillSlugs?: string[],
+  ) => {
+    onSendMessage(sessionId, message, attachments, skillSlugs)
+  }, [onSendMessage, sessionId])
+
+  const handleNoopSendMessage = React.useCallback(() => {}, [])
+
   // Session model change handler - persists per-session model and connection
   const handleModelChange = React.useCallback((model: string, connection?: string) => {
     if (activeWorkspaceId) {
@@ -613,7 +623,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                 <ChatDisplay
                   ref={chatDisplayRef}
                   session={skeletonSession}
-                  onSendMessage={() => {}}
+                  onSendMessage={handleNoopSendMessage}
                   onOpenFile={handleOpenFile}
                   onOpenUrl={handleOpenUrl}
                   currentModel={effectiveModel}
@@ -690,11 +700,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             <ChatDisplay
               ref={chatDisplayRef}
               session={session}
-              onSendMessage={(message, attachments, skillSlugs) => {
-                if (session) {
-                  onSendMessage(session.id, message, attachments, skillSlugs)
-                }
-              }}
+              onSendMessage={handleSendChatMessage}
               onOpenFile={handleOpenFile}
               onOpenUrl={handleOpenUrl}
               currentModel={effectiveModel}

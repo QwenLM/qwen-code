@@ -50,6 +50,8 @@ export type {
   AvailableSkillDetail,
   RecoveryAction,
   TypedError,
+  AskUserQuestionOption,
+  AskUserQuestionItem,
   PermissionRequest,
   AgentEvent,
   // Auth-related types

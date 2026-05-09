@@ -517,7 +517,19 @@ export interface TypedError {
 /**
  * Permission request type categories
  */
-export type PermissionRequestType = 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval';
+export type PermissionRequestType = 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval' | 'ask_user_question';
+
+export interface AskUserQuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface AskUserQuestionItem {
+  question: string;
+  header: string;
+  options: AskUserQuestionOption[];
+  multiSelect?: boolean;
+}
 
 /**
  * Permission request from agent (e.g., bash command approval)
@@ -542,6 +554,12 @@ export interface PermissionRequest {
   commandHash?: string;
   /** Approval validity window */
   approvalTtlSeconds?: number;
+  /** Structured questions for ask_user_question requests */
+  questions?: AskUserQuestionItem[];
+  /** Optional metadata from the ask_user_question tool */
+  metadata?: {
+    source?: string;
+  };
 }
 
 /**

@@ -63,7 +63,7 @@ import {
   type AuthRequestTurn,
 } from "@craft-agent/ui"
 import { MemoizedAuthRequestCard } from "@/components/chat/AuthRequestCard"
-import { ChatInputZone, type StructuredInputState, type StructuredResponse, type PermissionResponse, type AdminApprovalResponse } from "./input"
+import { ChatInputZone, type StructuredInputState, type StructuredResponse, type PermissionResponse, type AdminApprovalResponse, type AskUserQuestionResponse } from "./input"
 import type { RichTextInputHandle } from "@/components/ui/rich-text-input"
 import { useBackgroundTasks } from "@/hooks/useBackgroundTasks"
 import { useTurnCardExpansion } from "@/hooks/useTurnCardExpansion"
@@ -1380,7 +1380,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
   // Handle structured input responses (permissions and credentials)
   const handleStructuredResponse = (response: StructuredResponse) => {
-    if ((response.type === 'permission' || response.type === 'admin_approval') && pendingPermission && onRespondToPermission) {
+    if ((response.type === 'permission' || response.type === 'admin_approval' || response.type === 'ask_user_question') && pendingPermission && onRespondToPermission) {
       if (response.type === 'permission') {
         const permResponse = response as PermissionResponse
         onRespondToPermission(
@@ -1388,6 +1388,18 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           pendingPermission.requestId,
           permResponse.allowed,
           permResponse.alwaysAllow
+        )
+        return
+      }
+
+      if (response.type === 'ask_user_question') {
+        const questionResponse = response as AskUserQuestionResponse
+        onRespondToPermission(
+          pendingPermission.sessionId,
+          pendingPermission.requestId,
+          !questionResponse.cancelled,
+          false,
+          questionResponse.answers ? { answers: questionResponse.answers } : undefined
         )
         return
       }
@@ -1413,6 +1425,9 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   // Build structured input state from pending requests (permissions take priority)
   const structuredInput: StructuredInputState | undefined = React.useMemo(() => {
     if (pendingPermission) {
+      if (pendingPermission.type === 'ask_user_question') {
+        return { type: 'ask_user_question', data: pendingPermission }
+      }
       if (pendingPermission.type === 'admin_approval') {
         return {
           type: 'admin_approval',

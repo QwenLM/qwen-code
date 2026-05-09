@@ -78,6 +78,49 @@ kubectl apply -f k8s/deployment.yaml
 kubectl rollout status deployment/myapp`,
 }
 
+const askUserQuestionRequest: PermissionRequest = {
+  requestId: 'ask-1',
+  sessionId: 'session-1',
+  toolName: 'ask_user_question',
+  type: 'ask_user_question',
+  description: 'Please answer the following question(s):',
+  questions: [
+    {
+      header: 'Approach',
+      question: 'Which UI treatment should the agent use for tool approvals?',
+      options: [
+        {
+          label: 'Dedicated UI',
+          description: 'Render this tool with a purpose-built control surface.',
+        },
+        {
+          label: 'Generic Menu',
+          description: 'Keep using the shared permission dropdown-style UI.',
+        },
+      ],
+    },
+    {
+      header: 'Details',
+      question: 'Which supporting details should be visible?',
+      multiSelect: true,
+      options: [
+        {
+          label: 'Descriptions',
+          description: 'Show short helper copy under each choice.',
+        },
+        {
+          label: 'Progress',
+          description: 'Show which questions have already been answered.',
+        },
+        {
+          label: 'Custom Text',
+          description: 'Allow a typed answer alongside preset choices.',
+        },
+      ],
+    },
+  ],
+}
+
 // Sample background tasks
 const sampleBackgroundTasks: BackgroundTask[] = [
   {
@@ -314,6 +357,49 @@ const nestedActivitiesCompleted: ActivityItem[] = [
   },
 ]
 
+/** Qwen CLI agent tool naming (lowercase agent) with nested child tools */
+const qwenAgentActivities: ActivityItem[] = [
+  {
+    id: 'agent-1',
+    type: 'tool',
+    status: 'completed',
+    toolName: 'agent',
+    toolUseId: 'agent-parent-1',
+    toolInput: {
+      description: 'Investigate renderer behavior',
+      prompt: 'Find why the custom tool UI is not shown in desktop.',
+      subagent_type: 'explorer',
+    },
+    content: 'Investigation complete',
+    timestamp: Date.now() - 5000,
+    depth: 0,
+  },
+  {
+    id: 'agent-grep-1',
+    type: 'tool',
+    status: 'completed',
+    toolName: 'grep_search',
+    toolUseId: 'agent-grep-child-1',
+    toolInput: { pattern: 'isParentTaskTool', path: 'packages/desktop' },
+    content: '7 matches found',
+    timestamp: Date.now() - 4200,
+    parentId: 'agent-parent-1',
+    depth: 1,
+  },
+  {
+    id: 'agent-read-1',
+    type: 'tool',
+    status: 'completed',
+    toolName: 'read_file',
+    toolUseId: 'agent-read-child-1',
+    toolInput: { file_path: 'packages/desktop/packages/shared/src/utils/toolNames.ts' },
+    content: 'File contents...',
+    timestamp: Date.now() - 3400,
+    parentId: 'agent-parent-1',
+    depth: 1,
+  },
+]
+
 /** Task with nested child tools (in progress) */
 const nestedActivitiesInProgress: ActivityItem[] = [
   {
@@ -524,7 +610,7 @@ const deepNestedActivities: ActivityItem[] = [
   },
 ]
 
-type InputContainerMode = 'freeform' | 'permission' | 'admin_approval'
+type InputContainerMode = 'freeform' | 'permission' | 'admin_approval' | 'ask_user_question'
 
 interface InputContainerPlaygroundProps {
   disabled?: boolean
@@ -721,6 +807,13 @@ function InputContainerPlayground({
           impact: 'May install files in /Applications and system-managed directories.',
           command: 'brew install --cask docker',
         }),
+      }
+    }
+
+    if (inputMode === 'ask_user_question') {
+      return {
+        type: 'ask_user_question' as const,
+        data: askUserQuestionRequest,
       }
     }
 
@@ -1170,6 +1263,23 @@ export const chatComponents: ComponentEntry[] = [
     }),
   },
   {
+    id: 'turn-card-sub-agent-qwen',
+    name: 'TurnCard (Sub-Agent - Qwen)',
+    category: 'Turn Cards',
+    description: 'TurnCard showing the Qwen CLI lowercase agent tool grouped as a sub-agent',
+    component: TurnCard,
+    props: [],
+    variants: [
+      { name: 'Default', props: {} },
+    ],
+    mockData: () => ({
+      activities: qwenAgentActivities,
+      response: { text: 'The sub-agent found the lowercase agent tool name and checked the renderer path.', isStreaming: false },
+      isStreaming: false,
+      isComplete: true,
+    }),
+  },
+  {
     id: 'turn-card-nested-progress',
     name: 'TurnCard (Nested - In Progress)',
     category: 'Turn Cards',
@@ -1255,6 +1365,7 @@ export const chatComponents: ComponentEntry[] = [
             { label: 'Freeform', value: 'freeform' },
             { label: 'Permission', value: 'permission' },
             { label: 'Admin Approval', value: 'admin_approval' },
+            { label: 'Ask User Question', value: 'ask_user_question' },
           ],
         },
         defaultValue: 'freeform',

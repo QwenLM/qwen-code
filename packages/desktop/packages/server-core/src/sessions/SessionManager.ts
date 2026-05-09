@@ -947,7 +947,7 @@ export class SessionManager implements ISessionManager {
   // Permission request metadata tracking (keyed by requestId)
   private pendingPermissionRequests: Map<string, {
     sessionId: string
-    type?: 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval'
+    type?: 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval' | 'ask_user_question'
     commandHash?: string
   }> = new Map()
   // Privileged approval binding + audit logger
@@ -3807,7 +3807,7 @@ export class SessionManager implements ISessionManager {
         toolName: string;
         command?: string;
         description: string;
-        type?: 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval';
+        type?: 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval' | 'ask_user_question';
         appName?: string;
         reason?: string;
         impact?: string;
@@ -3815,6 +3815,10 @@ export class SessionManager implements ISessionManager {
         rememberForMinutes?: number;
         commandHash?: string;
         approvalTtlSeconds?: number;
+        questions?: import('@craft-agent/core/types').AskUserQuestionItem[];
+        metadata?: {
+          source?: string;
+        };
       }) => {
         sessionLog.info(`Permission request for session ${managed.id}:`, request.command)
         let brokerMetadata: {
@@ -6760,7 +6764,7 @@ export class SessionManager implements ISessionManager {
       }
 
       sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}`)
-      managed.agent.respondToPermission(requestId, allowed, alwaysAllow)
+      managed.agent.respondToPermission(requestId, allowed, alwaysAllow, options)
       return true
     } else {
       sessionLog.warn(`Cannot respond to permission - no agent for session ${sessionId}`)

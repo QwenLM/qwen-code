@@ -12,7 +12,7 @@
  * - AsyncGenerator for streaming: Consistent with existing CraftAgent API
  */
 
-import type { AgentEvent, AvailableSlashCommand, AvailableSkillDetail, Message, MessageTextElement } from '@craft-agent/core/types';
+import type { AgentEvent, AskUserQuestionItem, AvailableSlashCommand, AvailableSkillDetail, Message, MessageTextElement } from '@craft-agent/core/types';
 import type { FileAttachment } from '../../utils/files.ts';
 import type { ThinkingLevel } from '../thinking-levels.ts';
 import type { PermissionMode } from '../mode-manager.ts';
@@ -33,6 +33,7 @@ import type { ModelDefinition, ModelProvider } from '../../config/models.ts';
 import type { LlmAuthType, LlmProviderType } from '../../config/llm-connections.ts';
 export type { LlmAuthType, LlmProviderType } from '../../config/llm-connections.ts';
 import type { AutomationSystem } from '../../automations/index.ts';
+import type { PermissionResponseOptions } from '../../protocol/dto.ts';
 
 /**
  * Provider identifier for AI backends.
@@ -48,7 +49,7 @@ export type AgentProvider = ModelProvider;
 /**
  * Permission prompt types for different tool categories.
  */
-export type PermissionRequestType = 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval';
+export type PermissionRequestType = 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval' | 'ask_user_question';
 
 /**
  * Permission request callback signature.
@@ -67,6 +68,10 @@ export type PermissionCallback = (request: {
   rememberForMinutes?: number;
   commandHash?: string;
   approvalTtlSeconds?: number;
+  questions?: AskUserQuestionItem[];
+  metadata?: {
+    source?: string;
+  };
 }) => void;
 
 /**
@@ -626,7 +631,12 @@ export interface AgentBackend {
    * @param allowed - Whether permission was granted
    * @param alwaysAllow - Whether to remember this permission for session
    */
-  respondToPermission(requestId: string, allowed: boolean, alwaysAllow?: boolean): void;
+  respondToPermission(
+    requestId: string,
+    allowed: boolean,
+    alwaysAllow?: boolean,
+    options?: PermissionResponseOptions,
+  ): void;
 
   // ============================================================
   // Callbacks (set by facade after construction)

@@ -163,6 +163,32 @@ describe('groupActivitiesByParent', () => {
       expect(group.children[1]!.id).toBe(child2.id)
     })
 
+    it('groups child activities under lowercase Qwen agent parent', () => {
+      resetCounters()
+      const agentActivity = createActivity({
+        toolName: 'agent',
+        toolInput: {
+          description: 'Search codebase',
+          prompt: 'Find the renderer code for sub-agent tool calls',
+          subagent_type: 'explorer',
+        },
+        toolUseId: 'tu-agent',
+      })
+      const child = createChildActivity(agentActivity.toolUseId!, {
+        toolName: 'grep_search',
+      })
+
+      const result = groupActivitiesByParent([agentActivity, child])
+
+      expect(result.length).toBe(1)
+      expect(isActivityGroup(result[0]!)).toBe(true)
+
+      const group = result[0] as ActivityGroup
+      expect(group.parent.toolName).toBe('agent')
+      expect(group.children).toHaveLength(1)
+      expect(group.children[0]!.id).toBe(child.id)
+    })
+
     it('maintains chronological order of children within group', () => {
       resetCounters()
       const taskActivity = createTaskActivity('Analyze code')

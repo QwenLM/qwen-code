@@ -9,7 +9,7 @@ export type InputMode = 'freeform' | 'structured'
 /**
  * Types of structured input UIs
  */
-export type StructuredInputType = 'permission' | 'credential' | 'admin_approval'
+export type StructuredInputType = 'permission' | 'credential' | 'admin_approval' | 'ask_user_question'
 
 /**
  * Union type for structured input data
@@ -18,6 +18,7 @@ export type StructuredInputData =
   | { type: 'permission'; data: PermissionRequest }
   | { type: 'credential'; data: CredentialRequest }
   | { type: 'admin_approval'; data: AdminApprovalRequestData }
+  | { type: 'ask_user_question'; data: PermissionRequest }
 
 /**
  * State for structured input
@@ -45,10 +46,16 @@ export interface AdminApprovalResponse {
   rememberForMinutes?: number
 }
 
+export interface AskUserQuestionResponse {
+  type: 'ask_user_question'
+  answers?: Record<string, string>
+  cancelled?: boolean
+}
+
 /**
  * Union type for all structured responses
  */
-export type StructuredResponse = PermissionResponse | CredentialResponse | AdminApprovalResponse
+export type StructuredResponse = PermissionResponse | CredentialResponse | AdminApprovalResponse | AskUserQuestionResponse
 
 // Re-export CredentialResponse for convenience
 export type { CredentialResponse }

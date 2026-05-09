@@ -19,4 +19,5 @@ export type {
   StructuredResponse,
   PermissionResponse,
   AdminApprovalResponse,
+  AskUserQuestionResponse,
 } from './structured/types'
