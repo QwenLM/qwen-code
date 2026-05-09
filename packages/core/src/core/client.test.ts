@@ -350,6 +350,7 @@ describe('Gemini Client (client.ts)', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
       revealDeferredTool: vi.fn(),
+      isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getTool: vi.fn().mockReturnValue(null),
     };
     const fileService = new FileDiscoveryService('/test/dir');
@@ -486,6 +487,91 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
+    });
+  });
+
+  describe('startChat — deferred tools', () => {
+    // Pulls the registry mock used by the surrounding suite so each test
+    // can stub the deferred-summary + ToolSearch availability per case.
+    function getRegistryMock() {
+      return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getTool: ReturnType<typeof vi.fn>;
+        isDeferredToolRevealed: ReturnType<typeof vi.fn>;
+        revealDeferredTool: ReturnType<typeof vi.fn>;
+      };
+    }
+
+    it('re-reveals deferred tools that appear in resumed history', async () => {
+      // Resume contract: a transcript referencing `cron_create` (a
+      // deferred tool) must re-reveal it on startChat so the API
+      // declaration list includes its schema — otherwise a follow-up
+      // call to that tool would be rejected as unknown.
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+        { name: 'cron_list', description: 'list' },
+      ]);
+      // ToolSearch is available so we DON'T enter the eager-reveal branch.
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.revealDeferredTool.mockClear();
+
+      // Pass extraHistory containing a functionCall to cron_create.
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { name: 'cron_create', args: {} },
+            } as never,
+          ],
+        },
+      ]);
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
+      // cron_list NOT in history → must NOT be revealed by the resume scan.
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('cron_list');
+    });
+
+    it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
+      // When ToolSearch is filtered out (deny rule / --exclude-tools
+      // tool_search), the model has no way to reach deferred schemas.
+      // Silent disappearance is the worst failure mode — instead, reveal
+      // every deferred tool eagerly so they all land in the declaration
+      // list. The token-saving rationale of deferral was predicated on
+      // the discovery surface being available.
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+        { name: 'cron_list', description: 'list' },
+      ]);
+      reg.getTool.mockReturnValue(null); // ToolSearch absent
+      reg.revealDeferredTool.mockClear();
+
+      await client.startChat();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_list');
+    });
+
+    it('does NOT eagerly reveal when ToolSearch is available', async () => {
+      // When ToolSearch IS registered, deferred tools stay hidden until
+      // the model discovers them — that's the whole point of deferral.
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.revealDeferredTool.mockClear();
+
+      await client.startChat();
+
+      // No history scan match, ToolSearch available → no reveal at all.
+      expect(reg.revealDeferredTool).not.toHaveBeenCalled();
     });
   });
 
