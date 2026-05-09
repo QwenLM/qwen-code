@@ -10,6 +10,7 @@ import {
   SpanStatusCode,
   TraceFlags,
   type HrTime,
+  type SpanContext,
 } from '@opentelemetry/api';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import type { ReadableLogRecord } from '@opentelemetry/sdk-logs';
@@ -23,6 +24,7 @@ interface ExportedSpan {
   endTime: HrTime;
   attributes: Record<string, string | number | boolean>;
   status: { code: number; message?: string };
+  parentSpanContext?: SpanContext;
 }
 
 describe('LogToSpanProcessor', () => {
@@ -51,7 +53,12 @@ describe('LogToSpanProcessor', () => {
     const logRecord = {
       body: 'test event',
       hrTime: [1000, 500000000] as [number, number],
-      attributes: { key1: 'value1', key2: 42, key3: true },
+      attributes: {
+        'event.name': 'test_event',
+        key1: 'value1',
+        key2: 42,
+        key3: true,
+      },
     } as unknown as ReadableLogRecord;
 
     processor.onEmit(logRecord);
@@ -59,7 +66,7 @@ describe('LogToSpanProcessor', () => {
 
     expect(exportedSpans).toHaveLength(1);
     const span = exportedSpans[0];
-    expect(span.name).toBe('test event');
+    expect(span.name).toBe('test_event');
     expect(span.kind).toBe(SpanKind.INTERNAL);
     expect(span.attributes['key1']).toBe('value1');
     expect(span.attributes['key2']).toBe(42);
@@ -143,9 +150,13 @@ describe('LogToSpanProcessor', () => {
       body: 'event',
       hrTime: [1000, 0] as [number, number],
       attributes: {
+        error: 'secret error',
+        ['error.message']: 'secret error message',
+        error_message: 'secret upstream error',
         prompt: 'secret prompt',
         function_args: '{"token":"secret"}',
         response_text: 'secret response',
+        error_type: 'RateLimitError',
         safe: 'visible',
       },
     } as unknown as ReadableLogRecord;
@@ -154,9 +165,13 @@ describe('LogToSpanProcessor', () => {
     await processor.forceFlush();
 
     const attrs = exportedSpans[0].attributes;
+    expect(attrs).not.toHaveProperty('error');
+    expect(attrs).not.toHaveProperty('error.message');
+    expect(attrs).not.toHaveProperty('error_message');
     expect(attrs).not.toHaveProperty('prompt');
     expect(attrs).not.toHaveProperty('function_args');
     expect(attrs).not.toHaveProperty('response_text');
+    expect(attrs['error_type']).toBe('RateLimitError');
     expect(attrs['safe']).toBe('visible');
     expect(attrs['log.bridge']).toBe(true);
   });
@@ -172,6 +187,9 @@ describe('LogToSpanProcessor', () => {
       body: 'event',
       hrTime: [1000, 0] as [number, number],
       attributes: {
+        error: 'secret error',
+        ['error.message']: 'secret error message',
+        error_message: 'secret upstream error',
         prompt: 'secret prompt',
         function_args: '{"token":"secret"}',
         response_text: 'secret response',
@@ -183,6 +201,9 @@ describe('LogToSpanProcessor', () => {
     await processor.forceFlush();
 
     const attrs = exportedSpans[0].attributes;
+    expect(attrs['error']).toBe('secret error');
+    expect(attrs['error.message']).toBe('secret error message');
+    expect(attrs['error_message']).toBe('secret upstream error');
     expect(attrs['prompt']).toBe('secret prompt');
     expect(attrs['function_args']).toBe('{"token":"secret"}');
     expect(attrs['response_text']).toBe('secret response');
@@ -207,7 +228,7 @@ describe('LogToSpanProcessor', () => {
     expect(attrs['log.bridge']).toBe(true);
   });
 
-  it('uses "unknown" as span name when body is missing', async () => {
+  it('uses a safe fallback span name when event name is missing', async () => {
     const logRecord = {
       body: undefined,
       hrTime: [1000, 0] as [number, number],
@@ -217,21 +238,38 @@ describe('LogToSpanProcessor', () => {
     processor.onEmit(logRecord);
     await processor.forceFlush();
 
-    expect(exportedSpans[0].name).toBe('unknown');
+    expect(exportedSpans[0].name).toBe('log.event');
   });
 
   it('truncates long span names', async () => {
     const longName = 'x'.repeat(200);
     const logRecord = {
-      body: longName,
+      body: 'body is not used for span name',
       hrTime: [1000, 0] as [number, number],
-      attributes: {},
+      attributes: { 'event.name': longName },
     } as unknown as ReadableLogRecord;
 
     processor.onEmit(logRecord);
     await processor.forceFlush();
 
     expect(exportedSpans[0].name).toBe(`${'x'.repeat(128)}...`);
+  });
+
+  it('uses event.name instead of raw log body for span names', async () => {
+    const logRecord = {
+      body: 'API error for test-model. Error: secret upstream failure.',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        'event.name': 'api_error',
+        error_message: 'secret upstream failure',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].name).toBe('api_error');
+    expect(exportedSpans[0].name).not.toContain('secret upstream failure');
   });
 
   it('generates unique trace IDs without session.id', async () => {
@@ -300,6 +338,30 @@ describe('LogToSpanProcessor', () => {
     expect(ctx1.traceId).not.toBe(ctx2.traceId);
   });
 
+  it('uses the log record span context as parent when available', async () => {
+    const parentSpanContext: SpanContext = {
+      traceId: '1'.repeat(32),
+      spanId: '2'.repeat(16),
+      traceFlags: TraceFlags.SAMPLED,
+    };
+    const logRecord = {
+      body: 'event',
+      hrTime: [1000, 0] as [number, number],
+      spanContext: parentSpanContext,
+      attributes: {
+        'event.name': 'child_event',
+        'session.id': 'session-abc',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    const span = exportedSpans[0];
+    expect(span.spanContext().traceId).toBe(parentSpanContext.traceId);
+    expect(span.parentSpanContext).toBe(parentSpanContext);
+  });
+
   it('drops the oldest spans when the buffer exceeds the configured limit', async () => {
     await processor.shutdown();
     processor = new LogToSpanProcessor(mockExporter, 60000, 2);
@@ -311,17 +373,17 @@ describe('LogToSpanProcessor', () => {
       processor.onEmit({
         body: 'event1',
         hrTime: [1000, 0] as [number, number],
-        attributes: {},
+        attributes: { 'event.name': 'event1' },
       } as unknown as ReadableLogRecord);
       processor.onEmit({
         body: 'event2',
         hrTime: [1001, 0] as [number, number],
-        attributes: {},
+        attributes: { 'event.name': 'event2' },
       } as unknown as ReadableLogRecord);
       processor.onEmit({
         body: 'event3',
         hrTime: [1002, 0] as [number, number],
-        attributes: {},
+        attributes: { 'event.name': 'event3' },
       } as unknown as ReadableLogRecord);
 
       expect(stderrWrite).toHaveBeenCalledWith(
@@ -353,7 +415,7 @@ describe('LogToSpanProcessor', () => {
         processor.onEmit({
           body,
           hrTime: [1000, 0] as [number, number],
-          attributes: {},
+          attributes: { 'event.name': body },
         } as unknown as ReadableLogRecord);
       }
 
@@ -384,7 +446,7 @@ describe('LogToSpanProcessor', () => {
         processor.onEmit({
           body,
           hrTime: [1000, 0] as [number, number],
-          attributes: {},
+          attributes: { 'event.name': body },
         } as unknown as ReadableLogRecord);
       }
 
@@ -420,7 +482,7 @@ describe('LogToSpanProcessor', () => {
         processor.onEmit({
           body,
           hrTime: [1000, 0] as [number, number],
-          attributes: {},
+          attributes: { 'event.name': body },
         } as unknown as ReadableLogRecord);
       }
 
@@ -455,7 +517,7 @@ describe('LogToSpanProcessor', () => {
         processor.onEmit({
           body,
           hrTime: [1000, 0] as [number, number],
-          attributes: {},
+          attributes: { 'event.name': body },
         } as unknown as ReadableLogRecord);
       }
 
@@ -487,6 +549,8 @@ describe('LogToSpanProcessor', () => {
       body: 'api error',
       hrTime: [1000, 0] as [number, number],
       attributes: {
+        error: 'raw error',
+        ['error.message']: 'connection refused',
         error_message: 'connection refused',
         error_type: 'NETWORK',
       },
@@ -497,9 +561,10 @@ describe('LogToSpanProcessor', () => {
 
     expect(exportedSpans[0].status.code).toBe(SpanStatusCode.ERROR);
     expect(exportedSpans[0].status.message).toBe('Log event recorded error');
-    expect(exportedSpans[0].attributes['error_message']).toBe(
-      'connection refused',
-    );
+    expect(exportedSpans[0].attributes).not.toHaveProperty('error');
+    expect(exportedSpans[0].attributes).not.toHaveProperty('error.message');
+    expect(exportedSpans[0].attributes).not.toHaveProperty('error_message');
+    expect(exportedSpans[0].attributes['error_type']).toBe('NETWORK');
     expect(JSON.stringify(exportedSpans[0].status)).not.toContain(
       'connection refused',
     );
@@ -570,7 +635,7 @@ describe('LogToSpanProcessor', () => {
     processor.onEmit({
       body: 'first',
       hrTime: [1000, 0] as [number, number],
-      attributes: {},
+      attributes: { 'event.name': 'first' },
     } as unknown as ReadableLogRecord);
     const firstFlush = processor.forceFlush();
     await Promise.resolve();
@@ -578,7 +643,7 @@ describe('LogToSpanProcessor', () => {
     processor.onEmit({
       body: 'second',
       hrTime: [1001, 0] as [number, number],
-      attributes: {},
+      attributes: { 'event.name': 'second' },
     } as unknown as ReadableLogRecord);
     const secondFlush = processor.forceFlush();
     await Promise.resolve();

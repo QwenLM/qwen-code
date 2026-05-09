@@ -5,10 +5,12 @@
  */
 
 import {
+  isSpanContextValid,
   SpanKind,
   SpanStatusCode,
   TraceFlags,
   type HrTime,
+  type SpanContext,
 } from '@opentelemetry/api';
 import type {
   LogRecordProcessor,
@@ -31,8 +33,12 @@ const EXPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER_SIZE = 10_000;
 const BUFFER_OVERFLOW_WARNING_INTERVAL_MS = 30_000;
 const LOG_EVENT_ERROR_STATUS_MESSAGE = 'Log event recorded error';
+const DEFAULT_LOG_SPAN_NAME = 'log.event';
 const MAX_SPAN_NAME_LENGTH = 128;
 const SENSITIVE_ATTRIBUTE_KEYS = new Set([
+  'error',
+  'error.message',
+  'error_message',
   'prompt',
   'function_args',
   'response_text',
@@ -106,7 +112,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       return;
     }
 
-    const name = sanitizeSpanName(logRecord.body);
+    const name = deriveSpanName(logRecord);
     const startTime = logRecord.hrTime;
 
     const attributes: Record<string, string | number | boolean> = {};
@@ -148,11 +154,15 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       endTime = [secs + Math.floor(endNanos / 1e9), endNanos % 1e9] as HrTime;
     }
 
-    // Derive traceId from session.id so all events in one session
-    // appear under a single trace. spanId is random per event.
+    // Prefer a real active span context when OTel logs provide one, preserving
+    // direct parentage. Otherwise derive traceId from session.id so all events
+    // in one session appear under a single trace.
+    const parentSpanContext = getValidParentSpanContext(logRecord.spanContext);
     const sessionId = logRecord.attributes?.['session.id'];
     let traceId: string;
-    if (sessionId) {
+    if (parentSpanContext) {
+      traceId = parentSpanContext.traceId;
+    } else if (sessionId) {
       const sid = String(sessionId);
       if (sid !== this.cachedSessionId) {
         this.cachedSessionId = sid;
@@ -170,7 +180,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       spanContext: () => ({
         traceId,
         spanId,
-        traceFlags: TraceFlags.SAMPLED,
+        traceFlags: parentSpanContext?.traceFlags ?? TraceFlags.SAMPLED,
       }),
       startTime,
       endTime,
@@ -185,7 +195,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         version: '',
       },
       ended: true,
-      parentSpanContext: undefined,
+      parentSpanContext,
       droppedAttributesCount: 0,
       droppedEventsCount: 0,
       droppedLinksCount: 0,
@@ -321,11 +331,19 @@ interface ReadableSpanLike {
   resource: Resource;
   instrumentationScope: { name: string; version?: string; schemaUrl?: string };
   ended: boolean;
-  parentSpanContext?: { traceId: string; spanId: string; traceFlags: number };
+  parentSpanContext?: SpanContext;
   droppedAttributesCount: number;
   droppedEventsCount: number;
   droppedLinksCount: number;
   recordException: () => void;
+}
+
+function deriveSpanName(logRecord: ReadableLogRecord): string {
+  const eventName = logRecord.attributes?.['event.name'] ?? logRecord.eventName;
+  if (typeof eventName === 'string' && eventName.trim().length > 0) {
+    return sanitizeSpanName(eventName);
+  }
+  return DEFAULT_LOG_SPAN_NAME;
 }
 
 function sanitizeSpanName(body: unknown): string {
@@ -333,6 +351,15 @@ function sanitizeSpanName(body: unknown): string {
   return rawName.length > MAX_SPAN_NAME_LENGTH
     ? `${rawName.slice(0, MAX_SPAN_NAME_LENGTH)}...`
     : rawName;
+}
+
+function getValidParentSpanContext(
+  spanContext: SpanContext | undefined,
+): SpanContext | undefined {
+  if (!spanContext || !isSpanContextValid(spanContext)) {
+    return undefined;
+  }
+  return spanContext;
 }
 
 /**
