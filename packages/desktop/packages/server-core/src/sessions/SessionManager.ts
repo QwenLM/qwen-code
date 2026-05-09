@@ -910,18 +910,10 @@ function compareManagedSessionsByActivityDesc(a: ManagedSession, b: ManagedSessi
 
 // Performance: Batch IPC delta events to reduce renderer load
 const DELTA_BATCH_INTERVAL_MS = 50  // Flush batched deltas every 50ms
-const DRAFT_AGENT_IDLE_TTL_MS = 2 * 60 * 1000
 
 interface PendingDelta {
   delta: string
   turnId?: string
-}
-
-interface DraftAgentEntry {
-  agent: AgentInstance
-  workspace: Workspace
-  workingDirectory?: string
-  cleanupTimer?: NodeJS.Timeout
 }
 
 export class SessionManager implements ISessionManager {
@@ -957,7 +949,6 @@ export class SessionManager implements ISessionManager {
   private externalSessionListSyncPromises: Map<string, Promise<void>> = new Map()
   private pendingExternalSessionDeletes: Set<string> = new Set()
   private externalSessionAgents: Map<string, AgentBackend> = new Map()
-  private draftAgents: Map<string, DraftAgentEntry> = new Map()
   /**
    * Track which session the user is actively viewing (per workspace).
    * Map of workspaceId -> sessionId. Used to determine if a session should be
@@ -5099,41 +5090,7 @@ export class SessionManager implements ISessionManager {
     sessionLog.info(`Session ${sessionId} model updated to: ${persistedModel ?? '(global config)'}`)
   }
 
-  private getDraftAgentKey(workspaceId: string, connection: string | undefined, workingDirectory: string | undefined): string {
-    return [workspaceId, connection ?? '', workingDirectory ?? ''].join('\u0000')
-  }
-
-  private scheduleDraftAgentCleanup(key: string, entry: DraftAgentEntry): void {
-    if (entry.cleanupTimer) clearTimeout(entry.cleanupTimer)
-    entry.cleanupTimer = setTimeout(() => {
-      void this.destroyDraftAgent(key, 'idle timeout')
-    }, DRAFT_AGENT_IDLE_TTL_MS)
-  }
-
-  private async destroyDraftAgent(key: string, reason: string): Promise<void> {
-    const entry = this.draftAgents.get(key)
-    if (!entry) return
-
-    this.draftAgents.delete(key)
-    if (entry.cleanupTimer) clearTimeout(entry.cleanupTimer)
-
-    const nativeSessionId = entry.agent.getSessionId()
-    if (nativeSessionId && entry.agent.deleteBackendSession) {
-      try {
-        await entry.agent.deleteBackendSession(nativeSessionId, {
-          cwd: entry.workingDirectory ?? entry.workspace.rootPath,
-        })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        sessionLog.warn(`Draft agent cleanup failed for ${nativeSessionId}: ${message}`)
-      }
-    }
-
-    entry.agent.destroy()
-    sessionLog.info(`Destroyed draft agent (${reason})`)
-  }
-
-  private async getOrCreateDraftAgent(args: {
+  private async createDraftAgent(args: {
     workspace: Workspace
     workspaceConfig: ReturnType<typeof loadWorkspaceConfig>
     backendContext: ReturnType<typeof resolveBackendContext>
@@ -5144,18 +5101,7 @@ export class SessionManager implements ISessionManager {
     thinkingLevel?: ThinkingLevel
     enabledSourceSlugs?: string[]
     debugPrefix: string
-  }): Promise<{ key: string; agent: AgentInstance; created: boolean }> {
-    const key = this.getDraftAgentKey(args.workspace.id, args.connectionSlug, args.workingDirectory)
-    const cached = this.draftAgents.get(key)
-    if (cached) {
-      if (cached.cleanupTimer) clearTimeout(cached.cleanupTimer)
-      if (args.model) cached.agent.setModel(args.model)
-      if (args.permissionMode) cached.agent.setPermissionMode(args.permissionMode)
-      if (args.thinkingLevel) cached.agent.setThinkingLevel(args.thinkingLevel)
-      this.scheduleDraftAgentCleanup(key, cached)
-      return { key, agent: cached.agent, created: false }
-    }
-
+  }): Promise<AgentInstance> {
     const connection = args.backendContext.connection
     const miniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
     const now = Date.now()
@@ -5211,14 +5157,24 @@ export class SessionManager implements ISessionManager {
       sessionLog.warn(`Draft agent auth warning: ${postInitResult.authWarning}`)
     }
 
-    const entry: DraftAgentEntry = {
-      agent,
-      workspace: args.workspace,
-      workingDirectory: args.workingDirectory,
+    return agent
+  }
+
+  private async cleanupDraftAgent(agent: AgentInstance, workspace: Workspace, workingDirectory: string | undefined, reason: string): Promise<void> {
+    const nativeSessionId = agent.getSessionId()
+    if (nativeSessionId && agent.deleteBackendSession) {
+      try {
+        await agent.deleteBackendSession(nativeSessionId, {
+          cwd: workingDirectory ?? workspace.rootPath,
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        sessionLog.warn(`Draft agent cleanup failed for ${nativeSessionId}: ${message}`)
+      }
     }
-    this.draftAgents.set(key, entry)
-    this.scheduleDraftAgentCleanup(key, entry)
-    return { key, agent, created: true }
+
+    agent.destroy()
+    sessionLog.info(`Destroyed draft agent (${reason})`)
   }
 
   private async persistDraftModelSelection(workspaceId: string, model: string, connection?: string): Promise<void> {
@@ -5242,8 +5198,9 @@ export class SessionManager implements ISessionManager {
     }
 
     const resolvedModel = backendContext.resolvedModel || model
+    let agent: AgentInstance | undefined
     try {
-      const { agent, created } = await this.getOrCreateDraftAgent({
+      agent = await this.createDraftAgent({
         workspace,
         workspaceConfig,
         backendContext,
@@ -5252,13 +5209,15 @@ export class SessionManager implements ISessionManager {
         model: resolvedModel,
         debugPrefix: 'draft model',
       })
-      if (created || !agent.getSessionId()) {
-        await agent.refreshAvailableCommands?.()
-      }
+      await agent.refreshAvailableCommands?.()
       sessionLog.info(`[persistDraftModelSelection] persisted draft model via ACP: ${resolvedModel}`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       sessionLog.warn(`Draft model persistence failed: ${message}`)
+    } finally {
+      if (agent) {
+        await this.cleanupDraftAgent(agent, workspace, workspaceConfig?.defaults?.workingDirectory, 'draft model complete')
+      }
     }
   }
 
@@ -6799,8 +6758,9 @@ export class SessionManager implements ISessionManager {
       workingDirectory,
     })
 
+    let agent: AgentInstance | undefined
     try {
-      const { agent } = await this.getOrCreateDraftAgent({
+      agent = await this.createDraftAgent({
         workspace,
         workspaceConfig,
         backendContext,
@@ -6839,6 +6799,10 @@ export class SessionManager implements ISessionManager {
       const message = error instanceof Error ? error.message : String(error)
       sessionLog.warn(`refreshAvailableCommands draft discovery failed: ${message}`)
       return { success: false, error: message }
+    } finally {
+      if (agent) {
+        await this.cleanupDraftAgent(agent, workspace, workingDirectory, 'draft discovery complete')
+      }
     }
   }
 
@@ -8180,17 +8144,6 @@ export class SessionManager implements ISessionManager {
       }
     }
     this.externalSessionAgents.clear()
-
-    for (const [key, entry] of this.draftAgents) {
-      try {
-        if (entry.cleanupTimer) clearTimeout(entry.cleanupTimer)
-        entry.agent.dispose()
-        sessionLog.info(`Disposed draft agent ${key}`)
-      } catch (error) {
-        sessionLog.warn(`Failed to dispose draft agent ${key}:`, error)
-      }
-    }
-    this.draftAgents.clear()
 
     sessionLog.info('Cleanup complete')
   }
