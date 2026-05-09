@@ -35,6 +35,16 @@ The user provides a brief description of a feature request or bug report:
   - Bug report: follow @.github/ISSUE_TEMPLATE/bug_report.yml
 - Write from the user's perspective, not as an implementation spec
 - Keep the language clear and concise, AVOID internal implementation details
+- **Bilingual requirement**: The issue body must be in both English and Chinese
+  - English content comes first at the top
+  - Chinese translation goes at the end, wrapped in a `<details>` collapsible tag:
+    ```markdown
+    <details>
+    <summary>中文</summary>
+    (Chinese translation here)
+    </details>
+    ```
+  - The issue title stays in English only — do NOT translate the title
 
 4.  **Review with user**
 

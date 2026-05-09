@@ -45,8 +45,7 @@ function areModelMetricsCoreEqual(
     a.tokens.candidates !== b.tokens.candidates ||
     a.tokens.total !== b.tokens.total ||
     a.tokens.cached !== b.tokens.cached ||
-    a.tokens.thoughts !== b.tokens.thoughts ||
-    a.tokens.tool !== b.tokens.tool
+    a.tokens.thoughts !== b.tokens.thoughts
   ) {
     return false;
   }

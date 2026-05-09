@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { Storage } from '../../config/storage.js';
 
 import type {
   StartSessionEvent,
@@ -302,17 +303,29 @@ export class QwenLogger {
 
   readSourceInfo(): string {
     try {
-      const sourceJsonPath = path.join(os.homedir(), '.qwen', 'source.json');
-      if (fs.existsSync(sourceJsonPath)) {
-        const sourceJsonContent = fs.readFileSync(sourceJsonPath, 'utf8');
-        const sourceData = JSON.parse(sourceJsonContent);
-        if (
-          sourceData &&
-          typeof sourceData === 'object' &&
-          sourceData.source &&
-          sourceData.source !== 'unknown'
-        ) {
-          return sourceData.source;
+      const globalDir = Storage.getGlobalQwenDir();
+      const sourceJsonPath = path.join(globalDir, 'source.json');
+
+      // Also check legacy ~/.qwen/source.json when QWEN_HOME is set,
+      // since the installer writes to ~/.qwen/ regardless of the env var.
+      const legacyPath = path.join(os.homedir(), '.qwen', 'source.json');
+      const candidates =
+        path.normalize(sourceJsonPath) !== path.normalize(legacyPath)
+          ? [sourceJsonPath, legacyPath]
+          : [sourceJsonPath];
+
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          const sourceJsonContent = fs.readFileSync(candidate, 'utf8');
+          const sourceData = JSON.parse(sourceJsonContent);
+          if (
+            sourceData &&
+            typeof sourceData === 'object' &&
+            sourceData.source &&
+            sourceData.source !== 'unknown'
+          ) {
+            return sourceData.source;
+          }
         }
       }
     } catch (_error) {
@@ -623,7 +636,6 @@ export class QwenLogger {
         output_token_count: event.output_token_count,
         cached_content_token_count: event.cached_content_token_count,
         thoughts_token_count: event.thoughts_token_count,
-        tool_token_count: event.tool_token_count,
       }),
     });
 

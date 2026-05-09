@@ -1031,7 +1031,7 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session (--fast for suggestion model)':
+  'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Modell für diese Sitzung wechseln (--fast für Vorschlagsmodell)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Leichteres Modell für Eingabevorschläge und spekulative Ausführung festlegen',
@@ -1041,6 +1041,8 @@ export default {
     'Authentifizierungstyp nicht verfügbar.',
   'No models available for the current authentication type ({{authType}}).':
     'Keine Modelle für den aktuellen Authentifizierungstyp ({{authType}}) verfügbar.',
+  // Needs translation
+  ' (not in model registry)': ' (not in model registry)',
 
   // ============================================================================
   // Commands - Clear
@@ -1617,6 +1619,7 @@ export default {
   'Found {{count}} TOML command file:': '{{count}} TOML-Befehlsdatei gefunden:',
   'Found {{count}} TOML command files:':
     '{{count}} TOML-Befehlsdateien gefunden:',
+  'Current tasks': 'Aktuelle Aufgaben',
   '... and {{count}} more': '... und {{count}} weitere',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Das TOML-Format ist veraltet. Möchten Sie sie ins Markdown-Format migrieren?',

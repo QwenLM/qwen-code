@@ -225,9 +225,12 @@ export function SessionPicker(props: SessionPickerProps) {
 
   // Calculate box width (marginX={2})
   const boxWidth = width - 4;
-  // Calculate visible items (same heuristic as before)
-  // Reserved space: header (1), footer (1), separators (2), borders (2)
-  const reservedLines = 6;
+  // Calculate visible items.
+  // Reserved space: header (1), search row (1), footer (1), separators (2),
+  // borders (2). The search row is rendered as a thin "Press / to search"
+  // hint in list mode and a live query in search mode — same height in
+  // both, so the visible-item count doesn't shift between modes.
+  const reservedLines = 7;
   // Each item takes 2 lines (prompt + metadata) + 1 line margin between items
   const itemHeight = 3;
   const maxVisibleItems = Math.max(
@@ -299,6 +302,39 @@ export function SessionPicker(props: SessionPickerProps) {
               {t('(branch: {{branch}})', { branch: currentBranch })}
             </Text>
           )}
+          {picker.searchQuery !== '' && (
+            <Text color={theme.text.secondary}>
+              {' '}
+              {t('({{count}} matches)', {
+                count: String(picker.filteredSessions.length),
+              })}
+            </Text>
+          )}
+        </Box>
+
+        {/* Search row — three states share this row at constant height so
+            the visible-item count doesn't shift between them:
+              - search: "Search: <query>▌" (live editing, caret visible)
+              - list + non-empty query: "Filter: <query>" (read-only,
+                no caret — user has stopped typing but the filter sticks)
+              - list + empty query: "Press / to search" hint */}
+        <Box paddingX={1}>
+          {picker.isSearchActive ? (
+            <>
+              <Text color={theme.text.secondary}>{t('Search: ')}</Text>
+              <Text color={theme.text.primary}>
+                {picker.searchQuery}
+                <Text color={theme.text.secondary}>▌</Text>
+              </Text>
+            </>
+          ) : picker.searchQuery !== '' ? (
+            <>
+              <Text color={theme.text.secondary}>{t('Filter: ')}</Text>
+              <Text color={theme.text.primary}>{picker.searchQuery}</Text>
+            </>
+          ) : (
+            <Text color={theme.text.secondary}>{t('Press / to search')}</Text>
+          )}
         </Box>
 
         {/* Separator */}
@@ -317,11 +353,15 @@ export function SessionPicker(props: SessionPickerProps) {
           ) : picker.filteredSessions.length === 0 ? (
             <Box paddingY={1} justifyContent="center">
               <Text color={theme.text.secondary}>
-                {picker.filterByBranch
-                  ? t('No sessions found for branch "{{branch}}"', {
-                      branch: currentBranch ?? '',
+                {picker.searchQuery !== ''
+                  ? t('No sessions match "{{query}}"', {
+                      query: picker.searchQuery,
                     })
-                  : t('No sessions found')}
+                  : picker.filterByBranch
+                    ? t('No sessions found for branch "{{branch}}"', {
+                        branch: currentBranch ?? '',
+                      })
+                    : t('No sessions found')}
               </Text>
             </Box>
           ) : (
@@ -332,7 +372,10 @@ export function SessionPicker(props: SessionPickerProps) {
                 <SessionListItemView
                   key={session.sessionId}
                   session={session}
-                  isSelected={actualIndex === picker.selectedIndex}
+                  isSelected={
+                    !picker.isSearchActive &&
+                    actualIndex === picker.selectedIndex
+                  }
                   isFirst={visibleIndex === 0}
                   isLast={visibleIndex === picker.visibleSessions.length - 1}
                   showScrollUp={picker.showScrollUp}
@@ -365,49 +408,59 @@ export function SessionPicker(props: SessionPickerProps) {
         {/* Footer */}
         <Box paddingX={1}>
           <Box flexDirection="row">
-            {currentBranch && (
+            {picker.isSearchActive ? (
               <Text color={theme.text.secondary}>
-                <Text
-                  bold={picker.filterByBranch}
-                  color={picker.filterByBranch ? theme.text.accent : undefined}
-                >
-                  B
-                </Text>
-                {t(' to toggle branch · ')}
+                {t('Type to search · Enter to commit · Esc to clear')}
               </Text>
-            )}
-            {enablePreview && (
-              <Text color={theme.text.secondary}>
-                {t('Space to preview · ')}
-              </Text>
-            )}
-            {enableMultiSelect &&
-              (() => {
-                // Count only checked items that are currently visible *and*
-                // committable (i.e. not disabled). This is the exact set
-                // Enter would commit — so the footer can't say "3 selected"
-                // while Enter is about to delete 0.
-                const visibleCheckedCount = picker.filteredSessions.reduce(
-                  (n, s) =>
-                    picker.checkedIds.has(s.sessionId) &&
-                    !picker.disabledIdSet.has(s.sessionId)
-                      ? n + 1
-                      : n,
-                  0,
-                );
-                return (
+            ) : (
+              <>
+                {currentBranch && (
                   <Text color={theme.text.secondary}>
-                    {picker.checkedIds.size > 0
-                      ? t('Space to toggle · {{count}} selected · ', {
-                          count: String(visibleCheckedCount),
-                        })
-                      : t('Space to select multiple · ')}
+                    <Text
+                      bold={picker.filterByBranch}
+                      color={
+                        picker.filterByBranch ? theme.text.accent : undefined
+                      }
+                    >
+                      Ctrl+B
+                    </Text>
+                    {t(' to toggle branch · ')}
                   </Text>
-                );
-              })()}
-            <Text color={theme.text.secondary}>
-              {t('↑↓ to navigate · Esc to cancel')}
-            </Text>
+                )}
+                {enablePreview && (
+                  <Text color={theme.text.secondary}>
+                    {t('Space to preview · ')}
+                  </Text>
+                )}
+                {enableMultiSelect &&
+                  (() => {
+                    // Count only checked items that are currently visible *and*
+                    // committable (i.e. not disabled). This is the exact set
+                    // Enter would commit — so the footer can't say "3 selected"
+                    // while Enter is about to delete 0.
+                    const visibleCheckedCount = picker.filteredSessions.reduce(
+                      (n, s) =>
+                        picker.checkedIds.has(s.sessionId) &&
+                        !picker.disabledIdSet.has(s.sessionId)
+                          ? n + 1
+                          : n,
+                      0,
+                    );
+                    return (
+                      <Text color={theme.text.secondary}>
+                        {picker.checkedIds.size > 0
+                          ? t('Space to toggle · {{count}} selected · ', {
+                              count: String(visibleCheckedCount),
+                            })
+                          : t('Space to select multiple · ')}
+                      </Text>
+                    );
+                  })()}
+                <Text color={theme.text.secondary}>
+                  {t('↑↓ to navigate · Type to search · Esc to cancel')}
+                </Text>
+              </>
+            )}
           </Box>
         </Box>
       </Box>

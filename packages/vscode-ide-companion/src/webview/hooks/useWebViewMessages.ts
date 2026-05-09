@@ -521,6 +521,13 @@ export const useWebViewMessages = ({
           break;
         }
 
+        case 'authCancelled': {
+          // User dismissed the auth picker — clear loading state so the
+          // input is not left disabled.
+          handlers.messageHandling.clearWaitingForResponse();
+          break;
+        }
+
         case 'authState': {
           const state = (
             message?.data as { authenticated?: boolean | null } | undefined

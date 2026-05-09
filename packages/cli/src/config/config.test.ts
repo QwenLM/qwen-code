@@ -791,11 +791,44 @@ describe('loadCliConfig', () => {
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
 
+    it('should set proxy from settings when present', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'http://localhost:7890' };
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
+    it('should normalize proxy from settings when scheme is omitted', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'localhost:7890' };
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
+    it('should prioritize settings proxy over environment variable', async () => {
+      vi.stubEnv('HTTPS_PROXY', 'http://localhost:7891');
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'http://localhost:7890' };
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
     it('should prioritize CLI flag over environment variable for proxy (CLI http://localhost:7890, environment variable http://localhost:7891)', async () => {
       vi.stubEnv('http_proxy', 'http://localhost:7891');
       process.argv = ['node', 'script.js', '--proxy', 'http://localhost:7890'];
       const argv = await parseArguments();
       const settings: Settings = {};
+      const config = await loadCliConfig(settings, argv);
+      expect(config.getProxy()).toBe('http://localhost:7890');
+    });
+
+    it('should prioritize CLI flag over settings proxy', async () => {
+      process.argv = ['node', 'script.js', '--proxy', 'http://localhost:7890'];
+      const argv = await parseArguments();
+      const settings: Settings = { proxy: 'http://localhost:7891' };
       const config = await loadCliConfig(settings, argv);
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
@@ -972,6 +1005,24 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
   });
 
+  it('should use includeSensitiveSpanAttributes from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { includeSensitiveSpanAttributes: true },
+    };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it('should default includeSensitiveSpanAttributes to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { telemetry: { enabled: true } };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
+  });
+
   it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1026,6 +1077,7 @@ describe('loadCliConfig telemetry', () => {
 describe('mergeExcludeTools', () => {
   const defaultExcludes = [
     ToolNames.SHELL,
+    ToolNames.MONITOR,
     ToolNames.EDIT,
     ToolNames.WRITE_FILE,
   ];
@@ -1092,6 +1144,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1111,6 +1164,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1131,6 +1185,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1147,6 +1202,43 @@ describe('Approval mode tool exclusion logic', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should not exclude monitor when explicitly allowed in tools.allowed', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: [ToolNames.MONITOR],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should honor monitor aliases in tools.allowed for non-interactive exclusions', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: ['Monitor', 'Shell(git status)'],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.SHELL);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
@@ -1165,6 +1257,25 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should not exclude monitor when explicitly allowed in tools.core', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [ToolNames.MONITOR],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1185,6 +1296,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1205,6 +1317,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1218,6 +1331,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1243,6 +1357,7 @@ describe('Approval mode tool exclusion logic', () => {
 
       const excludedTools = config.getPermissionsDeny();
       expect(excludedTools).not.toContain(ToolNames.SHELL);
+      expect(excludedTools).not.toContain(ToolNames.MONITOR);
       expect(excludedTools).not.toContain(ToolNames.EDIT);
       expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
     }
@@ -1255,6 +1370,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1275,6 +1391,7 @@ describe('Approval mode tool exclusion logic', () => {
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain('custom_tool'); // From settings
     expect(excludedTools).toContain(ToolNames.SHELL); // From approval mode
+    expect(excludedTools).toContain(ToolNames.MONITOR); // From approval mode
     expect(excludedTools).not.toContain(ToolNames.EDIT); // Should be allowed in auto-edit
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE); // Should be allowed in auto-edit
   });
@@ -1477,6 +1594,95 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
     expect(config.getMcpServers()).toEqual({
       server2: { url: 'http://localhost:8081' },
       server3: { url: 'http://localhost:8082' },
+    });
+  });
+});
+
+describe('loadCliConfig with --mcp-config', () => {
+  const baseSettings: Settings = {
+    mcpServers: {
+      'settings-server': { url: 'http://localhost:9000' },
+    },
+  };
+
+  it('should parse inline JSON with mcpServers wrapper', async () => {
+    const mcpConfig = JSON.stringify({
+      mcpServers: {
+        'cli-server': { command: 'node', args: ['server.js'] },
+      },
+    });
+    process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
+
+    const mcpServers = config.getMcpServers();
+    expect(mcpServers['cli-server']).toEqual({
+      command: 'node',
+      args: ['server.js'],
+    });
+    // Settings server should still be present
+    expect(mcpServers['settings-server']).toEqual({
+      url: 'http://localhost:9000',
+    });
+  });
+
+  it('should parse inline JSON without wrapper', async () => {
+    const mcpConfig = JSON.stringify({
+      'direct-server': { url: 'http://localhost:8080' },
+    });
+    process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
+
+    expect(config.getMcpServers()['direct-server']).toEqual({
+      url: 'http://localhost:8080',
+    });
+  });
+
+  it('should override settings file servers with same name', async () => {
+    const mcpConfig = JSON.stringify({
+      'settings-server': { url: 'http://localhost:8888' }, // Override
+    });
+    process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
+
+    // CLI config should override settings
+    expect(config.getMcpServers()['settings-server']).toEqual({
+      url: 'http://localhost:8888',
+    });
+  });
+
+  it('should work with --allowed-mcp-server-names filter', async () => {
+    const mcpConfig = JSON.stringify({
+      server1: { url: 'http://localhost:8081' },
+      server2: { url: 'http://localhost:8082' },
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      '--mcp-config',
+      mcpConfig,
+      '--allowed-mcp-server-names',
+      'server1',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+
+    // Only server1 should be allowed
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8081' },
+    });
+  });
+
+  it('should handle empty mcp-config gracefully', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
+
+    // Should only have settings server
+    expect(config.getMcpServers()).toEqual({
+      'settings-server': { url: 'http://localhost:9000' },
     });
   });
 });
@@ -2474,6 +2680,17 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
   });
 
+  it('should prioritize QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', 'true');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { includeSensitiveSpanAttributes: false },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
   it('should prioritize QWEN_TELEMETRY_OUTFILE over settings', async () => {
     vi.stubEnv('QWEN_TELEMETRY_OUTFILE', '/gemini/env/telemetry.log');
     process.argv = ['node', 'script.js'];
@@ -2554,6 +2771,27 @@ describe('Telemetry configuration via environment variables', () => {
       [],
     );
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+  });
+
+  it("should treat QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES='1' as true", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it("should treat QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES='false' as false", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', 'false');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { telemetry: { includeSensitiveSpanAttributes: true } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
   });
 });
 
