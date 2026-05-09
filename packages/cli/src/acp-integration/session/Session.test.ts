@@ -943,6 +943,67 @@ describe('Session', () => {
         );
       });
 
+      it('injects drained mid-turn user messages with tool responses', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          messages: ['please also check tests'],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          'craft/drainMidTurnQueue',
+          { sessionId: 'test-session-id' },
+        );
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[1].message).toEqual(
+          expect.arrayContaining([
+            {
+              text: '\n[User message received during tool execution]: please also check tests',
+            },
+          ]),
+        );
+      });
+
       it('stops tool response follow-up before sending when the session token limit is exceeded', async () => {
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',

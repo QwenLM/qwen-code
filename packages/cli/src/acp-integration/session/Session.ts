@@ -116,6 +116,8 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
 /**
  * Session represents an active conversation session with the AI model.
  * It uses modular components for consistent event emission:
@@ -145,6 +147,7 @@ export class Session implements SessionContext {
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
+  private midTurnDrainUnavailable = false;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -541,7 +544,13 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            nextMessage = { role: 'user', parts: toolResponseParts };
+            nextMessage = {
+              role: 'user',
+              parts: [
+                ...toolResponseParts,
+                ...(await this.#drainMidTurnUserMessages()),
+              ],
+            };
           }
         }
 
@@ -779,7 +788,13 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            nextMessage = { role: 'user', parts: toolResponseParts };
+            nextMessage = {
+              role: 'user',
+              parts: [
+                ...toolResponseParts,
+                ...(await this.#drainMidTurnUserMessages()),
+              ],
+            };
           }
         }
 
@@ -1049,6 +1064,37 @@ export class Session implements SessionContext {
     });
   }
 
+  async #drainMidTurnUserMessages(): Promise<Part[]> {
+    if (this.midTurnDrainUnavailable) return [];
+
+    try {
+      const response = await this.client.extMethod(
+        MID_TURN_QUEUE_DRAIN_METHOD,
+        {
+          sessionId: this.sessionId,
+        },
+      );
+      const messages = Array.isArray(response['messages'])
+        ? response['messages'].filter(
+            (message): message is string =>
+              typeof message === 'string' && message.trim().length > 0,
+          )
+        : [];
+
+      return messages.map((message) => ({
+        text: `\n[User message received during tool execution]: ${message}`,
+      }));
+    } catch (error) {
+      this.midTurnDrainUnavailable = true;
+      debugLogger.debug(
+        `Mid-turn queue drain unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return [];
+    }
+  }
+
   /**
    * Starts the cron scheduler if cron is enabled and jobs exist.
    * The scheduler runs in the background, pushing fired prompts into
@@ -1213,7 +1259,13 @@ export class Session implements SessionContext {
                 promptId,
                 functionCalls,
               );
-              nextMessage = { role: 'user', parts: toolResponseParts };
+              nextMessage = {
+                role: 'user',
+                parts: [
+                  ...toolResponseParts,
+                  ...(await this.#drainMidTurnUserMessages()),
+                ],
+              };
             }
           }
         } catch (error) {

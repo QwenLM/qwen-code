@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -36,6 +36,9 @@ type QwenAvailableCommandsInternals = {
   qwenSessionId: string | null;
   _isProcessing: boolean;
   currentTurnId?: string;
+  createAcpClient: () => {
+    extMethod?: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
   suppressedSessionUpdates: Set<string>;
   eventQueue: {
     hasPending: boolean;
@@ -59,6 +62,7 @@ const originalRuntimeDir = process.env.QWEN_RUNTIME_DIR;
 function createAgent(
   cwd: string,
   onSdkSessionIdUpdate?: BackendConfig['onSdkSessionIdUpdate'],
+  onMidTurnMessagesDrained?: BackendConfig['onMidTurnMessagesDrained'],
 ): QwenAgent {
   return new QwenAgent({
     provider: 'qwen',
@@ -79,6 +83,7 @@ function createAgent(
     },
     isHeadless: true,
     onSdkSessionIdUpdate,
+    onMidTurnMessagesDrained,
   } as BackendConfig);
 }
 
@@ -135,6 +140,55 @@ describe('QwenAgent slash command history', () => {
       .buildPromptBlocks('hello');
 
     expect(blocks).toEqual([{ type: 'text', text: 'hello' }]);
+  });
+
+  it('drains queued mid-turn messages through the ACP client extension', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const onMidTurnMessagesDrained = mock(() => {});
+    const agent = createAgent(cwd, undefined, onMidTurnMessagesDrained);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+    internals._isProcessing = true;
+
+    expect(agent.enqueueMidTurnMessage('please also inspect tests')).toBe(true);
+
+    const client = internals.createAcpClient();
+    await expect(
+      client.extMethod?.('craft/drainMidTurnQueue', {
+        sessionId: 'other-session',
+      }),
+    ).resolves.toEqual({ messages: [] });
+    await expect(
+      client.extMethod?.('craft/drainMidTurnQueue', {
+        sessionId: 'session-qwen',
+      }),
+    ).resolves.toEqual({
+      messages: ['please also inspect tests'],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
+      'please also inspect tests',
+    ]);
+
+    expect(agent.enqueueMidTurnMessage('and summarize findings')).toBe(true);
+    await expect(
+      client.extMethod?.('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      messages: ['and summarize findings'],
+    });
+    expect(onMidTurnMessagesDrained).toHaveBeenLastCalledWith([
+      'and summarize findings',
+    ]);
+    await expect(
+      client.extMethod?.('craft/drainMidTurnQueue', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({ messages: [] });
+
+    agent.destroy();
   });
 
   it('adds slash command invocations when their result produced output', () => {

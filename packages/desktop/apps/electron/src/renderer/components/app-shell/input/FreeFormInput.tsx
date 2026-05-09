@@ -10,6 +10,7 @@ import {
   DatabaseZap,
   ChevronDown,
   AlertCircle,
+  CornerDownRight,
   X,
 } from 'lucide-react';
 import { Icon_Home, Icon_Folder } from '@craft-agent/ui';
@@ -75,6 +76,7 @@ import type {
   FileAttachment,
   LoadedSource,
   LoadedSkill,
+  Message,
 } from '../../../../shared/types';
 import {
   PERMISSION_MODE_ORDER,
@@ -337,6 +339,8 @@ export interface FreeFormInputProps {
   inputValue?: string;
   /** Callback when input value changes */
   onInputChange?: (value: string) => void;
+  /** Messages waiting for the next tool-result boundary */
+  queuedInputMessages?: Message[];
   /** Persisted attachment draft for this session (seeds local state on session switch) */
   attachmentsValue?: FileAttachment[];
   /** Callback when attachment list changes (add, remove, clear on send) */
@@ -444,6 +448,7 @@ export function FreeFormInput({
   enabledModes = [...PERMISSION_MODE_ORDER],
   inputValue,
   onInputChange,
+  queuedInputMessages = [],
   attachmentsValue,
   onAttachmentsChange,
   unstyled = false,
@@ -2348,6 +2353,33 @@ export function FreeFormInput({
                   </AnimatePresence>
                 </motion.div>
               </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence initial={false}>
+          {queuedInputMessages.length > 0 && (
+            <motion.div
+              key="queued-input-messages"
+              initial={{ opacity: 0, y: 6, height: 0 }}
+              animate={{ opacity: 1, y: 0, height: 'auto' }}
+              exit={{ opacity: 0, y: -4, height: 0 }}
+              transition={{ duration: 0.16, ease: [0.2, 0, 0.2, 1] }}
+              className="overflow-hidden border-b border-border/40"
+            >
+              <div className="flex flex-col">
+                {queuedInputMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className="flex min-h-10 items-center gap-2 px-5 py-2 text-[13px] text-foreground/60"
+                  >
+                    <CornerDownRight className="h-4 w-4 shrink-0 text-foreground/35" />
+                    <span className="min-w-0 flex-1 truncate">
+                      {message.content}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </motion.div>
           )}
         </AnimatePresence>

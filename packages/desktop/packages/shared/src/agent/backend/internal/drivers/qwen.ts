@@ -149,7 +149,9 @@ async function fetchQwenModelsFromAcp(args: {
 }): Promise<ModelFetchResult> {
   const qwenCliPath = args.resolvedPaths.qwenCliPath;
   if (!qwenCliPath) {
-    throw new Error('Qwen Code CLI not found. Set QWEN_CODE_CLI to the qwen dist/cli.js path or install qwen on PATH.');
+    throw new Error(
+      'Qwen Code CLI not found. Build the current qwen-code checkout with npm run build && npm run bundle, or set QWEN_CODE_CLI to a dist/cli.js path.',
+    );
   }
 
   const nodePath = args.resolvedPaths.nodeRuntimePath || process.execPath;

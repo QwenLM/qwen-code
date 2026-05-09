@@ -225,6 +225,8 @@ interface ChatDisplayProps {
   inputValue?: string
   /** Callback when input value changes */
   onInputChange?: (value: string) => void
+  /** Messages waiting for the next tool-result boundary, shown above the input */
+  queuedInputMessages?: Message[]
   /** Persisted attachment draft for this session (hydrated from disk in ChatPage) */
   attachmentsValue?: FileAttachment[]
   /** Callback when attachment draft changes (add, remove, clear on send) */
@@ -498,6 +500,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   // Input value preservation
   inputValue,
   onInputChange,
+  queuedInputMessages,
   attachmentsValue,
   onAttachmentsChange,
   // Sources
@@ -1588,6 +1591,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           onStructuredResponse: handleStructuredResponse,
           inputValue,
           onInputChange,
+          queuedInputMessages,
           attachmentsValue,
           onAttachmentsChange,
           sources,

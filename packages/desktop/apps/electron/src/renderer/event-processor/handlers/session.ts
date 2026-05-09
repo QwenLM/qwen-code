@@ -581,6 +581,7 @@ export function handleUserMessage(
 ): ProcessResult {
   const { session, streaming } = state;
   const { message, status } = event;
+  const effects: Effect[] = [];
 
   // Find existing message by ID match (backend ID, optimistic ID, or content+timestamp fallback)
   const existingIndex = session.messages.findIndex(
@@ -595,11 +596,61 @@ export function handleUserMessage(
   let updatedMessages: Message[];
   let preserveProcessingForLateQueuedEvent = false;
 
+  if (status === 'queued') {
+    if (existingIndex >= 0 && session.messages[existingIndex]?.isQueued === false) {
+      const existingMessage = session.messages[existingIndex];
+      updatedMessages = session.messages.map((m, i) => {
+        if (i !== existingIndex) return m;
+        return {
+          ...m,
+          ...message,
+          id: message.id,
+          attachments: message.attachments ?? existingMessage.attachments,
+          textElements: message.textElements ?? existingMessage.textElements,
+          isPending: false,
+          isQueued: false,
+        };
+      });
+      preserveProcessingForLateQueuedEvent = true;
+    } else {
+      updatedMessages =
+        existingIndex >= 0
+          ? session.messages.filter((_, i) => i !== existingIndex)
+          : session.messages;
+      effects.push({
+        type: 'queued_input_add',
+        message: {
+          ...message,
+          isPending: false,
+          isQueued: true,
+        },
+        optimisticMessageId: event.optimisticMessageId,
+      });
+    }
+
+    return {
+      state: {
+        session: {
+          ...session,
+          messages: updatedMessages,
+          lastMessageAt: Date.now(),
+          lastMessageRole: 'user',
+          isProcessing: session.isProcessing,
+        },
+        streaming,
+      },
+      effects,
+    };
+  }
+
+  effects.push({
+    type: 'queued_input_remove',
+    messageId: message.id,
+    optimisticMessageId: event.optimisticMessageId,
+  });
+
   if (existingIndex >= 0) {
     const existingMessage = session.messages[existingIndex];
-    const isLateQueuedEvent =
-      status === 'queued' && existingMessage.isQueued === false;
-    preserveProcessingForLateQueuedEvent = isLateQueuedEvent;
 
     // Update existing message with the backend-authoritative payload.
     // This matters for providers that expand slash commands before persistence:
@@ -614,9 +665,7 @@ export function handleUserMessage(
           attachments: message.attachments ?? existingMessage.attachments,
           textElements: message.textElements ?? existingMessage.textElements,
           isPending: false,
-          // Event sequence protection: don't regress from processing back to queued.
-          // This handles out-of-order events (e.g., 'processing' arrives before 'queued').
-          isQueued: isLateQueuedEvent ? false : status === 'queued',
+          isQueued: false,
         };
       }
       return m;
@@ -626,7 +675,7 @@ export function handleUserMessage(
     const newMessage: Message = {
       ...message,
       isPending: false,
-      isQueued: status === 'queued',
+      isQueued: false,
     };
     updatedMessages = [...session.messages, newMessage];
   }
@@ -645,7 +694,7 @@ export function handleUserMessage(
       },
       streaming,
     },
-    effects: [],
+    effects,
   };
 }
 
@@ -975,7 +1024,7 @@ export function handleAuthCompleted(
   state: SessionState,
   event: AuthCompletedEvent,
 ): ProcessResult {
-  const { session, streaming: _streaming } = state;
+  const { session, streaming } = state;
 
   // Update the auth-request message status
   const updatedMessages = session.messages.map((m) => {

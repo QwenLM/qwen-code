@@ -25,6 +25,7 @@ import { ensureSessionMessagesLoadedAtom, loadedSessionsAtom, sessionMetaMapAtom
 import { getSessionTitle } from '@/utils/session'
 // Model resolution: connection.defaultModel (no hardcoded defaults)
 import { resolveEffectiveConnectionSlug, isSessionConnectionUnavailable } from '@config/llm-connections'
+import type { Message } from '../../shared/types'
 
 export interface ChatPageProps {
   sessionId: string
@@ -233,6 +234,8 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     return () => clearInterval(interval)
   }, [sessionId, getDraft])
 
+  const [queuedInputMessages, setQueuedInputMessages] = React.useState<Message[]>([])
+
   // Listen for restore-input events (queued messages restored to input on abort)
   React.useEffect(() => {
     const handler = (e: Event) => {
@@ -241,10 +244,48 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
         const nextText = coerceInputText(text)
         setInputValue(nextText)
         inputValueRef.current = nextText
+        setQueuedInputMessages([])
       }
     }
     window.addEventListener('craft:restore-input', handler)
     return () => window.removeEventListener('craft:restore-input', handler)
+  }, [sessionId])
+
+  React.useEffect(() => {
+    setQueuedInputMessages([])
+  }, [sessionId])
+
+  React.useEffect(() => {
+    const handleAdd = (e: Event) => {
+      const { sessionId: targetId, message, optimisticMessageId } = (e as CustomEvent).detail ?? {}
+      if (targetId !== sessionId || !message) return
+
+      setQueuedInputMessages(prev => {
+        const existingIndex = prev.findIndex(item =>
+          item.id === message.id || (!!optimisticMessageId && item.id === optimisticMessageId)
+        )
+        if (existingIndex >= 0) {
+          return prev.map((item, index) => index === existingIndex ? message : item)
+        }
+        return [...prev, message]
+      })
+    }
+
+    const handleRemove = (e: Event) => {
+      const { sessionId: targetId, messageId, optimisticMessageId } = (e as CustomEvent).detail ?? {}
+      if (targetId !== sessionId) return
+
+      setQueuedInputMessages(prev => prev.filter(item =>
+        item.id !== messageId && (!optimisticMessageId || item.id !== optimisticMessageId)
+      ))
+    }
+
+    window.addEventListener('craft:queued-input-add', handleAdd)
+    window.addEventListener('craft:queued-input-remove', handleRemove)
+    return () => {
+      window.removeEventListener('craft:queued-input-add', handleAdd)
+      window.removeEventListener('craft:queued-input-remove', handleRemove)
+    }
   }, [sessionId])
 
   const handleInputChange = React.useCallback((value: string) => {
@@ -589,6 +630,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                   enabledModes={enabledModes}
                   inputValue={inputValue}
                   onInputChange={handleInputChange}
+                  queuedInputMessages={queuedInputMessages}
                   attachmentsValue={attachmentsValue}
                   onAttachmentsChange={handleAttachmentsChange}
                   sources={enabledSources}
@@ -669,6 +711,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
               enabledModes={enabledModes}
               inputValue={inputValue}
               onInputChange={handleInputChange}
+              queuedInputMessages={queuedInputMessages}
               attachmentsValue={attachmentsValue}
               onAttachmentsChange={handleAttachmentsChange}
               sources={enabledSources}
