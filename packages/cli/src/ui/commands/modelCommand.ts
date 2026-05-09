@@ -97,6 +97,7 @@ export const modelCommand: SlashCommand = {
       'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
     );
   },
+  argumentHint: '[--fast] [<model-id>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {

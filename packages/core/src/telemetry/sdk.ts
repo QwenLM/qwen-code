@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DiagConsoleLogger, DiagLogLevel, diag } from '@opentelemetry/api';
+import { DiagLogLevel, diag } from '@opentelemetry/api';
+import type { DiagLogger } from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
@@ -32,8 +33,21 @@ import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { createSessionRootContext } from './tracer.js';
 import { setSessionContext } from './session-context.js';
 
-// For troubleshooting, set the log level to DiagLogLevel.DEBUG
-diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.WARN);
+function createTelemetryDiagLogger(): DiagLogger {
+  const debugLogger = createDebugLogger('OTEL');
+  return {
+    error: (message, ...args) => debugLogger.error(message, ...args),
+    warn: (message, ...args) => debugLogger.warn(message, ...args),
+    info: (message, ...args) => debugLogger.info(message, ...args),
+    debug: (message, ...args) => debugLogger.debug(message, ...args),
+    verbose: (message, ...args) => debugLogger.debug(message, ...args),
+  };
+}
+
+// For troubleshooting, set the log level to DiagLogLevel.DEBUG.
+// OTel SDK diagnostics must not write to console because console output can be
+// surfaced in user-visible UI. Keep diagnostics in the debug log instead.
+diag.setLogger(createTelemetryDiagLogger(), DiagLogLevel.WARN);
 
 /**
  * Standard OTLP HTTP signal-specific paths per the OpenTelemetry specification.
