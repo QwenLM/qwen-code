@@ -38,6 +38,15 @@ function validateAuthTypeKey(key: string): AuthType | undefined {
 }
 
 /**
+ * Build a composite registry key from model id and optional baseUrl.
+ * Two models with the same id but different baseUrls are distinct entries.
+ * When baseUrl is omitted/empty the key is just the id (backward compatible).
+ */
+export function modelRegistryKey(id: string, baseUrl?: string): string {
+  return baseUrl ? `${id}\0${baseUrl}` : id;
+}
+
+/**
  * Central registry for managing model configurations.
  * Models are organized by authType.
  */
@@ -85,7 +94,9 @@ export class ModelRegistry {
 
   /**
    * Register models for an authType.
-   * If multiple models have the same id, the first one takes precedence.
+   * Uniqueness is determined by the composite key (id + baseUrl).
+   * Two models with the same id but different baseUrls are treated as distinct.
+   * If multiple models share both id and baseUrl, the first one takes precedence.
    */
   private registerAuthTypeModels(
     authType: AuthType,
@@ -94,15 +105,15 @@ export class ModelRegistry {
     const modelMap = new Map<string, ResolvedModelConfig>();
 
     for (const config of models) {
-      // Skip if a model with the same id is already registered (first one wins)
-      if (modelMap.has(config.id)) {
+      const key = modelRegistryKey(config.id, config.baseUrl);
+      if (modelMap.has(key)) {
         debugLogger.warn(
-          `Duplicate model id "${config.id}" for authType "${authType}". Using the first registered config.`,
+          `Duplicate model id "${config.id}"${config.baseUrl ? ` with baseUrl "${config.baseUrl}"` : ''} for authType "${authType}". Using the first registered config.`,
         );
         continue;
       }
       const resolved = this.resolveModelConfig(config, authType);
-      modelMap.set(config.id, resolved);
+      modelMap.set(key, resolved);
     }
 
     this.modelsByAuthType.set(authType, modelMap);
@@ -134,22 +145,41 @@ export class ModelRegistry {
   }
 
   /**
-   * Get model configuration by authType and modelId
+   * Get model configuration by authType and modelId.
+   * When baseUrl is provided, looks up by the exact composite key (id+baseUrl).
+   * When baseUrl is omitted, tries the plain id first (backward compatible),
+   * then scans all entries for the first match by model id.
    */
   getModel(
     authType: AuthType,
     modelId: string,
+    baseUrl?: string,
   ): ResolvedModelConfig | undefined {
     const models = this.modelsByAuthType.get(authType);
-    return models?.get(modelId);
+    if (!models) return undefined;
+
+    if (baseUrl) {
+      return models.get(modelRegistryKey(modelId, baseUrl));
+    }
+
+    // Try plain id key first (models registered without explicit baseUrl)
+    const plain = models.get(modelId);
+    if (plain) return plain;
+
+    // Scan for the first entry with matching model id
+    for (const model of models.values()) {
+      if (model.id === modelId) return model;
+    }
+    return undefined;
   }
 
   /**
-   * Check if model exists for given authType
+   * Check if model exists for given authType.
+   * When baseUrl is provided, checks the exact composite key.
+   * When baseUrl is omitted, checks plain id and scans by model id.
    */
-  hasModel(authType: AuthType, modelId: string): boolean {
-    const models = this.modelsByAuthType.get(authType);
-    return models?.has(modelId) ?? false;
+  hasModel(authType: AuthType, modelId: string, baseUrl?: string): boolean {
+    return this.getModel(authType, modelId, baseUrl) !== undefined;
   }
 
   /**

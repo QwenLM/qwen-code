@@ -18,16 +18,6 @@
       "type": "object",
       "additionalProperties": true
     },
-    "codingPlan": {
-      "description": "Coding Plan template version tracking and configuration.",
-      "type": "object",
-      "properties": {
-        "version": {
-          "description": "SHA256 hash of the Coding Plan template. Used to detect template updates.",
-          "type": "string"
-        }
-      }
-    },
     "env": {
       "description": "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.",
       "type": "object",
@@ -587,6 +577,11 @@
           "description": "Enable automatic consolidation (dream) of collected memories.",
           "type": "boolean",
           "default": false
+        },
+        "enableAutoSkill": {
+          "description": "Enable background review for reusable project skills after tool-heavy sessions.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -835,7 +830,7 @@
           "additionalProperties": true
         },
         "runtimeOutputDir": {
-          "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.",
+          "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen (or QWEN_HOME if set). Env var QWEN_RUNTIME_DIR takes priority.",
           "type": "string"
         }
       }

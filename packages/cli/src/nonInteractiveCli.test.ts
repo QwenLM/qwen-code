@@ -95,6 +95,8 @@ describe('runNonInteractive', () => {
     sendMessageStream: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
+    consumePendingMemoryTaskPromises: Mock;
+    recordCompletedToolCall: Mock;
   };
   let mockGetDebugResponses: Mock;
 
@@ -150,6 +152,8 @@ describe('runNonInteractive', () => {
 
     mockGeminiClient = {
       sendMessageStream: vi.fn(),
+      consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
+      recordCompletedToolCall: vi.fn(),
       getChatRecordingService: vi.fn(() => ({
         initialize: vi.fn(),
         recordMessage: vi.fn(),
@@ -196,6 +200,7 @@ describe('runNonInteractive', () => {
       getCronScheduler: vi.fn().mockReturnValue(null),
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
+      getAutoSkillEnabled: vi.fn().mockReturnValue(false),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
       getBackgroundTaskRegistry: vi
         .fn()
@@ -407,6 +412,15 @@ describe('runNonInteractive', () => {
       { type: SendMessageType.ToolResult },
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+    // Verify recordCompletedToolCall is called with the tool name and args.
+    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+      'testTool',
+      { arg1: 'value1' },
+    );
+    // Verify consumePendingMemoryTaskPromises is called at the end of the session.
+    expect(
+      mockGeminiClient.consumePendingMemoryTaskPromises,
+    ).toHaveBeenCalled();
   });
 
   it('should handle error during tool execution and should send error back to the model', async () => {

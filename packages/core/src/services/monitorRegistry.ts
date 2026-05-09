@@ -59,6 +59,7 @@ export interface MonitorEntry {
   endTime?: number;
   abortController: AbortController;
   toolUseId?: string;
+  ownerAgentId?: string;
   eventCount: number;
   lastEventTime: number;
   maxEvents: number;
@@ -88,6 +89,7 @@ export interface MonitorNotificationMeta {
   status: MonitorStatus;
   eventCount: number;
   toolUseId?: string;
+  ownerAgentId?: string;
 }
 
 export type MonitorNotificationCallback = (
@@ -95,6 +97,8 @@ export type MonitorNotificationCallback = (
   modelText: string,
   meta: MonitorNotificationMeta,
 ) => void;
+
+export type MonitorOwnerLifecycleCallback = () => void;
 
 export type MonitorRegisterCallback = (entry: MonitorEntry) => void;
 
@@ -123,6 +127,14 @@ interface MonitorCancelOptions {
 
 export class MonitorRegistry {
   private readonly monitors = new Map<string, MonitorEntry>();
+  private readonly agentNotificationCallbacks = new Map<
+    string,
+    MonitorNotificationCallback
+  >();
+  private readonly agentLifecycleCallbacks = new Map<
+    string,
+    MonitorOwnerLifecycleCallback
+  >();
   private notificationCallback?: MonitorNotificationCallback;
   private registerCallback?: MonitorRegisterCallback;
   private statusChangeCallback?: MonitorStatusChangeCallback;
@@ -137,7 +149,7 @@ export class MonitorRegistry {
     debugLogger.info(`Registered monitor: ${entry.monitorId}`);
     this.resetIdleTimer(entry);
 
-    if (this.registerCallback) {
+    if (!entry.ownerAgentId && this.registerCallback) {
       try {
         this.registerCallback(entry);
       } catch (error) {
@@ -226,13 +238,19 @@ export class MonitorRegistry {
     const entry = this.monitors.get(monitorId);
     if (!entry || entry.status !== 'running') return;
 
+    if (options.notify === false) {
+      this.settle(entry, 'cancelled');
+      debugLogger.info(`Monitor cancelled: ${monitorId}`);
+      entry.abortController.abort();
+      this.dispatchOwnerLifecycleWake(entry);
+      return;
+    }
+
     entry.abortController.abort();
     if (entry.status !== 'running') return;
     this.settle(entry, 'cancelled');
     debugLogger.info(`Monitor cancelled: ${monitorId}`);
-    if (options.notify !== false) {
-      this.emitTerminalNotification(entry);
-    }
+    this.emitTerminalNotification(entry);
   }
 
   get(monitorId: string): MonitorEntry | undefined {
@@ -249,8 +267,39 @@ export class MonitorRegistry {
     );
   }
 
+  hasRunningForOwner(ownerAgentId: string): boolean {
+    for (const entry of this.monitors.values()) {
+      if (entry.ownerAgentId === ownerAgentId && entry.status === 'running') {
+        return true;
+      }
+    }
+    return false;
+  }
+
   setNotificationCallback(cb: MonitorNotificationCallback | undefined): void {
     this.notificationCallback = cb;
+  }
+
+  setAgentNotificationCallback(
+    agentId: string,
+    cb: MonitorNotificationCallback | undefined,
+  ): void {
+    if (cb) {
+      this.agentNotificationCallbacks.set(agentId, cb);
+    } else {
+      this.agentNotificationCallbacks.delete(agentId);
+    }
+  }
+
+  setAgentLifecycleCallback(
+    agentId: string,
+    cb: MonitorOwnerLifecycleCallback | undefined,
+  ): void {
+    if (cb) {
+      this.agentLifecycleCallbacks.set(agentId, cb);
+    } else {
+      this.agentLifecycleCallbacks.delete(agentId);
+    }
   }
 
   setRegisterCallback(cb: MonitorRegisterCallback | undefined): void {
@@ -274,7 +323,25 @@ export class MonitorRegistry {
     debugLogger.info('Aborted all monitors');
   }
 
+  cancelRunningForOwner(
+    ownerAgentId: string,
+    options: MonitorCancelOptions = {},
+  ): void {
+    const monitorIds: string[] = [];
+    for (const entry of this.monitors.values()) {
+      if (entry.ownerAgentId === ownerAgentId && entry.status === 'running') {
+        monitorIds.push(entry.monitorId);
+      }
+    }
+
+    for (const monitorId of monitorIds) {
+      this.cancel(monitorId, options);
+    }
+  }
+
   reset(): void {
+    this.agentNotificationCallbacks.clear();
+    this.agentLifecycleCallbacks.clear();
     if (this.monitors.size === 0) return;
     for (const entry of this.monitors.values()) {
       this.clearIdleTimer(entry);
@@ -310,6 +377,17 @@ export class MonitorRegistry {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('statusChange callback failed:', error);
+    }
+  }
+
+  private dispatchOwnerLifecycleWake(entry: MonitorEntry): void {
+    if (!entry.ownerAgentId) return;
+    const callback = this.agentLifecycleCallbacks.get(entry.ownerAgentId);
+    if (!callback) return;
+    try {
+      callback();
+    } catch (error) {
+      debugLogger.error('owner lifecycle callback failed:', error);
     }
   }
 
@@ -358,8 +436,6 @@ export class MonitorRegistry {
 
   /** Emit a streaming event notification (status=running, includes stdout line). */
   private emitNotification(entry: MonitorEntry, eventLine: string): void {
-    if (!this.notificationCallback) return;
-
     const desc = stripDisplayControlChars(
       this.truncateDescription(entry.description),
     );
@@ -387,19 +463,14 @@ export class MonitorRegistry {
       status: 'running',
       eventCount: entry.eventCount,
       toolUseId: entry.toolUseId,
+      ownerAgentId: entry.ownerAgentId,
     };
 
-    try {
-      this.notificationCallback(displayLine, xmlParts.join('\n'), meta);
-    } catch (error) {
-      debugLogger.error('Failed to emit monitor event notification:', error);
-    }
+    this.dispatchNotification(entry, displayLine, xmlParts.join('\n'), meta);
   }
 
   /** Emit a terminal notification (completed/failed/cancelled). */
   private emitTerminalNotification(entry: MonitorEntry, detail?: string): void {
-    if (!this.notificationCallback) return;
-
     const statusText =
       entry.status === 'completed'
         ? 'completed'
@@ -441,12 +512,34 @@ export class MonitorRegistry {
       status: entry.status,
       eventCount: entry.eventCount,
       toolUseId: entry.toolUseId,
+      ownerAgentId: entry.ownerAgentId,
     };
 
+    this.dispatchNotification(entry, displayLine, xmlParts.join('\n'), meta);
+  }
+
+  private dispatchNotification(
+    entry: MonitorEntry,
+    displayLine: string,
+    modelText: string,
+    meta: MonitorNotificationMeta,
+  ): void {
+    const callback = entry.ownerAgentId
+      ? this.agentNotificationCallbacks.get(entry.ownerAgentId)
+      : this.notificationCallback;
+    if (!callback) {
+      if (entry.ownerAgentId) {
+        debugLogger.warn(
+          `Dropping monitor notification for ${entry.monitorId}: owner agent ${entry.ownerAgentId} has no notification callback`,
+        );
+      }
+      return;
+    }
+
     try {
-      this.notificationCallback(displayLine, xmlParts.join('\n'), meta);
+      callback(displayLine, modelText, meta);
     } catch (error) {
-      debugLogger.error('Failed to emit monitor terminal notification:', error);
+      debugLogger.error('Failed to emit monitor notification:', error);
     }
   }
 

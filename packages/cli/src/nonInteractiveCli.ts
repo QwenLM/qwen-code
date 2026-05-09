@@ -592,6 +592,12 @@ export async function runNonInteractive(
             }
 
             adapter.emitToolResult(finalRequestInfo, toolResponse);
+            config
+              .getGeminiClient()
+              .recordCompletedToolCall(
+                finalRequestInfo.name,
+                finalRequestInfo.args as Record<string, unknown>,
+              );
 
             if (
               finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
@@ -773,6 +779,12 @@ export async function runNonInteractive(
                   }
 
                   adapter.emitToolResult(requestInfo, toolResponse);
+                  config
+                    .getGeminiClient()
+                    .recordCompletedToolCall(
+                      requestInfo.name,
+                      requestInfo.args as Record<string, unknown>,
+                    );
 
                   if (toolResponse.responseParts) {
                     itemToolResponseParts.push(...toolResponse.responseParts);
@@ -897,6 +909,12 @@ export async function runNonInteractive(
             await new Promise((r) => setTimeout(r, 100));
           }
 
+          const memoryTaskPromises = config
+            .getGeminiClient()
+            .consumePendingMemoryTaskPromises();
+          if (memoryTaskPromises.length > 0) {
+            await Promise.allSettled(memoryTaskPromises);
+          }
           finalizeOneShotMonitors();
 
           const metrics = uiTelemetryService.getMetrics();

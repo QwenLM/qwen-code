@@ -17,7 +17,7 @@ import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { QWEN_CONFIG_DIR } from '../memory/const.js';
+import { QWEN_DIR } from '../config/storage.js';
 
 // Mock tool names if they are dynamically generated or complex
 vi.mock('../tools/ls', () => ({ LSTool: { Name: 'list_directory' } }));
@@ -179,7 +179,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
 
     it('should read from default path when QWEN_SYSTEM_MD is "true"', () => {
-      const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
+      const defaultPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
       vi.stubEnv('QWEN_SYSTEM_MD', 'true');
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
@@ -190,7 +190,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
 
     it('should read from default path when QWEN_SYSTEM_MD is "1"', () => {
-      const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
+      const defaultPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
       vi.stubEnv('QWEN_SYSTEM_MD', '1');
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
@@ -243,7 +243,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
 
     it('should write to default path when QWEN_WRITE_SYSTEM_MD is "true"', () => {
-      const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
+      const defaultPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', 'true');
       getCoreSystemPrompt();
       expect(fs.writeFileSync).toHaveBeenCalledWith(
@@ -253,7 +253,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
 
     it('should write to default path when QWEN_WRITE_SYSTEM_MD is "1"', () => {
-      const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
+      const defaultPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', '1');
       getCoreSystemPrompt();
       expect(fs.writeFileSync).toHaveBeenCalledWith(

@@ -317,6 +317,7 @@ describe('<ToolMessage />', () => {
         terminateReason?: string;
       };
       isFocused?: boolean;
+      isPending?: boolean;
     }): ToolMessageProps => {
       const resultDisplay = {
         type: 'task_execution' as const,
@@ -331,6 +332,7 @@ describe('<ToolMessage />', () => {
         callId: 'gated-task-call',
         forceShowResult: true, // mirror ToolGroupMessage's forceShowResult
         isFocused: overrides.isFocused,
+        isPending: overrides.isPending,
       };
     };
 
@@ -355,7 +357,7 @@ describe('<ToolMessage />', () => {
       expect(output).not.toContain('Queued approval:');
     });
 
-    it('completed subagent → renders a one-line scrollback summary', () => {
+    it('committed (`!isPending`) terminal subagent → renders a one-line scrollback summary', () => {
       // The verbose 15-row inline frame is retired (it caused
       // scrollback flicker), but the conversation history needs to
       // keep a permanent record after the panel's 8s window expires
@@ -370,6 +372,7 @@ describe('<ToolMessage />', () => {
               taskPrompt: 'Already done',
               status: 'completed',
             },
+            isPending: false,
           })}
         />,
         StreamingState.Idle,
@@ -382,6 +385,35 @@ describe('<ToolMessage />', () => {
       // No approval prompt — completed subagents don't sit on the
       // focus lock.
       expect(output).not.toContain('MockApprovalPrompt');
+    });
+
+    it('live (`isPending`) terminal subagent → renders summary inline (panel snapshot already dropped)', () => {
+      // After `unregisterForeground`'s post-delete emit (#3921 swap-
+      // order), the panel snapshot drops the foreground entry as soon
+      // as the subagent finishes — even while the parent turn is
+      // still in `pendingHistoryItems`. If the inline summary were
+      // also gated on `!isPending`, a foreground subagent that
+      // finishes mid-turn would simply disappear from screen until
+      // commit. Render the summary in BOTH live and committed phases;
+      // the live-phase filter in `ToolGroupMessage` already keeps
+      // running entries from reaching this renderer.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'live-terminal',
+              taskDescription: 'Just finished mid-turn',
+              taskPrompt: 'Mid-turn',
+              status: 'completed',
+            },
+            isPending: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('✔');
+      expect(output).toContain('Just finished mid-turn');
     });
 
     it('failed subagent → renders summary with terminate reason', () => {

@@ -251,8 +251,8 @@ export class AuthMessageHandler extends BaseMessageHandler {
     const keyType = await this.pick(
       [
         {
-          label: 'Alibaba Cloud ModelStudio Standard API Key',
-          description: 'Quick setup for Model Studio (China/International)',
+          label: 'Standard API Key',
+          description: 'Connect with an existing ModelStudio API key',
           value: 'alibaba-standard' as const,
         },
         {
