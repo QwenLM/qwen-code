@@ -82,7 +82,6 @@ function WorkspaceHeader({
   workspace,
   displayName,
   isActive,
-  hasUnread,
   iconUrl,
   isCollapsed,
   isConversation,
@@ -104,7 +103,6 @@ function WorkspaceHeader({
   workspace: Workspace
   displayName: string
   isActive: boolean
-  hasUnread?: boolean
   iconUrl?: string
   isCollapsed: boolean
   isConversation: boolean
@@ -159,7 +157,6 @@ function WorkspaceHeader({
         </FadingText>
         {isPinned && !isProtected && <Pin className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
         {workspace.remoteServer && <Cloud className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
-        {hasUnread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
       </button>
       <button
         type="button"
@@ -231,14 +228,12 @@ function WorkspaceDragOverlay({
   workspace,
   displayName,
   isActive,
-  hasUnread,
   iconUrl,
   isPinned,
 }: {
   workspace: Workspace
   displayName: string
   isActive: boolean
-  hasUnread?: boolean
   iconUrl?: string
   isPinned: boolean
 }) {
@@ -266,7 +261,6 @@ function WorkspaceDragOverlay({
         </FadingText>
         {isPinned && <Pin className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
         {workspace.remoteServer && <Cloud className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
-        {hasUnread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
       </div>
     </div>
   )
@@ -359,7 +353,6 @@ export function WorkspaceProjectTree({
   selectedSessionId,
   workspaceSessions,
   loadingWorkspaceSessionIds,
-  workspaceUnreadMap,
   onSelectWorkspace,
   onSelectSession,
   onNewSession,
@@ -689,7 +682,6 @@ export function WorkspaceProjectTree({
           workspace={workspace}
           displayName={displayName}
           isActive={workspace.id === activeWorkspaceId}
-          hasUnread={workspaceUnreadMap?.[workspace.id]}
           iconUrl={workspaceIconMap.get(workspace.id)}
           isCollapsed={isCollapsed || isSorting}
           isConversation={conversationWorkspace}
@@ -758,7 +750,6 @@ export function WorkspaceProjectTree({
       workspace={workspace}
       displayName={getWorkspaceDisplayName(workspace, t)}
       isActive={workspace.id === activeWorkspaceId}
-      hasUnread={workspaceUnreadMap?.[workspace.id]}
       iconUrl={workspaceIconMap.get(workspace.id)}
       isPinned={Boolean(workspace.pinned)}
     />

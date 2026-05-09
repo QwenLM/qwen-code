@@ -806,12 +806,25 @@ export function NavigationProvider({
           }
 
           suppressAutoSelectRef.current = true
-          setNewSessionDraft((previous) => ({
-            nonce: previous.nonce + 1,
-            input: parsed.params.input ?? '',
-            createOptions,
-            badges,
-          }))
+          const hasExplicitDraftParams =
+            parsed.params.input !== undefined ||
+            parsed.params.mode !== undefined ||
+            parsed.params.workdir !== undefined ||
+            parsed.params.model !== undefined ||
+            parsed.params.systemPrompt !== undefined ||
+            parsed.params.name !== undefined ||
+            parsed.params.status !== undefined ||
+            parsed.params.label !== undefined ||
+            parsed.params.badges !== undefined
+
+          if (hasExplicitDraftParams) {
+            setNewSessionDraft((previous) => ({
+              nonce: previous.nonce + 1,
+              input: parsed.params.input ?? previous.input,
+              createOptions,
+              badges,
+            }))
+          }
 
           const draftState: NavigationState = {
             navigator: 'sessions',

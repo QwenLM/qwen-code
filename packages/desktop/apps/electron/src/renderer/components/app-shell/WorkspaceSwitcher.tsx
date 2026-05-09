@@ -51,7 +51,6 @@ export function WorkspaceSwitcher({
   onSelect,
   onWorkspaceCreated,
   onWorkspaceRemoved,
-  workspaceUnreadMap,
 }: WorkspaceSwitcherProps) {
   const { t } = useTranslation()
   const [showCreationScreen, setShowCreationScreen] = useState(false)
@@ -121,11 +120,6 @@ export function WorkspaceSwitcher({
     return remoteHealthMap.get(workspaceId) === 'error'
   }
 
-  const hasUnreadInOtherWorkspaces = React.useMemo(() => {
-    if (!activeWorkspaceId || !workspaceUnreadMap) return false
-    return workspaces.some((workspace) => workspace.id !== activeWorkspaceId && workspaceUnreadMap[workspace.id])
-  }, [workspaces, activeWorkspaceId, workspaceUnreadMap])
-
   const handleNewWorkspace = () => {
     setShowCreationScreen(true)
     setFullscreenOverlayOpen(true)
@@ -150,7 +144,7 @@ export function WorkspaceSwitcher({
       toast.success(t('toast.removedWorkspace', { name: workspace.name }))
       onWorkspaceRemoved?.()
     }
-  }, [activeWorkspaceId, onWorkspaceRemoved])
+  }, [activeWorkspaceId, onWorkspaceRemoved, t])
 
   const handleCloseCreationScreen = useCallback(() => {
     setShowCreationScreen(false)
@@ -171,7 +165,7 @@ export function WorkspaceSwitcher({
 
     handleCloseCreationScreen()
     toast.success(t('toast.workspaceReconnected'))
-  }, [activeWorkspaceId, handleCloseCreationScreen, onSelect])
+  }, [activeWorkspaceId, handleCloseCreationScreen, onSelect, t])
 
   return (
     <>
@@ -209,7 +203,6 @@ export function WorkspaceSwitcher({
                   : <Cloud className="h-3 w-3 opacity-60 shrink-0" />
               )}
               <ChevronDown className="h-3 w-3 opacity-60 shrink-0" />
-              {hasUnreadInOtherWorkspaces && <span className="h-2 w-2 rounded-full bg-accent shrink-0" />}
             </button>
           ) : (
             <button
@@ -288,7 +281,6 @@ export function WorkspaceSwitcher({
                       ? <span title={getDisconnectTooltip(workspace.id)} className="shrink-0"><CloudOff className="h-3.5 w-3.5 text-destructive" /></span>
                       : <Cloud className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                   )}
-                  {workspaceUnreadMap?.[workspace.id] && <span className="h-2 w-2 rounded-full bg-accent shrink-0" />}
                 </div>
                 <div className="flex items-center gap-1">
                   {/* Action buttons - only visible on hover for non-active workspaces */}

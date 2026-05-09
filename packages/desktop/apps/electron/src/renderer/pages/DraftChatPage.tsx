@@ -31,7 +31,6 @@ export default function DraftChatPage() {
     skills,
     labels,
     enabledModes,
-    sessionStatuses,
     rightSidebarButton,
     leadingAction,
     isCompactMode,
@@ -104,8 +103,13 @@ export default function DraftChatPage() {
   const [sessionStatusTouched, setSessionStatusTouched] = React.useState(false)
   const [labelsTouched, setLabelsTouched] = React.useState(false)
   const [isCreating, setIsCreating] = React.useState(false)
+  const appliedDraftResetKeyRef = React.useRef<string | null>(null)
 
   React.useEffect(() => {
+    const resetKey = `${draft.nonce}:${filterStatus ?? ''}:${filterLabel ?? ''}`
+    if (appliedDraftResetKeyRef.current === resetKey) return
+    appliedDraftResetKeyRef.current = resetKey
+
     setInputValue(draft.input)
     setAttachmentsValue([])
     setPermissionMode(draft.createOptions.permissionMode ?? defaultSessionOptions.permissionMode)
@@ -127,6 +131,17 @@ export default function DraftChatPage() {
     setSessionStatusTouched(false)
     setLabelsTouched(false)
   }, [draft.nonce, draft.input, draft.createOptions, filterStatus, filterLabel])
+
+  const handleInputChange = React.useCallback((nextValue: string) => {
+    setInputValue(nextValue)
+    setDraft((previous) => {
+      if (previous.input === nextValue) return previous
+      return {
+        ...previous,
+        input: nextValue,
+      }
+    })
+  }, [setDraft])
 
   React.useEffect(() => {
     if (draft.createOptions.permissionMode === undefined && !permissionModeTouched) {
@@ -241,6 +256,10 @@ export default function DraftChatPage() {
       console.error('[DraftChatPage] Failed to create session from draft:', error)
       toast.error(t('toast.unknownError'))
       setInputValue(message)
+      setDraft((previous) => ({
+        ...previous,
+        input: message,
+      }))
       setAttachmentsValue(attachments ?? [])
     } finally {
       setIsCreating(false)
@@ -307,7 +326,7 @@ export default function DraftChatPage() {
           }}
           enabledModes={enabledModes}
           inputValue={inputValue}
-          onInputChange={setInputValue}
+          onInputChange={handleInputChange}
           attachmentsValue={attachmentsValue}
           onAttachmentsChange={setAttachmentsValue}
           sources={enabledSources}
@@ -321,11 +340,7 @@ export default function DraftChatPage() {
             setSessionLabels(nextLabels)
             setLabelsTouched(true)
           }}
-          sessionStatuses={sessionStatuses}
-          onSessionStatusChange={(nextStatus) => {
-            setSessionStatus(nextStatus)
-            setSessionStatusTouched(true)
-          }}
+          sessionStatuses={[]}
           workspaceId={activeWorkspaceId || undefined}
           workingDirectory={workingDirectory}
           onWorkingDirectoryChange={(nextWorkingDirectory) => {
