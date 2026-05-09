@@ -18,8 +18,12 @@ const MIN_COLUMN_WIDTH = 3;
 /** Maximum number of lines per row before switching to vertical format */
 const MAX_ROW_LINES = 4;
 
-/** Narrow terminals make horizontal tables unreadable and scrollback-heavy. */
-const MIN_HORIZONTAL_TABLE_WIDTH = 60;
+/**
+ * Below this width the column-aware budget (see `minHorizontalTableWidth`
+ * below) is bypassed and we always switch to vertical: even a 1-column
+ * table is barely readable horizontally under ~24 cols of content.
+ */
+const ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH = 24;
 
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
@@ -395,8 +399,18 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   const maxRowLines = calculateMaxRowLines();
+  // Column-aware horizontal-vs-vertical decision: a horizontal table needs
+  // at least `MIN_COLUMN_WIDTH` per column plus the border overhead computed
+  // above, with a safety margin. This avoids the prior fixed 60-col floor
+  // that forced vertical mode for a 2-col table on a 50-col terminal even
+  // when content fit comfortably. The downstream `maxLineWidth` safety
+  // check still catches content that would actually overflow.
+  const minHorizontalTableWidth = Math.max(
+    ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
+    colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
+  );
   const useVerticalFormat =
-    contentWidth < MIN_HORIZONTAL_TABLE_WIDTH || maxRowLines > MAX_ROW_LINES;
+    contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES;
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>

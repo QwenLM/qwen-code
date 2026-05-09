@@ -38,8 +38,11 @@ export const Composer = () => {
   const isStreaming =
     uiState.streamingState === StreamingState.Responding ||
     uiState.streamingState === StreamingState.WaitingForConfirmation;
+  // `isStreaming` covers Responding|WaitingForConfirmation, but we only
+  // suppress during Responding (active token output). A confirmation prompt
+  // must remain visible regardless of width. Drop the redundant `isStreaming`
+  // guard so future expansions of `isStreaming` don't silently widen suppression.
   const suppressBottomLoadingIndicator =
-    isStreaming &&
     uiState.streamingState === StreamingState.Responding &&
     uiState.terminalWidth <= 30;
 
