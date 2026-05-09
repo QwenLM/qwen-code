@@ -1228,6 +1228,7 @@
   "transport.wsClosedWithCode": "WebSocket closed with code {{code}}{{reason}}.",
   "turnCard.errorCount_one": " · {{count}} error",
   "turnCard.errorCount_other": " · {{count}} errors",
+  "turnCard.processedDuration": "Processed {{duration}}",
   "turnCard.processing": "Processing",
   "turnCard.responding": "Responding...",
   "turnCard.starting": "Starting...",

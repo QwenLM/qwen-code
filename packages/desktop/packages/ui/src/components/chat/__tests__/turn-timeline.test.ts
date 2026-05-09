@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test';
-import { buildTurnTimelineItems } from '../turn-timeline';
+import {
+  buildTurnTimelineItems,
+  splitTimelineAtFinalResponse,
+} from '../turn-timeline';
 import type { ActivityItem, ResponseContent } from '../TurnCard';
 
 function activity(overrides: Partial<ActivityItem>): ActivityItem {
@@ -90,5 +93,34 @@ describe('buildTurnTimelineItems', () => {
         ? timeline[0].activities.map((item) => item.id)
         : [],
     ).toEqual(['tool-1', 'tool-2']);
+  });
+
+  it('splits every non-final-response item into details', () => {
+    const timeline = buildTurnTimelineItems(
+      [
+        activity({
+          id: 'commentary',
+          type: 'intermediate',
+          intermediateKind: 'commentary',
+          content: 'Checking files',
+          timestamp: 1000,
+        }),
+        activity({ id: 'tool', toolName: 'Read', timestamp: 1100 }),
+      ],
+      {
+        text: 'Final answer',
+        isStreaming: false,
+        timestamp: 1200,
+        messageId: 'final',
+      },
+    );
+
+    const split = splitTimelineAtFinalResponse(timeline);
+
+    expect(split.finalResponseItem?.id).toBe('final');
+    expect(split.detailItems.map((item) => item.type)).toEqual([
+      'commentary',
+      'activity-section',
+    ]);
   });
 });

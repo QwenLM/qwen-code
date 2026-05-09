@@ -1228,6 +1228,7 @@
   "transport.wsClosedWithCode": "WebSocket 已关闭，代码 {{code}}{{reason}}。",
   "turnCard.errorCount_one": " · {{count}} 个错误",
   "turnCard.errorCount_other": " · {{count}} 个错误",
+  "turnCard.processedDuration": "已处理 {{duration}}",
   "turnCard.processing": "处理中",
   "turnCard.responding": "回复中...",
   "turnCard.starting": "启动中...",

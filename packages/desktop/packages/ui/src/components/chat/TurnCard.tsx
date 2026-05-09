@@ -38,7 +38,12 @@ import { parseDiffFromFile, type FileContents } from '@pierre/diffs'
 import { getDiffStats, getUnifiedDiffStats } from '../code-viewer'
 import { TurnCardActionsMenu } from './TurnCardActionsMenu'
 import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, formatDuration, formatTokens, deriveTurnPhase, shouldShowThinkingIndicator, type ActivityGroup, type AssistantTurn } from './turn-utils'
-import { buildTurnTimelineItems } from './turn-timeline'
+import {
+  buildTurnTimelineItems,
+  splitTimelineAtFinalResponse,
+  type ResponseTimelineItem,
+  type TurnTimelineItem,
+} from './turn-timeline'
 import { extractAnnotationSelectedText } from './follow-up-helpers'
 import {
   formatAnnotationFollowUpTooltipText,
@@ -773,10 +778,122 @@ function getPreviewText(
   return i18n.t('turnCard.starting')
 }
 
+function getTimelineItemTimestamp(item: TurnTimelineItem): number | undefined {
+  switch (item.type) {
+    case 'activity-section':
+      return item.activities[0]?.timestamp
+    case 'commentary':
+    case 'plan':
+      return item.activity.timestamp
+    case 'response':
+      return item.response.timestamp
+    default:
+      return undefined
+  }
+}
+
+function getProcessedDurationMs(
+  detailItems: TurnTimelineItem[],
+  finalResponseItem?: ResponseTimelineItem,
+): number {
+  const timestamps = detailItems
+    .map(getTimelineItemTimestamp)
+    .filter((timestamp): timestamp is number => Number.isFinite(timestamp))
+
+  const responseTimestamp = finalResponseItem?.response.timestamp
+  if (!Number.isFinite(responseTimestamp) || timestamps.length === 0) {
+    return 0
+  }
+
+  const startedAt = Math.min(...timestamps)
+  return Math.max(0, responseTimestamp! - startedAt)
+}
+
+function formatProcessedDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return '0s'
+  }
+
+  const totalSeconds = Math.max(1, Math.round(ms / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`
+  }
+  return `${seconds}s`
+}
+
 
 // ============================================================================
 // Sub-Components
 // ============================================================================
+
+interface ProcessedDetailsDisclosureProps {
+  duration: string
+  isExpanded: boolean
+  onToggle: () => void
+  children: React.ReactNode
+}
+
+function ProcessedDetailsDisclosure({
+  duration,
+  isExpanded,
+  onToggle,
+  children,
+}: ProcessedDetailsDisclosureProps) {
+  return (
+    <div className="select-none">
+      <button
+        type="button"
+        aria-expanded={isExpanded}
+        onClick={onToggle}
+        className={cn(
+          "group flex w-full items-center gap-1.5 rounded-[6px] px-0 py-1.5 text-left",
+          SIZE_CONFIG.fontSize,
+          "text-muted-foreground hover:text-foreground transition-colors",
+          "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        )}
+      >
+        <span className="font-medium tabular-nums">
+          {i18n.t('turnCard.processedDuration', { duration })}
+        </span>
+        <motion.span
+          initial={false}
+          animate={{ rotate: isExpanded ? 90 : 0 }}
+          transition={{ duration: 0.15, ease: 'easeOut' }}
+          className={cn(SIZE_CONFIG.iconSize, "flex items-center justify-center shrink-0")}
+        >
+          <ChevronRight className={SIZE_CONFIG.iconSize} />
+        </motion.span>
+      </button>
+      <div className="border-b border-border/60" />
+
+      <AnimatePresence initial={false}>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{
+              height: { duration: 0.25, ease: [0.4, 0, 0.2, 1] },
+              opacity: { duration: 0.15 },
+            }}
+            className="overflow-hidden"
+          >
+            <div className="space-y-1 py-1.5">
+              {children}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
 
 /**
  * Status icon for an activity - exported for reuse in inline execution.
@@ -3152,6 +3269,25 @@ export const TurnCard = React.memo(function TurnCard({
     [allSortedActivities, isBuffering, response]
   )
 
+  const { detailItems, finalResponseItem } = useMemo(
+    () => splitTimelineAtFinalResponse(timelineItems),
+    [timelineItems]
+  )
+  const shouldCollapseCompletedDetails = isComplete
+    && !animateResponse
+    && !!finalResponseItem
+    && !finalResponseItem.response.isStreaming
+    && detailItems.length > 0
+  const processedDuration = useMemo(
+    () => formatProcessedDuration(getProcessedDurationMs(detailItems, finalResponseItem)),
+    [detailItems, finalResponseItem]
+  )
+  const [isProcessedDetailsExpanded, setIsProcessedDetailsExpanded] = useState(false)
+
+  useEffect(() => {
+    setIsProcessedDetailsExpanded(false)
+  }, [sessionId, turnId])
+
   const activitySectionItems = useMemo(
     () => timelineItems.filter(item => item.type === 'activity-section'),
     [timelineItems]
@@ -3307,85 +3443,100 @@ export const TurnCard = React.memo(function TurnCard({
     />
   )
 
+  const renderTimelineItem = (item: TurnTimelineItem) => {
+    if (item.type === 'commentary') {
+      return (
+        <div key={item.id} className="select-text">
+          <ResponseCard
+            text={item.activity.content || ''}
+            isStreaming={false}
+            plainChrome
+            showResponseActions={false}
+          />
+        </div>
+      )
+    }
+
+    if (item.type === 'activity-section') {
+      return (
+        <ActivitySection
+          key={item.id}
+          activities={item.activities}
+          previewText={getPreviewText(
+            item.activities,
+            item.id === firstActivitySectionId ? intent : undefined,
+            isStreaming,
+            false,
+            isComplete
+          )}
+          totalActivityCount={item.activities.length}
+          isExpanded={expandedActivitySectionIds.has(item.id)}
+          onToggleExpanded={() => toggleActivitySection(item.id)}
+          activitiesContainerRef={activitiesContainerRef}
+          hasUserToggled={hasUserToggled}
+          hasMounted={hasMounted}
+          renderActionsMenu={renderActionsMenu}
+          onOpenDetails={onOpenDetails}
+          onOpenActivityDetails={onOpenActivityDetails}
+          onOpenMultiFileDiff={onOpenMultiFileDiff}
+          hasEditOrWriteActivities={hasEditOrWriteActivities}
+          expandedActivityGroups={expandedActivityGroups}
+          onExpandedActivityGroupsChange={handleExpandedActivityGroupsChange}
+          sessionFolderPath={sessionFolderPath}
+          displayMode={displayMode}
+          showThinking={isThinking && !animateResponse && item.id === lastActivitySectionId}
+          thinkingText={thinkingText}
+          todos={item.id === lastActivitySectionId ? todos : undefined}
+        />
+      )
+    }
+
+    if (item.type === 'plan') {
+      return (
+        <div key={item.id} className="select-text">
+          {renderPlanCard(item.activity)}
+        </div>
+      )
+    }
+
+    if (animateResponse) {
+      return (
+        <AnimatePresence key={item.id}>
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, ease: "easeOut" }}
+            className="select-text"
+          >
+            {renderResponseCard(item.response)}
+          </motion.div>
+        </AnimatePresence>
+      )
+    }
+
+    return (
+      <div key={item.id} className="select-text">
+        {renderResponseCard(item.response)}
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-1">
-      {timelineItems.map(item => {
-        if (item.type === 'commentary') {
-          return (
-            <div key={item.id} className="select-text">
-              <ResponseCard
-                text={item.activity.content || ''}
-                isStreaming={false}
-                plainChrome
-                showResponseActions={false}
-              />
-            </div>
-          )
-        }
-
-        if (item.type === 'activity-section') {
-          return (
-            <ActivitySection
-              key={item.id}
-              activities={item.activities}
-              previewText={getPreviewText(
-                item.activities,
-                item.id === firstActivitySectionId ? intent : undefined,
-                isStreaming,
-                false,
-                isComplete
-              )}
-              totalActivityCount={item.activities.length}
-              isExpanded={expandedActivitySectionIds.has(item.id)}
-              onToggleExpanded={() => toggleActivitySection(item.id)}
-              activitiesContainerRef={activitiesContainerRef}
-              hasUserToggled={hasUserToggled}
-              hasMounted={hasMounted}
-              renderActionsMenu={renderActionsMenu}
-              onOpenDetails={onOpenDetails}
-              onOpenActivityDetails={onOpenActivityDetails}
-              onOpenMultiFileDiff={onOpenMultiFileDiff}
-              hasEditOrWriteActivities={hasEditOrWriteActivities}
-              expandedActivityGroups={expandedActivityGroups}
-              onExpandedActivityGroupsChange={handleExpandedActivityGroupsChange}
-              sessionFolderPath={sessionFolderPath}
-              displayMode={displayMode}
-              showThinking={isThinking && !animateResponse && item.id === lastActivitySectionId}
-              thinkingText={thinkingText}
-              todos={item.id === lastActivitySectionId ? todos : undefined}
-            />
-          )
-        }
-
-        if (item.type === 'plan') {
-          return (
-            <div key={item.id} className="select-text">
-              {renderPlanCard(item.activity)}
-            </div>
-          )
-        }
-
-        if (animateResponse) {
-          return (
-            <AnimatePresence key={item.id}>
-              <motion.div
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, ease: "easeOut" }}
-                className="select-text"
-              >
-                {renderResponseCard(item.response)}
-              </motion.div>
-            </AnimatePresence>
-          )
-        }
-
-        return (
-          <div key={item.id} className="select-text">
-            {renderResponseCard(item.response)}
-          </div>
-        )
-      })}
+      {shouldCollapseCompletedDetails ? (
+        <>
+          <ProcessedDetailsDisclosure
+            duration={processedDuration}
+            isExpanded={isProcessedDetailsExpanded}
+            onToggle={() => setIsProcessedDetailsExpanded(expanded => !expanded)}
+          >
+            {detailItems.map(renderTimelineItem)}
+          </ProcessedDetailsDisclosure>
+          {renderTimelineItem(finalResponseItem!)}
+        </>
+      ) : (
+        timelineItems.map(renderTimelineItem)
+      )}
 
       {!hasActivitySections && isThinking && !animateResponse && (
         <div className={cn("flex items-center gap-2 px-3 py-1.5 text-muted-foreground", SIZE_CONFIG.fontSize)}>

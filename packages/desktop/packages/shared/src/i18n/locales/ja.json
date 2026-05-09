@@ -1228,6 +1228,7 @@
   "transport.wsClosedWithCode": "WebSocketがコード {{code}}{{reason}} で閉じました。",
   "turnCard.errorCount_one": " · {{count}}件のエラー",
   "turnCard.errorCount_other": " · {{count}}件のエラー",
+  "turnCard.processedDuration": "処理済み {{duration}}",
   "turnCard.processing": "処理中",
   "turnCard.responding": "応答中...",
   "turnCard.starting": "開始中...",

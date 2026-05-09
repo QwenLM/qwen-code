@@ -1228,6 +1228,7 @@
   "transport.wsClosedWithCode": "WebSocket lezárva, kód: {{code}}{{reason}}.",
   "turnCard.errorCount_one": " · {{count}} hiba",
   "turnCard.errorCount_other": " · {{count}} hiba",
+  "turnCard.processedDuration": "Feldolgozva {{duration}}",
   "turnCard.processing": "Feldolgozás",
   "turnCard.responding": "Válaszolás...",
   "turnCard.starting": "Indítás...",

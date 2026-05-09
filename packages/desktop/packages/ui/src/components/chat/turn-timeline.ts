@@ -22,6 +22,11 @@ export type TurnTimelineItem =
       response: ResponseContent;
     };
 
+export type ResponseTimelineItem = Extract<
+  TurnTimelineItem,
+  { type: 'response' }
+>;
+
 function isVisibleCommentaryActivity(activity: ActivityItem): boolean {
   return (
     activity.type === 'intermediate' &&
@@ -29,6 +34,24 @@ function isVisibleCommentaryActivity(activity: ActivityItem): boolean {
     activity.status === 'completed' &&
     !!activity.content?.trim()
   );
+}
+
+export function splitTimelineAtFinalResponse(items: TurnTimelineItem[]): {
+  detailItems: TurnTimelineItem[];
+  finalResponseItem?: ResponseTimelineItem;
+} {
+  const finalResponseIndex = items.findLastIndex(
+    (item) => item.type === 'response',
+  );
+
+  if (finalResponseIndex === -1) {
+    return { detailItems: items };
+  }
+
+  return {
+    detailItems: items.filter((_, index) => index !== finalResponseIndex),
+    finalResponseItem: items[finalResponseIndex] as ResponseTimelineItem,
+  };
 }
 
 /**
