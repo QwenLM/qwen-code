@@ -398,6 +398,7 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
           currentTurn.response = {
             text: lastTextActivity.content,
             isStreaming: false,
+            timestamp: lastTextActivity.timestamp,
             messageId: lastTextActivity.id,
           }
         }
@@ -621,6 +622,7 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
         text: message.content,
         isStreaming: !!message.isStreaming,
         streamStartTime: message.isStreaming ? message.timestamp : undefined,
+        timestamp: message.timestamp,
         messageId: message.id,
         annotations: message.annotations,
       }
