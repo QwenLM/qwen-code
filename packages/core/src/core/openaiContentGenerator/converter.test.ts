@@ -2202,6 +2202,143 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
+    it('should ignore repeated cumulative reasoning_content chunks with no new suffix', () => {
+      // Mirrors the content-channel `should ignore repeated cumulative chunks
+      // with no new suffix` test: the reasoning channel uses a separate state
+      // object, so the exact-repeat entry path is exercised independently.
+      const ctx = withStreamParser();
+      const reasoning =
+        'The reasoning section also starts with enough text to pass.';
+      const emitted = [reasoning, reasoning].map((reasoning_content, index) => {
+        const part = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-repeat-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      // Chunk 1: emits as a thought part.
+      expect(emitted[0]).toEqual({ text: reasoning, thought: true });
+      // Chunk 2: exact repeat — enters cumulative mode, suppressed (no part).
+      expect(emitted[1]).toEqual({ text: '', thought: false });
+    });
+
+    it('should exit cumulative mode on reasoning_content channel when chunk does not match prior accumulated text', () => {
+      // Mirrors the content-channel `should exit cumulative mode` test against
+      // the reasoning channel's independent state.
+      const ctx = withStreamParser();
+      const chunks = [
+        'Step one of my reasoning is to gather inputs.',
+        'Step one of my reasoning is to gather inputs.\nStep two: validate.',
+        'Brand new unrelated reasoning.',
+      ];
+
+      const emitted = chunks.map((reasoning_content, index) => {
+        const part = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-exit-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      // Chunk 1: initial passthrough.
+      expect(emitted[0]).toEqual({
+        text: 'Step one of my reasoning is to gather inputs.',
+        thought: true,
+      });
+      // Chunk 2: cumulative mode entered, emits suffix only.
+      expect(emitted[1]).toEqual({
+        text: '\nStep two: validate.',
+        thought: true,
+      });
+      // Chunk 3: NOT a prefix-extension — cumulative mode must exit and the
+      //          new chunk must be appended verbatim (no silent loss).
+      expect(emitted[2]).toEqual({
+        text: 'Brand new unrelated reasoning.',
+        thought: true,
+      });
+    });
+
+    it('should resume prefix detection on reasoning_content channel after exiting cumulative mode', () => {
+      // Mirrors the content-channel `should resume prefix detection cleanly
+      // after exiting cumulative mode` test. After the exit path resets the
+      // baseline to the new chunk, the reasoning channel must be able to
+      // re-enter cumulative mode on the next prefix-extending chunk.
+      const ctx = withStreamParser();
+      const chunks = [
+        'Step one of my reasoning is to gather inputs.',
+        'Step one of my reasoning is to gather inputs.\nStep two: validate.',
+        'Brand new unrelated reasoning.',
+        'Brand new unrelated reasoning. And further reflection.',
+      ];
+
+      const emitted = chunks.map((reasoning_content, index) => {
+        const part = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: `chunk-reasoning-reentry-${index}`,
+            created: 456 + index,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+
+      expect(emitted[0]).toEqual({
+        text: 'Step one of my reasoning is to gather inputs.',
+        thought: true,
+      });
+      expect(emitted[1]).toEqual({
+        text: '\nStep two: validate.',
+        thought: true,
+      });
+      // Cumulative mode exits; fresh baseline = chunk 3.
+      expect(emitted[2]).toEqual({
+        text: 'Brand new unrelated reasoning.',
+        thought: true,
+      });
+      // Chunk 4 prefix-extends chunk 3 — re-enters cumulative, emits suffix only.
+      expect(emitted[3]).toEqual({
+        text: ' And further reflection.',
+        thought: true,
+      });
+    });
+
     it('should deduplicate interleaved reasoning_content and content channels independently', () => {
       const ctx = withStreamParser();
       // reasoning_content and content each use a separate state object;
@@ -2244,6 +2381,184 @@ describe('OpenAIContentConverter', () => {
       expect(emitted[2]).toEqual([{ text: '\nStep two.', thought: true }]);
       // Content chunk 2: cumulative extension of content channel
       expect(emitted[3]).toEqual([{ text: ' is the answer.' }]);
+    });
+
+    it('should enter cumulative mode on exact 20-char repeat (at threshold)', () => {
+      const ctx = withStreamParser();
+      // Exactly 20 chars — meets CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
+      const twentyChars = 'abcdefghij0123456789';
+      const chunks = [twentyChars, twentyChars, twentyChars + ' and more'];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-threshold20-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial passthrough
+      expect(emitted[0]).toBe(twentyChars);
+      // Chunk 2: exact 20-char repeat — enters cumulative mode, suppressed
+      expect(emitted[1]).toBe('');
+      // Chunk 3: cumulative extension — emits suffix only
+      expect(emitted[2]).toBe(' and more');
+    });
+
+    it('should pass through 19-char exact repeat without entering cumulative mode (below threshold)', () => {
+      const ctx = withStreamParser();
+      // 19 chars — one short of CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
+      const nineteenChars = 'abcdefghij012345678';
+      const chunks = [nineteenChars, nineteenChars, nineteenChars + ' extra'];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-threshold19-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial passthrough
+      expect(emitted[0]).toBe(nineteenChars);
+      // Chunk 2: 19-char repeat — below threshold, passes through unchanged
+      expect(emitted[1]).toBe(nineteenChars);
+      // Chunk 3: prefix-extends prior — enters cumulative, emits suffix only
+      expect(emitted[2]).toBe(' extra');
+    });
+
+    it('should not enter cumulative mode after the detection window cap is reached on a non-cumulative stream', () => {
+      // After CUMULATIVE_DETECTION_WINDOW_BYTES (1024) of incremental
+      // emittedText growth, the baseline freezes and prefix/exact-repeat
+      // detection becomes unsafe. The early-return guard ensures that a chunk
+      // arriving after the cap is reached is passed through verbatim instead
+      // of being misclassified against a stale baseline.
+      const ctx = withStreamParser();
+      // 100 incremental chunks of 20 chars = 2000 chars, well past the cap.
+      const incrementalChunks = Array.from(
+        { length: 100 },
+        (_, i) => `chunk${String(i).padStart(3, '0')}-payload__`,
+      );
+      // Trailing chunk that, by coincidence, starts with what *would* be the
+      // frozen 1024-char baseline. With the early-return guard, this MUST NOT
+      // enter cumulative mode and MUST emit the chunk verbatim.
+      const allEmitted = incrementalChunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-cap-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Every chunk should pass through verbatim — none should be
+      // misclassified as cumulative.
+      expect(allEmitted).toEqual(incrementalChunks);
+    });
+
+    it('should suppress cumulative rewind (provider re-sends shorter accumulated string)', () => {
+      const ctx = withStreamParser();
+      // Scenario: provider sends Hello → Hello World (extension) → Hello (rewind) → Hello World! (extension again)
+      const chunks = ['Hello', 'Hello World', 'Hello', 'Hello World!'];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-rewind-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial passthrough
+      expect(emitted[0]).toBe('Hello');
+      // Chunk 2: prefix-extends 'Hello' → enters cumulative, emits suffix
+      expect(emitted[1]).toBe(' World');
+      // Chunk 3: rewind — 'Hello' is a strict prefix of emitted 'Hello World' → suppressed
+      expect(emitted[2]).toBe('');
+      // Chunk 4: extension resumes from 'Hello World' → emits '!'
+      expect(emitted[3]).toBe('!');
+    });
+
+    it('should handle a single chunk delta with both reasoning_content and content simultaneously', () => {
+      const ctx = withStreamParser();
+      const part =
+        converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-dual-1',
+            created: 456,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  reasoning_content: 'I need to think.',
+                  content: 'Here is my answer.',
+                },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts ?? [];
+
+      // Both channels should emit independently in the same response
+      const thoughtPart = part.find((p) => p.thought === true);
+      const textPart = part.find((p) => !p.thought);
+      expect(thoughtPart?.text).toBe('I need to think.');
+      expect(textPart?.text).toBe('Here is my answer.');
     });
   });
 

@@ -94,6 +94,9 @@ function normalizeStreamingTextDelta(
     }
 
     if (state.emittedText.startsWith(rawDelta)) {
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: cumulative rewind suppression (emitted=${state.emittedText.length}b, chunk=${rawDelta.length}b)`,
+      );
       return '';
     }
 
@@ -103,6 +106,13 @@ function normalizeStreamingTextDelta(
     state.cumulativeMode = false;
     // Reset baseline to current chunk so future prefix checks use fresh state.
     state.emittedText = rawDelta;
+    return rawDelta;
+  }
+
+  if (
+    !state.cumulativeMode &&
+    state.emittedText.length >= CUMULATIVE_DETECTION_WINDOW_BYTES
+  ) {
     return rawDelta;
   }
 
