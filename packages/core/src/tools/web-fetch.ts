@@ -156,6 +156,9 @@ ${textContent}
         // Pin to the main model — fast model loses too much fidelity on
         // long, rich source material.
         model: this.config.getModel(),
+        // Best-effort: the outer catch already converts processing failures
+        // into a tool error; retrying 7× just delays that fallback.
+        maxAttempts: 1,
         contents: [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
         systemInstruction:
           'Extract and summarize the requested information from the provided web content. ' +

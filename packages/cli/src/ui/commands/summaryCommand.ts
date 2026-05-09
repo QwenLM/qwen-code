@@ -92,9 +92,22 @@ export const summaryCommand: SlashCommand = {
         parts: message.parts,
       }));
 
+      // Carry over the main session's system instruction. Without this the
+      // model sees only chat history + the summary prompt, losing the coding-
+      // assistant role, project context, and user memory. The chat sets it
+      // as a string (see GeminiClient.getMainSessionSystemInstruction).
+      const rawSystemInstruction = geminiClient
+        .getChat()
+        .getGenerationConfig().systemInstruction;
+      const chatSystemInstruction =
+        typeof rawSystemInstruction === 'string'
+          ? rawSystemInstruction
+          : undefined;
+
       const result = await runSideQuery(config, {
         purpose: 'project-summary',
         model: config.getModel(),
+        systemInstruction: chatSystemInstruction,
         contents: [
           ...conversationContext,
           {

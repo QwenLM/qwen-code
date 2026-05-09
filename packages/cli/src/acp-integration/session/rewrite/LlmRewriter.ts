@@ -117,6 +117,9 @@ export class LlmRewriter {
       const result = await runSideQuery(this.config, {
         purpose: 'acp-rewrite',
         model,
+        // Best-effort: failure path returns null gracefully, so don't burn
+        // 7 retries on transient outages the user will never see.
+        maxAttempts: 1,
         systemInstruction: this.prompt,
         config: {
           temperature: 0.3,
