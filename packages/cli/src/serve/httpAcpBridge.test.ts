@@ -39,6 +39,16 @@ import {
   type ChannelFactory,
 } from './httpAcpBridge.js';
 
+// Workspace fixtures must round-trip through `path.resolve` so the
+// expected values match what the bridge canonicalizes internally on
+// every platform — a literal `/work/a` resolves to `D:\work\a` on
+// Windows and the assertion drifts. Same for the FakeAgent's
+// `sess:<cwd>` synthetic id, since the cwd it sees is the post-resolve
+// value the bridge passes through `connection.newSession`.
+const WS_A = path.resolve(path.sep, 'work', 'a');
+const WS_B = path.resolve(path.sep, 'work', 'b');
+const SESS_A = `sess:${WS_A}`;
+
 interface FakeAgentOpts {
   /** What the fake agent returns from `newSession`. */
   sessionIdPrefix?: string;
@@ -171,13 +181,13 @@ describe('createHttpAcpBridge', () => {
     };
     const bridge = createHttpAcpBridge({ channelFactory: factory });
 
-    const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
-    expect(session.sessionId).toBe('sess:/work/a');
-    expect(session.workspaceCwd).toBe('/work/a');
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(session.sessionId).toBe(SESS_A);
+    expect(session.workspaceCwd).toBe(WS_A);
     expect(session.attached).toBe(false);
     expect(bridge.sessionCount).toBe(1);
     expect(handles).toHaveLength(1);
-    expect(handles[0]?.agent.newSessionCalls[0]?.cwd).toBe('/work/a');
+    expect(handles[0]?.agent.newSessionCalls[0]?.cwd).toBe(WS_A);
 
     await bridge.shutdown();
     expect(handles[0]?.killed).toBe(true);
@@ -192,8 +202,8 @@ describe('createHttpAcpBridge', () => {
     };
     const bridge = createHttpAcpBridge({ channelFactory: factory });
 
-    const first = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
-    const second = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
     expect(first.sessionId).toBe(second.sessionId);
     expect(first.attached).toBe(false);
@@ -213,8 +223,8 @@ describe('createHttpAcpBridge', () => {
     };
     const bridge = createHttpAcpBridge({ channelFactory: factory });
 
-    const a = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
-    const b = await bridge.spawnOrAttach({ workspaceCwd: '/work/b' });
+    const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const b = await bridge.spawnOrAttach({ workspaceCwd: WS_B });
 
     expect(a.sessionId).not.toBe(b.sessionId);
     expect(a.attached).toBe(false);
@@ -237,8 +247,8 @@ describe('createHttpAcpBridge', () => {
       channelFactory: factory,
     });
 
-    const first = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
-    const second = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
     expect(first.sessionId).not.toBe(second.sessionId);
     expect(first.attached).toBe(false);
@@ -269,7 +279,7 @@ describe('createHttpAcpBridge', () => {
     };
     const bridge = createHttpAcpBridge({ channelFactory: factory });
 
-    const a = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+    const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     const aNoisy = await bridge.spawnOrAttach({ workspaceCwd: '/work/./a' });
 
     expect(a.sessionId).toBe(aNoisy.sessionId);
@@ -293,7 +303,7 @@ describe('createHttpAcpBridge', () => {
     // ACP SDK rewrites unhandled exceptions to a JSON-RPC Internal error
     // object (code -32603); the original message text is intentionally not
     // forwarded. Assert on rejection + resource cleanup.
-    const err = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' }).then(
+    const err = await bridge.spawnOrAttach({ workspaceCwd: WS_A }).then(
       () => null,
       (e: unknown) => e,
     );
@@ -314,9 +324,9 @@ describe('createHttpAcpBridge', () => {
       initializeTimeoutMs: 50,
     });
 
-    await expect(
-      bridge.spawnOrAttach({ workspaceCwd: '/work/a' }),
-    ).rejects.toThrow(/initialize timed out/);
+    await expect(bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
+      /initialize timed out/,
+    );
     expect(handles[0]?.killed).toBe(true);
     expect(bridge.sessionCount).toBe(0);
   });
@@ -330,8 +340,8 @@ describe('createHttpAcpBridge', () => {
     };
     const bridge = createHttpAcpBridge({ channelFactory: factory });
 
-    await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
-    await bridge.spawnOrAttach({ workspaceCwd: '/work/b' });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_B });
     expect(bridge.sessionCount).toBe(2);
 
     await bridge.shutdown();
@@ -350,7 +360,7 @@ describe('createHttpAcpBridge', () => {
         return h.channel;
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const result = await bridge.sendPrompt(session.sessionId, {
         sessionId: session.sessionId,
@@ -370,7 +380,7 @@ describe('createHttpAcpBridge', () => {
         return h.channel;
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await bridge.sendPrompt(session.sessionId, {
         // Body claims a different sessionId — bridge must not honor it.
@@ -407,7 +417,7 @@ describe('createHttpAcpBridge', () => {
         return h.channel;
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const p1 = bridge.sendPrompt(session.sessionId, {
         sessionId: session.sessionId,
@@ -452,7 +462,7 @@ describe('createHttpAcpBridge', () => {
         return h.channel;
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const failed = await bridge
         .sendPrompt(session.sessionId, {
@@ -498,7 +508,7 @@ describe('createHttpAcpBridge', () => {
         return h.channel;
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await bridge.cancelSession(session.sessionId);
       // Cancel is a notification — let it propagate before observing.
@@ -555,7 +565,7 @@ describe('createHttpAcpBridge', () => {
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       return { bridge, session, conn: capturedConn!, handles };
     }
 
@@ -810,7 +820,7 @@ describe('createHttpAcpBridge', () => {
     it('applies modelServiceId via unstable_setSessionModel after newSession', async () => {
       const { bridge, setModelCalls } = setup();
       const session = await bridge.spawnOrAttach({
-        workspaceCwd: '/work/a',
+        workspaceCwd: WS_A,
         modelServiceId: 'qwen3-coder',
       });
       expect(session.attached).toBe(false);
@@ -822,7 +832,7 @@ describe('createHttpAcpBridge', () => {
 
     it('does NOT call setSessionModel when modelServiceId is omitted', async () => {
       const { bridge, setModelCalls } = setup();
-      await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(setModelCalls).toHaveLength(0);
       await bridge.shutdown();
     });
@@ -835,7 +845,7 @@ describe('createHttpAcpBridge', () => {
       });
       await expect(
         bridge.spawnOrAttach({
-          workspaceCwd: '/work/a',
+          workspaceCwd: WS_A,
           modelServiceId: 'definitely-not-a-real-model',
         }),
       ).rejects.toBeTruthy();
@@ -863,14 +873,14 @@ describe('createHttpAcpBridge', () => {
 
       await expect(
         bridge.spawnOrAttach({
-          workspaceCwd: '/work/a',
+          workspaceCwd: WS_A,
           modelServiceId: 'try-1',
         }),
       ).rejects.toBeTruthy();
       expect(bridge.sessionCount).toBe(0);
 
       const session = await bridge.spawnOrAttach({
-        workspaceCwd: '/work/a',
+        workspaceCwd: WS_A,
         modelServiceId: 'try-2',
       });
       expect(session.attached).toBe(false);
@@ -906,7 +916,7 @@ describe('createHttpAcpBridge', () => {
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
 
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(bridge.sessionCount).toBe(1);
 
       // Subscribe so we can observe the session_died event.
@@ -932,7 +942,7 @@ describe('createHttpAcpBridge', () => {
 
       // A subsequent spawnOrAttach for the same workspace must NOT reuse
       // the dead session; it spawns fresh (attached: false) with a new id.
-      const fresh = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const fresh = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(fresh.attached).toBe(false);
       expect(fresh.sessionId).not.toBe(session.sessionId);
       expect(handles).toHaveLength(2);
@@ -949,7 +959,7 @@ describe('createHttpAcpBridge', () => {
         return h.channel;
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       // No subscribers; planned shutdown removes the entry first, THEN
       // calls channel.kill() which resolves channel.exited. The cleanup
@@ -994,7 +1004,7 @@ describe('createHttpAcpBridge', () => {
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({
-        workspaceCwd: '/work/a',
+        workspaceCwd: WS_A,
         modelServiceId: 'first',
       });
 
@@ -1006,7 +1016,7 @@ describe('createHttpAcpBridge', () => {
       // Second attach with a NEW model — agent rejects.
       await expect(
         bridge.spawnOrAttach({
-          workspaceCwd: '/work/a',
+          workspaceCwd: WS_A,
           modelServiceId: 'rejected',
         }),
       ).rejects.toBeTruthy();
@@ -1065,7 +1075,7 @@ describe('createHttpAcpBridge', () => {
       const bridge = createHttpAcpBridge({ channelFactory: factory });
       // First call spawns the session AND applies model "A".
       await bridge.spawnOrAttach({
-        workspaceCwd: '/work/a',
+        workspaceCwd: WS_A,
         modelServiceId: 'A',
       });
 
@@ -1073,11 +1083,11 @@ describe('createHttpAcpBridge', () => {
       // they'd interleave (enter:B, enter:C, exit:B, exit:C).
       await Promise.all([
         bridge.spawnOrAttach({
-          workspaceCwd: '/work/a',
+          workspaceCwd: WS_A,
           modelServiceId: 'B',
         }),
         bridge.spawnOrAttach({
-          workspaceCwd: '/work/a',
+          workspaceCwd: WS_A,
           modelServiceId: 'C',
         }),
       ]);
@@ -1136,11 +1146,11 @@ describe('createHttpAcpBridge', () => {
 
       // First call spawns; second call attaches with a DIFFERENT model.
       const first = await bridge.spawnOrAttach({
-        workspaceCwd: '/work/a',
+        workspaceCwd: WS_A,
         modelServiceId: 'model-A',
       });
       const second = await bridge.spawnOrAttach({
-        workspaceCwd: '/work/a',
+        workspaceCwd: WS_A,
         modelServiceId: 'model-B',
       });
 
@@ -1160,11 +1170,11 @@ describe('createHttpAcpBridge', () => {
       const bridge = createHttpAcpBridge({ channelFactory: factory });
 
       await bridge.spawnOrAttach({
-        workspaceCwd: '/work/a',
+        workspaceCwd: WS_A,
         modelServiceId: 'model-A',
       });
       // Plain attach — no model preference passed.
-      await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       expect(setModelCalls).toEqual([
         { sessionId: expect.any(String), modelId: 'model-A' },
@@ -1226,7 +1236,7 @@ describe('createHttpAcpBridge', () => {
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const promptResult = bridge.sendPrompt(session.sessionId, {
         sessionId: session.sessionId,
@@ -1273,8 +1283,8 @@ describe('createHttpAcpBridge', () => {
       const bridge = createHttpAcpBridge({ channelFactory: factory });
 
       const [a, b] = await Promise.all([
-        bridge.spawnOrAttach({ workspaceCwd: '/work/a' }),
-        bridge.spawnOrAttach({ workspaceCwd: '/work/a' }),
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
       ]);
 
       expect(spawnCount).toBe(1);
@@ -1303,13 +1313,13 @@ describe('createHttpAcpBridge', () => {
       const bridge = createHttpAcpBridge({ channelFactory: factory });
 
       await expect(
-        bridge.spawnOrAttach({ workspaceCwd: '/work/a' }),
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
       ).rejects.toBeTruthy();
 
       // The retry must NOT see the rejected promise still parked in
       // inFlightSpawns — that would poison every future call.
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
-      expect(session.sessionId).toBe('sess:/work/a');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(session.sessionId).toBe(SESS_A);
       expect(session.attached).toBe(false);
       expect(attempt).toBe(2);
 
@@ -1338,7 +1348,7 @@ describe('createHttpAcpBridge', () => {
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       return { bridge, session, conn: capturedConn! };
     }
 
@@ -1465,16 +1475,16 @@ describe('createHttpAcpBridge', () => {
         channelFactory: factory,
       });
 
-      const a1 = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
-      const a2 = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
-      await bridge.spawnOrAttach({ workspaceCwd: '/work/b' });
+      const a1 = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const a2 = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_B });
 
-      const aList = bridge.listWorkspaceSessions('/work/a');
+      const aList = bridge.listWorkspaceSessions(WS_A);
       expect(aList).toHaveLength(2);
       expect(aList.map((s) => s.sessionId).sort()).toEqual(
         [a1.sessionId, a2.sessionId].sort(),
       );
-      const bList = bridge.listWorkspaceSessions('/work/b');
+      const bList = bridge.listWorkspaceSessions(WS_B);
       expect(bList).toHaveLength(1);
       const idleList = bridge.listWorkspaceSessions('/work/c');
       expect(idleList).toEqual([]);
@@ -1485,11 +1495,11 @@ describe('createHttpAcpBridge', () => {
     it('canonicalizes the lookup path', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const list = bridge.listWorkspaceSessions('/work/./a');
       expect(list).toHaveLength(1);
-      expect(list[0]?.workspaceCwd).toBe('/work/a');
+      expect(list[0]?.workspaceCwd).toBe(WS_A);
 
       await bridge.shutdown();
     });
@@ -1539,7 +1549,7 @@ describe('createHttpAcpBridge', () => {
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       return { bridge, session, setModelCalls };
     }
 
@@ -1621,7 +1631,7 @@ describe('createHttpAcpBridge', () => {
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const abort = new AbortController();
       const iter = bridge.subscribeEvents(session.sessionId, {
@@ -1637,7 +1647,7 @@ describe('createHttpAcpBridge', () => {
         },
       });
 
-      const collected: Array<{ id: number; type: string; data: unknown }> = [];
+      const collected: Array<{ id?: number; type: string; data: unknown }> = [];
       for await (const e of iter) {
         collected.push({ id: e.id, type: e.type, data: e.data });
         if (collected.length === 1) break;
@@ -1652,7 +1662,7 @@ describe('createHttpAcpBridge', () => {
     it('shutdown closes live event subscriptions', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
       const bridge = createHttpAcpBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const abort = new AbortController();
       const iter = bridge.subscribeEvents(session.sessionId, {

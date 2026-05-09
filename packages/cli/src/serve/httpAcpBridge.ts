@@ -6,7 +6,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import {
@@ -402,9 +402,20 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   const inFlightSpawns = new Map<string, Promise<BridgeSession>>();
 
   const registerPending = (p: PendingPermission) => {
-    pendingPermissions.set(p.requestId, p);
     const entry = byId.get(p.sessionId);
-    if (entry) entry.pendingPermissionIds.add(p.requestId);
+    if (!entry) {
+      // The session was torn down (channel.exited, killSession, shutdown)
+      // between when the agent decided to ask for permission and when the
+      // request reached this function. There's no SessionEntry to chain
+      // the requestId onto and no SSE bus to publish `permission_request`
+      // — nobody can vote, so the permission would hang the agent's
+      // `requestPermission` forever. Resolve immediately as cancelled to
+      // unwind the agent side; matches the shutdown / killSession path.
+      p.resolve({ outcome: { outcome: 'cancelled' } });
+      return;
+    }
+    pendingPermissions.set(p.requestId, p);
+    entry.pendingPermissionIds.add(p.requestId);
   };
 
   /** Resolve a single pending request and clean up its bookkeeping. */
@@ -658,7 +669,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           `workspaceCwd must be an absolute path; got "${req.workspaceCwd}"`,
         );
       }
-      const workspaceKey = path.resolve(req.workspaceCwd);
+      const workspaceKey = canonicalizeWorkspace(req.workspaceCwd);
 
       if (sessionScope === 'single') {
         const existing = byWorkspace.get(workspaceKey);
@@ -782,6 +793,11 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           onAbort();
         } else {
           signal.addEventListener('abort', onAbort, { once: true });
+          // The aborted state can flip synchronously between the early-exit
+          // check at the top of `sendPrompt` and addEventListener — re-check
+          // after registration so a microsecond-window abort still fires
+          // `cancel()` instead of letting the prompt run uncancellable.
+          if (signal.aborted) onAbort();
           // Detach the listener once the prompt resolves so the
           // AbortController can be GC'd.
           racedPromise.finally(() =>
@@ -810,6 +826,17 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // Cancel intentionally bypasses the prompt queue: it's a notification
       // that the agent uses to wind down the *currently active* prompt, not
       // something to wait behind queued work.
+      //
+      // CONTRACT (multi-prompt clients): cancel affects ONLY the active
+      // prompt. Any prompts the client previously POSTed and that are
+      // still queued behind the active one will continue to execute
+      // after the active prompt resolves with `stopReason: 'cancelled'`.
+      // This matches ACP's "cancel is a wind-down notification for the
+      // current turn" semantics — multi-prompt queueing is a daemon
+      // convenience, not in spec, so we don't extend cancel's reach
+      // there. Clients that want a hard stop should stop posting new
+      // prompts and call `cancelSession` after their last prompt
+      // resolves, or kill the session via the channel-exit path.
       const notif: CancelNotification = req
         ? { ...req, sessionId }
         : { sessionId };
@@ -828,7 +855,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
 
     listWorkspaceSessions(workspaceCwd) {
       if (!path.isAbsolute(workspaceCwd)) return [];
-      const key = path.resolve(workspaceCwd);
+      const key = canonicalizeWorkspace(workspaceCwd);
       const out: BridgeSessionSummary[] = [];
       for (const entry of byId.values()) {
         if (entry.workspaceCwd === key) {
@@ -861,8 +888,31 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // mirroring that here, two concurrent model changes interleave and the
       // last `model_switched` event published may not match the actual model
       // the agent is on.
+      //
+      // Race the agent call against `transportClosedReject` and a
+      // `withTimeout` so a wedged child can't block the HTTP handler
+      // forever. Matches `sendPrompt` (transport race) and
+      // `applyModelServiceId` (timeout) — the absence of either was an
+      // attack surface for "POST /session/:id/model never returns".
+      // Lazy-init the channel-exit promise the same way `sendPrompt` does
+      // so we don't accumulate one channel.exited listener per call.
+      if (!entry.transportClosedReject) {
+        entry.transportClosedReject = entry.channel.exited.then(() => {
+          throw new Error(
+            `agent channel closed while setSessionModel was in flight (session ${entry.sessionId})`,
+          );
+        });
+      }
+      const transportClosed = entry.transportClosedReject;
       const work = entry.modelChangeQueue.then(() =>
-        conn.unstable_setSessionModel(normalized),
+        Promise.race([
+          withTimeout(
+            conn.unstable_setSessionModel(normalized),
+            initTimeoutMs,
+            'setSessionModel',
+          ),
+          transportClosed,
+        ]),
       );
       // Tail-swallow on the queue so a model-change failure doesn't poison
       // every subsequent change (matches `applyModelServiceId`'s pattern).
@@ -870,7 +920,28 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         () => undefined,
         () => undefined,
       );
-      const response = await work;
+      let response: SetSessionModelResponse;
+      try {
+        response = await work;
+      } catch (err) {
+        // Mirror `applyModelServiceId`'s observability contract: surface
+        // failed model changes on the SSE bus so subscribers can update
+        // their UI / retry. Without this the only signal is the HTTP
+        // 5xx, which doesn't reach passive viewers.
+        try {
+          entry.events.publish({
+            type: 'model_switch_failed',
+            data: {
+              sessionId: entry.sessionId,
+              requestedModelId: req.modelId,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          });
+        } catch {
+          /* bus closed */
+        }
+        throw err;
+      }
       try {
         entry.events.publish({
           type: 'model_switched',
@@ -921,9 +992,54 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       byId.clear();
       pendingPermissions.clear();
       for (const e of entries) e.events.close();
-      await Promise.all(entries.map((e) => e.channel.kill().catch(() => {})));
+      // Wait for in-flight spawns too. The snapshot above only sees
+      // sessions already in `byId`; a `doSpawn` past `channelFactory()`
+      // but still inside `connection.newSession` (~1s on cold start) is
+      // not yet registered. Without the await, `bridge.shutdown()`
+      // resolves before the late re-check at doSpawn:472 tears down its
+      // half-built channel — the orphan's stderr error fires AFTER the
+      // daemon claimed graceful shutdown (log-confusing). Settle on
+      // each, ignoring rejections so a single failure doesn't poison
+      // the others.
+      const inFlightAwaits = Array.from(inFlightSpawns.values()).map(
+        (p): Promise<void> =>
+          p.then(
+            () => undefined,
+            () => undefined,
+          ),
+      );
+      await Promise.all([
+        ...entries.map((e) => e.channel.kill().catch(() => {})),
+        ...inFlightAwaits,
+      ]);
     },
   };
+}
+
+/**
+ * Canonicalize a workspace path so two callers referring to the same
+ * directory get the same `byWorkspace` key. `path.resolve` alone collapses
+ * `..` and `.` segments and absolutizes, but on case-insensitive filesystems
+ * (macOS APFS, Windows NTFS) `/Work/A` and `/work/a` are the same directory
+ * yet `resolve` returns them verbatim — two `byWorkspace` entries form for
+ * one physical workspace and `sessionScope: 'single'` silently degrades to
+ * "one per spelling".
+ *
+ * `realpathSync.native` (when the path exists) walks symlinks and returns
+ * the on-disk casing; this matches what `config.ts` / `settings.ts` /
+ * `sandbox.ts` use for their own workspace resolution. When the path
+ * doesn't exist (test fixtures, ahead-of-mkdir flows) we fall back to
+ * the resolved-but-uncanonicalized form rather than throwing — the
+ * downstream `spawn({cwd})` will fail with a useful ENOENT if the
+ * workspace truly doesn't exist.
+ */
+function canonicalizeWorkspace(p: string): string {
+  const resolved = path.resolve(p);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 async function withTimeout<T>(
@@ -980,13 +1096,59 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // is a `.ts` file Node can't run; users should `npm run build` before
   // `qwen serve` or set `process.execPath` to a tsx-aware shim. Stage 1
   // accepts this — the daemon is meant for built deployments.
-  // Strip the daemon's bearer token from the child's environment. The
-  // child runs as the same UID with shell-tool access, but it's also
-  // executing user-supplied prompts — leaving `QWEN_SERVER_TOKEN` in
-  // its env would let prompt injection turn the agent into an
-  // authenticated client of its own daemon. The agent doesn't need
-  // the token (it speaks to the daemon over stdio, not HTTP).
-  const childEnv: NodeJS.ProcessEnv = { ...process.env };
+  // Pass an *allowlisted* environment to the child — NOT a
+  // `{ ...process.env }` copy with one or two known-bad keys deleted.
+  // The agent runs user-supplied prompts with shell-tool access, so
+  // anything in its env is reachable by prompt injection: API keys
+  // (OPENAI/ANTHROPIC/GEMINI/DASHSCOPE/...), DB passwords, AWS/GCP
+  // credentials, OAuth tokens, secrets your operator forgot they
+  // exported. A denylist requires perfect knowledge of every secret
+  // anyone might set; an allowlist requires only that we know what
+  // the agent legitimately needs.
+  //
+  // What's needed: enough to launch Node + load the entry script and
+  // resolve user-config files (HOME), enough to find binaries and
+  // standard tools (PATH), enough to localize and identify the user
+  // for any session-state lookups (LANG/LC_*, USER/LOGNAME). Anything
+  // beyond this list should be passed to the agent through ACP, not
+  // through the spawn env.
+  //
+  // Per-platform extras: NODE-specific knobs (NODE_OPTIONS, NODE_PATH)
+  // and shell-driven temp dir overrides (TMPDIR/TEMP/TMP) are usually
+  // benign but can carry instructions; include only the temp-dir ones
+  // since the agent legitimately writes scratch files. Windows-only
+  // SYSTEMROOT/USERPROFILE/APPDATA are required by Node itself on
+  // Windows or the spawn fails.
+  const ALLOWED_ENV_KEYS = new Set([
+    'HOME',
+    'PATH',
+    'USER',
+    'LOGNAME',
+    'LANG',
+    'LC_ALL',
+    'LC_CTYPE',
+    'LC_COLLATE',
+    'LC_MESSAGES',
+    'TMPDIR',
+    'TEMP',
+    'TMP',
+    'NODE_PATH',
+    // Windows essentials
+    'SYSTEMROOT',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'COMSPEC',
+    'PATHEXT',
+  ]);
+  const childEnv: NodeJS.ProcessEnv = {};
+  for (const key of ALLOWED_ENV_KEYS) {
+    const v = process.env[key];
+    if (typeof v === 'string') childEnv[key] = v;
+  }
+  // Defense-in-depth: the explicit allowlist is exhaustive but the
+  // delete keeps the security review trail readable — anyone grepping
+  // for `QWEN_SERVER_TOKEN` finds the scrub explicitly named.
   delete childEnv['QWEN_SERVER_TOKEN'];
   // CodeQL `js/path-injection` flags the `cwd: workspaceCwd` flow.
   // Stage 1 trust model accepts this — see the function-level comment
@@ -1042,6 +1204,8 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   };
 };
 
+const KILL_HARD_DEADLINE_MS = 10_000;
+
 function killChild(child: ChildProcess): Promise<void> {
   return new Promise<void>((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) {
@@ -1052,6 +1216,7 @@ function killChild(child: ChildProcess): Promise<void> {
     const finish = () => {
       if (resolved) return;
       resolved = true;
+      child.removeListener('exit', finish);
       resolve();
     };
     child.once('exit', finish);
@@ -1070,5 +1235,16 @@ function killChild(child: ChildProcess): Promise<void> {
         }
       }
     }, 5_000).unref();
+    // Even SIGKILL doesn't return if the child is in uninterruptible
+    // sleep (D-state, e.g. NFS read blocked on a dead server). Without
+    // this hard deadline, `bridge.shutdown()`'s `Promise.all` waits
+    // forever on that one wedged child and SHUTDOWN_FORCE_CLOSE_MS in
+    // `runQwenServe` only covers `server.close()`, not the bridge.
+    // After the deadline give up: the child is probably stuck in a
+    // kernel call we can't cancel, and `process.exit(0)` will reap it
+    // when the daemon returns to its caller.
+    setTimeout(() => {
+      if (!resolved) finish();
+    }, KILL_HARD_DEADLINE_MS).unref();
   });
 }

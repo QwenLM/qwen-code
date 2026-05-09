@@ -7,6 +7,7 @@
 import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
 import {
   createHttpAcpBridge,
@@ -98,17 +99,26 @@ export function createServeApp(
         workspaceCwd: cwd,
         modelServiceId,
       });
-      // Client may have disconnected during the 1-3s spawn window. If so,
-      // the response can't be delivered. The session is otherwise orphaned
-      // (in `byId` / `byWorkspace` with no client knowing the id), and
-      // under churn this leaks one child process per aborted request.
+      // Client may have disconnected during the 1–3s spawn window. If
+      // so, the response can't be delivered. The session is otherwise
+      // orphaned (in `byId` / `byWorkspace` with no client knowing the
+      // id), and under churn this leaks one child per aborted request.
       //
-      // `req.aborted` flips on the request's `abort` event (legacy but
-      // still reliable on Node 20). Combined with `!session.attached` we
-      // only reap when WE spawned a fresh child for this request — if
-      // another client legitimately attached, killing it tears out their
-      // work mid-flight.
-      if (req.aborted && !session.attached) {
+      // Detect "can we still write the response?" via `res.writable`,
+      // which stays true until the SOCKET destination side closes
+      // (the right signal for our case). The legacy `req.aborted`
+      // only flips while the request body is still being received,
+      // so a client that completed the POST and then closed during
+      // the spawn would slip past it. `req.destroyed` is too eager
+      // — clients (incl. supertest) close their writable end after
+      // sending the body even though they're still listening for the
+      // response. `res.writable` is the documented signal for
+      // "ServerResponse can still send to client".
+      //
+      // Combined with `!session.attached` we only reap when WE spawned
+      // a fresh child for this request — if another client legitimately
+      // attached, killing it would tear out their work mid-flight.
+      if (!res.writable && !session.attached) {
         bridge.killSession(session.sessionId).catch(() => {
           // Best-effort cleanup; channel.exited will eventually reap.
         });
@@ -116,7 +126,7 @@ export function createServeApp(
       }
       res.status(200).json(session);
     } catch (err) {
-      res.status(500).json({ error: errorMessage(err) });
+      sendBridgeError(res, err);
     }
   });
 
@@ -440,7 +450,17 @@ function sendBridgeError(res: import('express').Response, err: unknown): void {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;
   }
-  res.status(500).json({ error: errorMessage(err) });
+  // 5xx is the kind of error operators need to see in their daemon log
+  // — bridge ENOMEM, agent stack trace, unexpected throw, etc. Without
+  // logging here every 500 disappears once the caller consumes the
+  // response body. This is a stop-gap until structured access/error
+  // logging lands (tracked under §10 follow-ups). Use the stdio helper
+  // (not `console.error`) to keep the no-console lint rule happy and
+  // route through the same writer the rest of the daemon uses.
+  writeStderrLine(
+    `qwen serve: bridge error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+  );
+  res.status(500).json(errorPayload(err));
 }
 
 /**
@@ -461,4 +481,30 @@ function errorMessage(err: unknown): string {
     }
   }
   return String(err);
+}
+
+/**
+ * Build the JSON body for a 5xx response. The ACP SDK forwards
+ * JSON-RPC-shaped errors like `{code: -32000, message: "Internal error",
+ * data: {reason: "model quota exceeded"}}` — discarding `code`/`data`
+ * collapses every distinct failure (quota / rate-limit / auth /
+ * crash) to the same opaque `"Internal error"` string at the client.
+ * Forward both fields so callers can triage from response body alone.
+ * `error` stays as the human-readable string for backward compatibility
+ * with clients that only consumed `error` in the original shape.
+ */
+function errorPayload(err: unknown): {
+  error: string;
+  code?: unknown;
+  data?: unknown;
+} {
+  const out: { error: string; code?: unknown; data?: unknown } = {
+    error: errorMessage(err),
+  };
+  if (err && typeof err === 'object') {
+    const obj = err as Record<string, unknown>;
+    if ('code' in obj) out.code = obj['code'];
+    if ('data' in obj) out.data = obj['data'];
+  }
+  return out;
 }

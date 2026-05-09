@@ -23,8 +23,14 @@ export const EVENT_SCHEMA_VERSION = 1 as const;
 
 /** A single frame published on the bus. */
 export interface BridgeEvent {
-  /** Monotonic per-session id, starting at 1. */
-  id: number;
+  /**
+   * Monotonic per-session id, starting at 1. Absent on synthetic
+   * terminal frames (e.g. `client_evicted`) so they don't burn a slot
+   * in the sequence other subscribers observe — the gap would be
+   * visible on the live stream and the resume ring wouldn't have the
+   * skipped id either, silently breaking contiguity.
+   */
+  id?: number;
   /** Schema version; bumped on breaking frame changes. */
   v: typeof EVENT_SCHEMA_VERSION;
   /** Frame type: `session_update`, `client_evicted`, or daemon-pushed events. */
@@ -109,8 +115,16 @@ export class EventBus {
       if (sub.evicted) continue;
       if (!sub.queue.push(event)) {
         sub.evicted = true;
+        // Synthetic terminal frame: NO `id` field. Otherwise it would
+        // burn a slot in the per-session monotonic sequence (`nextId++`)
+        // visible to every OTHER subscriber as a gap (3 → 5, missing 4).
+        // Healthy subscribers would see the gap on the live stream and
+        // on `Last-Event-ID: 3` resume the ring has no record of 4
+        // either — silently broken contiguity contradicts the
+        // `BridgeEvent.id` doc-comment. Same pattern as `stream_error`
+        // in server.ts; `formatSseFrame` omits the `id:` line when
+        // `id` is absent.
         const evictionFrame: BridgeEvent = {
-          id: this.nextId++,
           v: EVENT_SCHEMA_VERSION,
           type: 'client_evicted',
           data: { reason: 'queue_overflow', droppedAfter: event.id },
@@ -157,7 +171,14 @@ export class EventBus {
       // caught up). If the gap really is enormous, the queue will be
       // primed with a long backlog the consumer drains at its own pace.
       for (const e of this.ring) {
-        if (e.id > opts.lastEventId) queue.forcePush(e);
+        // The ring only ever contains live events (publish() always
+        // assigns an id before pushing to ring), so `e.id` is never
+        // undefined here — but the type system can't see that since
+        // BridgeEvent.id is optional for synthetic terminal frames.
+        // Guard explicitly to keep narrow typing without runtime cost.
+        if (e.id !== undefined && e.id > opts.lastEventId) {
+          queue.forcePush(e);
+        }
       }
     }
 

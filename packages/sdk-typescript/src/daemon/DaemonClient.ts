@@ -129,10 +129,10 @@ export class DaemonClient {
     if (!this.fetchTimeoutMs || !Number.isFinite(this.fetchTimeoutMs)) {
       return await this._fetch(url, init);
     }
-    const timeoutSignal = AbortSignal.timeout(this.fetchTimeoutMs);
+    const timeoutSignal = abortTimeout(this.fetchTimeoutMs);
     const callerSignal = init.signal ?? undefined;
     const signal = callerSignal
-      ? AbortSignal.any([callerSignal, timeoutSignal])
+      ? composeAbortSignals([callerSignal, timeoutSignal])
       : timeoutSignal;
     return await this._fetch(url, { ...init, signal });
   }
@@ -348,4 +348,47 @@ export class DaemonClient {
     }
     throw await this.failOnError(res, 'POST /permission/:requestId');
   }
+}
+
+/**
+ * `AbortSignal.timeout` is in Node 17.3+ — within our `>=18` engines floor —
+ * but exposed as `static` on `AbortSignal`, so cautious feature-detect plus
+ * a polyfill keeps us honest if a runtime ships a stripped-down `AbortSignal`.
+ */
+function abortTimeout(ms: number): AbortSignal {
+  const tFn = (
+    AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal }
+  ).timeout;
+  if (typeof tFn === 'function') return tFn.call(AbortSignal, ms);
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(new DOMException('TimeoutError')), ms);
+  return ctrl.signal;
+}
+
+/**
+ * `AbortSignal.any` was added in Node 20.3, but the SDK declares
+ * `engines.node >=18.0.0`. Without this polyfill, every non-streaming call
+ * would throw `TypeError: AbortSignal.any is not a function` on Node 18.0–
+ * 20.2 and the SDK would be unusable on its own declared minimum runtime.
+ *
+ * The polyfill creates a fresh controller and forwards the first abort
+ * from any input signal, including any that are already aborted at call
+ * time. It does NOT support every native edge-case (cleanup of remaining
+ * listeners after the first fire is best-effort), but for `fetch`-style
+ * single-shot use the difference is invisible.
+ */
+function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
+  const anyFn = (
+    AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }
+  ).any;
+  if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
+  const ctrl = new AbortController();
+  for (const s of signals) {
+    if (s.aborted) {
+      ctrl.abort(s.reason);
+      return ctrl.signal;
+    }
+    s.addEventListener('abort', () => ctrl.abort(s.reason), { once: true });
+  }
+  return ctrl.signal;
 }
