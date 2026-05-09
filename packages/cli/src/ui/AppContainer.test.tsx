@@ -1889,14 +1889,14 @@ describe('AppContainer State Management', () => {
       expect(handleKeypress).toBeDefined();
 
       // Fire Ctrl+B.
-      const ctrlBKey = {
+      const ctrlBKey: Key = {
         name: 'b',
         ctrl: true,
         meta: false,
         shift: false,
         paste: false,
         sequence: '\x02',
-      } as unknown as Key;
+      };
       handleKeypress!(ctrlBKey);
 
       expect(abortSpy).toHaveBeenCalledTimes(1);
@@ -1941,14 +1941,14 @@ describe('AppContainer State Management', () => {
         ) as ((key: Key) => void) | undefined;
       expect(handleKeypress).toBeDefined();
 
-      const ctrlBKey = {
+      const ctrlBKey: Key = {
         name: 'b',
         ctrl: true,
         meta: false,
         shift: false,
         paste: false,
         sequence: '\x02',
-      } as unknown as Key;
+      };
       // No-op: no throw.
       expect(() => handleKeypress!(ctrlBKey)).not.toThrow();
     });

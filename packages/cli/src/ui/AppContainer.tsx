@@ -2254,17 +2254,35 @@ export const AppContainer = (props: AppContainerProps) => {
         // the no-op case is intentional: while the agent is idle the
         // input layer's own Ctrl+B handler (cursor-left in the
         // prompt) should still fire as before.
+        //
+        // Broadcast caveat: `KeypressContext.broadcast()` has no
+        // consumed-flag mechanism today, so even after we `return`
+        // here the same Ctrl+B keypress is also dispatched to other
+        // useKeypress consumers (text buffer cursor-left,
+        // DebugProfiler, etc.). Visible side effect during a
+        // successful promote: the input cursor will move one
+        // character left if the prompt has focus. Cosmetic; tracked
+        // for a follow-up that introduces a `consumed` return value
+        // on KeypressHandler so global handlers can swallow keys.
         const executingShell = pendingToolCallsRef.current.find(
           (tc) =>
             tc.status === 'executing' &&
             tc.promoteAbortController !== undefined,
         ) as TrackedExecutingToolCall | undefined;
         if (executingShell?.promoteAbortController) {
+          debugLogger.debug(
+            `Ctrl+B promote: matched executing shell tool call ${executingShell.request.callId}`,
+          );
           executingShell.promoteAbortController.abort({
             kind: 'background',
           });
           return;
         }
+        debugLogger.debug(
+          `Ctrl+B promote: no executing shell tool call; falling through ` +
+            `(streamingState=${streamingState}, ` +
+            `pendingToolCalls=${pendingToolCallsRef.current.length})`,
+        );
       }
     },
     [

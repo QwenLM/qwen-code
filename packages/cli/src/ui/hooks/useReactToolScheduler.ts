@@ -50,22 +50,21 @@ export type TrackedValidatingToolCall = ValidatingToolCall & {
 export type TrackedWaitingToolCall = WaitingToolCall & {
   responseSubmittedToGemini?: boolean;
 };
+/**
+ * NOTE on inherited fields: `pid?` and `promoteAbortController?` come
+ * from the core `ExecutingToolCall` type via the `&` intersection —
+ * we do NOT redeclare them here. `promoteAbortController` is set by
+ * `coreToolScheduler` when the shell tool's
+ * `setPromoteAbortControllerCallback` fires, and is read by the
+ * Ctrl+B keybind handler in `AppContainer.handleGlobalKeypress`.
+ * Aborting with reason `{ kind: 'background' }` triggers the
+ * `ShellExecutionService` promote handoff; `shell.ts` then registers
+ * a `BackgroundShellEntry` and the child keeps running. The optional
+ * `shellId` field on the abort reason is generated downstream by
+ * `handlePromotedForeground` — callers leave it unset.
+ */
 export type TrackedExecutingToolCall = ExecutingToolCall & {
   responseSubmittedToGemini?: boolean;
-  pid?: number;
-  /**
-   * AbortController exposed by the shell tool so a UI surface (Ctrl+B
-   * keybind in `AppContainer`) can promote a running foreground shell
-   * to background mid-flight. Set by `coreToolScheduler` via the
-   * shell tool's `setPromoteAbortControllerCallback` when the shell
-   * branch enters the executing state. Undefined for non-shell tools.
-   *
-   * Aborting with reason `{ kind: 'background', shellId }` is the
-   * trigger; `ShellExecutionService` resolves with `promoted: true`
-   * and `shell.ts` registers a `BackgroundShellEntry` — the child
-   * keeps running.
-   */
-  promoteAbortController?: AbortController;
 };
 export type TrackedCompletedToolCall = CompletedToolCall & {
   responseSubmittedToGemini?: boolean;
@@ -127,32 +126,28 @@ export function useReactToolScheduler(
             existingTrackedCall?.responseSubmittedToGemini ?? false;
 
           if (coreTc.status === 'executing') {
-            const executingCore = coreTc as ExecutingToolCall;
+            // `...coreTc` already spreads `pid` and
+            // `promoteAbortController` from the core `ExecutingToolCall`
+            // — no need to re-project. `liveOutput` is the only React-
+            // side state we need to carry over from the previous tracked
+            // version of this call.
             return {
               ...coreTc,
               responseSubmittedToGemini,
               liveOutput: (existingTrackedCall as TrackedExecutingToolCall)
                 ?.liveOutput,
-              pid: executingCore.pid,
-              // Project the promote AbortController so the Ctrl+B
-              // keybind handler in AppContainer can find it via the
-              // executing tool call without re-plumbing through the
-              // scheduler. Set on shell-tool branches by
-              // `coreToolScheduler` when shell.ts fires its
-              // `setPromoteAbortControllerCallback`. Undefined for
-              // non-shell tools.
-              promoteAbortController: executingCore.promoteAbortController,
             };
           }
 
-          // For other statuses, explicitly set liveOutput and pid to undefined
-          // to ensure they are not carried over from a previous executing state.
+          // For non-executing statuses, explicitly clear liveOutput so
+          // it doesn't leak across an executing → completed transition.
+          // `pid` / `promoteAbortController` are not on `coreTc` for
+          // non-executing statuses (`...coreTc` doesn't include them),
+          // so no extra clearing needed.
           return {
             ...coreTc,
             responseSubmittedToGemini,
             liveOutput: undefined,
-            pid: undefined,
-            promoteAbortController: undefined,
           };
         }),
       );
