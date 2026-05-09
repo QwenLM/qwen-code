@@ -97,6 +97,24 @@ function matchesLocaleToken(candidate: string, token: string): boolean {
   );
 }
 
+function getMatchedLocaleTokenLength(
+  candidate: string,
+  language: LanguageDefinition,
+): number | undefined {
+  const code = language.code.toLowerCase();
+  const id = language.id.toLowerCase();
+
+  if (matchesLocaleToken(candidate, id)) {
+    return id.length;
+  }
+
+  if (matchesLocaleToken(candidate, code)) {
+    return code.length;
+  }
+
+  return undefined;
+}
+
 /**
  * Resolves a language alias or locale ID to a supported canonical locale code.
  * Returns undefined for unsupported values so callers can preserve custom codes.
@@ -109,20 +127,26 @@ export function resolveSupportedLanguage(
     return undefined;
   }
 
+  let bestMatch: { code: SupportedLanguage; tokenLength: number } | undefined;
+
   for (const language of SUPPORTED_LANGUAGES) {
-    const code = language.code.toLowerCase();
-    const id = language.id.toLowerCase();
     if (
-      matchesLocaleToken(normalized, code) ||
-      matchesLocaleToken(normalized, id) ||
       normalized === language.fullName.toLowerCase() ||
       (language.nativeName && normalized === language.nativeName.toLowerCase())
     ) {
       return language.code;
     }
+
+    const tokenLength = getMatchedLocaleTokenLength(normalized, language);
+    if (
+      tokenLength !== undefined &&
+      (!bestMatch || tokenLength > bestMatch.tokenLength)
+    ) {
+      bestMatch = { code: language.code, tokenLength };
+    }
   }
 
-  return undefined;
+  return bestMatch?.code;
 }
 
 /**

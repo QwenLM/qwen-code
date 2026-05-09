@@ -88,3 +88,20 @@ describe('language normalization', () => {
     expect(t('show version info')).toBe('mostrar informações de versão');
   });
 });
+
+describe('supported language resolution', () => {
+  it('prefers the longest supported locale match', async () => {
+    const { resolveSupportedLanguage } = await import('./languages.js');
+
+    expect(resolveSupportedLanguage('zh-TW')).toBe('zh-TW');
+    expect(resolveSupportedLanguage('zh_TW')).toBe('zh-TW');
+    expect(resolveSupportedLanguage('zh-TW.UTF-8')).toBe('zh-TW');
+  });
+
+  it('keeps existing fallback behavior for generic Chinese locales', async () => {
+    const { resolveSupportedLanguage } = await import('./languages.js');
+
+    expect(resolveSupportedLanguage('zh-CN')).toBe('zh');
+    expect(resolveSupportedLanguage('zh-HK')).toBe('zh');
+  });
+});

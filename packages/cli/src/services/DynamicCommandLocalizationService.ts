@@ -101,6 +101,7 @@ function splitIntoBatches(items: TranslationItem[]): TranslationItem[][] {
 
 export class DynamicCommandLocalizationService {
   private cacheLoaded = false;
+  private cacheLoadPromise: Promise<void> | null = null;
   private readonly cacheEntries = new Map<string, string>();
   private readonly forceRefreshLanguages = new Set<SupportedLanguage>();
   private cacheWriteQueue: Promise<void> = Promise.resolve();
@@ -110,8 +111,14 @@ export class DynamicCommandLocalizationService {
       return;
     }
 
-    this.cacheLoaded = true;
+    if (!this.cacheLoadPromise) {
+      this.cacheLoadPromise = this.loadCache();
+    }
 
+    await this.cacheLoadPromise;
+  }
+
+  private async loadCache(): Promise<void> {
     try {
       const raw = await fs.readFile(getCachePath(), 'utf-8');
       const parsed = JSON.parse(raw) as CacheFile;
@@ -131,6 +138,9 @@ export class DynamicCommandLocalizationService {
           getErrorMessage(error),
         );
       }
+    } finally {
+      this.cacheLoaded = true;
+      this.cacheLoadPromise = null;
     }
   }
 
@@ -140,13 +150,20 @@ export class DynamicCommandLocalizationService {
       entries: Object.fromEntries(this.cacheEntries),
     };
 
-    this.cacheWriteQueue = this.cacheWriteQueue.then(async () => {
+    const writeTask = this.cacheWriteQueue.then(async () => {
       const cachePath = getCachePath();
       await fs.mkdir(path.dirname(cachePath), { recursive: true });
       await fs.writeFile(cachePath, JSON.stringify(payload, null, 2), 'utf-8');
     });
 
-    await this.cacheWriteQueue;
+    this.cacheWriteQueue = writeTask.catch((error) => {
+      debugLogger.warn(
+        'Failed to persist dynamic command translation cache:',
+        getErrorMessage(error),
+      );
+    });
+
+    await writeTask;
   }
 
   requestRefreshForLanguage(language: SupportedLanguage): void {
@@ -239,6 +256,7 @@ export class DynamicCommandLocalizationService {
           signal,
         );
 
+        let hasNewCacheEntry = false;
         for (const item of missing) {
           const translated = translations.get(item.id)?.trim();
           if (!translated) {
@@ -256,9 +274,12 @@ export class DynamicCommandLocalizationService {
             buildCacheKey(language, buildFingerprint(target)),
             translated,
           );
+          hasNewCacheEntry = true;
         }
 
-        await this.persistCache();
+        if (hasNewCacheEntry) {
+          await this.persistCache();
+        }
       } catch (error) {
         if (!signal.aborted) {
           debugLogger.warn(
@@ -317,29 +338,40 @@ export class DynamicCommandLocalizationService {
         JSON.stringify(batch, null, 2),
       ].join('\n');
 
-      const response = await config.getBaseLlmClient().generateJson({
-        model,
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        schema: {
-          type: 'object',
-          properties: {
-            translations: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  id: { type: 'string' },
-                  text: { type: 'string' },
+      let response: Record<string, unknown>;
+      try {
+        response = (await config.getBaseLlmClient().generateJson({
+          model,
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          schema: {
+            type: 'object',
+            properties: {
+              translations: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    text: { type: 'string' },
+                  },
+                  required: ['id', 'text'],
                 },
-                required: ['id', 'text'],
               },
             },
+            required: ['translations'],
           },
-          required: ['translations'],
-        },
-        abortSignal: signal,
-        promptId: 'dynamic_command_localization',
-      });
+          abortSignal: signal,
+          promptId: 'dynamic_command_localization',
+        })) as Record<string, unknown>;
+      } catch (error) {
+        if (!signal.aborted) {
+          debugLogger.warn(
+            'Failed to translate dynamic command description batch:',
+            getErrorMessage(error),
+          );
+        }
+        break;
+      }
 
       const entries = Array.isArray(response['translations'])
         ? response['translations']

@@ -26,7 +26,11 @@ import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
 import type { LoadedSettings } from './config/settings.js';
-import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
+import {
+  CommandKind,
+  type ExecutionMode,
+  type SlashCommand,
+} from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
 import {
@@ -111,13 +115,7 @@ describe('runNonInteractive', () => {
       filterCommandsForMode(mockGetCommands(), mode),
     );
     mockCommandServiceFromCommands.mockImplementation(
-      (
-        commands: Array<{
-          name: string;
-          modelInvocable?: boolean;
-          hidden?: boolean;
-        }>,
-      ) => ({
+      (commands: readonly SlashCommand[]) => ({
         getCommands: () => commands,
         getCommandsForMode: (mode: ExecutionMode) =>
           filterCommandsForMode(commands, mode),

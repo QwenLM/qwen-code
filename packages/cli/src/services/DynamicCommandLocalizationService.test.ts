@@ -190,6 +190,118 @@ describe('DynamicCommandLocalizationService', () => {
     expect(secondGenerateJson).toHaveBeenCalledTimes(1);
   });
 
+  it('waits for an in-flight cache load before clearing language entries', async () => {
+    const service = new DynamicCommandLocalizationService();
+    await service.localizeCommands(
+      mockConfig,
+      [makeDynamicCommand()],
+      new AbortController().signal,
+      true,
+    );
+
+    generateJson.mockClear();
+
+    const cachePath = path.join(tempDir, 'dynamic-command-translations.json');
+    const secondService = new DynamicCommandLocalizationService();
+    const localizePromise = secondService.localizeCommands(
+      mockConfig,
+      [makeDynamicCommand()],
+      new AbortController().signal,
+      true,
+    );
+    const clearPromise = secondService.clearCacheForLanguage('zh');
+
+    const [localized, deleted] = await Promise.all([
+      localizePromise,
+      clearPromise,
+    ]);
+
+    expect(localized[0]?.description).toBe('审查代码变更');
+    expect(deleted).toBeGreaterThan(0);
+    expect(generateJson).not.toHaveBeenCalled();
+
+    const raw = await fs.readFile(cachePath, 'utf-8');
+    const parsed = JSON.parse(raw) as { entries: Record<string, string> };
+    expect(Object.keys(parsed.entries)).toHaveLength(0);
+  });
+
+  it('continues writing cache entries after a previous write failure', async () => {
+    const cachePath = path.join(tempDir, 'dynamic-command-translations.json');
+    const fileInsteadOfDir = path.join(tempDir, 'not-a-directory');
+    await fs.writeFile(fileInsteadOfDir, 'not a directory', 'utf-8');
+    vi.mocked(Storage.getGlobalQwenDir).mockReturnValue(fileInsteadOfDir);
+
+    const service = new DynamicCommandLocalizationService();
+    const firstLocalized = await service.localizeCommands(
+      mockConfig,
+      [makeDynamicCommand()],
+      new AbortController().signal,
+      true,
+    );
+
+    expect(firstLocalized[0]?.description).toBe('审查代码变更');
+
+    vi.mocked(Storage.getGlobalQwenDir).mockReturnValue(tempDir);
+    generateJson.mockResolvedValueOnce({
+      translations: [{ id: 'review', text: '恢复审查代码变更' }],
+    });
+
+    service.requestRefreshForLanguage('zh');
+    const secondLocalized = await service.localizeCommands(
+      mockConfig,
+      [makeDynamicCommand()],
+      new AbortController().signal,
+      true,
+    );
+
+    expect(secondLocalized[0]?.description).toBe('恢复审查代码变更');
+
+    const raw = await fs.readFile(cachePath, 'utf-8');
+    const parsed = JSON.parse(raw) as { entries: Record<string, string> };
+    expect(Object.values(parsed.entries)).toContain('恢复审查代码变更');
+  });
+
+  it('persists successful batch translations when a later batch fails', async () => {
+    const commands = Array.from({ length: 25 }, (_, index) =>
+      makeDynamicCommand({
+        name: `cmd${index}`,
+        description: `Command ${index}`,
+        modelDescription: `Command ${index}`,
+      }),
+    );
+
+    generateJson
+      .mockResolvedValueOnce({
+        translations: Array.from({ length: 24 }, (_, index) => ({
+          id: `cmd${index}`,
+          text: `已翻译 ${index}`,
+        })),
+      })
+      .mockRejectedValueOnce(new Error('batch failed'));
+
+    const service = new DynamicCommandLocalizationService();
+    const localized = await service.localizeCommands(
+      mockConfig,
+      commands,
+      new AbortController().signal,
+      true,
+    );
+
+    expect(generateJson).toHaveBeenCalledTimes(2);
+    expect(localized[0]?.description).toBe('已翻译 0');
+    expect(localized[23]?.description).toBe('已翻译 23');
+    expect(localized[24]?.description).toBe('Command 24');
+
+    const raw = await fs.readFile(
+      path.join(tempDir, 'dynamic-command-translations.json'),
+      'utf-8',
+    );
+    const parsed = JSON.parse(raw) as { entries: Record<string, string> };
+    expect(Object.values(parsed.entries)).toHaveLength(24);
+    expect(Object.values(parsed.entries)).toContain('已翻译 0');
+    expect(Object.values(parsed.entries)).toContain('已翻译 23');
+  });
+
   it('localizes nested subcommand descriptions recursively', async () => {
     generateJson.mockResolvedValueOnce({
       translations: [
