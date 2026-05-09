@@ -101,6 +101,12 @@ async function handle(req) {
       // no-op
       break;
     default:
+      // Loud-fail on unknown methods so MCP SDK upgrades that add new probes
+      // (e.g. logging/setLevel, sampling/createMessage) surface via the cli's
+      // MCP STDERR debug logger instead of silently degrading the fixture.
+      process.stderr.write(
+        `echo-mcp[${NAME}]: unhandled method "${req.method}"\n`,
+      );
       if (id !== undefined) {
         send({
           jsonrpc: '2.0',

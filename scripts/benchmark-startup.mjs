@@ -107,7 +107,8 @@ function parseArgs(argv) {
     out: '',
     baseline: '',
     cliEntry: CLI_ENTRY,
-    nonInteractive: false,
+    interactive: false,
+    interactiveTimeoutMs: 30000,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -133,8 +134,12 @@ function parseArgs(argv) {
         out.cliEntry = next;
         i++;
         break;
-      case '--non-interactive':
-        out.nonInteractive = true;
+      case '--interactive':
+        out.interactive = true;
+        break;
+      case '--interactive-timeout':
+        out.interactiveTimeoutMs = parseInt(next, 10);
+        i++;
         break;
       case '-h':
       case '--help':
@@ -157,7 +162,19 @@ function parseArgs(argv) {
 
 function printHelp() {
   process.stderr.write(
-    `Usage: scripts/benchmark-startup.mjs --fixture <name> --runs <N> --out <path> [--baseline <prev.summary.json>] [--non-interactive]\n` +
+    `Usage: scripts/benchmark-startup.mjs --fixture <name> --runs <N> --out <path>\n` +
+      `       [--baseline <prev.summary.json>]\n` +
+      `       [--interactive] [--interactive-timeout <ms>]\n` +
+      `\n` +
+      `By default the harness runs --prompt noop (non-interactive). It captures\n` +
+      `everything except interactive-only metrics (first_paint, input_enabled).\n` +
+      `\n` +
+      `--interactive uses node-pty to give the cli a real TTY, waits for the\n` +
+      `profile JSON to be written by AppContainer's mount effect (which fires\n` +
+      `finalizeStartupProfile after input_enabled), then sends Ctrl+C. This\n` +
+      `captures first_paint / input_enabled / config_initialize_dur / MCP\n` +
+      `events / gemini_tools_updated.\n` +
+      `\n` +
       `Fixtures: ${listFixtures().join(', ')}\n`,
   );
 }
@@ -190,7 +207,14 @@ function listExistingProfiles(perfDir) {
 }
 
 async function runOne(opts, fixture, attempt) {
-  const env = {
+  if (opts.interactive) {
+    return runOneInteractive(opts, fixture, attempt);
+  }
+  return runOneNonInteractive(opts, fixture, attempt);
+}
+
+function buildEnv(fixtureDir) {
+  return {
     ...process.env,
     QWEN_CODE_PROFILE_STARTUP: '1',
     // Force the profiler to activate without an actual OS sandbox.
@@ -198,14 +222,167 @@ async function runOne(opts, fixture, attempt) {
     // QWEN_HOME points at the directory that *contains* `settings.json`
     // directly (it becomes `~/.qwen/`). Each fixture stores settings under
     // `<fixture>/.qwen/settings.json`, so QWEN_HOME = <fixture>/.qwen.
-    QWEN_HOME: path.join(fixture.dir, '.qwen'),
+    QWEN_HOME: path.join(fixtureDir, '.qwen'),
     // HOME is set so any code path that falls back to `os.homedir()` lands
     // in the fixture rather than the developer's real home.
-    HOME: fixture.dir,
+    HOME: fixtureDir,
     // Avoid colored output in benchmarks.
     NO_COLOR: '1',
     QWEN_CODE_NO_UPDATE_CHECK: '1',
   };
+}
+
+/**
+ * Interactive variant: spawn the cli through node-pty so the cli sees a real
+ * TTY (it won't otherwise enter the interactive UI path). We poll the
+ * fixture's startup-perf dir for the new profile JSON file — the cli writes
+ * it from AppContainer's mount effect after input_enabled, so once it
+ * appears we know first_paint / config_initialize_* / input_enabled / MCP
+ * events have all been recorded. Then we send Ctrl+C to terminate the cli
+ * cleanly.
+ */
+/**
+ * node-pty ships its `spawn-helper` binary without the executable bit set
+ * inside the npm tarball, so a fresh `npm install` produces a binary that
+ * `posix_spawnp` refuses to run with EACCES. We chmod it once on first use
+ * to keep the harness robust against fresh checkouts. Idempotent / cheap.
+ */
+function ensurePtyHelperExecutable() {
+  const candidates = [
+    `darwin-${process.arch}`,
+    `linux-${process.arch}`,
+  ];
+  for (const dir of candidates) {
+    const helper = path.join(
+      REPO_ROOT,
+      'node_modules/node-pty/prebuilds',
+      dir,
+      'spawn-helper',
+    );
+    try {
+      const st = fs.statSync(helper);
+      if (!(st.mode & 0o111)) {
+        fs.chmodSync(helper, st.mode | 0o755);
+      }
+    } catch {
+      // Helper for this arch may not exist on the current platform; ignore.
+    }
+  }
+}
+
+async function runOneInteractive(opts, fixture, attempt) {
+  ensurePtyHelperExecutable();
+  const pty = await import('node-pty');
+  const env = buildEnv(fixture.dir);
+  const perfDir = getPerfDir(fixture);
+  const before = listExistingProfiles(perfDir);
+
+  return await new Promise((resolve) => {
+    const child = pty.spawn(process.execPath, [opts.cliEntry], {
+      cwd: fixture.dir,
+      env,
+      cols: 120,
+      rows: 40,
+      name: 'xterm-256color',
+    });
+
+    let done = false;
+    let stderrBuf = '';
+    child.onData((d) => {
+      stderrBuf += d.toString();
+      // Cap buffer so we don't OOM on repeating output.
+      if (stderrBuf.length > 64 * 1024) {
+        stderrBuf = stderrBuf.slice(-32 * 1024);
+      }
+    });
+
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      try {
+        child.kill('SIGINT');
+      } catch {
+        /* ignore */
+      }
+      // Give the process a brief moment to flush before forcing exit.
+      setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }, 1500);
+      resolve(result);
+    };
+
+    // Poll the perf dir for the new profile file.
+    const pollInterval = setInterval(() => {
+      const after = listExistingProfiles(perfDir);
+      const created = [...after].filter((f) => !before.has(f));
+      if (created.length > 0) {
+        clearInterval(pollInterval);
+        clearTimeout(timeoutHandle);
+        const file = path.join(perfDir, created[created.length - 1]);
+        // The profiler writes the file synchronously via fs.writeFileSync,
+        // so by the time we see the directory entry, the JSON is complete.
+        try {
+          const report = JSON.parse(fs.readFileSync(file, 'utf-8'));
+          finish({ attempt, ok: true, file, report });
+        } catch (err) {
+          finish({
+            attempt,
+            ok: false,
+            reason: `parse failure: ${err.message}`,
+            stderr: stderrBuf,
+          });
+        }
+      }
+    }, 100);
+
+    const timeoutHandle = setTimeout(() => {
+      clearInterval(pollInterval);
+      finish({
+        attempt,
+        ok: false,
+        reason: `interactive run timed out after ${opts.interactiveTimeoutMs}ms`,
+        stderr: stderrBuf.slice(-2000),
+      });
+    }, opts.interactiveTimeoutMs);
+
+    child.onExit(() => {
+      // If the child exits before we see the profile, that's a failure.
+      if (!done) {
+        clearInterval(pollInterval);
+        clearTimeout(timeoutHandle);
+        // Give the filesystem a tiny window in case writeFileSync is racing
+        // with directory listing.
+        setTimeout(() => {
+          const after = listExistingProfiles(perfDir);
+          const created = [...after].filter((f) => !before.has(f));
+          if (created.length > 0) {
+            const file = path.join(perfDir, created[created.length - 1]);
+            try {
+              const report = JSON.parse(fs.readFileSync(file, 'utf-8'));
+              finish({ attempt, ok: true, file, report });
+              return;
+            } catch {
+              /* fall through */
+            }
+          }
+          finish({
+            attempt,
+            ok: false,
+            reason: 'cli exited before profile was produced',
+            stderr: stderrBuf.slice(-2000),
+          });
+        }, 50);
+      }
+    });
+  });
+}
+
+async function runOneNonInteractive(opts, fixture, attempt) {
+  const env = buildEnv(fixture.dir);
 
   const perfDir = getPerfDir(fixture);
   // Snapshot existing perf files so we can identify the new one.

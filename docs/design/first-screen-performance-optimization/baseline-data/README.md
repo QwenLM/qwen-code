@@ -11,11 +11,11 @@ Collected via `scripts/benchmark-startup.mjs` on this branch (PR0+1) before any 
 - **Platform**: macOS (`darwin arm64`) — MacBook M-series
 - **Bundle**: `dist/cli.js` (production bundle, post-`npm run bundle`)
 - **Profiler activation**: `QWEN_CODE_PROFILE_STARTUP=1` + `SANDBOX=1` (faked sandbox env)
-- **Mode**: non-interactive (`--prompt noop`)
+- **Modes (both committed)**: non-interactive (`--prompt noop`) AND interactive (`--interactive` via node-pty pty allocation). Both run 4 fixtures × 30 samples.
 
-> **Limitation**: The non-interactive harness does NOT capture interactive-only checkpoints (`first_paint`, `input_enabled`). Those are emitted from `AppContainer`'s mount effect and require a TTY. An interactive benchmark mode (using `node-pty` or similar) is a known follow-up; see `05-rollout-and-rollback.md`. The metrics below are sufficient for PR2 (settings) and PR4 (MCP); PR3's `processUptimeAtT0Ms` improvement is also visible here.
+## Per-fixture summary (p50, n=30)
 
-## Per-fixture summary (p50)
+### Non-interactive (`<fixture>.summary.json`)
 
 | Fixture           | `processUptimeAtT0Ms` | `before_render` | `config_initialize_dur` | `mcp_first_tool` | `mcp_all_settled` | `gemini_tools_lag` |
 | ----------------- | --------------------- | --------------- | ----------------------- | ---------------- | ----------------- | ------------------ |
@@ -24,7 +24,20 @@ Collected via `scripts/benchmark-startup.mjs` on this branch (PR0+1) before any 
 | `three-mixed-mcp` | 462                   | 81              | **6679**                | 335              | **6734**          | **6425**           |
 | `flaky-mcp`       | 456                   | 80              | **10045**               | —                | 10100             | —                  |
 
-(All numbers in ms. n=30 per fixture.)
+### Interactive (`<fixture>-interactive.summary.json`)
+
+| Fixture           | `first_paint` | `input_enabled` | `config_initialize_dur` | `mcp_first_tool` | `mcp_all_settled` | `gemini_tools_lag` |
+| ----------------- | ------------- | --------------- | ----------------------- | ---------------- | ----------------- | ------------------ |
+| `no-mcp`          | 420           | 480             | 70                      | —                | 469               | —                  |
+| `one-fast-mcp`    | 422           | 875             | 464                     | 866              | 866               | 9.9                |
+| `three-mixed-mcp` | 423           | **7101**        | **6688**                | 872              | **7077**          | **6235**           |
+| `flaky-mcp`       | 413           | **10483**       | **10081**               | —                | 10467             | —                  |
+
+### Heisenberg (`heisenberg.summary.json`, profiler overhead)
+
+`profiler-on-heap` vs `profiler-off`: Δp50 = -9 ms (-1.12%), Welch's t-test p = 0.092 — within noise band, methodology validated. See `heisenberg.report.md`.
+
+(All numbers in ms.)
 
 ## What this tells us (interpretation, no decisions yet)
 

@@ -311,6 +311,20 @@ describe('startupProfiler', () => {
       expect(dp.gemini_tools_lag).toBeGreaterThanOrEqual(0);
     });
 
+    it('caps the events array at MAX_EVENTS and flags truncation', () => {
+      initStartupProfiler();
+      profileCheckpoint('main_entry');
+      // Force well past the cap.
+      for (let i = 0; i < 2000; i++) {
+        recordStartupEvent(`evt:${i}`);
+      }
+      const report = getStartupReport()!;
+      // Cap is 1024; report should reflect both the cap and the truncated flag.
+      expect(report.events.length).toBeLessThanOrEqual(1024);
+      expect(report.events.length).toBeGreaterThan(1000);
+      expect(report.eventsTruncated).toBe(true);
+    });
+
     it('captures heap snapshots at each checkpoint by default', () => {
       initStartupProfiler();
       profileCheckpoint('phase_a');

@@ -55,16 +55,17 @@ qwen-code 的交互式启动管线存在两类用户感知问题：
 
 ### 1.3 设计目标（量化）
 
-| 指标                           | 当前估计 (待 PR0+1 确认 baseline) | 目标 (PR4 完成后, p50)         |
-| ------------------------------ | --------------------------------- | ------------------------------ |
-| `before_render`                | 80ms (no-mcp)                     | -50~150ms                      |
-| `first_paint`                  | 待补 (interactive harness)        | -150~300ms                     |
-| `input_enabled`                | 待补 (interactive harness)        | -300~600ms                     |
-| `mcp_first_tool_registered`    | 335ms (one-fast-mcp baseline)     | < 2s（最快 server 响应时间）   |
-| `gemini_tools_lag`             | 6425ms (three-mixed-mcp p50)      | **≤ 16ms**（一帧 batch flush） |
-| `mcp_all_servers_settled`      | 6734ms (three-mixed-mcp p50)      | 不退化                         |
-| `interactive_bundle_size` (gz) | 待测                              | -10~25%                        |
-| `headless_bundle_size`         | 待测                              | **不含 Ink/AppContainer**      |
+| 指标                           | PR0+1 baseline (p50)                                  | 目标 (PR4 完成后, p50)                            |
+| ------------------------------ | ----------------------------------------------------- | ------------------------------------------------- |
+| `before_render`                | 79-81 ms (跨 fixture)                                 | -50~150 ms                                        |
+| `first_paint`                  | 420 ms (no-mcp 交互态)                                | -150~300 ms                                       |
+| `input_enabled`                | 480 ms (no-mcp 交互), 7101 ms (three-mixed 交互)      | no-mcp -300 ms; 慢 MCP fixture 下不再被 MCP 拖延  |
+| `config_initialize_dur`        | 70 ms (no-mcp 交互), 6688 ms (three-mixed 交互)       | 慢 MCP fixture 下 ≤ 1s（PR4 fire-and-forget MCP） |
+| `mcp_first_tool_registered`    | 866 ms (one-fast-mcp 交互), 872 ms (three-mixed 交互) | < 500 ms（最快 server 响应时间）                  |
+| `gemini_tools_lag`             | 6235 ms (three-mixed 交互)                            | **≤ 16 ms**（一帧 batch flush，~390x 改善）       |
+| `mcp_all_servers_settled`      | 7077 ms (three-mixed 交互)                            | 不退化（仍由最慢 server 决定）                    |
+| `interactive_bundle_size` (gz) | 待测（PR3 引入）                                      | -10~25%                                           |
+| `headless_bundle_size`         | 待测（PR3 引入）                                      | **不含 Ink/AppContainer**                         |
 
 ### 1.4 不做项（明确边界）
 
@@ -83,6 +84,8 @@ qwen-code 的交互式启动管线存在两类用户感知问题：
 > - qwen-code（本仓）：`packages/`
 > - Gemini CLI：`/Users/gawain/Documents/codebase/opensource/gemini-cli/`
 > - Claude Code：`/Users/gawain/Documents/codebase/opensource/claude-code/`
+>
+> **Last verified**: 2026-05-09 against `gemini-cli@1a894c18e`, `claude-code@496a077`. 行号会随上游演进失准；如果引用不上，先 `git log --all -- <path>` 找最近相关提交再回到本节更新。
 >
 > 任何后续设计决策都应能在此节找到 file:line 级证据；无证据的"借鉴"不算数。
 
@@ -1226,11 +1229,15 @@ PR0+1 合并后，整体路径如下：
 - **Platform**: macOS (`darwin arm64`) —— MacBook M-series
 - **Bundle**: `dist/cli.js` (`npm run bundle` 产物)
 - **Profiler**: `QWEN_CODE_PROFILE_STARTUP=1` + `SANDBOX=1`（faked sandbox env）
-- **Mode**: 非交互（`--prompt noop`）
+- **Modes**: 两套 baseline，**两种都跑 4 fixture × 30 runs**：
+  - **非交互** (`--prompt noop`)：覆盖 `module_load → before_render` + MCP（共享 init 路径）。
+  - **交互** (`--interactive` via node-pty)：额外覆盖 `first_paint` / `input_enabled` / `config_initialize_dur`（仅在 AppContainer mount-effect 中才会被记录）。
 
-> **Limitation**: 非交互 harness 不捕获 `first_paint`、`input_enabled`（这些来自 `AppContainer` 的 mount effect，需 TTY）。已在 § 5.6 标注，是后续工作。
+PR2/3/4 提交时**两套都对照**：PR2/PR3 关注非交互 + 交互；PR4 主要 MCP 指标在交互 baseline 中数量级更大、信号更清晰。
 
-### 11.2 Per-fixture 摘要 (p50, n=30)
+### 11.2 Per-fixture 摘要 (p50, n=30, 单位 ms)
+
+#### 11.2.A 非交互（base path）
 
 | Fixture           | `processUptimeAtT0Ms` | `before_render` | `config_initialize_dur` | `mcp_first_tool` | `mcp_all_settled` | `gemini_tools_lag` |
 | ----------------- | --------------------- | --------------- | ----------------------- | ---------------- | ----------------- | ------------------ |
@@ -1239,7 +1246,50 @@ PR0+1 合并后，整体路径如下：
 | `three-mixed-mcp` | 462                   | 81              | **6679**                | 335              | **6734**          | **6425**           |
 | `flaky-mcp`       | 456                   | 80              | **10045**               | —                | 10100             | —                  |
 
-（所有数字单位 ms。）
+#### 11.2.B 交互（含 first_paint / input_enabled，n=30 each via node-pty）
+
+| Fixture           | `first_paint` | `input_enabled` | `config_initialize_dur` | `mcp_first_tool` | `mcp_all_settled` | `gemini_tools_lag` |
+| ----------------- | ------------- | --------------- | ----------------------- | ---------------- | ----------------- | ------------------ |
+| `no-mcp`          | 420           | 480             | 70                      | —                | 469               | —                  |
+| `one-fast-mcp`    | 422           | 875             | 464                     | 866              | 866               | 9.9                |
+| `three-mixed-mcp` | 423           | **7101**        | **6688**                | 872              | **7077**          | **6235**           |
+| `flaky-mcp`       | 413           | **10483**       | **10081**               | —                | 10467             | —                  |
+
+**关键观察**：
+
+- `first_paint` 在所有 fixture 中稳定在 ~420ms —— 因为它在 `config.initialize()` 之前完成（AppContainer 已 mount 但 effect 还没跑）。这正是 qwen-code "UI 早现 + 后台 init" 的设计；PR4 渐进式 MCP 不动这一行，只 PR3 能改善。
+- `input_enabled` 与 `config_initialize_dur` 强相关：交互态下 `config.initialize()` 在 mount 后跑，包含 MCP discovery，因此一旦 MCP 慢就直接拖后 input_enabled。
+- 交互 vs 非交互：one-fast-mcp 下 `config_initialize_dur` 交互 (464ms) 比非交互 (264ms) 多 200ms —— 说明 React render + AppContainer 副作用与 MCP 子进程 spawn 竞争 cycles。这块有额外优化空间（不在当前 4 个 PR 范围，记入 backlog）。
+- `gemini_tools_lag` 6235ms（交互 three-mixed-mcp）—— **PR4 的 16ms batch flush 应把这个降到 ≤16ms（~390x 改善）**。
+
+数据落盘：`baseline-data/<fixture>{,-interactive}.summary.json`。
+
+### 11.2.0 Heisenberg 验证（profiler 自身开销）
+
+`scripts/benchmark-heisenberg.mjs` 跑 3 配置 × 30 samples，全部带 `SANDBOX=1` 隔离 sandbox-relaunch 路径，仅切换 profiler 状态。结果（macOS arm64, Node 24.15）：
+
+| Config             | p50 (ms) | Δ vs off | t-test p | 结论     |
+| ------------------ | -------- | -------- | -------- | -------- |
+| profiler-off       | 813.6    | —        | —        | baseline |
+| profiler-on-noheap | 807.5    | -6.1     | 0.079    | 噪声     |
+| profiler-on-heap   | 804.5    | -9.1     | 0.092    | 噪声     |
+
+p > 0.05，无法拒绝零假设，**profiler 开销在统计噪声内**（< 1%）。负号是测量方差，不构成"profiler 反而更快"的可信结论。验证 § 9.3 退出条件通过。
+
+数据落盘：`baseline-data/heisenberg.{summary.json,report.md}`。
+
+> **Foot-gun 提示**：harness 的所有配置必须保留 `SANDBOX=1`。删了 `SANDBOX=1` 的话 cli 会触发真实 sandbox 子进程 spawn（约 +700ms），完全淹没 profiler 开销信号。第一版 harness 没保留这一点，跑出来"profiler-off 比 on 慢一倍"的离谱数字 —— 注释已加进 `benchmark-heisenberg.mjs` 防止再踩。
+
+### 11.2.1 已知现象：`gemini_tools_updated` 在启动期触发两次
+
+baseline trace 中 `gemini_tools_updated` 在间隔约 0.02ms 内触发两次。诊断结果：
+
+1. **第 1 次**：`client.initialize()` → `startChat()` (`client.ts:438`) → `setTools()` —— 初始 chat 带内置工具。
+2. **第 2 次**：`SkillTool` 构造器 fire-and-forget 调用 `refreshSkills()` (`tools/skill.ts:98`)，加载完技能后触发 `setTools()` 更新描述。
+
+不是 bug —— 是 SkillTool 异步注册的副作用。**反过来印证 PR4 的 16ms batch flush 是正确选择**：这种"短时间内多次 setTools"的模式在引入 MCP per-server-ready 后会更频繁，batch flush 会自然合并这类调用，避免重复刷新模型 tools declaration。
+
+PR4 落地后期望：`gemini_tools_lag` 仅记录到 1 次 setTools（合并后）。
 
 ### 11.3 解读（无决策，仅观察）
 

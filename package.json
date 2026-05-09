@@ -117,6 +117,7 @@
     "mnemonist": "^0.40.3",
     "mock-fs": "^5.5.0",
     "msw": "^2.10.4",
+    "node-pty": "^1.1.0",
     "npm-run-all": "^4.1.5",
     "prettier": "^3.5.3",
     "react-devtools-core": "^4.28.5",

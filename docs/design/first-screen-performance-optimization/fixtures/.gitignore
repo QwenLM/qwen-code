@@ -17,6 +17,8 @@
 */.qwen/settings.json.orig
 */.qwen/skills/
 */.qwen/tmp/
+*/.qwen/tip_history.json
+*/.qwen/migration-version
 
 # Fixture roots (HOME-level artifacts qwen-code writes outside .qwen/)
 */debug/
@@ -25,6 +27,4 @@
 */.bash_history
 */.npm/
 */.cache/
-
-# Migration-flag files
-*/.qwen/migration-version
+*/.config/

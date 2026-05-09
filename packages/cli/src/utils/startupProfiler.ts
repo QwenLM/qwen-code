@@ -93,6 +93,8 @@ export interface StartupReport {
   totalMs: number;
   phases: StartupPhase[];
   events: StartupEvent[];
+  /** True if the events list hit MAX_EVENTS and dropped some entries. */
+  eventsTruncated: boolean;
   derivedPhases: DerivedPhases;
   nodeVersion: string;
   platform: string;
@@ -107,7 +109,14 @@ let t0 = 0;
 let processUptimeAtT0Ms = 0;
 let checkpoints: Checkpoint[] = [];
 let events: StartupEvent[] = [];
+let eventsTruncated = false;
 let finalized = false;
+
+// Defense-in-depth cap on the events list. Under normal flow `finalized`
+// stops new events shortly after `input_enabled`. This bound only matters in
+// pathological paths where finalize is bypassed (e.g. crash before the mount
+// effect runs while MCP still emits server-ready events).
+const MAX_EVENTS = 1024;
 
 const HEAP_BYTES_TO_MB = 1 / (1024 * 1024);
 
@@ -175,6 +184,10 @@ export function recordStartupEvent(
   attrs?: StartupEventAttrs,
 ): void {
   if (!enabled || finalized) return;
+  if (events.length >= MAX_EVENTS) {
+    eventsTruncated = true;
+    return;
+  }
   events.push({
     name,
     tMs: Math.round((performance.now() - t0) * 100) / 100,
@@ -288,6 +301,7 @@ export function getStartupReport(): StartupReport | null {
     totalMs: Math.round((lastTimestamp - t0) * 100) / 100,
     phases,
     events: [...events],
+    eventsTruncated,
     derivedPhases: computeDerivedPhases(),
     nodeVersion: process.version,
     platform: process.platform,
@@ -329,6 +343,7 @@ export function resetStartupProfiler(): void {
   processUptimeAtT0Ms = 0;
   checkpoints = [];
   events = [];
+  eventsTruncated = false;
   finalized = false;
 }
 
