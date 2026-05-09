@@ -2385,33 +2385,48 @@ function AppShellContent({
             <div className="flex h-full flex-col select-none pt-[48px]">
               {/* Sidebar Top Section */}
               <div className="flex-1 flex flex-col min-h-0">
-                {/* New Session Button - Gmail-style, with context menu for "Open in New Window" */}
-                <div className="px-2 pb-2 shrink-0">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <div>
-                        <ContextMenu modal={true}>
-                          <ContextMenuTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              onClick={(e) => handleNewChat(e.metaKey || e.ctrlKey)}
-                              className="w-full justify-start gap-2 py-[7px] px-2 text-[13px] font-normal rounded-[6px] shadow-minimal bg-background"
-                              data-tutorial="new-chat-button"
-                            >
-                              <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
-                              {t("session.newSession")}
-                            </Button>
-                          </ContextMenuTrigger>
-                          <StyledContextMenuContent>
-                            <ContextMenuProvider>
-                              <SidebarMenu type="newSession" />
-                            </ContextMenuProvider>
-                          </StyledContextMenuContent>
-                        </ContextMenu>
-                      </div>
-                    </TooltipTrigger>
-                    <TooltipContent side="right">{newChatHotkey}</TooltipContent>
-                  </Tooltip>
+                {/* New Session Button - matches sidebar rows, with context menu for "Open in New Window" */}
+                <div className="px-2 pb-0 shrink-0">
+                  <ContextMenu modal={true}>
+                    <ContextMenuTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={(e) => handleNewChat(e.metaKey || e.ctrlKey)}
+                        className={cn(
+                          "group flex w-full items-center gap-2 rounded-[6px] px-2 py-[5px]",
+                          "text-[13px] font-normal select-none outline-none titlebar-no-drag",
+                          "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover",
+                          "focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
+                        )}
+                        data-tutorial="new-chat-button"
+                      >
+                        <SquarePenRounded
+                          className="h-3.5 w-3.5 shrink-0"
+                          style={{
+                            color: 'color-mix(in oklch, var(--foreground) 60%, transparent)',
+                          }}
+                        />
+                        <span className="min-w-0 flex-1 truncate text-left">
+                          {t("session.newSession")}
+                        </span>
+                        {newChatHotkey && (
+                          <span
+                            className={cn(
+                              "ml-auto shrink-0 text-xs text-foreground/30 opacity-0 transition-opacity",
+                              "group-hover:opacity-100 group-focus-visible:opacity-100 group-data-[state=open]:opacity-100",
+                            )}
+                          >
+                            {newChatHotkey}
+                          </span>
+                        )}
+                      </button>
+                    </ContextMenuTrigger>
+                    <StyledContextMenuContent>
+                      <ContextMenuProvider>
+                        <SidebarMenu type="newSession" />
+                      </ContextMenuProvider>
+                    </StyledContextMenuContent>
+                  </ContextMenu>
                 </div>
                 <div className="shrink-0 border-b border-foreground/5 py-2">
                   <LeftSidebar
