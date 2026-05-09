@@ -24,6 +24,7 @@ import {
   CODING_PLAN_ENV_KEY,
   CodingPlanRegion,
   SUBSCRIPTION_PLAN_OPTIONS,
+  TOKEN_PLAN_ENV_KEY,
   findSubscriptionPlanByConfig,
   getSubscriptionPlanConfig,
   isSubscriptionPlanConfig,
@@ -57,7 +58,7 @@ export type VSCodeModelProviders = Record<string, string>;
  * Values extracted from ~/.qwen/settings.json for populating VSCode Settings.
  */
 export interface QwenSettingsForVSCode {
-  provider: 'coding-plan' | 'api-key';
+  provider: 'coding-plan' | 'token-plan' | 'api-key';
   apiKey: string;
   codingPlanRegion: 'china' | 'global';
 }
@@ -351,6 +352,60 @@ export function writeCodingPlanConfig(
 }
 
 /**
+ * Write Token Plan configuration to ~/.qwen/settings.json.
+ * Auto-injects model providers from the token plan template,
+ * preserving any existing non-Token-Plan entries.
+ *
+ * @returns The injected models as a VSCode key-value map (modelId → baseUrl)
+ */
+export function writeTokenPlanConfig(apiKey: string): VSCodeModelProviders {
+  const settings = readSettings();
+  const planConfig = getSubscriptionPlanConfig('token');
+
+  // Auth
+  const auth = ensureNestedObject(settings, 'security', 'auth');
+  auth.selectedType = AuthType.USE_OPENAI;
+
+  // API key
+  const env = ensureNestedObject(settings, 'env');
+  env[TOKEN_PLAN_ENV_KEY] = apiKey;
+
+  // Model providers — merge Token Plan templates with existing non-TP entries
+  const providers = ensureNestedObject(settings, 'modelProviders');
+  const existing = findOpenaiModels(
+    settings.modelProviders as Record<string, unknown>,
+  );
+  const nonTokenPlan = existing.filter(
+    (e) => !isSubscriptionPlanConfig(e.baseUrl as string, e.envKey as string),
+  );
+  const planModels = planConfig.template.map((model) => ({
+    ...model,
+    envKey: planConfig.envKey,
+  }));
+  providers[AuthType.USE_OPENAI] = [...planModels, ...nonTokenPlan];
+
+  // Token Plan metadata
+  const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
+  providerMetadata['token-plan'] = {
+    version: planConfig.version,
+  };
+  delete settings.tokenPlan;
+
+  // Default model
+  const defaultModelId = planConfig.template[0]?.id ?? 'qwen3.5-plus';
+  settings.model = { name: defaultModelId };
+
+  writeSettings(settings);
+
+  // Return key-value map for VSCode settings
+  const result: VSCodeModelProviders = {};
+  for (const m of planConfig.template) {
+    result[m.id] = m.baseUrl || '';
+  }
+  return result;
+}
+
+/**
  * Write model providers from VSCode Settings (key-value map) to ~/.qwen/settings.json.
  * Used when provider = "api-key" and user edits the modelProviders map.
  *
@@ -623,7 +678,15 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
     };
   }
 
-  // Non-Coding-Plan — find API key from model providers
+  if (subscriptionPlan?.plan.id === 'token') {
+    return {
+      provider: 'token-plan',
+      apiKey: env[subscriptionPlan.plan.envKey] || '',
+      codingPlanRegion: 'china',
+    };
+  }
+
+  // Non-subscription-plan — find API key from model providers
   const firstEnvKey = (openaiModels[0]?.envKey as string) || 'OPENAI_API_KEY';
   const apiKey = env[firstEnvKey] || '';
 

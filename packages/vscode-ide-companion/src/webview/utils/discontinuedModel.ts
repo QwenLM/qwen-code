@@ -25,7 +25,7 @@ export const QWEN_OAUTH_AUTH_TYPE = 'qwen-oauth';
 /** User-facing strings for the discontinued state (English-only — webview has no i18n runtime). */
 export const DISCONTINUED_MESSAGES = {
   badge: '(Discontinued)',
-  description: 'Discontinued — switch to Coding Plan or API Key',
+  description: 'Discontinued — switch to Coding Plan, Token Plan, or API Key',
   blockedError:
     'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
 } as const;

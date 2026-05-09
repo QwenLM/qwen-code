@@ -107,7 +107,7 @@ describe('ModelSelector — discontinued state (Issue #3745)', () => {
       models: [discontinuedModel],
     });
     expect(container.textContent).toContain(
-      'Discontinued — switch to Coding Plan or API Key',
+      'Discontinued — switch to Coding Plan, Token Plan, or API Key',
     );
     expect(container.textContent).not.toContain(
       'Original description should be replaced',

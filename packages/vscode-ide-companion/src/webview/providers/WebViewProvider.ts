@@ -34,6 +34,8 @@ import {
   snapshotSettingsForRollback,
   restoreSettingsSnapshot,
   writeCodingPlanConfig,
+  writeTokenPlanConfig,
+  writeModelProvidersConfig,
   readQwenSettingsForVSCode,
   clearPersistedAuth,
 } from '../../services/settingsWriter.js';
@@ -1079,6 +1081,14 @@ export class WebViewProvider {
     try {
       const provider = config.get<string>('provider', 'coding-plan');
 
+      if (provider === 'token-plan') {
+        writeTokenPlanConfig(apiKey);
+        console.log(
+          '[WebViewProvider] Synced VSCode settings → ~/.qwen/settings.json (provider=token-plan)',
+        );
+        return true;
+      }
+
       if (provider !== 'coding-plan') {
         console.log(
           '[WebViewProvider] Skipping VSCode settings sync for api-key provider; interactive auth owns provider details',
@@ -1348,24 +1358,37 @@ export class WebViewProvider {
       `[WebViewProvider] authInteractive: provider=${providerConfig.id}, host=${baseUrlHost}`,
     );
 
-    // Snapshot the pre-write settings so we can roll back bad credentials if
-    // the reconnect below rejects them. applyProviderInstallPlanToFile's own
-    // backup/restore only covers failures *inside* the plan; the
-    // disconnect/reconnect runs after the plan commits (cleanupBackup), so
-    // without this a rejected key would persist and every VS Code restart
-    // would keep retrying it.
-    const rollbackSnapshot = snapshotSettingsForRollback();
-    // restoreSettingsSnapshot → writeSettings can itself throw (EPERM on
-    // Windows renameSync, disk full, EACCES). Never let a rollback failure
-    // mask the original auth error or skip the user-facing error message.
-    const safeRollback = () => {
-      try {
-        restoreSettingsSnapshot(rollbackSnapshot);
-      } catch (rollbackErr) {
-        console.error(
-          '[WebViewProvider] settings rollback failed:',
-          rollbackErr,
-        );
+    try {
+      if (provider === 'coding-plan') {
+        writeCodingPlanConfig(region === 'global' ? 'global' : 'china', apiKey);
+      } else if (provider === 'token-plan') {
+        writeTokenPlanConfig(apiKey);
+      } else if (provider === 'alibaba-standard') {
+        // Alibaba Standard — multiple models sharing the same base URL
+        const modelBaseUrl =
+          baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+        const ids = (modelIds || model || 'qwen3.5-plus')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const providers: Record<string, string> = {};
+        for (const id of ids) {
+          providers[id] = modelBaseUrl;
+        }
+        writeModelProvidersConfig({
+          apiKey,
+          modelProviders: providers,
+          activeModel: ids[0] || 'qwen3.5-plus',
+        });
+      } else {
+        // Custom API Key — single model entry
+        const modelId = model || 'default';
+        const modelBaseUrl = baseUrl || 'https://api.openai.com/v1';
+        writeModelProvidersConfig({
+          apiKey,
+          modelProviders: { [modelId]: modelBaseUrl },
+          activeModel: modelId,
+        });
       }
     };
     // Tear down an agent left holding rejected/partial credentials in memory

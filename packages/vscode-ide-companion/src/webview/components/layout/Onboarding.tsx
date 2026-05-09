@@ -65,7 +65,7 @@ export const Onboarding: FC = () => (
       className="text-[10px] mt-4 text-center max-w-[260px]"
       style={{ color: 'var(--app-secondary-foreground)', opacity: 0.6 }}
     >
-      Supports Alibaba Cloud Coding Plan, ModelStudio API Key, and
+      Supports Alibaba Cloud Coding Plan, Token Plan, ModelStudio API Key, and
       OpenAI-compatible endpoints
     </p>
   </div>

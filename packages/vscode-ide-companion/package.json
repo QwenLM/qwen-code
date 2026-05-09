@@ -207,20 +207,22 @@
           "type": "string",
           "enum": [
             "coding-plan",
+            "token-plan",
             "api-key"
           ],
           "enumDescriptions": [
-            "Alibaba Cloud Coding Plan — configurable from VS Code Settings",
-            "Configured via Qwen Code: Auth or the onboarding button"
+            "Alibaba Cloud Coding Plan — for individual developers",
+            "Alibaba Cloud Token Plan — for teams and companies",
+            "API Key — ModelStudio or OpenAI-compatible providers"
           ],
           "default": "coding-plan",
-          "markdownDescription": "**Coding Plan**: enter API Key + Region here to sync `~/.qwen/settings.json`.\n\n**API Key**: use **Qwen Code: Auth** or the onboarding button to configure ModelStudio or custom OpenAI-compatible providers."
+          "markdownDescription": "**Coding Plan**: enter API Key + Region to sync `~/.qwen/settings.json`.\n\n**Token Plan**: enter API Key to sync `~/.qwen/settings.json`.\n\n**API Key**: use **Qwen Code: Auth** or the onboarding button to configure ModelStudio or custom OpenAI-compatible providers."
         },
         "qwen-code.apiKey": {
           "order": 1,
           "type": "string",
           "default": "",
-          "markdownDescription": "API key used for **Coding Plan** settings sync. For **API Key** providers, configure the full provider details through **Qwen Code: Auth**."
+          "markdownDescription": "API key for **Coding Plan** or **Token Plan** settings sync. For **API Key** providers, configure the full provider details through **Qwen Code: Auth**."
         },
         "qwen-code.codingPlanRegion": {
           "order": 2,

@@ -434,7 +434,7 @@ export const App: React.FC = () => {
           {
             id: 'auth',
             label: '/auth',
-            description: 'Configure Coding Plan or API Key',
+            description: 'Configure Coding Plan, Token Plan, or API Key',
             type: 'command',
             group: 'Account',
           },
