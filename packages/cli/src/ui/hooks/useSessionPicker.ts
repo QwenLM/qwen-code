@@ -15,7 +15,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
-  ListSessionsResult,
   SessionListItem,
   SessionService,
 } from '@qwen-code/qwen-code-core';
@@ -168,29 +167,76 @@ export function useSessionPicker({
   const showScrollDown =
     scrollOffset + maxVisibleItems < filteredSessions.length;
 
+  // Two-phase load: lite (stat-only) renders the first frame
+  // immediately as placeholder rows; enrich runs in the background
+  // and replaces each row with its full metadata. Picker unmount
+  // signals an abort so a long enrichment doesn't try to setState
+  // on an unmounted hook.
+  const enrichAbortRef = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      enrichAbortRef.current?.abort();
+    },
+    [],
+  );
+
+  const replaceEnriched = useCallback((enriched: SessionListItem[]) => {
+    // Project-mismatch / disappeared-file items get filtered out by
+    // enrichSessions. Drop those from local state by replacing only
+    // the rows whose sessionId came back; the rest stay as their
+    // pending placeholders or get removed if the enrichment didn't
+    // return them at all.
+    setSessionState((prev) => {
+      const enrichedById = new Map(enriched.map((s) => [s.sessionId, s]));
+      const next: SessionListItem[] = [];
+      for (const row of prev.sessions) {
+        if (!row.pending) {
+          next.push(row);
+          continue;
+        }
+        const hit = enrichedById.get(row.sessionId);
+        if (hit) {
+          next.push(hit);
+        }
+        // else: lite row didn't survive enrichment — drop it.
+      }
+      return { ...prev, sessions: next };
+    });
+  }, []);
+
   // Initial load — skip when pre-filtered sessions are provided
   useEffect(() => {
     if (!sessionService || hasInitialSessions) {
       return;
     }
 
+    const ctrl = new AbortController();
+    enrichAbortRef.current?.abort();
+    enrichAbortRef.current = ctrl;
+
     const loadInitialSessions = async () => {
       try {
-        const result: ListSessionsResult = await sessionService.listSessions({
+        const lite = await sessionService.listSessionsLite({
           size: SESSION_PAGE_SIZE,
         });
+        if (ctrl.signal.aborted) return;
         setSessionState({
-          sessions: result.items,
-          hasMore: result.hasMore,
-          nextCursor: result.nextCursor,
+          sessions: lite.items,
+          hasMore: lite.hasMore,
+          nextCursor: lite.nextCursor,
         });
-      } finally {
+        setIsLoading(false);
+
+        const enriched = await sessionService.enrichSessions(lite.items);
+        if (ctrl.signal.aborted) return;
+        replaceEnriched(enriched);
+      } catch {
         setIsLoading(false);
       }
     };
 
     void loadInitialSessions();
-  }, [sessionService, hasInitialSessions]);
+  }, [sessionService, hasInitialSessions, replaceEnriched]);
 
   const loadMoreSessions = useCallback(async () => {
     if (!sessionService || !sessionState.hasMore || isLoadingMoreRef.current) {
@@ -199,19 +245,27 @@ export function useSessionPicker({
 
     isLoadingMoreRef.current = true;
     try {
-      const result: ListSessionsResult = await sessionService.listSessions({
+      const lite = await sessionService.listSessionsLite({
         size: SESSION_PAGE_SIZE,
         cursor: sessionState.nextCursor,
       });
       setSessionState((prev) => ({
-        sessions: [...prev.sessions, ...result.items],
-        hasMore: result.hasMore && result.nextCursor !== undefined,
-        nextCursor: result.nextCursor,
+        sessions: [...prev.sessions, ...lite.items],
+        hasMore: lite.hasMore && lite.nextCursor !== undefined,
+        nextCursor: lite.nextCursor,
       }));
+
+      const enriched = await sessionService.enrichSessions(lite.items);
+      replaceEnriched(enriched);
     } finally {
       isLoadingMoreRef.current = false;
     }
-  }, [sessionService, sessionState.hasMore, sessionState.nextCursor]);
+  }, [
+    sessionService,
+    sessionState.hasMore,
+    sessionState.nextCursor,
+    replaceEnriched,
+  ]);
 
   // Reset selection when any filter changes (branch toggle or text query).
   useEffect(() => {

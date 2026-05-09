@@ -341,7 +341,11 @@ class QwenAgent implements Agent {
     });
 
     const sessions: SessionInfo[] = result.items.map((item) => ({
-      cwd: item.cwd,
+      // `cwd` is now optional on SessionListItem (lite tier omits it),
+      // but `listSessions` returns enriched items so it's populated in
+      // practice. Fall back to the request's `cwd` for any edge case
+      // where the head-record decode failed mid-page.
+      cwd: item.cwd ?? cwd,
       sessionId: item.sessionId,
       title: item.customTitle || item.prompt || '(session)',
       updatedAt: new Date(item.mtime).toISOString(),

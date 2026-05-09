@@ -192,6 +192,89 @@ describe('SessionService', () => {
       expect(result.items[0].gitBranch).toBe('main');
     });
 
+    it('listSessionsLite returns stat-only items (no head/tail IO)', async () => {
+      // Pin the fast-path contract: lite items expose only the
+      // cheap stat-derived fields (sessionId / mtime / filePath /
+      // fileSize / pending). No head record means no `cwd`, no
+      // `prompt`, no `customTitle` etc. Future refactors that
+      // re-introduce head IO into listSessionsLite will fail here.
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: 12345,
+        size: 4096,
+        isFile: () => true,
+      } as fs.Stats);
+
+      const result = await sessionService.listSessionsLite();
+
+      expect(vi.mocked(jsonl.readLines)).not.toHaveBeenCalled();
+      expect(result.items).toHaveLength(1);
+      const item = result.items[0];
+      expect(item.sessionId).toBe(sessionIdA);
+      expect(item.mtime).toBe(12345);
+      expect(item.fileSize).toBe(4096);
+      expect(item.pending).toBe(true);
+      expect(item.cwd).toBeUndefined();
+      expect(item.prompt).toBeUndefined();
+      expect(item.customTitle).toBeUndefined();
+    });
+
+    it('enrichSessions populates metadata and applies the project filter', async () => {
+      // Two lite items: one whose head record matches our project
+      // hash, one that doesn't (sibling project sharing the same
+      // chats dir). Enrichment must keep the first and drop the
+      // second — same defensive filter the pre-split listSessions
+      // applied during the head-read step.
+      const wrongProject = 'other-project-hash';
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) => {
+        if (cwd === '/test/project/root') return 'test-project-hash';
+        return wrongProject;
+      });
+      const otherProjectRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/somewhere/else',
+        sessionId: sessionIdB,
+      };
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [otherProjectRecord];
+          return [];
+        },
+      );
+
+      const lite: ReturnType<SessionService['listSessionsLite']> =
+        Promise.resolve({
+          items: [
+            {
+              sessionId: sessionIdA,
+              mtime: 200,
+              filePath: `/chats/${sessionIdA}.jsonl`,
+              fileSize: 1024,
+              pending: true,
+            },
+            {
+              sessionId: sessionIdB,
+              mtime: 100,
+              filePath: `/chats/${sessionIdB}.jsonl`,
+              fileSize: 1024,
+              pending: true,
+            },
+          ],
+          hasMore: false,
+        });
+
+      const enriched = await sessionService.enrichSessions((await lite).items);
+
+      expect(enriched).toHaveLength(1);
+      expect(enriched[0].sessionId).toBe(sessionIdA);
+      expect(enriched[0].pending).toBe(false);
+      expect(enriched[0].cwd).toBe('/test/project/root');
+      expect(enriched[0].prompt).toBe('hello session a');
+    });
+
     it('should NOT populate messageCount during listing', async () => {
       // Listing must avoid the full-file readline that counting requires
       // — message counts are now lazy and provided by
@@ -232,8 +315,11 @@ describe('SessionService', () => {
 
       const result = await sessionService.listSessions();
 
-      expect(result.items[0].prompt.length).toBe(203); // 200 + '...'
-      expect(result.items[0].prompt.endsWith('...')).toBe(true);
+      // `prompt` is now optional on SessionListItem (lite items omit
+      // it). After the listSessions wrapper enriches, it should be
+      // populated for valid same-project sessions.
+      expect(result.items[0].prompt!.length).toBe(203); // 200 + '...'
+      expect(result.items[0].prompt!.endsWith('...')).toBe(true);
     });
 
     it('should paginate with size parameter', async () => {

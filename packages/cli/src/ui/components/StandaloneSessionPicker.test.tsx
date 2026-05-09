@@ -71,12 +71,35 @@ function createMockSessionService(
   sessions: SessionListItem[] = [],
   hasMore = false,
 ) {
+  // Two-phase listing API. Tests pass already-enriched session
+  // objects; the lite stub returns them as `pending: true` (so the
+  // first frame matches the lite contract) and enrichSessions echoes
+  // the same enriched items back. The legacy `listSessions` stays
+  // around for any test that still calls it directly.
+  const liteItems = sessions.map((s) => ({ ...s, pending: true }));
   return {
     listSessions: vi.fn().mockResolvedValue({
       items: sessions,
       hasMore,
       nextCursor: hasMore ? Date.now() : undefined,
     } as ListSessionsResult),
+    listSessionsLite: vi.fn().mockResolvedValue({
+      items: liteItems,
+      hasMore,
+      nextCursor: hasMore ? Date.now() : undefined,
+    } as ListSessionsResult),
+    enrichSessions: vi
+      .fn()
+      .mockImplementation(async (items: SessionListItem[]) => {
+        // Echo back the originally provided enriched objects, matching
+        // by sessionId. Items not in the original list (shouldn't
+        // happen in these tests) are dropped, mirroring the real
+        // service's project-mismatch drop.
+        const byId = new Map(sessions.map((s) => [s.sessionId, s]));
+        return items
+          .map((it) => byId.get(it.sessionId))
+          .filter((s): s is SessionListItem => s !== undefined);
+      }),
     loadSession: vi.fn(),
     loadLastSession: vi
       .fn()
@@ -1547,6 +1570,63 @@ describe('SessionPicker', () => {
   });
 
   describe('Pagination', () => {
+    it('renders the first frame from lite items before enrichment lands', async () => {
+      // The two-phase load contract: listSessionsLite resolves
+      // synchronously-ish, the picker renders pending placeholders,
+      // and only later does enrichSessions resolve to fill in titles.
+      // This test holds enrichSessions open while inspecting the
+      // intermediate frame.
+      const enriched = [
+        createMockSession({
+          sessionId: 'enriched-1',
+          prompt: 'final title',
+          messageCount: 1,
+        }),
+      ];
+      const liteItems = enriched.map((s) => ({ ...s, pending: true }));
+
+      let resolveEnrich: (items: SessionListItem[]) => void = () => {};
+      const enrichPromise = new Promise<SessionListItem[]>((resolve) => {
+        resolveEnrich = resolve;
+      });
+
+      const mockService = {
+        listSessions: vi.fn(),
+        listSessionsLite: vi.fn().mockResolvedValue({
+          items: liteItems,
+          hasMore: false,
+        }),
+        enrichSessions: vi.fn().mockReturnValue(enrichPromise),
+        loadSession: vi.fn(),
+        loadLastSession: vi.fn().mockResolvedValue({}),
+      };
+
+      const { lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={mockService as never}
+            onSelect={vi.fn()}
+            onCancel={vi.fn()}
+          />
+        </KeypressProvider>,
+      );
+
+      // Lite resolves; picker should paint pending placeholders.
+      await wait(50);
+      const pendingFrame = lastFrame() ?? '';
+      // Placeholder format: '…' followed by sessionId prefix.
+      expect(pendingFrame).toContain('…enriched');
+      expect(pendingFrame).not.toContain('final title');
+
+      // Now release enrichment; the row swaps to the real title.
+      resolveEnrich(enriched);
+      await wait(50);
+      const enrichedFrame = lastFrame() ?? '';
+      expect(enrichedFrame).toContain('final title');
+
+      unmount();
+    });
+
     it('should load more sessions when scrolling to bottom', async () => {
       const firstPage = Array.from({ length: 5 }, (_, i) =>
         createMockSession({
@@ -1565,19 +1645,28 @@ describe('SessionPicker', () => {
         }),
       );
 
+      // Two-phase load: the picker calls listSessionsLite for each
+      // page (first frame) and enrichSessions to hydrate. Stub both.
+      const liteFirst = firstPage.map((s) => ({ ...s, pending: true }));
+      const liteSecond = secondPage.map((s) => ({ ...s, pending: true }));
       const mockService = {
-        listSessions: vi
+        listSessions: vi.fn(),
+        listSessionsLite: vi
           .fn()
           .mockResolvedValueOnce({
-            items: firstPage,
+            items: liteFirst,
             hasMore: true,
             nextCursor: Date.now() - 5000,
           })
           .mockResolvedValueOnce({
-            items: secondPage,
+            items: liteSecond,
             hasMore: false,
             nextCursor: undefined,
           }),
+        enrichSessions: vi
+          .fn()
+          .mockResolvedValueOnce(firstPage)
+          .mockResolvedValueOnce(secondPage),
         loadSession: vi.fn(),
         loadLastSession: vi.fn().mockResolvedValue({}),
       };
@@ -1597,8 +1686,9 @@ describe('SessionPicker', () => {
 
       await wait(200);
 
-      // First page should be loaded
-      expect(mockService.listSessions).toHaveBeenCalled();
+      // First page should be loaded via the lite-then-enrich path.
+      expect(mockService.listSessionsLite).toHaveBeenCalled();
+      expect(mockService.enrichSessions).toHaveBeenCalled();
 
       unmount();
     });

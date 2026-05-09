@@ -109,11 +109,20 @@ function SessionListItemView({
         ? prefixChars.scrollDown
         : prefixChars.normal;
 
-  const promptText = session.customTitle || session.prompt || '(empty prompt)';
+  // Pending rows have come back from `listSessionsLite` but enrichment
+  // hasn't filled in the title/prompt yet. Show a short sessionId
+  // prefix as a placeholder so the row is visibly "loading" rather
+  // than blank — once enrichment completes the row re-renders with
+  // the real title.
+  const isPending = session.pending === true;
+  const promptText = isPending
+    ? `…${session.sessionId.slice(0, 8)}`
+    : session.customTitle || session.prompt || '(empty prompt)';
   const truncatedPrompt = truncateText(promptText, maxPromptWidth);
   // Dim auto-generated titles so users can distinguish a model guess from
   // a title they chose themselves with `/rename`. Selected row keeps the
   // accent color — legibility of the focused row wins over source hinting.
+  // Pending rows also dim — they're not actionable until enriched.
   const isAutoTitle =
     session.titleSource === 'auto' && Boolean(session.customTitle);
 
@@ -136,7 +145,7 @@ function SessionListItemView({
           color={
             isSelected
               ? theme.text.accent
-              : isAutoTitle
+              : isAutoTitle || isPending
                 ? theme.text.secondary
                 : theme.text.primary
           }

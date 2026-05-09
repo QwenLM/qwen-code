@@ -30,23 +30,41 @@ const debugLogger = createDebugLogger('SESSION');
 
 /**
  * Session item for list display.
- * Contains essential info extracted from the first record of a session file.
+ *
+ * The picker reads this in two phases: a "lite" first pass (just stat-
+ * level metadata: sessionId, mtime, filePath, fileSize) so the frame
+ * can render instantly, then an "enrich" pass that fills the head-
+ * derived (cwd, startTime, prompt, gitBranch) and tail-derived
+ * (customTitle, titleSource) fields. Every field beyond the stat-
+ * level minimum is optional because lite items omit them; consumers
+ * must guard accordingly.
+ *
+ * `pending: true` marks an item that hasn't been enriched yet — the
+ * UI uses it to show a placeholder row instead of an empty one.
  */
 export interface SessionListItem {
-  /** Unique session identifier */
+  /** Unique session identifier (always present, derived from filename). */
   sessionId: string;
-  /** Working directory at session start */
-  cwd: string;
-  /** ISO 8601 timestamp when session started */
-  startTime: string;
-  /** File modification time (used for ordering and pagination) */
+  /** File modification time (used for ordering and pagination). */
   mtime: number;
-  /** First user prompt text (truncated for display) */
-  prompt: string;
-  /** Git branch at session start, if available */
-  gitBranch?: string;
-  /** Full path to the session file */
+  /** Full path to the session file (always present). */
   filePath: string;
+  /** Size of the underlying file in bytes (cheap stat field). */
+  fileSize?: number;
+  /**
+   * True while the item is still in lite form — head/tail metadata has
+   * not been read yet. Picker renders these as placeholders. Becomes
+   * `false` (or absent) once `enrichSessions` populates the rest.
+   */
+  pending?: boolean;
+  /** Working directory at session start (populated during enrichment). */
+  cwd?: string;
+  /** ISO 8601 timestamp when session started (populated during enrichment). */
+  startTime?: string;
+  /** First user prompt text, truncated for display (populated during enrichment). */
+  prompt?: string;
+  /** Git branch at session start, if available (populated during enrichment). */
+  gitBranch?: string;
   /**
    * Number of unique-UUID user/assistant messages, when known. Listing
    * does NOT compute this — counting requires a full readline pass over
@@ -423,36 +441,90 @@ export class SessionService {
   }
 
   /**
-   * Lists sessions for the current project with pagination.
+   * Lists sessions for the current project with pagination — fully
+   * enriched (head + tail reads applied, project filter resolved).
    *
-   * Sessions are ordered by file modification time (most recent first).
-   * Uses cursor-based pagination with mtime as the cursor.
-   *
-   * Only reads the first line of each JSONL file for efficiency.
-   * Files are filtered by UUID pattern first, then by project hash.
-   *
-   * @param options Pagination options
-   * @returns Paginated list of sessions
+   * Backward-compatible wrapper: composes {@link listSessionsLite} +
+   * {@link enrichSessions}. New callers that want the picker to render
+   * a first frame before any per-file IO completes should call those
+   * two methods directly so the lite phase can drive an immediate
+   * render and the enrichment can hydrate progressively.
    */
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
     const { cursor, size = 20 } = options;
+    const enriched: SessionListItem[] = [];
+    let nextCursor: number | undefined = cursor;
+    let exhausted = false;
+
+    // Some lite items drop out during enrichment (file disappeared
+    // mid-page, project-hash mismatch in a shared chats dir). Loop
+    // until we either fill the page or exhaust the disk — matches
+    // the pre-split behaviour where listSessions paged through
+    // filtered-out files automatically.
+    while (enriched.length < size && !exhausted) {
+      const lite = await this.listSessionsLite({
+        cursor: nextCursor,
+        size: size - enriched.length,
+      });
+      if (lite.items.length === 0) {
+        exhausted = true;
+        break;
+      }
+      const batch = await this.enrichSessions(lite.items);
+      enriched.push(...batch);
+      nextCursor = lite.nextCursor;
+      if (!lite.hasMore) {
+        exhausted = true;
+      }
+    }
+
+    const items = enriched.slice(0, size);
+    const lastMtime = items[items.length - 1]?.mtime;
+    return {
+      items,
+      hasMore: !exhausted || enriched.length > size,
+      nextCursor: exhausted && enriched.length <= size ? undefined : lastMtime,
+    };
+  }
+
+  /**
+   * Phase 1 of the two-phase listing path: stat-only enumeration.
+   *
+   * Reads `chatsDir`, filters by the session-file naming pattern, and
+   * returns a page of `pending: true` items carrying just the cheap
+   * stat-level fields (sessionId, mtime, filePath, fileSize). NO
+   * JSONL parsing happens here, so this completes in roughly
+   * `O(readdir + N · stat)` — measured in ms even for thousands of
+   * sessions on local disk.
+   *
+   * The returned items are NOT project-filtered yet (the project-hash
+   * check requires reading the first record, which is enrichment
+   * territory). Callers that don't pass through {@link enrichSessions}
+   * will see sessions belonging to sibling projects when path
+   * sanitization causes a chats-dir collision; callers that DO pass
+   * through enrichment get the same filtered list as the legacy
+   * {@link listSessions} would.
+   *
+   * Pagination uses the same `mtime`-cursor as `listSessions`.
+   */
+  async listSessionsLite(
+    options: ListSessionsOptions = {},
+  ): Promise<ListSessionsResult> {
+    const { cursor, size = 20 } = options;
     const chatsDir = this.getChatsDir();
 
-    // Get all valid session files (matching UUID pattern) with their stats
-    let files: Array<{ name: string; mtime: number }> = [];
+    let files: Array<{ name: string; mtime: number; size: number }> = [];
     try {
       const fileNames = fs.readdirSync(chatsDir);
       for (const name of fileNames) {
-        // Only process files matching session file pattern
         if (!SESSION_FILE_PATTERN.test(name)) continue;
         const filePath = path.join(chatsDir, name);
         try {
           const stats = fs.statSync(filePath);
-          files.push({ name, mtime: stats.mtimeMs });
+          files.push({ name, mtime: stats.mtimeMs, size: stats.size });
         } catch {
-          // Skip files we can't stat
           continue;
         }
       }
@@ -463,89 +535,106 @@ export class SessionService {
       throw error;
     }
 
-    // Sort by mtime descending (most recent first)
     files.sort((a, b) => b.mtime - a.mtime);
-
-    // Apply cursor filter (items with mtime < cursor)
     if (cursor !== undefined) {
       files = files.filter((f) => f.mtime < cursor);
     }
 
-    // Iterate through files until we have enough matching ones.
-    // Different projects may share the same chats directory due to path sanitization,
-    // so we need to filter by project hash and continue until we have enough items.
-    const items: SessionListItem[] = [];
-    let filesProcessed = 0;
-    let lastProcessedMtime: number | undefined;
-    let hasMoreFiles = false;
+    const cap = Math.min(size, MAX_FILES_TO_PROCESS);
+    const slice = files.slice(0, cap);
+    const hasMore = files.length > cap;
+    const lastMtime = slice[slice.length - 1]?.mtime;
 
-    // Pre-allocate the tail-read buffer once and pass it to every
-    // per-file metadata read. Without pooling, each session in the
-    // page allocs+GCs a fresh 64KB Buffer; for a typical page of 20
-    // that's ~1.3MB churn per /resume open. Phase-2 (full-file
-    // fallback) inside the helper still allocs per chunk because
-    // chunk lengths vary, but Phase-2 is rarely entered.
-    const tailBuffer = Buffer.alloc(LITE_READ_BUF_SIZE);
-
-    for (const file of files) {
-      // Safety limit to prevent performance issues
-      if (filesProcessed >= MAX_FILES_TO_PROCESS) {
-        hasMoreFiles = true;
-        break;
-      }
-
-      // Stop if we have enough items
-      if (items.length >= size) {
-        hasMoreFiles = true;
-        break;
-      }
-
-      filesProcessed++;
-      lastProcessedMtime = file.mtime;
-
-      const filePath = path.join(chatsDir, file.name);
-      const records = await jsonl.readLines<ChatRecord>(
-        filePath,
-        MAX_PROMPT_SCAN_LINES,
-      );
-
-      if (records.length === 0) continue;
-      const firstRecord = records[0];
-
-      // Skip if not matching current project
-      // We use cwd comparison since first record doesn't have projectHash
-      const recordProjectHash = getProjectHash(firstRecord.cwd);
-      if (recordProjectHash !== this.projectHash) continue;
-
-      const prompt = this.extractFirstPromptFromRecords(records);
-
-      const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
-      items.push({
-        sessionId: firstRecord.sessionId,
-        cwd: firstRecord.cwd,
-        startTime: firstRecord.timestamp,
-        mtime: file.mtime,
-        prompt,
-        gitBranch: firstRecord.gitBranch,
-        filePath,
-        // messageCount intentionally omitted — see SessionListItem
-        // and `countSessionMessages` for the rationale.
-        customTitle: titleInfo.title,
-        titleSource: titleInfo.source,
-      });
-    }
-
-    // Determine next cursor (mtime of last processed file)
-    // Only set if there are more files to process
-    const nextCursor =
-      hasMoreFiles && lastProcessedMtime !== undefined
-        ? lastProcessedMtime
-        : undefined;
+    const items: SessionListItem[] = slice.map((f) => ({
+      sessionId: f.name.replace(/\.jsonl$/, ''),
+      mtime: f.mtime,
+      filePath: path.join(chatsDir, f.name),
+      fileSize: f.size,
+      pending: true,
+    }));
 
     return {
       items,
-      nextCursor,
-      hasMore: hasMoreFiles,
+      hasMore,
+      nextCursor: hasMore ? lastMtime : undefined,
+    };
+  }
+
+  /**
+   * Phase 2 of the two-phase listing path: hydrate a batch of lite
+   * items with head- and tail-derived metadata.
+   *
+   * For each item this:
+   *   1. Reads the head (`MAX_PROMPT_SCAN_LINES` lines via jsonl.readLines)
+   *      to recover the first record (cwd, startTime, gitBranch) and
+   *      the first user prompt.
+   *   2. Drops the item if the first record's cwd hashes to a
+   *      different project — same defensive filter the pre-split
+   *      `listSessions` did, just deferred.
+   *   3. Tail-reads (pooled buffer) for customTitle / titleSource.
+   *   4. Returns a fresh, fully populated SessionListItem with
+   *      `pending` cleared.
+   *
+   * Items already enriched (`pending` falsy) are returned unchanged.
+   * Items that fail enrichment (missing/empty file, wrong project)
+   * are silently dropped from the result. Callers that need to know
+   * which items vanished should diff the input vs output by
+   * `sessionId`.
+   */
+  async enrichSessions(items: SessionListItem[]): Promise<SessionListItem[]> {
+    if (items.length === 0) return items;
+
+    // Pool one tail buffer for the whole batch. Same rationale as the
+    // pre-split implementation; mirrors claude-code's enrichLogs.
+    const tailBuffer = Buffer.alloc(LITE_READ_BUF_SIZE);
+    const out: SessionListItem[] = [];
+
+    for (const item of items) {
+      if (!item.pending) {
+        out.push(item);
+        continue;
+      }
+      const enriched = await this.enrichOne(item, tailBuffer);
+      if (enriched) out.push(enriched);
+    }
+
+    return out;
+  }
+
+  private async enrichOne(
+    item: SessionListItem,
+    tailBuffer: Buffer,
+  ): Promise<SessionListItem | undefined> {
+    const records = await jsonl.readLines<ChatRecord>(
+      item.filePath,
+      MAX_PROMPT_SCAN_LINES,
+    );
+    if (records.length === 0) return undefined;
+    const firstRecord = records[0];
+
+    if (getProjectHash(firstRecord.cwd) !== this.projectHash) {
+      return undefined;
+    }
+
+    const prompt = this.extractFirstPromptFromRecords(records);
+    const titleInfo = this.readSessionTitleInfoFromFile(
+      item.filePath,
+      tailBuffer,
+    );
+
+    return {
+      sessionId: firstRecord.sessionId,
+      mtime: item.mtime,
+      filePath: item.filePath,
+      fileSize: item.fileSize,
+      cwd: firstRecord.cwd,
+      startTime: firstRecord.timestamp,
+      prompt,
+      gitBranch: firstRecord.gitBranch,
+      customTitle: titleInfo.title,
+      titleSource: titleInfo.source,
+      // messageCount intentionally omitted; see SessionListItem.
+      pending: false,
     };
   }
 
