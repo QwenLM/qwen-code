@@ -83,6 +83,27 @@ describe('scoreTool', () => {
     expect(scoreTool(mcp, terms)).toBeGreaterThan(scoreTool(builtin, terms));
   });
 
+  it('MCP tools with `mcp__server__name` format get exact-suffix score on the trailing toolname', () => {
+    // Pin the regression: `endsWith('_' + term)` already matches MCP
+    // tools whose name is `mcp__<server>__<toolName>` because the `__`
+    // boundary contains the `_` boundary as its last char. A future
+    // refactor that switches to a tighter word-boundary regex must
+    // preserve this — otherwise MCP tools silently downgrade from the
+    // exact-suffix score (12) to substring (6).
+    const mcpCallable = {} as CallableTool;
+    const mcp = new DiscoveredMCPTool(
+      mcpCallable,
+      'github',
+      'create_issue',
+      'create a github issue',
+      {},
+    );
+    // mcp__github__create_issue ends with `_create_issue` — exact suffix.
+    expect(scoreTool(mcp, ['create_issue'])).toBe(12);
+    // The trailing single token `issue` ALSO satisfies _-boundary.
+    expect(scoreTool(mcp, ['issue'])).toBeGreaterThanOrEqual(12);
+  });
+
   it('scores searchHint word matches', () => {
     const withHint = new MockTool({
       name: 'cron_create',
