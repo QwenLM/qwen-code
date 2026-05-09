@@ -547,6 +547,39 @@ describe('ToolSearchTool', () => {
     expect(registry.isDeferredToolRevealed('cron_list')).toBe(true);
   });
 
+  it("doesn't propagate when ensureTool throws mid-batch — reports missing instead", async () => {
+    // ensureTool throwing mid-iteration would otherwise propagate out of
+    // the for loop with previous tools already revealed but never
+    // setTools()-synced — same orphaned-reveal failure mode the
+    // setTools() catch block guards against. Wrap ensureTool so the
+    // failure surfaces as a `missing` entry and processing continues
+    // for the rest of the batch.
+    registry.registerTool(new MockTool({ name: 'alpha', shouldDefer: true }));
+    registry.registerTool(new MockTool({ name: 'bravo', shouldDefer: true }));
+    registry.registerTool(new MockTool({ name: 'charlie', shouldDefer: true }));
+    // Arrange ensureTool to throw on bravo only.
+    const realEnsure = registry.ensureTool.bind(registry);
+    vi.spyOn(registry, 'ensureTool').mockImplementation(async (n) => {
+      if (n === 'bravo') throw new Error('mid-batch failure');
+      return realEnsure(n);
+    });
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:alpha,bravo,charlie' })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    // alpha and charlie loaded, bravo reported missing.
+    expect(content).toContain('"name":"alpha"');
+    expect(content).toContain('"name":"charlie"');
+    expect(content).toContain('Not found: bravo');
+    // alpha and charlie revealed; bravo not (the throw kept it out).
+    expect(registry.isDeferredToolRevealed('alpha')).toBe(true);
+    expect(registry.isDeferredToolRevealed('charlie')).toBe(true);
+    expect(registry.isDeferredToolRevealed('bravo')).toBe(false);
+  });
+
   it('treats a null GeminiClient identically to setTools() throwing', async () => {
     // Without the explicit null-check, optional chaining (`?.setTools()`)
     // silently no-ops if init hasn't completed yet, leaving the reveal

@@ -232,7 +232,17 @@ class ToolSearchInvocation extends BaseToolInvocation<
         missing.push(requested);
         continue;
       }
-      const tool = await registry.ensureTool(canonical);
+      // Treat ensureTool throws the same as a null return: log + report
+      // missing. Without this, an exception mid-batch would propagate
+      // out of the loop with previous tools already revealed but never
+      // setTools()-synced — same orphaned-reveal failure mode the
+      // setTools() catch block guards against.
+      let tool: AnyDeclarativeTool | undefined;
+      try {
+        tool = await registry.ensureTool(canonical);
+      } catch (err) {
+        debugLogger.warn(`ensureTool failed for ${canonical}:`, err);
+      }
       if (!tool) {
         missing.push(requested);
         continue;

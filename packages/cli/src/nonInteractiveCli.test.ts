@@ -2681,12 +2681,16 @@ describe('runNonInteractive', () => {
       );
 
       expect(process.exitCode).toBe(1);
-      // adapter sees the contract violation as an error result.
+      // adapter sees the contract violation as an error result, with
+      // diagnostic context: turn count + truncated preview of model's
+      // plain-text output ("plain answer" from the mocked stream).
       expect(adapter.emitResult).toHaveBeenCalledTimes(1);
       expect(adapter.emitResult).toHaveBeenCalledWith(
         expect.objectContaining({
           isError: true,
-          errorMessage: expect.stringMatching(/Model produced plain text/),
+          errorMessage: expect.stringMatching(
+            /Model produced plain text.+after 1 turn\(s\).+Output preview.+plain answer/s,
+          ),
         }),
       );
       // TEXT-mode users get a visible stderr line — emitResult is a no-op
@@ -2694,6 +2698,9 @@ describe('runNonInteractive', () => {
       // the only feedback they'd see if --output-format is unset.
       expect(processStderrSpy).toHaveBeenCalledWith(
         expect.stringMatching(/qwen --json-schema: Model produced plain text/),
+      );
+      expect(processStderrSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/plain answer/),
       );
     } finally {
       process.exitCode = priorExitCode;
