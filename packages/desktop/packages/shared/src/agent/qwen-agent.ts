@@ -1772,7 +1772,7 @@ export class QwenAgent extends BaseAgent {
     qwenCliPath: string,
     nodePath: string,
   ): { command: string; args: string[] } {
-    const args = ['--acp', '--channel=ACP'];
+    const args = ['--acp', '--channel=desktop'];
 
     if (qwenCliPath.endsWith('.js')) {
       return { command: nodePath, args: [qwenCliPath, ...args] };

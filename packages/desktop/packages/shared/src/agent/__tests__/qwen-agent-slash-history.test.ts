@@ -66,6 +66,13 @@ type QwenAvailableCommandsInternals = {
   flushPendingAvailableCommandsUpdate: (sessionId: string) => void;
 };
 
+type QwenSpawnInternals = {
+  buildSpawnCommand: (
+    qwenCliPath: string,
+    nodePath: string,
+  ) => { command: string; args: string[] };
+};
+
 const originalRuntimeDir = process.env.QWEN_RUNTIME_DIR;
 
 function createAgent(
@@ -142,6 +149,16 @@ describe('QwenAgent slash command history', () => {
       .buildPromptBlocks('  /context  ');
 
     expect(blocks).toEqual([{ type: 'text', text: '/context' }]);
+  });
+
+  it('starts Qwen ACP with the desktop channel', () => {
+    const command = (QwenAgent.prototype as unknown as QwenSpawnInternals)
+      .buildSpawnCommand('/opt/qwen/dist/cli.js', '/usr/local/bin/node');
+
+    expect(command).toEqual({
+      command: '/usr/local/bin/node',
+      args: ['/opt/qwen/dist/cli.js', '--acp', '--channel=desktop'],
+    });
   });
 
   it('does not prepend Craft context to Qwen prompts while disabled', () => {
