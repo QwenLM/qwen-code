@@ -874,12 +874,6 @@ function normalizeQwenAssistantText(
   return formatJsonMarkdown(parsed);
 }
 
-function normalizeQwenUserHistoryText(text: string): string {
-  return text
-    .replace(/^<craft_agent_context>[\s\S]*?<\/craft_agent_context>\s*/, '')
-    .trimStart();
-}
-
 function formatQwenSlashOutputHistoryItem(
   item: JsonRecord,
 ): string | undefined {
@@ -1068,6 +1062,7 @@ export class QwenAgent extends BaseAgent {
   private pendingPermissions = new Map<string, PendingPermission>();
   private miniCollectors = new Map<string, MiniCollector>();
   private historyCollectors = new Map<string, HistoryCollector>();
+  private ensureProcessPromise: Promise<void> | null = null;
   private suppressedSessionUpdates = new Set<string>();
   private pendingAvailableCommandsUpdates = new Map<string, JsonRecord>();
   private latestAvailableCommandsSnapshot: AvailableCommandsSnapshot | null =
@@ -1552,7 +1547,7 @@ export class QwenAgent extends BaseAgent {
         (connection) =>
           connection.loadSession({
             sessionId,
-            cwd: options.cwd || this.resolvedCwd(),
+            cwd,
             mcpServers: this.buildAcpMcpServers(),
           }),
         60_000,
@@ -1686,6 +1681,7 @@ export class QwenAgent extends BaseAgent {
     this.pendingPermissions.clear();
     this.miniCollectors.clear();
     this.historyCollectors.clear();
+    this.ensureProcessPromise = null;
   }
 
   // ============================================================
@@ -1699,10 +1695,25 @@ export class QwenAgent extends BaseAgent {
       !this.connection.signal.aborted
     )
       return;
-    await this.startProcess();
+
+    if (this.ensureProcessPromise) {
+      await this.ensureProcessPromise;
+      return;
+    }
+
+    this.ensureProcessPromise = this.startProcess();
+    try {
+      await this.ensureProcessPromise;
+    } finally {
+      this.ensureProcessPromise = null;
+    }
   }
 
   private async startProcess(): Promise<void> {
+    this.connection = null;
+    this.acpLease?.release();
+    this.acpLease = null;
+
     const runtime = getBackendRuntime(this.config);
     const qwenCliPath = runtime.paths?.qwenCli;
     if (!qwenCliPath) {
@@ -2630,7 +2641,7 @@ export class QwenAgent extends BaseAgent {
   private buildHistoryMessages(
     sessionId: string,
     updates: JsonRecord[],
-    cwd: string,
+    _cwd: string,
   ): Message[] {
     const messages: Message[] = [];
     const toolMessages = new Map<string, Message>();

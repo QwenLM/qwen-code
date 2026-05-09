@@ -33,6 +33,13 @@ type QwenPromptInternals = {
 };
 
 type QwenAvailableCommandsInternals = {
+  acpLease?: {
+    isActive: () => boolean;
+    release: () => void;
+  } | null;
+  connection?: {
+    signal: { aborted: boolean };
+  } | null;
   qwenSessionId: string | null;
   _isProcessing: boolean;
   currentTurnId?: string;
@@ -46,6 +53,7 @@ type QwenAvailableCommandsInternals = {
     drain: () => AsyncGenerator<AgentEvent>;
   };
   ensureProcess: () => Promise<void>;
+  startProcess: () => Promise<void>;
   callAcp: <T>(
     method: string,
     execute: (connection: {
@@ -918,5 +926,40 @@ describe('QwenAgent slash command history', () => {
     expect(result.messages.map(message => [message.role, message.content])).toEqual([
       ['user', 'hello'],
     ]);
+  });
+
+  it('shares concurrent Qwen ACP process startup for one agent instance', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+
+    let startCalls = 0;
+    let releaseStart!: () => void;
+    const startStarted = new Promise<void>((resolve) => {
+      internals.startProcess = async () => {
+        startCalls += 1;
+        resolve();
+        await new Promise<void>((release) => {
+          releaseStart = release;
+        });
+        internals.acpLease = {
+          isActive: () => true,
+          release: () => {},
+        };
+        internals.connection = { signal: { aborted: false } };
+      };
+    });
+
+    const first = internals.ensureProcess();
+    await startStarted;
+    const second = internals.ensureProcess();
+    releaseStart();
+
+    await Promise.all([first, second]);
+    agent.destroy();
+
+    expect(startCalls).toBe(1);
   });
 });
