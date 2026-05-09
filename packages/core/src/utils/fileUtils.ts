@@ -469,6 +469,183 @@ export type FileType =
   | 'notebook';
 
 /**
+ * `application/*` mime types that the `mime/lite` registry returns
+ * for unambiguously text payloads. We trust these in {@link
+ * detectFileType} so files bearing them skip the content-based
+ * `isBinaryFile` heuristic — that 4 KB sample can produce false
+ * positives on UTF-16 / UTF-32 without BOM and on encrypted /
+ * DRM-protected file systems where the OS surfaces encrypted bytes
+ * to `fs.open()` reads (the Windows scenario in issue #3964).
+ *
+ * Anything not in this set still falls through to the content check.
+ * Mimes ending in `+xml` / `+json` are accepted via suffix match
+ * rather than enumeration, since structured-data formats keep
+ * extending those families.
+ */
+const KNOWN_TEXT_APPLICATION_MIMES: ReadonlySet<string> = new Set([
+  'application/javascript',
+  'application/ecmascript',
+  'application/node',
+  'application/json',
+  'application/xml',
+  'application/toml',
+  'application/x-sh',
+  'application/x-csh',
+  'application/x-shellscript',
+  'application/x-perl',
+  'application/x-yaml',
+  'application/x-tex',
+  'application/x-latex',
+  'application/x-sql',
+  'application/sql',
+  'application/graphql',
+]);
+
+/**
+ * Source-code, config, and markup extensions that `mime/lite` either
+ * does not register or registers ambiguously, but which are
+ * unambiguously text in practice. Trusting the extension here means
+ * a file like `Trigger.kt` or `analysis.py` on an encrypted file
+ * system whose raw bytes look binary to `isBinaryFile`'s 4 KB
+ * sample is still classified as text — the fix for the Windows
+ * scenario in issue #3964.
+ *
+ * Scope: only languages and config formats commonly encountered in
+ * codebases that have been reported in the field, plus a few core
+ * markup / build formats. Anything more obscure still falls through
+ * to the content sampler — the goal is "do not lie about a known
+ * source-code extension", not "be exhaustive".
+ *
+ * Maintenance note: `path.extname()` returns `''` for dotfiles
+ * (`.gitignore`, `.editorconfig`), so this set cannot cover those.
+ * They go through the content sampler, which handles them fine on
+ * non-encrypted file systems. Adding a separate basename allowlist
+ * is a possible future extension if needed.
+ */
+const KNOWN_TEXT_EXTENSIONS: ReadonlySet<string> = new Set([
+  // C / C++
+  '.c',
+  '.cc',
+  '.cpp',
+  '.cxx',
+  '.h',
+  '.hh',
+  '.hpp',
+  '.hxx',
+  '.inl',
+  '.tpp',
+  // Python
+  '.py',
+  '.pyi',
+  '.pyw',
+  '.pyx',
+  // Rust
+  '.rs',
+  // Go
+  '.go',
+  // JVM
+  '.gradle',
+  '.groovy',
+  '.java',
+  '.kt',
+  '.kts',
+  '.sc',
+  '.scala',
+  // .NET
+  '.cs',
+  '.fs',
+  '.fsi',
+  '.fsx',
+  '.vb',
+  // Apple platforms
+  '.m',
+  '.mm',
+  '.swift',
+  // Functional
+  '.cljc',
+  '.cljs',
+  '.clj',
+  '.edn',
+  '.erl',
+  '.ex',
+  '.exs',
+  '.hrl',
+  '.hs',
+  '.lhs',
+  '.ml',
+  '.mli',
+  // Web frontend
+  '.astro',
+  '.jsx',
+  '.svelte',
+  '.tsx',
+  '.vue',
+  // Scripting
+  '.bash',
+  '.dart',
+  '.fish',
+  '.lua',
+  '.php',
+  '.pl',
+  '.pm',
+  '.ps1',
+  '.r',
+  '.rb',
+  '.sh',
+  '.zsh',
+  // Newer / niche source languages
+  '.cr',
+  '.nim',
+  '.sol',
+  '.zig',
+  // Schema / IDL / queries
+  '.gql',
+  '.graphql',
+  '.proto',
+  '.sql',
+  '.thrift',
+  // Markup / typesetting
+  '.adoc',
+  '.bib',
+  '.org',
+  '.rst',
+  '.tex',
+  // Config / build
+  '.cfg',
+  '.cmake',
+  '.conf',
+  '.containerfile',
+  '.dockerfile',
+  '.hcl',
+  '.ini',
+  '.mk',
+  '.nomad',
+  '.properties',
+  '.tf',
+  '.tfvars',
+  '.toml',
+]);
+
+/**
+ * Decide whether a mime registry entry is a text payload that the
+ * Edit / WriteFile tools can safely mutate as text. Used by {@link
+ * detectFileType} to avoid running `isBinaryFile` content sampling
+ * on files whose extension is registered as text — the sampling
+ * misclassifies UTF-16 without BOM, encrypted / DRM-protected
+ * volumes, and other plain-text payloads whose first 4 KB happen to
+ * include nulls / non-printables.
+ */
+function isTextMime(lookedUpMimeType: string): boolean {
+  if (lookedUpMimeType.startsWith('text/')) {
+    return true;
+  }
+  if (lookedUpMimeType.endsWith('+xml') || lookedUpMimeType.endsWith('+json')) {
+    return true;
+  }
+  return KNOWN_TEXT_APPLICATION_MIMES.has(lookedUpMimeType);
+}
+
+/**
  * Detects the type of file based on extension and content.
  * @param filePath Path to the file.
  * @returns Promise that resolves to a FileType string.
@@ -505,6 +682,15 @@ export async function detectFileType(filePath: string): Promise<FileType> {
     if (lookedUpMimeType === 'application/pdf') {
       return 'pdf';
     }
+    // Trust the registry for declared text payloads. Skipping the
+    // `isBinaryFile` content sampler below avoids false positives
+    // on UTF-16 / UTF-32 without BOM and on encrypted file systems
+    // (issue #3964 Windows scenario): when the extension already
+    // declares a text mime, the bytes are text even if the first
+    // 4 KB look binary on a raw read.
+    if (isTextMime(lookedUpMimeType)) {
+      return 'text';
+    }
   }
 
   // Stricter binary check for common non-text extensions before content check
@@ -513,8 +699,18 @@ export async function detectFileType(filePath: string): Promise<FileType> {
     return 'binary';
   }
 
+  // Curated source-code / config / markup extensions. The `mime/lite`
+  // registry omits most languages (`.py`, `.kt`, `.cpp`, `.go`, ...);
+  // without this set, an encrypted-volume read whose 4 KB sample
+  // looks binary would misclassify these as binary even though the
+  // extension is unambiguously text. Issue #3964 reproduced exactly
+  // this on `.c` / `.cpp` / `.h` files.
+  if (KNOWN_TEXT_EXTENSIONS.has(ext)) {
+    return 'text';
+  }
+
   // Fall back to content-based check if mime type wasn't conclusive for image/pdf
-  // and it's not a known binary extension.
+  // and it's not a known binary or known text extension.
   if (await isBinaryFile(filePath)) {
     return 'binary';
   }

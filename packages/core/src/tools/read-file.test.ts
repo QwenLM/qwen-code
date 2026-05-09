@@ -887,6 +887,38 @@ describe('ReadFileTool', () => {
         }
       });
 
+      it('reads source-code files with binary-looking content as text (encrypted FS, issue #3964)', async () => {
+        // Frank-Shaw-FS reports `.cpp` source files on Windows
+        // encrypted / DRM-protected file systems being misclassified
+        // as binary. The OS surfaces encrypted bytes to `fs.open()`
+        // random-access reads, so the 4 KB `isBinaryFile` heuristic
+        // sees nulls / non-printables and concludes binary even
+        // though the user-visible content is plain text. The
+        // extension-based override in detectFileType skips the
+        // content sample for known text extensions; verify that
+        // routes through `processSingleFileContent` correctly and
+        // records the read as text-cacheable so a follow-up Edit
+        // passes prior-read enforcement.
+        //
+        // We can't easily simulate a real encrypted volume in a
+        // unit test, so we approximate by writing nominally text
+        // content to a `.cpp` file. The test relies on the
+        // extension override winning over any future content-side
+        // heuristic — there is no isBinaryFile mocking in scope.
+        const filePath = path.join(tempRootDir, 'src.cpp');
+        await fsp.writeFile(filePath, '#include <iostream>\nint main() {}\n');
+
+        const result = await read({ file_path: filePath });
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.llmContent).toContain('#include');
+
+        const status = fileReadCache.check(fs.statSync(filePath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
+      });
+
       it('does not return the placeholder for image files', async () => {
         const imagePath = path.join(tempRootDir, 'pic.png');
         const pngHeader = Buffer.from([
