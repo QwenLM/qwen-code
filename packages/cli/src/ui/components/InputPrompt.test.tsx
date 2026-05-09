@@ -245,20 +245,39 @@ describe('InputPrompt', () => {
     };
   });
 
-  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+  const wait = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+  const flush = async () => {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  };
+  const advanceTimers = async (ms: number) => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+    await flush();
+  };
 
   describe('prompt suggestions', () => {
     it('does not accept the prompt suggestion on shift+tab', async () => {
+      vi.useFakeTimers();
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(350);
+      try {
+        await advanceTimers(300);
 
-      stdin.write('\x1b[Z'); // shift+tab
-      await wait();
+        act(() => {
+          stdin.write('\x1b[Z'); // shift+tab
+        });
+        await flush();
 
-      expect(mockBuffer.insert).not.toHaveBeenCalled();
-      unmount();
+        expect(mockBuffer.insert).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
     });
 
     it('does not accept a prompt suggestion while command completion is active', async () => {
@@ -271,27 +290,34 @@ describe('InputPrompt', () => {
         },
       ] as UseCommandCompletionReturn['suggestions'];
 
+      vi.useFakeTimers();
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(350);
+      try {
+        await advanceTimers(300);
 
-      stdin.write('\t');
-      await wait();
+        act(() => {
+          stdin.write('\t');
+        });
+        await flush();
 
-      expect(mockBuffer.insert).not.toHaveBeenCalledWith('commit this');
-      expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalled();
-      unmount();
+        expect(mockBuffer.insert).not.toHaveBeenCalledWith('commit this');
+        expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
     });
   });
 
   it('should call shellHistory.getPreviousCommand on up arrow in shell mode', async () => {
     props.shellModeActive = true;
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
-    await wait();
 
-    stdin.write('\u001B[A');
-    await wait();
+    act(() => {
+      stdin.write('\u001B[A');
+    });
 
     expect(mockShellHistory.getPreviousCommand).toHaveBeenCalled();
     unmount();
@@ -300,10 +326,10 @@ describe('InputPrompt', () => {
   it('should call shellHistory.getNextCommand on down arrow in shell mode', async () => {
     props.shellModeActive = true;
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
-    await wait();
 
-    stdin.write('\u001B[B');
-    await wait();
+    act(() => {
+      stdin.write('\u001B[B');
+    });
 
     expect(mockShellHistory.getNextCommand).toHaveBeenCalled();
     unmount();
@@ -1211,13 +1237,15 @@ describe('InputPrompt', () => {
     const { stdin, lastFrame, unmount } = renderWithProviders(<TestHarness />);
     await wait();
 
-    stdin.write('/export md');
-    await wait();
+    act(() => {
+      stdin.write('/export md');
+    });
     expect(stripAnsi(lastFrame() ?? '')).toContain('/export md');
 
     // Pressing Down must cycle to the NEXT format (json).
-    stdin.write('\u001B[B');
-    await wait();
+    act(() => {
+      stdin.write('\u001B[B');
+    });
     expect(stripAnsi(lastFrame() ?? '')).toContain('/export json');
     unmount();
   });
@@ -2451,19 +2479,28 @@ describe('InputPrompt', () => {
       );
       await wait();
 
-      // Simulate a paste operation (this sets the protection)
-      stdin.write(`\x1b[200~\npasted\x1b[201~`);
-      await wait();
+      vi.useFakeTimers();
+      try {
+        // Simulate a paste operation (this sets the protection)
+        act(() => {
+          stdin.write(`\x1b[200~\npasted\x1b[201~`);
+        });
+        await flush();
 
-      // Wait for the protection timeout to naturally expire
-      await new Promise((resolve) => setTimeout(resolve, 600));
+        // Advance the protection timer without sleeping in real time.
+        await advanceTimers(500);
 
-      // Now Enter should work normally
-      stdin.write('\r');
-      await wait();
+        // Now Enter should work normally
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
 
-      // Verify that onSubmit was called after the timeout
-      expect(props.onSubmit).toHaveBeenCalledWith('test command');
+        // Verify that onSubmit was called after the timeout
+        expect(props.onSubmit).toHaveBeenCalledWith('test command');
+      } finally {
+        vi.useRealTimers();
+      }
 
       unmount();
     });
@@ -2499,10 +2536,14 @@ describe('InputPrompt', () => {
       );
       await wait();
 
-      stdin.write('\x1B');
-      await wait();
+      act(() => {
+        stdin.write('\x1B');
+      });
+      await wait(50);
 
-      stdin.write('\x1B');
+      act(() => {
+        stdin.write('\x1B');
+      });
       await wait();
 
       expect(props.buffer.setText).toHaveBeenCalledWith('');
@@ -2945,7 +2986,7 @@ describe('InputPrompt', () => {
       expect(clean(stdout.lastFrame())).toContain('→');
 
       stdin.write('\u001B[C');
-      await wait(200);
+      await wait();
       expect(clean(stdout.lastFrame())).toContain('←');
       expect(stdout.lastFrame()).toMatchSnapshot(
         'command-search-expanded-match',
@@ -3169,19 +3210,28 @@ describe('InputPrompt', () => {
       );
       await wait();
 
-      // First paste to set up the placeholder
-      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
-      await wait();
+      vi.useFakeTimers();
+      try {
+        // First paste to set up the placeholder
+        act(() => {
+          stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+        });
+        await flush();
 
-      // Wait for paste protection to expire
-      await new Promise((resolve) => setTimeout(resolve, 600));
+        // Advance the protection timer without sleeping in real time.
+        await advanceTimers(500);
 
-      // Submit the input
-      stdin.write('\r');
-      await wait();
+        // Submit the input
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
 
-      // Verify onSubmit was called with expanded content
-      expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+        // Verify onSubmit was called with expanded content
+        expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+      } finally {
+        vi.useRealTimers();
+      }
 
       unmount();
     });
@@ -3195,25 +3245,36 @@ describe('InputPrompt', () => {
       );
       await wait();
 
-      stdin.write(`\x1b[200~${firstPaste}\x1b[201~`);
-      await wait();
-      stdin.write(`\x1b[200~${secondPaste}\x1b[201~`);
-      await wait();
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          stdin.write(`\x1b[200~${firstPaste}\x1b[201~`);
+        });
+        await flush();
+        act(() => {
+          stdin.write(`\x1b[200~${secondPaste}\x1b[201~`);
+        });
+        await flush();
 
-      mockBuffer.text =
-        '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]';
-      mockBuffer.lines = mockBuffer.text.split('\n');
-      mockBuffer.cursor = [1, '[Pasted Content 1001 chars]'.length];
+        mockBuffer.text =
+          '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]';
+        mockBuffer.lines = mockBuffer.text.split('\n');
+        mockBuffer.cursor = [1, '[Pasted Content 1001 chars]'.length];
 
-      // Wait for paste protection to expire
-      await new Promise((resolve) => setTimeout(resolve, 600));
+        // Advance the protection timer without sleeping in real time.
+        await advanceTimers(500);
 
-      stdin.write('\r');
-      await wait();
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
 
-      expect(props.onSubmit).toHaveBeenCalledWith(
-        `${secondPaste}\n${firstPaste}`,
-      );
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          `${secondPaste}\n${firstPaste}`,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
 
       unmount();
     });
@@ -3230,19 +3291,28 @@ describe('InputPrompt', () => {
       );
       await wait();
 
-      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
-      await wait();
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+        });
+        await flush();
 
-      // Wait for paste protection to expire
-      await new Promise((resolve) => setTimeout(resolve, 600));
+        // Advance the protection timer without sleeping in real time.
+        await advanceTimers(500);
 
-      stdin.write('\r');
-      await wait();
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
 
-      expect(mockShellHistory.addCommandToHistory).toHaveBeenCalledWith(
-        largeContent,
-      );
-      expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+        expect(mockShellHistory.addCommandToHistory).toHaveBeenCalledWith(
+          largeContent,
+        );
+        expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+      } finally {
+        vi.useRealTimers();
+      }
 
       unmount();
     });
@@ -3275,21 +3345,21 @@ describe('InputPrompt', () => {
 
       // First paste - gets ID 1
       stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
-      await wait();
+      await wait(50);
 
       // Verify first placeholder was inserted
       expect(mockBuffer.text).toBe('[Pasted Content 1001 chars]');
 
       // Press backspace to delete the placeholder (cursor is at end of placeholder)
       stdin.write('\x7f');
-      await wait();
+      await wait(50);
 
       // Verify the placeholder was deleted (buffer is now empty)
       expect(mockBuffer.text).toBe('');
 
       // Second paste - should reuse ID 1 since the first was deleted
       stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
-      await wait();
+      await wait(50);
 
       // Verify the ID was reused (no #2 suffix)
       const insertCalls = vi.mocked(mockBuffer.insert).mock.calls;

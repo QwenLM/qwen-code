@@ -187,8 +187,8 @@ vi.mock('../../utils/languageUtils.js', async () => {
 // const originalConsoleError = console.error;
 
 describe('SettingsDialog', () => {
-  // Simple delay function for remaining tests that need gradual migration
-  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Yield to Ink/React updates without adding broad real-time sleeps.
+  const wait = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // Custom waitFor utility for ink testing environment (not compatible with @testing-library/react)
   const waitFor = async (

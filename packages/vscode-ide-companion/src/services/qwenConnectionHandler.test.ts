@@ -135,12 +135,19 @@ describe('QwenConnectionHandler', () => {
   });
 
   describe('connect retry logic', () => {
+    const runPendingRetryTimer = async () => {
+      for (let i = 0; i < 5 && vi.getTimerCount() === 0; i++) {
+        await Promise.resolve();
+      }
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      await vi.runOnlyPendingTimersAsync();
+    };
+
     beforeEach(() => {
       mockGetConfiguration.mockReturnValue({
         get: () => undefined,
       });
-      // Speed up tests by mocking setTimeout-based delays
-      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.useFakeTimers();
     });
 
     afterEach(() => {
@@ -162,7 +169,16 @@ describe('QwenConnectionHandler', () => {
         )
         .mockResolvedValueOnce(undefined);
 
-      await handler.connect(mockConnection, '/workspace', '/path/to/cli.js');
+      const connectPromise = handler.connect(
+        mockConnection,
+        '/workspace',
+        '/path/to/cli.js',
+      );
+
+      await runPendingRetryTimer();
+      await expect(connectPromise).resolves.toMatchObject({
+        sessionCreated: true,
+      });
 
       expect(mockConnection.connect).toHaveBeenCalledTimes(2);
     });
@@ -175,9 +191,16 @@ describe('QwenConnectionHandler', () => {
         spawnError,
       );
 
-      await expect(
-        handler.connect(mockConnection, '/workspace', '/path/to/cli.js'),
-      ).rejects.toThrow(spawnError);
+      const connectPromise = handler.connect(
+        mockConnection,
+        '/workspace',
+        '/path/to/cli.js',
+      );
+      const errorPromise = connectPromise.catch((error: unknown) => error);
+
+      await runPendingRetryTimer();
+      await runPendingRetryTimer();
+      await expect(errorPromise).resolves.toBe(spawnError);
 
       expect(mockConnection.connect).toHaveBeenCalledTimes(3);
     });

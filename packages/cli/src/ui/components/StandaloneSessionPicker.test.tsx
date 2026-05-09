@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ReactNode } from 'react';
+import { act, type ReactNode } from 'react';
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
@@ -83,7 +83,14 @@ function createMockSessionService(
 }
 
 describe('SessionPicker', () => {
-  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+  const wait = async () => {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  };
+  const realWait = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
 
   afterEach(() => {
     vi.clearAllMocks();
@@ -122,7 +129,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       const output = lastFrame();
       expect(output).toContain('Hello');
@@ -149,7 +156,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       const output = lastFrame();
       expect(output).toContain('0 messages');
@@ -182,7 +189,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       const output = lastFrame();
       expect(output).toContain('Single message');
@@ -231,7 +238,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       // All sessions should be visible initially
       let output = lastFrame();
@@ -239,7 +246,7 @@ describe('SessionPicker', () => {
       expect(output).toContain('Feature branch');
 
       stdin.write(CTRL_B);
-      await wait(50);
+      await wait();
 
       output = lastFrame();
       // Only main branch sessions should be visible
@@ -284,10 +291,10 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       stdin.write(CTRL_B);
-      await wait(50);
+      await wait();
 
       const output = lastFrame();
       // Should only show sessions from main branch (including 0-message sessions)
@@ -330,7 +337,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       // First session should be selected initially (indicated by >)
       let output = lastFrame();
@@ -338,7 +345,7 @@ describe('SessionPicker', () => {
 
       // Navigate down
       stdin.write(ARROW_DOWN); // Down arrow
-      await wait(50);
+      await wait();
 
       output = lastFrame();
       // Selection indicator should move
@@ -367,11 +374,11 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       // Press Enter to select
       stdin.write('\r');
-      await wait(50);
+      await wait();
 
       expect(onSelect).toHaveBeenCalledWith('selected-session');
     });
@@ -394,11 +401,13 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       // Press Escape to cancel
-      stdin.write(ESC);
-      await wait(50);
+      act(() => {
+        stdin.write(ESC);
+      });
+      await realWait(50);
 
       expect(onCancel).toHaveBeenCalled();
       expect(onSelect).not.toHaveBeenCalled();
@@ -429,7 +438,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       const output = lastFrame();
       expect(output).toContain('Test prompt text');
@@ -453,7 +462,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       const output = lastFrame();
       expect(output).toContain('Resume Session');
@@ -480,7 +489,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       const output = lastFrame();
       expect(output).toContain('Ctrl+B');
@@ -506,7 +515,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       const output = lastFrame();
       // Should contain ellipsis for truncated text
@@ -531,7 +540,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(100);
+      await wait();
 
       const output = lastFrame();
       expect(output).toContain('(empty prompt)');
@@ -587,7 +596,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait(200);
+      await wait();
 
       // First page should be loaded
       expect(mockService.listSessions).toHaveBeenCalled();
@@ -746,12 +755,19 @@ describe('SessionPicker', () => {
         />,
       );
 
-      await wait(100);
-      stdin.write(' '); // Space → preview in list mode
-      await wait(150);
-      const frame = lastFrame() ?? '';
+      await act(async () => {
+        await service.listSessions.mock.results[0]!.value;
+      });
+      act(() => {
+        stdin.write(' '); // Space → preview in list mode
+      });
+      const loadSessionPromise = service.loadSession.mock.results[0]!
+        .value as Promise<typeof toolSession>;
+      await act(async () => {
+        await loadSessionPromise;
+      });
       // Tool group renders with raw function name fallback (no registry).
-      expect(frame).toContain('BashTool');
+      expect(lastFrame() ?? '').toContain('BashTool');
     });
 
     it('Enter inside preview fires onSelect with previewed sessionId', async () => {
@@ -780,11 +796,11 @@ describe('SessionPicker', () => {
         />,
       );
 
-      await wait(100);
+      await wait();
       stdin.write(' '); // open preview on s1
-      await wait(150);
+      await wait();
       stdin.write('\r'); // Enter
-      await wait(50);
+      await wait();
       expect(onSelect).toHaveBeenCalledWith('s1');
     });
 
@@ -814,7 +830,7 @@ describe('SessionPicker', () => {
         />,
       );
 
-      await wait(100);
+      await wait();
       const beforeFrame = lastFrame() ?? '';
       expect(beforeFrame).toContain('Deletable session');
       // Hint must not appear, otherwise we are training users to press
@@ -822,7 +838,7 @@ describe('SessionPicker', () => {
       expect(beforeFrame).not.toContain('Space to preview');
 
       stdin.write(' '); // Space — no-op when preview is disabled
-      await wait(150);
+      await wait();
       const afterFrame = lastFrame() ?? '';
       // No preview body, still on the list.
       expect(afterFrame).not.toContain('USER-ASKED-THIS');
@@ -831,7 +847,7 @@ describe('SessionPicker', () => {
       // Enter must still call onSelect on the highlighted row (delete path
       // unchanged), not be eaten by a phantom preview.
       stdin.write('\r');
-      await wait(50);
+      await wait();
       expect(onSelect).toHaveBeenCalledWith('s1');
       expect(service.loadSession).not.toHaveBeenCalled();
     });
