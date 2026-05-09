@@ -309,7 +309,7 @@ describe('BaseLlmClient', () => {
       mockGenerateContent.mockRejectedValue(apiError);
 
       await expect(client.generateJson(defaultOptions)).rejects.toThrow(
-        'Failed to generate JSON content: Service Unavailable (503)',
+        'Failed to generate JSON content (test-prompt-id): Service Unavailable (503)',
       );
 
       // Verify generic error reporting

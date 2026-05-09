@@ -199,7 +199,8 @@ export class BaseLlmClient {
         'generateJson-api',
       );
       throw new Error(
-        `Failed to generate JSON content: ${getErrorMessage(error)}`,
+        `Failed to generate JSON content${promptId ? ` (${promptId})` : ''}: ${getErrorMessage(error)}`,
+        { cause: error },
       );
     }
   }
@@ -269,7 +270,8 @@ export class BaseLlmClient {
         'generateText-api',
       );
       throw new Error(
-        `Failed to generate text content: ${getErrorMessage(error)}`,
+        `Failed to generate text content${promptId ? ` (${promptId})` : ''}: ${getErrorMessage(error)}`,
+        { cause: error },
       );
     }
   }

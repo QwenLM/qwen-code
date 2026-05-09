@@ -18,10 +18,22 @@ export interface SideQueryJsonOptions<TResponse> {
   contents: Content[];
   schema: Record<string, unknown>;
   abortSignal: AbortSignal;
+  /**
+   * Override the model used for this query. Defaults to
+   * `config.getFastModel?.() ?? config.getModel()` — side queries run on the
+   * fast model when one is configured. Pass an explicit value to pin to the
+   * main model (e.g. long-form summarization in web-fetch).
+   */
   model?: string;
   systemInstruction?: string | Part | Part[] | Content;
   promptId?: string;
   purpose?: string;
+  /**
+   * Caller-supplied generation config. `thinkingConfig.includeThoughts`
+   * defaults to `false` for all side queries; pass
+   * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
+   * required.
+   */
   config?: Omit<
     GenerateContentConfig,
     | 'systemInstruction'
@@ -47,10 +59,22 @@ export interface SideQueryTextOptions {
    */
   schema?: never;
   abortSignal: AbortSignal;
+  /**
+   * Override the model used for this query. Defaults to
+   * `config.getFastModel?.() ?? config.getModel()` — side queries run on the
+   * fast model when one is configured. Pass an explicit value to pin to the
+   * main model (e.g. long-form summarization in web-fetch).
+   */
   model?: string;
   systemInstruction?: string | Part | Part[] | Content;
   promptId?: string;
   purpose?: string;
+  /**
+   * Caller-supplied generation config. `thinkingConfig.includeThoughts`
+   * defaults to `false` for all side queries; pass
+   * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
+   * required.
+   */
   config?: Omit<
     GenerateContentConfig,
     'systemInstruction' | 'tools' | 'abortSignal'

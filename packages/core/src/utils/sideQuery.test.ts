@@ -183,6 +183,52 @@ describe('runSideQuery', () => {
         }),
       ).rejects.toThrow('Status must be non-empty');
     });
+
+    it('forwards maxAttempts when provided, omits it otherwise', async () => {
+      vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({ ok: true });
+      const baseOptions = {
+        purpose: 'p',
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+        schema: {
+          type: 'object',
+          properties: { ok: { type: 'boolean' } },
+          required: ['ok'],
+        },
+        abortSignal: abortController.signal,
+      };
+
+      await runSideQuery<{ ok: boolean }>(mockConfig, {
+        ...baseOptions,
+        maxAttempts: 1,
+      });
+      expect(mockBaseLlmClient.generateJson).toHaveBeenLastCalledWith(
+        expect.objectContaining({ maxAttempts: 1 }),
+      );
+
+      await runSideQuery<{ ok: boolean }>(mockConfig, baseOptions);
+      const lastCall = vi
+        .mocked(mockBaseLlmClient.generateJson)
+        .mock.calls.at(-1)?.[0];
+      expect(lastCall).toBeDefined();
+      expect(lastCall as object).not.toHaveProperty('maxAttempts');
+    });
+
+    it('propagates rejections from generateJson', async () => {
+      const apiError = new Error('upstream 503');
+      vi.mocked(mockBaseLlmClient.generateJson).mockRejectedValue(apiError);
+
+      await expect(
+        runSideQuery<{ ok: boolean }>(mockConfig, {
+          contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+          schema: {
+            type: 'object',
+            properties: { ok: { type: 'boolean' } },
+            required: ['ok'],
+          },
+          abortSignal: abortController.signal,
+        }),
+      ).rejects.toBe(apiError);
+    });
   });
 
   describe('text mode (no schema)', () => {
@@ -320,6 +366,40 @@ describe('runSideQuery', () => {
       const callArg = vi.mocked(mockBaseLlmClient.generateText).mock
         .calls[0][0];
       expect(callArg.systemInstruction).toBeUndefined();
+    });
+
+    it('forwards maxAttempts when provided, omits it otherwise', async () => {
+      mockTextResult('ok');
+      const baseOptions = {
+        purpose: 'p',
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+        abortSignal: abortController.signal,
+      };
+
+      await runSideQuery(mockConfig, { ...baseOptions, maxAttempts: 1 });
+      expect(mockBaseLlmClient.generateText).toHaveBeenLastCalledWith(
+        expect.objectContaining({ maxAttempts: 1 }),
+      );
+
+      await runSideQuery(mockConfig, baseOptions);
+      const lastCall = vi
+        .mocked(mockBaseLlmClient.generateText)
+        .mock.calls.at(-1)?.[0];
+      expect(lastCall).toBeDefined();
+      expect(lastCall as object).not.toHaveProperty('maxAttempts');
+    });
+
+    it('propagates rejections from generateText', async () => {
+      const apiError = new Error('upstream 503');
+      vi.mocked(mockBaseLlmClient.generateText).mockRejectedValue(apiError);
+
+      await expect(
+        runSideQuery(mockConfig, {
+          purpose: 'p',
+          contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+          abortSignal: abortController.signal,
+        }),
+      ).rejects.toBe(apiError);
     });
   });
 });
