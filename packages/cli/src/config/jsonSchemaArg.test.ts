@@ -377,4 +377,45 @@ describe('resolveJsonSchemaArg', () => {
       /must accept object-typed values/,
     );
   });
+
+  it('rejects if/then/else when the decidable branch admits no objects', () => {
+    // `if: true` reduces root acceptance to `then`'s acceptance.
+    // `if: false` reduces it to `else`'s acceptance. Object schemas in
+    // `if` are runtime-decidable only and fall through to Ajv.
+    expect(() =>
+      resolveJsonSchemaArg('{"if":true,"then":{"type":"string"}}'),
+    ).toThrow(/must accept object-typed values/);
+    expect(() => resolveJsonSchemaArg('{"if":true,"then":false}')).toThrow(
+      /must accept object-typed values/,
+    );
+    expect(() =>
+      resolveJsonSchemaArg('{"if":false,"else":{"type":"array"}}'),
+    ).toThrow(/must accept object-typed values/);
+    expect(() => resolveJsonSchemaArg('{"if":false,"else":false}')).toThrow(
+      /must accept object-typed values/,
+    );
+  });
+
+  it('accepts if/then/else when the decidable branch admits objects', () => {
+    // `if: true` + object-compatible `then` passes.
+    expect(
+      resolveJsonSchemaArg('{"if":true,"then":{"type":"object"}}'),
+    ).toBeDefined();
+    // Missing `then` (defaults to `true`) — no constraint on root.
+    expect(resolveJsonSchemaArg('{"if":true}')).toBeDefined();
+    // `if: false` + object-compatible `else`.
+    expect(
+      resolveJsonSchemaArg('{"if":false,"else":{"type":"object"}}'),
+    ).toBeDefined();
+    // Missing `else` defaults to `true` — no constraint.
+    expect(resolveJsonSchemaArg('{"if":false}')).toBeDefined();
+    // Object schema for `if` — runtime-decidable; defer to Ajv. We
+    // accept at parse time even when `then` excludes object, because
+    // an object value may not match `if` and so isn't bound by `then`.
+    expect(
+      resolveJsonSchemaArg(
+        '{"if":{"properties":{"k":{"const":"x"}}},"then":{"type":"string"}}',
+      ),
+    ).toBeDefined();
+  });
 });

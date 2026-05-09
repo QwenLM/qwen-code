@@ -3351,5 +3351,73 @@ describe('runNonInteractive', () => {
       expect(taskNotificationIdx).toBeGreaterThan(-1);
       expect(taskNotificationIdx).toBeLessThan(resultIdx);
     });
+
+    it('emits structuredResult to stdout in OutputFormat.TEXT mode', async () => {
+      // The other --json-schema tests pin OutputFormat.JSON /
+      // OutputFormat.STREAM_JSON. TEXT is the default for headless runs
+      // (`qwen -p "..."` without --output-format), so it needs its own
+      // pin: a regression that diverged the TEXT adapter's
+      // structuredResult handling from the JSON / stream-json paths
+      // would only surface to users running plain `qwen -p`.
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
+      setupMetricsMock();
+
+      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
+        setNotificationCallback: vi.fn(),
+        setRegisterCallback: vi.fn(),
+        getAll: vi.fn().mockReturnValue([]),
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        abortAll: vi.fn(),
+      });
+
+      const writes: string[] = [];
+      processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+        writes.push(
+          typeof chunk === 'string'
+            ? chunk
+            : Buffer.from(chunk).toString('utf8'),
+        );
+        return true;
+      });
+
+      const structuredArgs = { summary: 'text-mode-ok' };
+      const structuredCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured-text',
+          name: 'structured_output',
+          args: structuredArgs,
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-text',
+        },
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'ok' }],
+      });
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([structuredCall]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output (text mode)',
+        'prompt-id-text',
+      );
+
+      expect(exitCode).toBe(0);
+      // TEXT mode writes the JSON-stringified structured payload as the
+      // result on stdout (BaseJsonOutputAdapter.buildResultMessage forces
+      // `result = JSON.stringify(structuredResult)` when the field is
+      // set; JsonOutputAdapter writes `result` directly to stdout in
+      // TEXT mode). The line should be exactly the stringified args plus
+      // a trailing newline — no JSON envelope, no extra event log.
+      const stdout = writes.join('');
+      expect(stdout).toBe(`${JSON.stringify(structuredArgs)}\n`);
+    });
   });
 });

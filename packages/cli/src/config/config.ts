@@ -305,6 +305,35 @@ function schemaRootAcceptsObject(
     }
   }
 
+  // Best-effort `if/then/else` handling for the decidable cases. The
+  // semantics: if the value matches `if`, it must match `then`; otherwise
+  // it must match `else` (defaults to `true`). For root-acceptance we can
+  // only decide statically when `if` is itself a constant boolean
+  // subschema:
+  //   `if: true`  → every object matches `if`, so it MUST match `then`.
+  //   `if: false` → no value matches `if`, so it must match `else`.
+  // Other shapes for `if` (object schemas) depend on the candidate value
+  // and fall through to Ajv at runtime — we can't decide acceptance
+  // without seeing the value.
+  if ('if' in schema) {
+    const ifSchema = schema['if'];
+    if (ifSchema === true) {
+      // Object MUST match `then` (if absent, defaults to `true`, no
+      // constraint on root acceptance).
+      const thenSchema = schema['then'];
+      if (thenSchema !== undefined && !variantAcceptsObject(thenSchema)) {
+        return false;
+      }
+    } else if (ifSchema === false) {
+      // Object MUST match `else` (if absent, defaults to `true`).
+      const elseSchema = schema['else'];
+      if (elseSchema !== undefined && !variantAcceptsObject(elseSchema)) {
+        return false;
+      }
+    }
+    // ifSchema is an object schema — runtime Ajv decides; do nothing.
+  }
+
   // No narrowing at the root — lenient default, treated as object-compatible.
   return true;
 }

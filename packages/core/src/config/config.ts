@@ -2841,7 +2841,7 @@ export class Config {
 
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
-    options?: { skipDiscovery?: boolean },
+    options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -2883,8 +2883,20 @@ export class Config {
     // maxSessionTurns and exit via the "plain text" failure path. Hoisted
     // out of the two branches so the dynamic-import factory shape stays
     // in sync between them.
+    //
+    // Skipped when building a subagent-context registry. `this.jsonSchema`
+    // propagates to subagent overrides via prototype delegation
+    // (`Object.create(base)` in `createApprovalModeOverride` /
+    // `buildSubagentContextOverride`), but only `runNonInteractive`'s main
+    // and drain loops detect a successful structured_output call as
+    // terminal. A subagent that called the tool would receive the
+    // "Session will end now" llmContent, then keep running because its
+    // own loop has no termination handler — wasted tokens with no
+    // structured payload surfacing on stdout. Strip the registration in
+    // those contexts.
     const registerStructuredOutputIfRequested = async (): Promise<void> => {
       if (!this.jsonSchema) return;
+      if (options?.forSubAgent) return;
       const schema = this.jsonSchema;
       await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
         const { SyntheticOutputTool } = await import(
