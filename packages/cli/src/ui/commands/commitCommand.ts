@@ -26,7 +26,7 @@ export const commitCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   argumentHint: '<message>',
-  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  supportedModes: ['interactive'] as const,
   action: async (
     _context: CommandContext,
     args: string,
@@ -50,8 +50,8 @@ export const commitCommand: SlashCommand = {
       type: 'tool',
       toolName: 'run_shell_command',
       toolArgs: {
-        description: t('Stage all changes and commit'),
-        command: `git add -A && git commit -m ${quotedMessage}`,
+        description: t('Show status, stage all changes, and commit'),
+        command: `git status --short && git add -A && git commit -m ${quotedMessage}`,
         is_background: false,
       },
     };

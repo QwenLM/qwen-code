@@ -18,12 +18,8 @@ describe('commitCommand', () => {
     expect(commitCommand.altNames).toEqual(['ci']);
   });
 
-  it('should support all execution modes', () => {
-    expect(commitCommand.supportedModes).toEqual([
-      'interactive',
-      'non_interactive',
-      'acp',
-    ]);
+  it('should support only interactive execution mode', () => {
+    expect(commitCommand.supportedModes).toEqual(['interactive']);
   });
 
   it('should return an error when no message is provided', async () => {
@@ -53,8 +49,9 @@ describe('commitCommand', () => {
       type: 'tool',
       toolName: 'run_shell_command',
       toolArgs: {
-        description: expect.stringContaining('Stage all changes'),
-        command: "git add -A && git commit -m 'fix: resolve login bug'",
+        description: expect.stringContaining('Show status'),
+        command:
+          "git status --short && git add -A && git commit -m 'fix: resolve login bug'",
         is_background: false,
       },
     });
@@ -69,8 +66,9 @@ describe('commitCommand', () => {
       type: 'tool',
       toolName: 'run_shell_command',
       toolArgs: {
-        description: expect.stringContaining('Stage all changes'),
-        command: 'git add -A && git commit -m \'fix: resolve "login" bug\'',
+        description: expect.stringContaining('Show status'),
+        command:
+          'git status --short && git add -A && git commit -m \'fix: resolve "login" bug\'',
         is_background: false,
       },
     });
@@ -85,8 +83,9 @@ describe('commitCommand', () => {
       type: 'tool',
       toolName: 'run_shell_command',
       toolArgs: {
-        description: expect.stringContaining('Stage all changes'),
-        command: "git add -A && git commit -m 'fix: C:\\Users\\test'",
+        description: expect.stringContaining('Show status'),
+        command:
+          "git status --short && git add -A && git commit -m 'fix: C:\\Users\\test'",
         is_background: false,
       },
     });
@@ -97,7 +96,7 @@ describe('commitCommand', () => {
       {} as never,
       'fix: $(touch /tmp/pwned)',
     );
-    const command = (result as ToolActionReturn).toolArgs.command as string;
+    const command = (result as ToolActionReturn).toolArgs['command'] as string;
     // The dangerous content must be inside single quotes so the shell treats it as literal
     expect(command).toContain("git commit -m 'fix: $(touch /tmp/pwned)'");
     expect(command).toContain('git commit -m');
@@ -108,7 +107,7 @@ describe('commitCommand', () => {
       {} as never,
       'fix: `touch /tmp/pwned`',
     );
-    const command = (result as ToolActionReturn).toolArgs.command as string;
+    const command = (result as ToolActionReturn).toolArgs['command'] as string;
     // Backtick content must be inside single quotes
     expect(command).toContain("git commit -m 'fix: `touch /tmp/pwned`'");
     expect(command).toContain('git commit -m');
@@ -116,7 +115,7 @@ describe('commitCommand', () => {
 
   it('should prevent variable expansion via $VAR', async () => {
     const result = await commitCommand.action!({} as never, 'fix: $HOME');
-    const command = (result as ToolActionReturn).toolArgs.command as string;
+    const command = (result as ToolActionReturn).toolArgs['command'] as string;
     // $HOME must be inside single quotes, not double quotes
     expect(command).toContain("git commit -m 'fix: $HOME'");
     expect(command).not.toContain('"$HOME"');
@@ -128,7 +127,7 @@ describe('commitCommand', () => {
       {} as never,
       'fix: something; touch /tmp/pwned',
     );
-    const command = (result as ToolActionReturn).toolArgs.command as string;
+    const command = (result as ToolActionReturn).toolArgs['command'] as string;
     // Semicolon must be inside single quotes so it's not a command separator
     expect(command).toContain(
       "git commit -m 'fix: something; touch /tmp/pwned'",
@@ -141,7 +140,7 @@ describe('commitCommand', () => {
       {} as never,
       'fix: something\ntouch /tmp/pwned',
     );
-    const command = (result as ToolActionReturn).toolArgs.command as string;
+    const command = (result as ToolActionReturn).toolArgs['command'] as string;
     // Newline must be inside single quotes so it's not a command separator
     expect(command).toContain("git commit -m 'fix: something");
     expect(command).toContain("touch /tmp/pwned'");
@@ -153,7 +152,7 @@ describe('commitCommand', () => {
       {} as never,
       "fix: it's working",
     );
-    const command = (result as ToolActionReturn).toolArgs.command as string;
+    const command = (result as ToolActionReturn).toolArgs['command'] as string;
     expect(command).toContain('git commit -m');
     // shell-quote handles single quotes by wrapping in double quotes
     expect(command).toMatch(/git commit -m "fix: it's working"/);
@@ -168,8 +167,9 @@ describe('commitCommand', () => {
       type: 'tool',
       toolName: 'run_shell_command',
       toolArgs: {
-        description: expect.stringContaining('Stage all changes'),
-        command: "git add -A && git commit -m 'fix: something'",
+        description: expect.stringContaining('Show status'),
+        command:
+          "git status --short && git add -A && git commit -m 'fix: something'",
         is_background: false,
       },
     });
