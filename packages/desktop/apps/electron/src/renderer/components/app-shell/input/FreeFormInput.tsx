@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Command as CommandPrimitive } from 'cmdk';
-// eslint-disable-next-line import/no-internal-modules -- Motion's React bindings are exposed from this public subpath.
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Paperclip,
@@ -13,7 +12,7 @@ import {
   AlertCircle,
   X,
 } from 'lucide-react';
-import { Icon_Home, Icon_Folder, Spinner } from '@craft-agent/ui';
+import { Icon_Home, Icon_Folder } from '@craft-agent/ui';
 
 import { useDirectoryPicker } from '@/hooks/useDirectoryPicker';
 import { ServerDirectoryBrowser } from '@/components/ServerDirectoryBrowser';
@@ -42,14 +41,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@craft-agent/ui';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
-  DropdownMenuSub,
 } from '@/components/ui/dropdown-menu';
 import {
   StyledDropdownMenuContent,
   StyledDropdownMenuItem,
-  StyledDropdownMenuSeparator,
-  StyledDropdownMenuSubTrigger,
-  StyledDropdownMenuSubContent,
 } from '@/components/ui/styled-dropdown';
 import {
   Popover,
@@ -87,8 +82,6 @@ import {
 } from '@craft-agent/shared/agent/modes';
 import {
   type ThinkingLevel,
-  THINKING_LEVELS,
-  getThinkingLevelNameKey,
 } from '@craft-agent/shared/agent/thinking-levels';
 import { useEscapeInterrupt } from '@/context/EscapeInterruptContext';
 import { hasOpenOverlay } from '@/lib/overlay-detection';
@@ -446,7 +439,6 @@ export function FreeFormInput({
   currentModel,
   onModelChange,
   thinkingLevel = 'medium',
-  onThinkingLevelChange,
   permissionMode = 'ask',
   onPermissionModeChange,
   enabledModes = [...PERMISSION_MODE_ORDER],
@@ -577,16 +569,6 @@ export function FreeFormInput({
     if (!appShellCtx) return QWEN_MODELS;
     return qwenConnection?.models ?? [];
   }, [appShellCtx, qwenConnection, connectionUnavailable]);
-
-  const availableThinkingLevels = THINKING_LEVELS;
-
-  // Disable thinking selector when the current model explicitly doesn't support it
-  const thinkingDisabled = React.useMemo(() => {
-    const model = availableModels.find(
-      (m) => typeof m !== 'string' && m.id === currentModel,
-    );
-    return typeof model !== 'string' && model?.supportsThinking === false;
-  }, [availableModels, currentModel]);
 
   // Get display name for current model (full name, not short name)
   const currentModelDisplayName = React.useMemo(() => {
@@ -2800,83 +2782,6 @@ export function FreeFormInput({
                       </>
                     )}
 
-                    {/* Thinking level selector — only shown when thinking levels are available */}
-                    {availableThinkingLevels.length > 0 && (
-                      <>
-                        <StyledDropdownMenuSeparator className="my-1" />
-
-                        <DropdownMenuSub>
-                          <StyledDropdownMenuSubTrigger
-                            disabled={thinkingDisabled}
-                            className={cn(
-                              'flex items-center justify-between px-2 py-2 rounded-lg',
-                              thinkingDisabled &&
-                                'opacity-50 cursor-not-allowed',
-                            )}
-                          >
-                            <div className="text-left flex-1">
-                              <div className="font-medium text-sm">
-                                {t(getThinkingLevelNameKey(thinkingLevel))}
-                              </div>
-                              <div className="text-xs text-muted-foreground">
-                                {thinkingDisabled
-                                  ? t('thinking.notSupported')
-                                  : t('thinking.extendedDesc')}
-                              </div>
-                            </div>
-                          </StyledDropdownMenuSubTrigger>
-                          <StyledDropdownMenuSubContent className="min-w-[220px]">
-                            {availableThinkingLevels.map(
-                              ({ id, nameKey, descriptionKey }) => {
-                                const isSelected = thinkingLevel === id;
-                                return (
-                                  <StyledDropdownMenuItem
-                                    key={id}
-                                    onSelect={() => onThinkingLevelChange?.(id)}
-                                    className="flex items-center justify-between px-2 py-2 rounded-lg cursor-pointer"
-                                  >
-                                    <div className="text-left">
-                                      <div className="font-medium text-sm">
-                                        {t(nameKey)}
-                                      </div>
-                                      <div className="text-xs text-muted-foreground">
-                                        {t(descriptionKey)}
-                                      </div>
-                                    </div>
-                                    {isSelected && (
-                                      <Check className="h-3 w-3 text-foreground shrink-0 ml-3" />
-                                    )}
-                                  </StyledDropdownMenuItem>
-                                );
-                              },
-                            )}
-                          </StyledDropdownMenuSubContent>
-                        </DropdownMenuSub>
-                      </>
-                    )}
-
-                    {/* Context usage footer - only show when we have token data */}
-                    {contextStatus?.inputTokens != null &&
-                      contextStatus.inputTokens > 0 && (
-                        <>
-                          <StyledDropdownMenuSeparator className="my-1" />
-                          <div className="px-2 py-1.5 select-none">
-                            <div className="flex items-center justify-between text-xs text-muted-foreground">
-                              <span>{t('chat.context')}</span>
-                              <span className="flex items-center gap-1.5">
-                                {contextStatus.isCompacting && (
-                                  <Spinner className="h-3 w-3" />
-                                )}
-                                {t('chat.tokensUsed', {
-                                  displayCount: formatTokenCount(
-                                    contextStatus.inputTokens,
-                                  ),
-                                })}
-                              </span>
-                            </div>
-                          </div>
-                        </>
-                      )}
                   </StyledDropdownMenuContent>
                 </DropdownMenu>
               )}

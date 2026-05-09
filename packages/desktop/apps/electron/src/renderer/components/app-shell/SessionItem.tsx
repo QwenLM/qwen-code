@@ -138,7 +138,30 @@ export function SessionItem({
           onDelete={() => ctx.onDelete(item.id)}
         />
       }
-      contextMenuContent={ctx.isMultiSelectActive && isInMultiSelect ? <BatchSessionMenu /> : undefined}
+      contextMenuContent={
+        ctx.isMultiSelectActive && isInMultiSelect ? (
+          <BatchSessionMenu hideMetadataActions />
+        ) : (
+          <SessionMenu
+            item={item}
+            hideMetadataActions
+            sessionStatuses={ctx.sessionStatuses}
+            labels={ctx.labels}
+            onLabelsChange={ctx.onLabelsChange ? (ls) => ctx.onLabelsChange!(item.id, ls) : undefined}
+            onRename={() => ctx.onRenameClick(item.id, renameTitle)}
+            onFlag={() => ctx.onFlag?.(item.id)}
+            onUnflag={() => ctx.onUnflag?.(item.id)}
+            onArchive={() => ctx.onArchive?.(item.id)}
+            onUnarchive={() => ctx.onUnarchive?.(item.id)}
+            onMarkUnread={() => ctx.onMarkUnread(item.id)}
+            onSessionStatusChange={(s) => ctx.onSessionStatusChange(item.id, s)}
+            onOpenInNewWindow={() => ctx.onOpenInNewWindow(item)}
+            onSendToWorkspace={ctx.onSendToWorkspace ? () => ctx.onSendToWorkspace!([item.id]) : undefined}
+            hasRemoteWorkspaces={hasRemoteWorkspaces}
+            onDelete={() => ctx.onDelete(item.id)}
+          />
+        )
+      }
       icon={
         <>
           <SessionStatusIcon item={item} />

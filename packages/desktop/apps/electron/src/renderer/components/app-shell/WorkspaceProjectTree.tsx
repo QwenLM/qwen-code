@@ -326,6 +326,7 @@ function ProjectSessionRow({
         <ContextMenuProvider>
           <SessionMenu
             item={session}
+            hideMetadataActions
             sessionStatuses={menuConfig.sessionStatuses}
             labels={menuConfig.labels}
             onLabelsChange={menuConfig.onLabelsChange ? (labels) => menuConfig.onLabelsChange!(session.id, labels) : undefined}

@@ -2637,7 +2637,6 @@ export function ResponseCard({
               >
                 <Maximize2 className="size-3.5" />
               </ResponseActionButton>
-              {onBranch && <BranchDropdown onBranch={onBranch} />}
             </div>
           )}
         </div>

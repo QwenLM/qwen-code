@@ -27,9 +27,11 @@ import { LabelMenuItems, StatusMenuItems } from './SessionMenuParts'
 export interface BatchSessionMenuProps {
   /** Callback to open Send to Workspace dialog for the selected sessions */
   onSendToWorkspace?: () => void
+  /** Hide status, labels, and flag actions for session context menus. */
+  hideMetadataActions?: boolean
 }
 
-export function BatchSessionMenu({ onSendToWorkspace }: BatchSessionMenuProps = {}) {
+export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = false }: BatchSessionMenuProps = {}) {
   const { t } = useTranslation()
   const { MenuItem, Separator, Sub, SubTrigger, SubContent } = useMenuComponents()
 
@@ -177,57 +179,61 @@ export function BatchSessionMenu({ onSendToWorkspace }: BatchSessionMenuProps = 
       </div>
       <Separator />
 
-      {/* Status submenu */}
-      <Sub>
-        <SubTrigger className="pr-2">
-          {statusIcon ? (
-            <span style={{ color: getStateColor(activeStatusId!, sessionStatuses) ?? 'var(--foreground)' }}>
-              {statusIcon}
-            </span>
-          ) : (
-            <span className="h-3.5 w-3.5" />
+      {!hideMetadataActions && (
+        <>
+          {/* Status submenu */}
+          <Sub>
+            <SubTrigger className="pr-2">
+              {statusIcon ? (
+                <span style={{ color: getStateColor(activeStatusId!, sessionStatuses) ?? 'var(--foreground)' }}>
+                  {statusIcon}
+                </span>
+              ) : (
+                <span className="h-3.5 w-3.5" />
+              )}
+              <span className="flex-1">{t("sessionMenu.status")}</span>
+            </SubTrigger>
+            <SubContent>
+              <StatusMenuItems
+                sessionStatuses={sessionStatuses}
+                activeStateId={activeStatusId ?? undefined}
+                onSelect={handleBatchSetStatus}
+                menu={{ MenuItem }}
+              />
+            </SubContent>
+          </Sub>
+
+          {/* Labels submenu */}
+          {labels.length > 0 && (
+            <Sub>
+              <SubTrigger className="pr-2">
+                <Tag className="h-3.5 w-3.5" />
+                <span className="flex-1">{t("sidebar.labels")}</span>
+              </SubTrigger>
+              <SubContent>
+                <LabelMenuItems
+                  labels={labels}
+                  appliedLabelIds={appliedLabelIds}
+                  onToggle={handleBatchToggleLabel}
+                  menu={{ MenuItem, Separator, Sub, SubTrigger, SubContent }}
+                />
+              </SubContent>
+            </Sub>
           )}
-          <span className="flex-1">{t("sessionMenu.status")}</span>
-        </SubTrigger>
-        <SubContent>
-          <StatusMenuItems
-            sessionStatuses={sessionStatuses}
-            activeStateId={activeStatusId ?? undefined}
-            onSelect={handleBatchSetStatus}
-            menu={{ MenuItem }}
-          />
-        </SubContent>
-      </Sub>
 
-      {/* Labels submenu */}
-      {labels.length > 0 && (
-        <Sub>
-          <SubTrigger className="pr-2">
-            <Tag className="h-3.5 w-3.5" />
-            <span className="flex-1">{t("sidebar.labels")}</span>
-          </SubTrigger>
-          <SubContent>
-            <LabelMenuItems
-              labels={labels}
-              appliedLabelIds={appliedLabelIds}
-              onToggle={handleBatchToggleLabel}
-              menu={{ MenuItem, Separator, Sub, SubTrigger, SubContent }}
-            />
-          </SubContent>
-        </Sub>
-      )}
-
-      {/* Flag/Unflag */}
-      {allFlagged ? (
-        <MenuItem onClick={handleBatchUnflag}>
-          <FlagOff className="h-3.5 w-3.5" />
-          <span className="flex-1">{t("sessionMenu.unflagAll")}</span>
-        </MenuItem>
-      ) : (
-        <MenuItem onClick={handleBatchFlag}>
-          <Flag className="h-3.5 w-3.5 text-info" />
-          <span className="flex-1">{t("sessionMenu.flagAll")}</span>
-        </MenuItem>
+          {/* Flag/Unflag */}
+          {allFlagged ? (
+            <MenuItem onClick={handleBatchUnflag}>
+              <FlagOff className="h-3.5 w-3.5" />
+              <span className="flex-1">{t("sessionMenu.unflagAll")}</span>
+            </MenuItem>
+          ) : (
+            <MenuItem onClick={handleBatchFlag}>
+              <Flag className="h-3.5 w-3.5 text-info" />
+              <span className="flex-1">{t("sessionMenu.flagAll")}</span>
+            </MenuItem>
+          )}
+        </>
       )}
 
       {/* Archive */}

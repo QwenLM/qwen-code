@@ -54,6 +54,8 @@ import { MessagingSessionMenuItem } from '@/components/messaging/MessagingSessio
 export interface SessionMenuProps {
   /** Session data — display state is derived from this */
   item: SessionMeta
+  /** Hide metadata actions for context menus while keeping other menu entrypoints intact. */
+  hideMetadataActions?: boolean
   /** Available todo states */
   sessionStatuses: SessionStatus[]
   /** All available label configs (tree structure) for the labels submenu */
@@ -81,6 +83,7 @@ export interface SessionMenuProps {
  */
 export function SessionMenu({
   item,
+  hideMetadataActions = false,
   sessionStatuses,
   labels = [],
   onLabelsChange,
@@ -104,7 +107,7 @@ export function SessionMenu({
   const isArchived = item.isArchived ?? false
   const sharedUrl = item.sharedUrl
   const currentSessionStatus = getSessionStatus(item)
-  const sessionLabels = item.labels ?? []
+  const sessionLabels = React.useMemo(() => item.labels ?? [], [item.labels])
   const _hasMessages = hasMessagesMeta(item)
   const _hasUnread = hasUnreadMeta(item)
   // Share handlers
@@ -175,21 +178,23 @@ export function SessionMenu({
   return (
     <>
       {/* Share/Shared based on shared state */}
-      {!sharedUrl ? (
-        <MenuItem onClick={handleShare}>
-          <CloudUpload className="h-3.5 w-3.5" />
-          <span className="flex-1">{t("sessionMenu.share")}</span>
-        </MenuItem>
-      ) : (
-        <Sub>
-          <SubTrigger className="pr-2">
+      {!hideMetadataActions && (
+        !sharedUrl ? (
+          <MenuItem onClick={handleShare}>
             <CloudUpload className="h-3.5 w-3.5" />
-            <span className="flex-1">{t("sessionMenu.shared")}</span>
-          </SubTrigger>
-          <SubContent>
-            <ShareMenuItems sessionId={sessionId} sharedUrl={sharedUrl} menu={{ MenuItem, Separator }} />
-          </SubContent>
-        </Sub>
+            <span className="flex-1">{t("sessionMenu.share")}</span>
+          </MenuItem>
+        ) : (
+          <Sub>
+            <SubTrigger className="pr-2">
+              <CloudUpload className="h-3.5 w-3.5" />
+              <span className="flex-1">{t("sessionMenu.shared")}</span>
+            </SubTrigger>
+            <SubContent>
+              <ShareMenuItems sessionId={sessionId} sharedUrl={sharedUrl} menu={{ MenuItem, Separator }} />
+            </SubContent>
+          </Sub>
+        )
       )}
 
       {/* Send to Workspace — visible when at least one other workspace exists */}
@@ -205,63 +210,69 @@ export function SessionMenu({
 
       <Separator />
 
-      {/* Status submenu - includes all statuses plus Flag/Unflag at the bottom */}
-      <Sub>
-        <SubTrigger className="pr-2">
-          <span style={{ color: getStateColor(currentSessionStatus, sessionStatuses) ?? 'var(--foreground)' }}>
-            {(() => {
-              const icon = getStateIcon(currentSessionStatus, sessionStatuses)
-              return React.isValidElement(icon)
-                ? React.cloneElement(icon as React.ReactElement<{ bare?: boolean }>, { bare: true })
-                : icon
-            })()}
-          </span>
-          <span className="flex-1">{t("sessionMenu.status")}</span>
-        </SubTrigger>
-        <SubContent>
-          <StatusMenuItems
-            sessionStatuses={sessionStatuses}
-            activeStateId={currentSessionStatus}
-            onSelect={onSessionStatusChange}
-            menu={{ MenuItem }}
-          />
-        </SubContent>
-      </Sub>
-
-      {/* Labels submenu - hierarchical label tree with nested sub-menus and toggle checkmarks */}
-      {labels.length > 0 && (
-        <Sub>
-          <SubTrigger className="pr-2">
-            <Tag className="h-3.5 w-3.5" />
-            <span className="flex-1">{t("sessionMenu.labels")}</span>
-            {sessionLabels.length > 0 && (
-              <span className="text-[10px] text-muted-foreground tabular-nums -mr-2.5">
-                {sessionLabels.length}
+      {!hideMetadataActions && (
+        <>
+          {/* Status submenu - includes all statuses plus Flag/Unflag at the bottom */}
+          <Sub>
+            <SubTrigger className="pr-2">
+              <span style={{ color: getStateColor(currentSessionStatus, sessionStatuses) ?? 'var(--foreground)' }}>
+                {(() => {
+                  const icon = getStateIcon(currentSessionStatus, sessionStatuses)
+                  return React.isValidElement(icon)
+                    ? React.cloneElement(icon as React.ReactElement<{ bare?: boolean }>, { bare: true })
+                    : icon
+                })()}
               </span>
-            )}
-          </SubTrigger>
-          <SubContent>
-            <LabelMenuItems
-              labels={labels}
-              appliedLabelIds={appliedLabelIds}
-              onToggle={handleLabelToggle}
-              menu={{ MenuItem, Separator, Sub, SubTrigger, SubContent }}
-            />
-          </SubContent>
-        </Sub>
+              <span className="flex-1">{t("sessionMenu.status")}</span>
+            </SubTrigger>
+            <SubContent>
+              <StatusMenuItems
+                sessionStatuses={sessionStatuses}
+                activeStateId={currentSessionStatus}
+                onSelect={onSessionStatusChange}
+                menu={{ MenuItem }}
+              />
+            </SubContent>
+          </Sub>
+
+          {/* Labels submenu - hierarchical label tree with nested sub-menus and toggle checkmarks */}
+          {labels.length > 0 && (
+            <Sub>
+              <SubTrigger className="pr-2">
+                <Tag className="h-3.5 w-3.5" />
+                <span className="flex-1">{t("sessionMenu.labels")}</span>
+                {sessionLabels.length > 0 && (
+                  <span className="text-[10px] text-muted-foreground tabular-nums -mr-2.5">
+                    {sessionLabels.length}
+                  </span>
+                )}
+              </SubTrigger>
+              <SubContent>
+                <LabelMenuItems
+                  labels={labels}
+                  appliedLabelIds={appliedLabelIds}
+                  onToggle={handleLabelToggle}
+                  menu={{ MenuItem, Separator, Sub, SubTrigger, SubContent }}
+                />
+              </SubContent>
+            </Sub>
+          )}
+        </>
       )}
 
       {/* Flag/Unflag */}
-      {!isFlagged ? (
-        <MenuItem onClick={onFlag}>
-          <Flag className="h-3.5 w-3.5 text-info" />
-          <span className="flex-1">{t("sessionMenu.flag")}</span>
-        </MenuItem>
-      ) : (
-        <MenuItem onClick={onUnflag}>
-          <FlagOff className="h-3.5 w-3.5" />
-          <span className="flex-1">{t("sessionMenu.unflag")}</span>
-        </MenuItem>
+      {!hideMetadataActions && (
+        !isFlagged ? (
+          <MenuItem onClick={onFlag}>
+            <Flag className="h-3.5 w-3.5 text-info" />
+            <span className="flex-1">{t("sessionMenu.flag")}</span>
+          </MenuItem>
+        ) : (
+          <MenuItem onClick={onUnflag}>
+            <FlagOff className="h-3.5 w-3.5" />
+            <span className="flex-1">{t("sessionMenu.unflag")}</span>
+          </MenuItem>
+        )
       )}
 
       {/* Archive/Unarchive */}
@@ -278,7 +289,7 @@ export function SessionMenu({
       )}
 
       {/* Mark as Unread - only show if session has been read */}
-      {!_hasUnread && _hasMessages && (
+      {!hideMetadataActions && !_hasUnread && _hasMessages && (
         <MenuItem onClick={onMarkUnread}>
           <MailOpen className="h-3.5 w-3.5" />
           <span className="flex-1">{t("sessionMenu.markAsUnread")}</span>

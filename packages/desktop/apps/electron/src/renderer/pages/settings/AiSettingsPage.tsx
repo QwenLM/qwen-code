@@ -2,7 +2,7 @@
  * AiSettingsPage
  *
  * Qwen Code is the only supported backend. This page therefore focuses on the
- * settings users can still change: model, thinking level, and performance.
+ * settings users can still change: model and performance.
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
@@ -20,8 +20,7 @@ import {
   SettingsMenuSelectRow,
   SettingsToggle,
 } from '@/components/settings'
-import type { LlmConnection, LlmConnectionWithStatus, ThinkingLevel } from '../../../shared/types'
-import { DEFAULT_THINKING_LEVEL, THINKING_LEVELS } from '@craft-agent/shared/agent/thinking-levels'
+import type { LlmConnection, LlmConnectionWithStatus } from '../../../shared/types'
 import { getModelShortName, type ModelDefinition } from '@config/models'
 
 export const meta: DetailsPageMeta = {
@@ -62,7 +61,6 @@ function getModelOptionsForConnection(
 export default function AiSettingsPage() {
   const { t } = useTranslation()
   const { llmConnections, refreshLlmConnections } = useAppShellContext()
-  const [defaultThinking, setDefaultThinking] = useState<ThinkingLevel>(DEFAULT_THINKING_LEVEL)
   const [extendedPromptCache, setExtendedPromptCache] = useState(false)
   const [enable1MContext, setEnable1MContext] = useState(false)
 
@@ -70,9 +68,6 @@ export default function AiSettingsPage() {
     const load = async () => {
       if (!window.electronAPI) return
       try {
-        const defaultThinkingLevel = await window.electronAPI.getDefaultThinkingLevel()
-        setDefaultThinking(defaultThinkingLevel)
-
         const extendedCache = await window.electronAPI.getExtendedPromptCache()
         setExtendedPromptCache(extendedCache)
 
@@ -108,24 +103,6 @@ export default function AiSettingsPage() {
     await refreshLlmConnections()
   }, [qwenConnection, refreshLlmConnections])
 
-  const handleDefaultThinkingChange = useCallback(async (level: ThinkingLevel) => {
-    if (!window.electronAPI) return
-
-    const previous = defaultThinking
-    setDefaultThinking(level)
-
-    try {
-      const result = await window.electronAPI.setDefaultThinkingLevel(level)
-      if (!result.success) {
-        console.error('Failed to set default thinking level:', result.error)
-        setDefaultThinking(previous)
-      }
-    } catch (error) {
-      console.error('Failed to set default thinking level:', error)
-      setDefaultThinking(previous)
-    }
-  }, [defaultThinking])
-
   const handleExtendedPromptCacheChange = useCallback(async (enabled: boolean) => {
     setExtendedPromptCache(enabled)
     await window.electronAPI?.setExtendedPromptCache(enabled)
@@ -154,17 +131,6 @@ export default function AiSettingsPage() {
                     disabled={modelOptions.length === 0}
                     placeholder={t("common.loading")}
                     searchable={modelOptions.length > 8}
-                  />
-                  <SettingsMenuSelectRow
-                    label={t("settings.ai.thinking")}
-                    description={t("settings.ai.thinkingDesc")}
-                    value={defaultThinking}
-                    onValueChange={(value) => handleDefaultThinkingChange(value as ThinkingLevel)}
-                    options={THINKING_LEVELS.map(({ id, nameKey, descriptionKey }) => ({
-                      value: id,
-                      label: t(nameKey),
-                      description: t(descriptionKey),
-                    }))}
                   />
                 </SettingsCard>
               </SettingsSection>
