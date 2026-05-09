@@ -511,10 +511,14 @@ export async function runNonInteractive(
           // execute structured_output FIRST so its terminal-flag wins
           // before sibling tools' side effects (write_file, shell, …)
           // get a chance to persist. If structured_output succeeds the
-          // siblings receive a synthesized "skipped" tool_result instead
-          // of running. If structured_output fails (validation), the
-          // siblings still run via the normal loop body — same behavior
-          // as a turn that didn't issue structured_output at all.
+          // loop breaks immediately and siblings are skipped — no
+          // tool_result is emitted for them; the session terminates via
+          // the emitResult call below so the missing function_response
+          // entries cause no API protocol issue (there is no next turn).
+          // If structured_output fails (validation), `hasStructuredSubmission`
+          // stays false and the siblings still run via the normal loop
+          // body — same behavior as a turn that didn't issue
+          // structured_output at all.
           //
           // Without this, [write_file, structured_output] runs write_file
           // first (irreversible), THEN structured_output sets the flag,
