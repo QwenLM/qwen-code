@@ -36,9 +36,10 @@ type QwenAvailableCommandsInternals = {
   qwenSessionId: string | null;
   _isProcessing: boolean;
   currentTurnId?: string;
-  createAcpClient: () => {
-    extMethod?: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
-  };
+  handleExtMethod: (
+    method: string,
+    params: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
   suppressedSessionUpdates: Set<string>;
   eventQueue: {
     hasPending: boolean;
@@ -142,7 +143,7 @@ describe('QwenAgent slash command history', () => {
     expect(blocks).toEqual([{ type: 'text', text: 'hello' }]);
   });
 
-  it('drains queued mid-turn messages through the ACP client extension', async () => {
+  it('drains queued mid-turn messages through the ACP extension handler', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);
 
@@ -154,14 +155,13 @@ describe('QwenAgent slash command history', () => {
 
     expect(agent.enqueueMidTurnMessage('please also inspect tests')).toBe(true);
 
-    const client = internals.createAcpClient();
     await expect(
-      client.extMethod?.('craft/drainMidTurnQueue', {
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'other-session',
       }),
-    ).resolves.toEqual({ messages: [] });
+    ).resolves.toEqual({});
     await expect(
-      client.extMethod?.('craft/drainMidTurnQueue', {
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'session-qwen',
       }),
     ).resolves.toEqual({
@@ -173,7 +173,7 @@ describe('QwenAgent slash command history', () => {
 
     expect(agent.enqueueMidTurnMessage('and summarize findings')).toBe(true);
     await expect(
-      client.extMethod?.('craft/drainMidTurnQueue', {
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'sdk-session-qwen',
       }),
     ).resolves.toEqual({
@@ -183,7 +183,7 @@ describe('QwenAgent slash command history', () => {
       'and summarize findings',
     ]);
     await expect(
-      client.extMethod?.('craft/drainMidTurnQueue', {
+      internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'sdk-session-qwen',
       }),
     ).resolves.toEqual({ messages: [] });
