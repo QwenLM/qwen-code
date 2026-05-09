@@ -42,7 +42,8 @@ Arguments:
   --script     Also upload install-app.sh (requires --upload)
 
 Environment variables (from .env or environment):
-  QWEN_CODE_VERSION         - Bundled Qwen Code version (default: 0.15.2)
+  QWEN_CODE_VERSION         - Optional npm version for bundled Qwen Code
+                              (unset = build from current checkout)
   S3_VERSIONS_BUCKET_*      - S3 credentials (for --upload)
 EOF
     exit 0
@@ -65,7 +66,6 @@ done
 
 # Configuration
 BUN_VERSION="bun-v1.3.9"  # Pinned version for reproducible builds
-QWEN_CODE_VERSION="${QWEN_CODE_VERSION:-0.15.2}"  # Pinned version for bundled ACP sessions
 
 echo "=== Building Qwen Code AppImage (${ARCH}) using electron-builder ==="
 if [ "$UPLOAD" = true ]; then
@@ -114,18 +114,10 @@ unzip -o "$TEMP_DIR/${BUN_DOWNLOAD}.zip" -d "$TEMP_DIR"
 cp "$TEMP_DIR/${BUN_DOWNLOAD}/bun" "$ELECTRON_DIR/vendor/bun/"
 chmod +x "$ELECTRON_DIR/vendor/bun/bun"
 
-# 4. Download Qwen Code CLI package
-echo "Downloading Qwen Code ${QWEN_CODE_VERSION}..."
-QWEN_VENDOR_DIR="$ELECTRON_DIR/vendor/qwen-code"
-rm -rf "$QWEN_VENDOR_DIR"
-mkdir -p "$QWEN_VENDOR_DIR"
-QWEN_TARBALL="$TEMP_DIR/qwen-code-${QWEN_CODE_VERSION}.tgz"
-curl -fSL "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-${QWEN_CODE_VERSION}.tgz" -o "$QWEN_TARBALL"
-tar -xzf "$QWEN_TARBALL" -C "$QWEN_VENDOR_DIR" --strip-components=1
-if [ ! -e "$QWEN_VENDOR_DIR/cli.js" ] && [ ! -e "$QWEN_VENDOR_DIR/dist/cli.js" ]; then
-    echo "ERROR: Qwen Code CLI not found after unpacking @qwen-code/qwen-code."
-    exit 1
-fi
+# 4. Vendor Qwen Code CLI package
+echo "Vendoring Qwen Code CLI..."
+cd "$ROOT_DIR"
+bun run scripts/vendor-qwen-code.ts
 
 # 5. Build Electron app
 echo "Building Electron app..."
