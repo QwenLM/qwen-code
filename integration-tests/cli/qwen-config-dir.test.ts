@@ -216,8 +216,9 @@ describe('QWEN_HOME environment variable', () => {
       );
       const migrated = JSON.parse(migratedRaw) as Record<string, unknown>;
 
-      // V1 → V3 migration should have bumped the version to 3
-      expect(migrated['$version']).toBe(3);
+      // Migration should have bumped the version to the current SETTINGS_VERSION
+      // (packages/cli/src/config/settings.ts). Update this when the schema bumps.
+      expect(migrated['$version']).toBe(4);
     });
   });
 
@@ -229,12 +230,12 @@ describe('QWEN_HOME environment variable', () => {
     /**
      * 3a. Project-level workspace settings work independently of QWEN_HOME.
      *
-     * We put V3 settings in QWEN_HOME and V1 settings in the workspace
-     * .qwen/settings.json. Running with --help triggers loadSettings()
-     * (migration). If the CLI is correctly reading workspace settings from
-     * <testDir>/.qwen/, the workspace settings.json will be migrated to V3.
-     * If it mistakenly read from QWEN_HOME, the workspace file would be
-     * untouched (already V3 in QWEN_HOME means no migration signal).
+     * We put already-current settings in QWEN_HOME and V1 settings in the
+     * workspace .qwen/settings.json. Running `extensions list` triggers
+     * loadSettings() (migration). If the CLI is correctly reading workspace
+     * settings from <testDir>/.qwen/, the workspace settings.json will be
+     * migrated. If it mistakenly read from QWEN_HOME, the workspace file
+     * would be untouched.
      *
      * `extensions list` runs through `main()` and reaches `loadSettings()`
      * (which triggers migration) without needing an API key.
@@ -246,10 +247,11 @@ describe('QWEN_HOME environment variable', () => {
       mkdirSync(customConfigDir, { recursive: true });
       process.env['QWEN_HOME'] = customConfigDir;
 
-      // Write V3 settings into QWEN_HOME — already current, no migration needed
+      // Seed QWEN_HOME with the current schema version so it shouldn't migrate.
+      // Bump alongside SETTINGS_VERSION in packages/cli/src/config/settings.ts.
       writeFileSync(
         join(customConfigDir, 'settings.json'),
-        JSON.stringify({ $version: 3, customKey: 'in-global-dir' }, null, 2),
+        JSON.stringify({ $version: 4, customKey: 'in-global-dir' }, null, 2),
       );
 
       // Overwrite the workspace settings.json with V1 format so migration is observable
@@ -280,17 +282,18 @@ describe('QWEN_HOME environment variable', () => {
         // Tolerate non-zero exit; migration runs regardless.
       }
 
-      // The workspace settings.json must have been migrated to V3 — proving
-      // the CLI read it from the workspace dir, not from QWEN_HOME.
+      // The workspace settings.json must have been migrated to the current
+      // SETTINGS_VERSION — proving the CLI read it from the workspace dir, not
+      // from QWEN_HOME. Update the version when the schema bumps.
       const workspaceRaw = readFileSync(workspaceSettingsPath, 'utf-8');
       const workspaceSettings = JSON.parse(workspaceRaw) as Record<
         string,
         unknown
       >;
-      expect(workspaceSettings['$version']).toBe(3);
+      expect(workspaceSettings['$version']).toBe(4);
       expect(workspaceSettings['customWorkspaceKey']).toBe('workspace-value');
 
-      // The QWEN_HOME settings.json must be unchanged (still V3 with customKey)
+      // The QWEN_HOME settings.json must be unchanged (still at the version we wrote)
       const globalRaw = readFileSync(
         join(customConfigDir, 'settings.json'),
         'utf-8',
