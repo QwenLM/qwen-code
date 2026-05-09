@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qwen-code-sdk"
-version = "0.1.0"
+version = "0.1.0rc0"
 description = "Python SDK for programmatic access to qwen-code CLI"
 readme = "README.md"
 requires-python = ">=3.10"
