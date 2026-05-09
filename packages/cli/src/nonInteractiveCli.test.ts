@@ -2523,8 +2523,10 @@ describe('runNonInteractive', () => {
     // Single-shot contract: a model emitting
     // `[structured_output(...), write_file(...)]` in the same response
     // must not have write_file run after structured_output records.
-    // Tool calls *before* structured_output in the batch already ran
-    // (their elimination needs a pre-scan, tracked as follow-up).
+    // This test pins the break-after-success path; structured_output
+    // is at index 0 so the pre-scan reorder is a no-op here. See
+    // sibling test "reorders structured_output before side-effect tools"
+    // for the reorder coverage.
     setupMetricsMock();
     vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
       type: 'object',
@@ -2592,6 +2594,191 @@ describe('runNonInteractive', () => {
       ([req]) => req.callId === sideEffectCallId,
     );
     expect(sideEffectEmitted).toBe(false);
+  });
+
+  it('reorders structured_output before side-effect tools so siblings never run', async () => {
+    // Pre-scan: when --json-schema is active and the model emitted
+    // [write_file, structured_output] (struct NOT first), the pre-scan
+    // must hoist structured_output to position 0 and then the
+    // break-after-success path skips write_file entirely. Without the
+    // pre-scan, write_file would persist its side effect BEFORE
+    // structured_output's terminal flag fired.
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      properties: { answer: { type: 'number' } },
+    });
+
+    const writeFileCallId = 'write-pre-1';
+    const structuredCallId = 'so-pre-1';
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        // Order matters: write_file FIRST, structured_output second.
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: writeFileCallId,
+            name: 'write_file',
+            args: { path: '/tmp/should-not-run', content: 'side effect' },
+            isClientInitiated: false,
+            prompt_id: 'p-prescan',
+          },
+        },
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: structuredCallId,
+            name: ToolNames.STRUCTURED_OUTPUT,
+            args: { answer: 1 },
+            isClientInitiated: false,
+            prompt_id: 'p-prescan',
+          },
+        },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Structured output accepted.' }],
+    });
+
+    const adapter = makeMockAdapter();
+    await runNonInteractive(mockConfig, mockSettings, 'go', 'p-prescan', {
+      adapter,
+    });
+
+    // Exactly ONE executeToolCall — for structured_output. write_file
+    // never runs because the pre-scan moved it after structured_output
+    // and the break-after-success path skipped it.
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({
+        name: ToolNames.STRUCTURED_OUTPUT,
+        callId: structuredCallId,
+      }),
+      expect.any(AbortSignal),
+      expect.any(Object),
+    );
+    expect(adapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: false,
+        structuredResult: { answer: 1 },
+      }),
+    );
+    // No tool_result emitted for write_file: it never executed.
+    const toolResultCalls = vi.mocked(adapter.emitToolResult).mock.calls;
+    expect(
+      toolResultCalls.some(([req]) => req.callId === writeFileCallId),
+    ).toBe(false);
+  });
+
+  it('lets siblings run when structured_output validation fails so the model can retry', async () => {
+    // Validation-failure fallback: if structured_output execute() fails
+    // (e.g. arg validation rejected the payload), `hasStructuredSubmission`
+    // stays false and the loop continues normally — sibling tools in the
+    // batch SHOULD run, same as a turn that didn't issue structured_output
+    // at all. The model gets the validation error in the tool_result and
+    // can retry next turn.
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'number' } },
+    });
+
+    const writeFileCallId = 'write-fallback';
+    const structuredCallId = 'so-fail';
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: structuredCallId,
+            name: ToolNames.STRUCTURED_OUTPUT,
+            args: { answer: 'not-a-number' },
+            isClientInitiated: false,
+            prompt_id: 'p-fallback',
+          },
+        },
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: writeFileCallId,
+            name: 'write_file',
+            args: { path: '/tmp/x', content: 'sibling' },
+            isClientInitiated: false,
+            prompt_id: 'p-fallback',
+          },
+        },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    // Second turn (after the sibling tool ran) — model gives up cleanly
+    // by emitting plain text so the run terminates without
+    // hasStructuredSubmission ever flipping.
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'gave up' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    // structured_output → error; write_file → success.
+    mockCoreExecuteToolCall.mockImplementation(async (_cfg, req) => {
+      if (req.name === ToolNames.STRUCTURED_OUTPUT) {
+        return {
+          responseParts: [{ text: 'validation error' }],
+          error: new Error('Schema validation failed'),
+          errorType: 'TOOL_EXECUTION_ERROR',
+        } as never;
+      }
+      return { responseParts: [{ text: 'wrote' }] } as never;
+    });
+
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      const adapter = makeMockAdapter();
+      await runNonInteractive(mockConfig, mockSettings, 'go', 'p-fallback', {
+        adapter,
+      });
+
+      // Both tools executed (one successfully, one failed). The
+      // critical assertion is that the sibling DID run — fallback
+      // semantics are restored when structured_output fails.
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ name: ToolNames.STRUCTURED_OUTPUT }),
+        expect.any(AbortSignal),
+        expect.any(Object),
+      );
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ name: 'write_file' }),
+        expect.any(AbortSignal),
+        expect.any(Object),
+      );
+      // No structuredResult emitted — the failure didn't terminate via
+      // the success branch. The plain-text terminal branch fires
+      // instead (model gave up on turn 2).
+      const resultCalls = vi.mocked(adapter.emitResult).mock.calls;
+      const successCall = resultCalls.find(
+        ([opts]) =>
+          'structuredResult' in (opts as Record<string, unknown>) &&
+          !(opts as { isError?: boolean }).isError,
+      );
+      expect(successCall).toBeUndefined();
+    } finally {
+      process.exitCode = priorExitCode;
+    }
   });
 
   it('terminates even when structured_output args are undefined under an empty schema', async () => {

@@ -626,6 +626,21 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(cacheClear).toHaveBeenCalled();
     });
+
+    it('clears revealedDeferred set so /clear gives a clean tool slate', async () => {
+      // resetChat() must call clearRevealedDeferredTools() — without
+      // this, deferred tools revealed via ToolSearch in the previous
+      // session would carry over as phantom declarations, defeating
+      // the "clean slate" expectation of `/clear`.
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        clearRevealedDeferredTools: ReturnType<typeof vi.fn>;
+      };
+      reg.clearRevealedDeferredTools.mockClear();
+
+      await client.resetChat();
+
+      expect(reg.clearRevealedDeferredTools).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('history mutation invalidates FileReadCache', () => {
