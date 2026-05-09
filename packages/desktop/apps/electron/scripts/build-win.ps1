@@ -9,7 +9,6 @@ $RootDir = Split-Path -Parent (Split-Path -Parent $ElectronDir)
 
 # Configuration
 $BunVersion = "bun-v1.3.9"  # Pinned version for reproducible builds
-$QwenCodeVersion = if ($env:QWEN_CODE_VERSION) { $env:QWEN_CODE_VERSION } else { "0.15.2" }  # Pinned version for bundled ACP sessions
 
 Write-Host "=== Building Qwen Code Windows Installer using electron-builder ===" -ForegroundColor Cyan
 
@@ -154,27 +153,13 @@ try {
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
 }
 
-# 4. Download Qwen Code CLI package
-Write-Host "Downloading Qwen Code $QwenCodeVersion..."
-$QwenVendorDir = "$ElectronDir\vendor\qwen-code"
-if (Test-Path $QwenVendorDir) {
-    Remove-Item -Recurse -Force $QwenVendorDir
-}
-New-Item -ItemType Directory -Force -Path $QwenVendorDir | Out-Null
-
-$QwenTempDir = Join-Path $env:TEMP "qwen-code-download-$(Get-Random)"
-New-Item -ItemType Directory -Force -Path $QwenTempDir | Out-Null
+# 4. Vendor Qwen Code CLI package
+Write-Host "Vendoring Qwen Code CLI..."
+Push-Location $RootDir
 try {
-    $QwenTarball = "$QwenTempDir\qwen-code-$QwenCodeVersion.tgz"
-    $QwenUrl = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-$QwenCodeVersion.tgz"
-    Invoke-WebRequest -Uri $QwenUrl -OutFile $QwenTarball
-    tar.exe -xzf $QwenTarball -C $QwenVendorDir --strip-components=1
-
-    if (-not (Test-Path "$QwenVendorDir\cli.js") -and -not (Test-Path "$QwenVendorDir\dist\cli.js")) {
-        throw "Qwen Code CLI not found after extraction"
-    }
+    bun run scripts/vendor-qwen-code.ts
 } finally {
-    Remove-Item -Recurse -Force $QwenTempDir -ErrorAction SilentlyContinue
+    Pop-Location
 }
 
 # 5. Build Electron app
