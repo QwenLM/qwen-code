@@ -26,6 +26,13 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
   };
 });
 
+// Control byte sequences that ink-testing-library's stdin.write delivers as
+// modified key events. Pulled out so the tests don't bury invisible bytes
+// inside string literals.
+const CTRL_B = '';
+const ESC = '';
+const ARROW_DOWN = '[B';
+
 // Mock terminal size
 const mockTerminalSize = { columns: 80, rows: 24 };
 
@@ -186,7 +193,9 @@ describe('SessionPicker', () => {
   });
 
   describe('Branch Filtering', () => {
-    it('should filter by branch when B is pressed', async () => {
+    it('should filter by branch when Ctrl+B is pressed', async () => {
+      // Bare letter keys ('B', 'b', 'j', 'k', …) are reserved for the
+      // search query buffer. The branch toggle is Ctrl+B exclusively.
       const sessions = [
         createMockSession({
           sessionId: 's1',
@@ -229,8 +238,7 @@ describe('SessionPicker', () => {
       expect(output).toContain('Main branch');
       expect(output).toContain('Feature branch');
 
-      // Press B to filter by branch
-      stdin.write('B');
+      stdin.write(CTRL_B);
       await wait(50);
 
       output = lastFrame();
@@ -278,8 +286,7 @@ describe('SessionPicker', () => {
 
       await wait(100);
 
-      // Press B to filter by branch
-      stdin.write('B');
+      stdin.write(CTRL_B);
       await wait(50);
 
       const output = lastFrame();
@@ -330,52 +337,12 @@ describe('SessionPicker', () => {
       expect(output).toContain('First session');
 
       // Navigate down
-      stdin.write('\u001B[B'); // Down arrow
+      stdin.write(ARROW_DOWN); // Down arrow
       await wait(50);
 
       output = lastFrame();
       // Selection indicator should move
       expect(output).toBeDefined();
-    });
-
-    it('should navigate with vim keys (j/k)', async () => {
-      const sessions = [
-        createMockSession({
-          sessionId: 's1',
-          prompt: 'First',
-          messageCount: 1,
-        }),
-        createMockSession({
-          sessionId: 's2',
-          prompt: 'Second',
-          messageCount: 1,
-        }),
-      ];
-      const mockService = createMockSessionService(sessions);
-      const onSelect = vi.fn();
-      const onCancel = vi.fn();
-
-      const { stdin, unmount } = render(
-        <KeypressProvider kittyProtocolEnabled={false}>
-          <SessionPicker
-            sessionService={mockService as never}
-            onSelect={onSelect}
-            onCancel={onCancel}
-          />
-        </KeypressProvider>,
-      );
-
-      await wait(100);
-
-      // Navigate with j (down)
-      stdin.write('j');
-      await wait(50);
-
-      // Navigate with k (up)
-      stdin.write('k');
-      await wait(50);
-
-      unmount();
     });
 
     it('should select session on Enter', async () => {
@@ -430,7 +397,7 @@ describe('SessionPicker', () => {
       await wait(100);
 
       // Press Escape to cancel
-      stdin.write('\u001B');
+      stdin.write(ESC);
       await wait(50);
 
       expect(onCancel).toHaveBeenCalled();
@@ -492,6 +459,8 @@ describe('SessionPicker', () => {
       expect(output).toContain('Resume Session');
       expect(output).toContain('↑↓ to navigate');
       expect(output).toContain('Esc to cancel');
+      // The default footer points the user at typing to start a search.
+      expect(output).toContain('Type to search');
     });
 
     it('should show branch toggle hint when currentBranch is provided', async () => {
@@ -514,8 +483,8 @@ describe('SessionPicker', () => {
       await wait(100);
 
       const output = lastFrame();
-      expect(output).toContain('B');
-      expect(output).toContain('toggle branch');
+      expect(output).toContain('Ctrl+B');
+      expect(output).toContain('branch');
     });
 
     it('should truncate long prompts', async () => {
@@ -778,7 +747,7 @@ describe('SessionPicker', () => {
       );
 
       await wait(100);
-      stdin.write(' '); // Space → preview
+      stdin.write(' '); // Space → preview in list mode
       await wait(150);
       const frame = lastFrame() ?? '';
       // Tool group renders with raw function name fallback (no registry).
@@ -852,7 +821,7 @@ describe('SessionPicker', () => {
       // Space in destructive flows.
       expect(beforeFrame).not.toContain('Space to preview');
 
-      stdin.write(' '); // Space
+      stdin.write(' '); // Space — no-op when preview is disabled
       await wait(150);
       const afterFrame = lastFrame() ?? '';
       // No preview body, still on the list.

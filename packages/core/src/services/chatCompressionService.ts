@@ -49,6 +49,8 @@ export const MIN_COMPRESSION_FRACTION = 0.05;
  */
 export const TOOL_ROUND_RETAIN_COUNT = 2;
 
+export type CompactTrigger = 'manual' | 'auto';
+
 const hasFunctionCall = (content: Content | undefined): boolean =>
   !!content?.parts?.some((part) => !!part.functionCall);
 
@@ -162,6 +164,12 @@ export interface CompressOptions {
    * the service does not read or write any global telemetry.
    */
   originalTokenCount: number;
+  /**
+   * Hook trigger to report for this compression. `force=true` bypasses the
+   * threshold gate but does not always mean the user manually requested
+   * compaction; reactive overflow recovery is forced but still automatic.
+   */
+  trigger?: CompactTrigger;
   signal?: AbortSignal;
 }
 
@@ -177,8 +185,10 @@ export class ChatCompressionService {
       config,
       hasFailedCompressionAttempt,
       originalTokenCount,
+      trigger,
       signal,
     } = opts;
+    const compactTrigger = trigger ?? (force ? 'manual' : 'auto');
     const threshold =
       config.getChatCompression()?.contextPercentageThreshold ??
       COMPRESSION_TOKEN_THRESHOLD;
@@ -229,9 +239,12 @@ export class ChatCompressionService {
     // Fire PreCompact hook before compression begins
     const hookSystem = config.getHookSystem();
     if (hookSystem) {
-      const trigger = force ? PreCompactTrigger.Manual : PreCompactTrigger.Auto;
+      const preCompactTrigger =
+        compactTrigger === 'manual'
+          ? PreCompactTrigger.Manual
+          : PreCompactTrigger.Auto;
       try {
-        await hookSystem.firePreCompactEvent(trigger, '', signal);
+        await hookSystem.firePreCompactEvent(preCompactTrigger, '', signal);
       } catch (err) {
         config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
       }
@@ -456,9 +469,10 @@ export class ChatCompressionService {
 
       // Fire PostCompact event after successful compression
       try {
-        const postCompactTrigger = force
-          ? PostCompactTrigger.Manual
-          : PostCompactTrigger.Auto;
+        const postCompactTrigger =
+          compactTrigger === 'manual'
+            ? PostCompactTrigger.Manual
+            : PostCompactTrigger.Auto;
         await config
           .getHookSystem()
           ?.firePostCompactEvent(postCompactTrigger, summary, signal);
