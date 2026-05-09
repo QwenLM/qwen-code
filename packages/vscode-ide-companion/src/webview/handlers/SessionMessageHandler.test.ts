@@ -362,6 +362,181 @@ describe('SessionMessageHandler', () => {
     });
   });
 
+  it('aborts edits when the restore snapshot cannot be captured', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn(),
+      restoreSessionHistory: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn(),
+      truncateFromUserTurn: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
+
+    expect(conversationStore.truncateFromUserTurn).not.toHaveBeenCalled();
+    expect(agentManager.rewindSession).not.toHaveBeenCalled();
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'Failed to capture conversation state before editing.' },
+    });
+  });
+
+  it('restores the edited conversation snapshot when ACP rewind fails', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const originalConversation = {
+      id: 'session-1',
+      title: 'Existing session',
+      messages: [
+        { role: 'user' as const, content: 'first', timestamp: 1 },
+        { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
+        { role: 'user' as const, content: 'second', timestamp: 3 },
+      ],
+      createdAt: 1,
+      updatedAt: 3,
+    };
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockRejectedValue(new Error('rewind failed')),
+      restoreSessionHistory: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(originalConversation),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn().mockResolvedValue(true),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
+
+    expect(agentManager.restoreSessionHistory).not.toHaveBeenCalled();
+    expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
+      'session-1',
+      originalConversation.messages,
+    );
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'rewind failed' },
+    });
+  });
+
+  it('restores store and ACP history when saving the edited user message fails', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const historyBeforeRewind = [{ role: 'user', parts: [{ text: 'first' }] }];
+    const originalConversation = {
+      id: 'session-1',
+      title: 'Existing session',
+      messages: [
+        { role: 'user' as const, content: 'first', timestamp: 1 },
+        { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
+        { role: 'user' as const, content: 'second', timestamp: 3 },
+      ],
+      createdAt: 1,
+      updatedAt: 3,
+    };
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockResolvedValue({ historyBeforeRewind }),
+      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(originalConversation),
+      addMessage: vi.fn().mockRejectedValue(new Error('storage failed')),
+      replaceMessages: vi.fn().mockResolvedValue(true),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
+
+    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith(
+      historyBeforeRewind,
+    );
+    expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
+      'session-1',
+      originalConversation.messages,
+    );
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'storage failed' },
+    });
+  });
+
   it('rejects edit submissions with invalid target turn indexes', async () => {
     const agentManager = {
       isConnected: true,

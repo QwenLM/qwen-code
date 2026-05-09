@@ -611,7 +611,11 @@ export const App: React.FC = () => {
   useEffect(() => {
     const clearEditingOnRestoreOrFailure = (event: MessageEvent) => {
       const message = event.data;
-      if (message?.type === 'conversationLoaded') {
+      if (
+        message?.type === 'conversationLoaded' ||
+        message?.type === 'qwenSessionSwitched' ||
+        message?.type === 'conversationCleared'
+      ) {
         setEditingMessage(null);
         return;
       }

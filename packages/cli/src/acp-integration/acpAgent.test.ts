@@ -640,6 +640,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   let mockConfig: Config;
   let lastSessionMock:
     | {
+        captureHistorySnapshot: ReturnType<typeof vi.fn>;
+        restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
       }
     | undefined;
@@ -941,6 +943,121 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod('rewindSession', {
         sessionId: '22222222-2222-2222-2222-222222222222',
         targetTurnIndex: 1,
+      }),
+    ).rejects.toThrow('Session not found');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('restoreSessionHistory extension method restores the active session history', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const history = [{ role: 'user', parts: [{ text: 'restored' }] }];
+    const response = await agent.extMethod('restoreSessionHistory', {
+      sessionId,
+      history,
+      cwd: '/tmp',
+    });
+
+    expect(lastSessionMock?.restoreHistory).toHaveBeenCalledWith(history);
+    expect(response).toEqual({ success: true });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('restoreSessionHistory rejects invalid session ids', async () => {
+    await setupSessionMocks('11111111-1111-1111-1111-111111111111');
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('restoreSessionHistory', {
+        sessionId: '../bad',
+        history: [],
+      }),
+    ).rejects.toThrow('Invalid or missing sessionId');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('restoreSessionHistory rejects non-array history', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('restoreSessionHistory', {
+        sessionId,
+        history: { role: 'user' },
+      }),
+    ).rejects.toThrow('Invalid or missing history');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('restoreSessionHistory rejects missing sessions', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('restoreSessionHistory', {
+        sessionId: '22222222-2222-2222-2222-222222222222',
+        history: [],
       }),
     ).rejects.toThrow('Session not found');
 

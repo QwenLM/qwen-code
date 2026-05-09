@@ -260,6 +260,48 @@ describe('useWebViewMessages', () => {
     expect(rendered.setUsageStats).toHaveBeenCalledWith(undefined);
   });
 
+  it('ignores conversation rewind events when the target turn is missing', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'conversationRewound',
+            data: { targetTurnIndex: 99 },
+          },
+        }),
+      );
+    });
+
+    expect(
+      rendered.handlers.messageHandling.setMessages,
+    ).not.toHaveBeenCalled();
+    expect(rendered.handlers.rewindToolCallsToTimestamp).not.toHaveBeenCalled();
+    expect(rendered.handlers.setPlanEntries).not.toHaveBeenCalled();
+    expect(rendered.clearWaitingForResponse).not.toHaveBeenCalled();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'message',
+            data: { role: 'user', content: 'next', timestamp: 500 },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.handlers.messageHandling.addMessage).toHaveBeenCalledWith({
+      role: 'user',
+      content: 'next',
+      timestamp: 500,
+      turnIndex: 0,
+    });
+  });
+
   it('indexes user turns after switching to a persisted session', () => {
     const rendered = renderHookHarness();
     root = rendered.root;

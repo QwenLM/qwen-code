@@ -672,6 +672,7 @@ export const useWebViewMessages = ({
           let fallbackUserTurnIndex = 0;
           let truncateAt = currentMessages.length;
           let cutoffTimestamp = Date.now();
+          let foundTargetTurn = false;
 
           for (let i = 0; i < currentMessages.length; i++) {
             const msg = currentMessages[i];
@@ -689,8 +690,17 @@ export const useWebViewMessages = ({
             if (turnIndex === targetTurnIndex) {
               truncateAt = i;
               cutoffTimestamp = msg.timestamp;
+              foundTargetTurn = true;
               break;
             }
+          }
+
+          if (!foundTargetTurn) {
+            console.warn(
+              '[useWebViewMessages] conversationRewound target turn not found:',
+              targetTurnIndex,
+            );
+            break;
           }
 
           userTurnCounterRef.current = targetTurnIndex;

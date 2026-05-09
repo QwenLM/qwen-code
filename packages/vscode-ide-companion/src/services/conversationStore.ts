@@ -100,7 +100,7 @@ export class ConversationStore {
     }
 
     let userTurnIndex = 0;
-    let truncateAt = conversation.messages.length;
+    let truncateAt = -1;
     for (let i = 0; i < conversation.messages.length; i++) {
       if (conversation.messages[i]?.role !== 'user') {
         continue;
@@ -111,6 +111,14 @@ export class ConversationStore {
         break;
       }
       userTurnIndex += 1;
+    }
+
+    if (truncateAt < 0) {
+      console.warn(
+        '[ConversationStore] truncateFromUserTurn: target turn not found:',
+        targetTurnIndex,
+      );
+      return false;
     }
 
     conversation.messages = conversation.messages.slice(0, truncateAt);

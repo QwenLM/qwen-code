@@ -612,10 +612,28 @@ export class SessionMessageHandler extends BaseMessageHandler {
           this.currentConversationId,
         );
       } catch (error) {
-        console.warn(
+        console.error(
           '[SessionMessageHandler] Failed to capture edit restore snapshot:',
           error,
         );
+        const errorMsg = this.getErrorMessage(error);
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+
+      if (!editRestoreSnapshot) {
+        const errorMsg = 'Failed to capture conversation state before editing.';
+        console.error('[SessionMessageHandler]', errorMsg);
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
       }
 
       try {
@@ -700,10 +718,40 @@ export class SessionMessageHandler extends BaseMessageHandler {
       timestamp: Date.now(),
     };
 
-    await this.conversationStore.addMessage(
-      this.currentConversationId,
-      userMessage,
-    );
+    try {
+      await this.conversationStore.addMessage(
+        this.currentConversationId,
+        userMessage,
+      );
+    } catch (error) {
+      console.error(
+        '[SessionMessageHandler] Failed to save user message:',
+        error,
+      );
+
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        try {
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+        } catch (restoreError) {
+          console.warn(
+            '[SessionMessageHandler] Failed to restore ACP history after user message save failure:',
+            restoreError,
+          );
+        }
+      }
+
+      if (editStoreMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
+
+      const errorMsg = this.getErrorMessage(error);
+      vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
 
     this.sendToWebView({
       type: 'message',

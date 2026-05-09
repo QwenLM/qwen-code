@@ -101,4 +101,62 @@ describe('MessageMeta', () => {
       container.querySelector('button[aria-label="Copy message"]'),
     ).not.toBeNull();
   });
+
+  it('calls onEdit from the edit button and renders a custom edit icon', () => {
+    const onEdit = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(
+        <MessageMeta
+          timestamp={Date.UTC(2026, 3, 30, 1, 2)}
+          copyText="hi"
+          onEdit={onEdit}
+          editIcon={<span data-testid="edit-icon">edit</span>}
+        />,
+      );
+    });
+
+    const button = container.querySelector(
+      'button[aria-label="Edit message"]',
+    ) as HTMLButtonElement;
+    expect(container.querySelector('[data-testid="edit-icon"]')).not.toBeNull();
+
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onEdit).toHaveBeenCalledOnce();
+  });
+
+  it('disables the edit button when editDisabled is true', () => {
+    const onEdit = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(
+        <MessageMeta
+          copyText="hi"
+          onEdit={onEdit}
+          editDisabled
+          editIcon="edit"
+        />,
+      );
+    });
+
+    const button = container.querySelector(
+      'button[aria-label="Edit message"]',
+    ) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onEdit).not.toHaveBeenCalled();
+  });
 });
