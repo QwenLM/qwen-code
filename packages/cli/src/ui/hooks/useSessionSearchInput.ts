@@ -23,10 +23,22 @@
  * the outer picker stays untouched.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { Key } from './useKeypress.js';
 
 const DELETION_KEY_NAMES = new Set(['backspace', 'delete']);
+
+/**
+ * Normalize deletion-key detection so Windows terminals that deliver
+ * Backspace as the raw DEL byte (0x7F) without setting `name` are still
+ * recognised.  The `name` field is the primary signal; the sequence-byte
+ * fallback covers the case where the terminal emulator or ink-testing-library
+ * does not normalise the key name on Windows.
+ */
+const isDeletionKey = (key: Key): boolean =>
+  DELETION_KEY_NAMES.has(key.name) ||
+  key.sequence === '\x7f' || // DEL — common Backspace byte
+  key.sequence === '\b'; // BS — alternate Windows Backspace byte
 
 /**
  * True when the key represents a single printable character that
@@ -89,60 +101,71 @@ export function useSessionSearchInput(
   options: UseSessionSearchInputOptions,
 ): UseSessionSearchInputResult {
   const { onExitToList } = options;
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, rawSetSearchQuery] = useState('');
+  const searchQueryRef = useRef('');
 
-  const handleSearchKey = useCallback((key: Key): void => {
-    const { name, sequence, ctrl } = key;
+  /**
+   * Ref-backed setter that detects the non-empty → empty transition
+   * synchronously, without waiting for a `useEffect` flush.
+   *
+   * The synchronous ref check is the primary exit path.  The
+   * `useEffect` that previously drove this was vulnerable to a
+   * one-frame delay on Windows where the component rendered in
+   * search mode with an empty query before the effect fired,
+   * causing the "Press / to search" hint to be absent.
+   */
+  const setSearchQuery = useCallback(
+    (nextValue: React.SetStateAction<string>) => {
+      const prev = searchQueryRef.current;
+      const next =
+        typeof nextValue === 'function'
+          ? (nextValue as (value: string) => string)(prev)
+          : nextValue;
 
-    if (name === 'escape') {
-      // Drop the query; the empty-query effect below routes the exit.
-      // The list-mode Esc handler then implements the second-stage cancel.
-      setSearchQuery('');
-      return;
-    }
+      searchQueryRef.current = next;
+      rawSetSearchQuery(next);
 
-    if (DELETION_KEY_NAMES.has(name)) {
-      // Pop one char. Once the query empties out, the effect fires
-      // the exit — typing `/abc` ⌫⌫⌫⌫ leaves the user exactly where
-      // they started instead of stuck in a search frame.
-      //
-      // The functional updater is required for correctness under
-      // batched Backspaces (each call sees the previous queued
-      // value, not the same stale closure). React 18 StrictMode
-      // double-invokes updaters in dev for purity checks, which
-      // is why the side effect lives outside the updater.
-      setSearchQuery((q) => q.slice(0, -1));
-      return;
-    }
+      if (prev !== '' && next === '') {
+        onExitToList();
+      }
+    },
+    [onExitToList],
+  );
 
-    if (ctrl && (name === 'u' || name === 'l')) {
-      // Wipe the query and let the empty-query effect fire the exit.
-      setSearchQuery('');
-      return;
-    }
+  const handleSearchKey = useCallback(
+    (key: Key): void => {
+      const { name, sequence, ctrl } = key;
 
-    if (isPrintableSearchChar(key)) {
-      setSearchQuery((q) => q + sequence);
-      return;
-    }
+      if (name === 'escape') {
+        // Drop the query; the ref-backed setter fires onExitToList
+        // synchronously when the transition is non-empty → empty.
+        setSearchQuery('');
+        return;
+      }
 
-    // Anything else (Ctrl+B, Tab, Page keys, …) is silently
-    // swallowed by the caller — search owns the keyboard.
-  }, []);
+      if (isDeletionKey(key)) {
+        // Pop one char. The ref-backed setter detects when the last
+        // char is removed and exits to list mode immediately.
+        setSearchQuery((q) => q.slice(0, -1));
+        return;
+      }
 
-  // Exit to list mode whenever the query empties out — unifies Esc,
-  // Ctrl+U/L, and the last Backspace through a single side-effect
-  // site. The previous-value ref guards initial mount (where query
-  // starts at ''): we only fire on a non-empty → empty transition.
-  // StrictMode's mount/cleanup/mount dance is a no-op here because
-  // the initial state can never satisfy `prev !== ''`.
-  const prevSearchQueryRef = useRef('');
-  useEffect(() => {
-    if (searchQuery === '' && prevSearchQueryRef.current !== '') {
-      onExitToList();
-    }
-    prevSearchQueryRef.current = searchQuery;
-  }, [searchQuery, onExitToList]);
+      if (ctrl && (name === 'u' || name === 'l')) {
+        // Wipe the query and exit via the ref-backed setter.
+        setSearchQuery('');
+        return;
+      }
+
+      if (isPrintableSearchChar(key)) {
+        setSearchQuery((q) => q + sequence);
+        return;
+      }
+
+      // Anything else (Ctrl+B, Tab, Page keys, …) is silently
+      // swallowed by the caller — search owns the keyboard.
+    },
+    [setSearchQuery],
+  );
 
   return { searchQuery, setSearchQuery, handleSearchKey };
 }
