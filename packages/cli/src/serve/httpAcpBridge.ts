@@ -338,6 +338,14 @@ class BridgeClient implements Client {
   async readTextFile(
     params: ReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
+    // Reject obviously-degenerate `limit` up front. Without this,
+    // `sliceLineRange` hits the `end < start` path and returns an
+    // unexpectedly-larger slice (or empty depending on internals).
+    // ACP doesn't define semantics for limit ≤ 0, so treat as "no
+    // bytes wanted".
+    if (typeof params.limit === 'number' && params.limit <= 0) {
+      return { content: '' };
+    }
     const content = await fs.readFile(params.path, 'utf8');
     if (typeof params.line === 'number' || typeof params.limit === 'number') {
       // ACP `ReadTextFileRequest.line` is 1-based per spec — clients passing
@@ -602,16 +610,35 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         modelId: string;
       }): Promise<unknown>;
     };
+    // Race against `transportClosedReject` so a child crash during
+    // model switch fails the call immediately instead of waiting the
+    // full `timeoutMs`. Matches what `sendPrompt` and `setSessionModel`
+    // already do — without this, a callback-attach with a broken model
+    // wedges the HTTP handler for 10s. Lazy-init the rejector so we
+    // attach exactly ONE channel.exited listener over the session
+    // lifetime (a per-call attach would leak listeners on chatty
+    // model-change paths).
+    if (!entry.transportClosedReject) {
+      entry.transportClosedReject = entry.channel.exited.then(() => {
+        throw new Error(
+          `agent channel closed during applyModelServiceId (session ${entry.sessionId})`,
+        );
+      });
+    }
+    const transportClosed = entry.transportClosedReject;
     const work = entry.modelChangeQueue.then(async () => {
       try {
-        await withTimeout(
-          conn.unstable_setSessionModel({
-            sessionId: entry.sessionId,
-            modelId,
-          }),
-          timeoutMs,
-          'setSessionModel',
-        );
+        await Promise.race([
+          withTimeout(
+            conn.unstable_setSessionModel({
+              sessionId: entry.sessionId,
+              modelId,
+            }),
+            timeoutMs,
+            'setSessionModel',
+          ),
+          transportClosed,
+        ]);
         entry.events.publish({
           type: 'model_switched',
           data: { sessionId: entry.sessionId, modelId },
@@ -722,18 +749,31 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       }
 
       const promise = doSpawn(workspaceKey, req.modelServiceId);
-      if (sessionScope === 'single') {
-        inFlightSpawns.set(workspaceKey, promise);
-      }
+      // Track in-flight spawns regardless of scope. Under `single`
+      // this also serves the coalescing path above (a parallel
+      // `spawnOrAttach` finds the entry and waits for the same
+      // promise). Under `thread` we don't need coalescing — every
+      // call gets its own session — but `shutdown()` snapshots
+      // `inFlightSpawns.values()` to know which spawns to await
+      // for graceful tear-down. Without this, a `thread`-scope
+      // shutdown returns before in-progress spawns finish their
+      // child cleanup, surfacing stderr noise after the daemon
+      // claimed graceful shutdown. Use a unique key per spawn so
+      // simultaneous thread-scope spawns don't collide on the
+      // workspace key.
+      const tracker =
+        sessionScope === 'single'
+          ? workspaceKey
+          : `${workspaceKey}#${randomUUID()}`;
+      inFlightSpawns.set(tracker, promise);
       try {
         return await promise;
       } finally {
-        // Always clear the in-flight slot whether the spawn resolved or
-        // rejected — leaving a rejected promise behind would poison every
-        // future call for this workspace.
-        if (sessionScope === 'single') {
-          inFlightSpawns.delete(workspaceKey);
-        }
+        // Always clear the in-flight slot whether the spawn resolved
+        // or rejected — leaving a rejected promise behind would
+        // poison every future coalescing-path call for this
+        // workspace (single-scope) or grow unbounded (thread-scope).
+        inFlightSpawns.delete(tracker);
       }
     },
 
@@ -1070,6 +1110,19 @@ function sliceLineRange(
  * the resolved-but-uncanonicalized form rather than throwing — the
  * downstream `spawn({cwd})` will fail with a useful ENOENT if the
  * workspace truly doesn't exist.
+ *
+ * NOTE: This is an undocumented cross-module contract — `config.ts`,
+ * `settings.ts`, `sandbox.ts`, and this file all need to canonicalize
+ * the same way for `sessionScope: 'single'` re-attach to work
+ * correctly across paths. Stage 2 in-process (issue #3803 §10) will
+ * collapse the bridge into core, removing the bridge-side path
+ * resolution entirely; until then, *any* change to how those modules
+ * resolve workspace paths needs a matching change here. A shared
+ * `canonicalizeWorkspace` utility under `packages/cli/src/utils/`
+ * (or `packages/core/src/utils/`) was considered but deferred:
+ * the call sites use slightly different fallback policies, and a
+ * lowest-common-denominator extraction would force changes in
+ * unrelated subsystems mid-Stage-1.
  */
 function canonicalizeWorkspace(p: string): string {
   const resolved = path.resolve(p);
@@ -1134,53 +1187,12 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // is a `.ts` file Node can't run; users should `npm run build` before
   // `qwen serve` or set `process.execPath` to a tsx-aware shim. Stage 1
   // accepts this — the daemon is meant for built deployments.
-  // Pass an *allowlisted* environment to the child — NOT a
-  // `{ ...process.env }` copy with one or two known-bad keys deleted.
-  // The agent runs user-supplied prompts with shell-tool access, so
-  // anything in its env is reachable by prompt injection: API keys
-  // (OPENAI/ANTHROPIC/GEMINI/DASHSCOPE/...), DB passwords, AWS/GCP
-  // credentials, OAuth tokens, secrets your operator forgot they
-  // exported. A denylist requires perfect knowledge of every secret
-  // anyone might set; an allowlist requires only that we know what
-  // the agent legitimately needs.
-  //
-  // What's needed: enough to launch Node + load the entry script and
-  // resolve user-config files (HOME), enough to find binaries and
-  // standard tools (PATH), enough to localize and identify the user
-  // for any session-state lookups (LANG/LC_*, USER/LOGNAME). Anything
-  // beyond this list should be passed to the agent through ACP, not
-  // through the spawn env.
-  //
-  // Per-platform extras: NODE-specific knobs (NODE_OPTIONS, NODE_PATH)
-  // and shell-driven temp dir overrides (TMPDIR/TEMP/TMP) are usually
-  // benign but can carry instructions; include only the temp-dir ones
-  // since the agent legitimately writes scratch files. Windows-only
-  // SYSTEMROOT/USERPROFILE/APPDATA are required by Node itself on
-  // Windows or the spawn fails.
-  const ALLOWED_ENV_KEYS = new Set([
-    'HOME',
-    'PATH',
-    'USER',
-    'LOGNAME',
-    'LANG',
-    'LC_ALL',
-    'LC_CTYPE',
-    'LC_COLLATE',
-    'LC_MESSAGES',
-    'TMPDIR',
-    'TEMP',
-    'TMP',
-    'NODE_PATH',
-    // Windows essentials
-    'SYSTEMROOT',
-    'USERPROFILE',
-    'APPDATA',
-    'LOCALAPPDATA',
-    'COMSPEC',
-    'PATHEXT',
-  ]);
+  // Pass an *allowlisted* environment to the child (see
+  // ALLOWED_CHILD_ENV_KEYS at module scope for the rationale + the
+  // allowlist itself). Move-out keeps the Set allocated once, not
+  // per-spawn.
   const childEnv: NodeJS.ProcessEnv = {};
-  for (const key of ALLOWED_ENV_KEYS) {
+  for (const key of ALLOWED_CHILD_ENV_KEYS) {
     const v = process.env[key];
     if (typeof v === 'string') childEnv[key] = v;
   }
@@ -1243,6 +1255,57 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
 };
 
 const KILL_HARD_DEADLINE_MS = 10_000;
+
+/**
+ * Environment variables the spawned `qwen --acp` child is allowed to
+ * inherit from the daemon's environment. Anything else is dropped —
+ * the agent runs user-supplied prompts with shell-tool access, so
+ * everything in its env is reachable by prompt injection: API keys
+ * (OPENAI/ANTHROPIC/GEMINI/DASHSCOPE/...), DB passwords, AWS/GCP
+ * credentials, OAuth tokens, secrets your operator forgot they
+ * exported. A denylist requires perfect knowledge of every secret
+ * anyone might set; an allowlist requires only that we know what
+ * the agent legitimately needs.
+ *
+ * What's needed: enough to launch Node + load the entry script and
+ * resolve user-config files (HOME), enough to find binaries and
+ * standard tools (PATH), enough to localize and identify the user
+ * for any session-state lookups (LANG/LC_*, USER/LOGNAME). Anything
+ * beyond this list should be passed to the agent through ACP, not
+ * through the spawn env.
+ *
+ * Per-platform extras: NODE-specific knobs (NODE_OPTIONS, NODE_PATH)
+ * and shell-driven temp dir overrides (TMPDIR/TEMP/TMP) are usually
+ * benign but can carry instructions; include only the temp-dir ones
+ * since the agent legitimately writes scratch files. Windows-only
+ * SYSTEMROOT/USERPROFILE/APPDATA are required by Node itself on
+ * Windows or the spawn fails.
+ *
+ * Defined at module scope so the Set is allocated once at load,
+ * not rebuilt on every `defaultSpawnChannelFactory` call.
+ */
+const ALLOWED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
+  'HOME',
+  'PATH',
+  'USER',
+  'LOGNAME',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'LC_COLLATE',
+  'LC_MESSAGES',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  'NODE_PATH',
+  // Windows essentials — Node refuses to spawn without these on Win32.
+  'SYSTEMROOT',
+  'USERPROFILE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'COMSPEC',
+  'PATHEXT',
+]);
 
 function killChild(child: ChildProcess): Promise<void> {
   return new Promise<void>((resolve) => {

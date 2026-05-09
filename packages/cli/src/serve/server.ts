@@ -118,10 +118,15 @@ export function createServeApp(
       // Combined with `!session.attached` we only reap when WE spawned
       // a fresh child for this request — if another client legitimately
       // attached, killing it would tear out their work mid-flight.
-      if (!res.writable && !session.attached) {
-        bridge.killSession(session.sessionId).catch(() => {
-          // Best-effort cleanup; channel.exited will eventually reap.
-        });
+      // The disconnect-without-reap branch also needs to skip
+      // `res.json` — writing to a closed socket would throw EPIPE
+      // through Express's default error handler.
+      if (!res.writable) {
+        if (!session.attached) {
+          bridge.killSession(session.sessionId).catch(() => {
+            // Best-effort cleanup; channel.exited will eventually reap.
+          });
+        }
         return;
       }
       res.status(200).json(session);
@@ -137,9 +142,20 @@ export function createServeApp(
         ? (req.body as Record<string, unknown>)
         : {};
     const prompt = body['prompt'];
-    if (!Array.isArray(prompt)) {
+    if (!Array.isArray(prompt) || prompt.length === 0) {
       res.status(400).json({
-        error: '`prompt` is required and must be an array of content blocks',
+        error:
+          '`prompt` is required and must be a non-empty array of content blocks',
+      });
+      return;
+    }
+    if (
+      !prompt.every(
+        (item: unknown) => typeof item === 'object' && item !== null,
+      )
+    ) {
+      res.status(400).json({
+        error: 'each `prompt` element must be an object (content block)',
       });
       return;
     }
@@ -161,6 +177,14 @@ export function createServeApp(
       );
       res.status(200).json(result);
     } catch (err) {
+      // The HTTP client disconnecting fires `req.on('close')` → abort,
+      // and the bridge re-throws as `AbortError`. That's a normal
+      // wind-down path, not an error worth a 500 + stderr stack
+      // trace. Drop it silently — the socket is already closed so we
+      // can't send a response anyway, and active clients (e.g. an
+      // IDE plugin scrubbing a stuck prompt) would otherwise spam
+      // the daemon log.
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       sendBridgeError(res, err);
     } finally {
       req.off('close', onClientClose);
@@ -358,7 +382,16 @@ export function createServeApp(
     // actually rely on to tear down the subscription; this listener just
     // suppresses the noise + ensures cleanup runs even if for some reason
     // the close event doesn't fire first.
-    res.on('error', cleanup);
+    res.on('error', (err) => {
+      // Without this log the daemon side is blind to SSE disconnects
+      // (RST, mid-flight kill -9, network blip). Cleanup still runs —
+      // the listener exists primarily so Node doesn't crash on EPIPE
+      // — but operators get a breadcrumb when chasing flaky clients.
+      writeStderrLine(
+        `qwen serve: SSE socket error (session ${sessionId}): ${err.message}`,
+      );
+      cleanup();
+    });
 
     void (async () => {
       try {
@@ -390,6 +423,37 @@ export function createServeApp(
       }
     })();
   });
+
+  // Final error handler. `express.json()` throws `SyntaxError` (with
+  // `status: 400`) on malformed body — without this 4-arg middleware
+  // Express renders an HTML error page, which trips SDK clients that
+  // expect a JSON body on every response. Anything else bubbling out
+  // is a programmer error; log it and return a JSON 500 (matches the
+  // route-level `sendBridgeError` shape so clients have one error
+  // contract to parse).
+  app.use(
+    (
+      err: unknown,
+      _req: import('express').Request,
+      res: import('express').Response,
+      _next: import('express').NextFunction,
+    ) => {
+      if (
+        err instanceof SyntaxError &&
+        'status' in err &&
+        (err as { status: number }).status === 400
+      ) {
+        res.status(400).json({ error: 'Invalid JSON in request body' });
+        return;
+      }
+      writeStderrLine(
+        `qwen serve: unhandled error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    },
+  );
 
   return app;
 }

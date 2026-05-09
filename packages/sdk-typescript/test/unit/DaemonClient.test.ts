@@ -451,4 +451,64 @@ describe('DaemonClient', () => {
       expect(calls[0]?.url).toBe('http://daemon/health');
     });
   });
+
+  describe('fetchWithTimeout', () => {
+    it('aborts the underlying fetch when the configured timeout fires', async () => {
+      // Fetch that *never* resolves on its own — only abort can end it.
+      // This is what the polyfill paths (`abortTimeout` /
+      // `composeAbortSignals`) need to actually exercise; the rest of
+      // the suite uses synchronous-resolving fakes that never trigger
+      // the timeout machinery.
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_res, rej) => {
+            init?.signal?.addEventListener('abort', () =>
+              rej(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 50,
+      });
+      const before = Date.now();
+      await expect(client.health()).rejects.toThrow();
+      const elapsed = Date.now() - before;
+      // Generous upper bound — we just want to know the timer fired
+      // (not that the test runner waited the full default 5s).
+      expect(elapsed).toBeLessThan(2000);
+    });
+
+    it('aborts when the caller-supplied signal fires (composeAbortSignals path)', async () => {
+      // Verifies that `composeAbortSignals` actually forwards the
+      // caller's abort to the underlying fetch — the polyfill path
+      // is the only one Node 18.0–20.2 takes for signal composition.
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_res, rej) => {
+            init?.signal?.addEventListener('abort', () =>
+              rej(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 60_000, // long, so the caller's abort is what fires
+      });
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 30);
+      await expect(
+        // subscribeEvents forwards opts.signal through fetchWithTimeout
+        // — pick a method whose typed surface accepts a signal.
+        (async () => {
+          const iter = client.subscribeEvents('s-1', { signal: ctrl.signal });
+          for await (const _ of iter) {
+            void _;
+          }
+        })(),
+      ).rejects.toThrow();
+    });
+  });
 });

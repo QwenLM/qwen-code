@@ -159,10 +159,25 @@ export async function runQwenServe(
             // would terminate the process and orphan agent children. We
             // detach AFTER drain completes (`finish` below).
 
-            // server.close waits for in-flight connections (e.g. long-lived
-            // SSE subscribers) before invoking the callback. Without a force
-            // timeout, a single hung consumer can block shutdown forever.
-            // Race a setTimeout against the natural close.
+            // Two-phase shutdown:
+            //   1. `bridge.shutdown()` — tears down agent children with
+            //      its own internal `KILL_HARD_DEADLINE_MS` (10s) so
+            //      a wedged child can't block forever. We wait
+            //      unconditionally; the bridge bounds itself.
+            //   2. `server.close()` — drains in-flight HTTP connections
+            //      (long-lived SSE subscribers especially). This is
+            //      what `SHUTDOWN_FORCE_CLOSE_MS` actually protects:
+            //      a single hung SSE consumer would otherwise pin
+            //      the listener open forever.
+            //
+            // Crucially, the force timer is armed AFTER bridge.shutdown
+            // resolves, not at the start of the whole sequence. An
+            // earlier version raced both phases against the same 5s
+            // timer; if the bridge took 5–10s to kill its children
+            // (e.g. SIGTERM grace period), the timer fired first,
+            // resolved this promise, and `process.exit(0)` ran while
+            // the bridge was still tearing children down — orphaning
+            // any that hadn't yet hit `KILL_HARD_DEADLINE_MS`.
             let settled = false;
             const finish = (err?: Error | null) => {
               if (settled) return;
@@ -173,19 +188,7 @@ export async function runQwenServe(
               if (err) rej(err);
               else res();
             };
-            const forceTimer = setTimeout(() => {
-              writeStderrLine(
-                `qwen serve: ${SHUTDOWN_FORCE_CLOSE_MS}ms shutdown timeout reached; force-closing remaining connections`,
-              );
-              // Force-destroy every still-open connection on the listener.
-              // This unblocks `server.close` which then resolves naturally.
-              server.closeAllConnections();
-              setTimeout(() => finish(), 100).unref();
-            }, SHUTDOWN_FORCE_CLOSE_MS);
-            forceTimer.unref();
 
-            // Tear down child agents before closing the listener so in-flight
-            // requests aren't left holding references to dead processes.
             bridge
               .shutdown()
               .catch((err) =>
@@ -194,6 +197,16 @@ export async function runQwenServe(
                 ),
               )
               .finally(() => {
+                // Phase 2: arm the force timer NOW so it only races
+                // server.close, not the bridge tear-down above.
+                const forceTimer = setTimeout(() => {
+                  writeStderrLine(
+                    `qwen serve: ${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
+                  );
+                  server.closeAllConnections();
+                  setTimeout(() => finish(), 100).unref();
+                }, SHUTDOWN_FORCE_CLOSE_MS);
+                forceTimer.unref();
                 server.close((err) => {
                   clearTimeout(forceTimer);
                   finish(err);
