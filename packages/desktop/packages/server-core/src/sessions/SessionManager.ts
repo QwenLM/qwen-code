@@ -1410,17 +1410,16 @@ export class SessionManager implements ISessionManager {
     this.eventSink(RPC_CHANNELS.llmConnections.CHANGED, { to: 'all' })
   }
 
-  private updateQwenConnectionModels(slug: string, models: ModelDefinition[], currentModelId?: string): void {
+  private updateQwenConnectionModels(slug: string, models: ModelDefinition[], _currentModelId?: string): void {
     const connection = getLlmConnection(slug)
     if (!connection || connection.providerType !== 'qwen' || models.length === 0) return
 
-    const modelIds = models.map(model => model.id)
-    const serverDefault = currentModelId && modelIds.includes(currentModelId) ? currentModelId : undefined
     let changed = false
     try {
+      const previous = getModelRefreshService().getRuntimeModelState(slug)
       changed = getModelRefreshService().setRuntimeModelState(slug, {
         models,
-        serverDefault,
+        serverDefault: previous?.serverDefault,
       })
     } catch (error) {
       sessionLog.warn(`Qwen runtime model cache unavailable: ${error instanceof Error ? error.message : String(error)}`)
@@ -5176,7 +5175,13 @@ export class SessionManager implements ISessionManager {
       // Fallback chain: session model > workspace default > connection default
       const effectiveModel = resolveModel(persistedModel ?? wsConfig?.defaults?.model ?? sessionConn?.defaultModel)
       sessionLog.info(`[updateSessionModel] Calling agent.setModel(${effectiveModel}) [agent exists=${!!managed.agent}, connectionLocked=${managed.connectionLocked}]`)
-      if (effectiveModel) managed.agent.setModel(effectiveModel)
+      if (effectiveModel) {
+        managed.agent.setModel(effectiveModel)
+        if (sessionConn?.providerType === 'qwen') {
+          await managed.agent.refreshAvailableCommands?.()
+          await this.refreshQwenConnectionDefault(sessionConn.slug, 'session model update')
+        }
+      }
     } else {
       sessionLog.info(`[updateSessionModel] No agent yet, model will apply on next agent creation`)
     }
@@ -5329,7 +5334,7 @@ export class SessionManager implements ISessionManager {
 
     const resolvedModel = backendContext.resolvedModel || model
     try {
-      const { agent, created } = await this.getOrCreateDraftAgent({
+      const { agent } = await this.getOrCreateDraftAgent({
         workspace,
         workspaceConfig,
         backendContext,
@@ -5338,13 +5343,24 @@ export class SessionManager implements ISessionManager {
         model: resolvedModel,
         debugPrefix: 'draft model',
       })
-      if (created || !agent.getSessionId()) {
-        await agent.refreshAvailableCommands?.()
+      await agent.refreshAvailableCommands?.()
+      if (sessionConnection?.slug) {
+        await this.refreshQwenConnectionDefault(sessionConnection.slug, 'draft model selection')
       }
       sessionLog.info(`[persistDraftModelSelection] persisted draft model via ACP: ${resolvedModel}`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       sessionLog.warn(`Draft model persistence failed: ${message}`)
+    }
+  }
+
+  private async refreshQwenConnectionDefault(slug: string, reason: string): Promise<void> {
+    try {
+      await getModelRefreshService().refreshNow(slug)
+      this.broadcastLlmConnectionsChanged()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      sessionLog.warn(`Failed to refresh Qwen ACP model default after ${reason}: ${message}`)
     }
   }
 
