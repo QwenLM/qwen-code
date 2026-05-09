@@ -30,6 +30,7 @@ import {
 const EXPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER_SIZE = 10_000;
 const BUFFER_OVERFLOW_WARNING_INTERVAL_MS = 30_000;
+const LOG_EVENT_ERROR_STATUS_MESSAGE = 'Log event recorded error';
 const MAX_SPAN_NAME_LENGTH = 128;
 const SENSITIVE_ATTRIBUTE_KEYS = new Set([
   'prompt',
@@ -68,6 +69,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private lastBufferOverflowWarningMs: number | undefined;
   private droppedSpansSinceLastBufferWarning = 0;
   private totalDroppedSpans = 0;
+  private isShutdown = false;
 
   constructor(spanExporter: SpanExporter);
   constructor(
@@ -84,13 +86,14 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     if (typeof flushIntervalMsOrOptions === 'number') {
       this.flushIntervalMs = flushIntervalMsOrOptions;
       this.includeSensitiveSpanAttributes = false;
-      this.maxBufferSize = maxBufferSize;
+      this.maxBufferSize = normalizeMaxBufferSize(maxBufferSize);
     } else {
       this.flushIntervalMs = flushIntervalMsOrOptions.flushIntervalMs ?? 5000;
       this.includeSensitiveSpanAttributes =
         flushIntervalMsOrOptions.includeSensitiveSpanAttributes ?? false;
-      this.maxBufferSize =
-        flushIntervalMsOrOptions.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
+      this.maxBufferSize = normalizeMaxBufferSize(
+        flushIntervalMsOrOptions.maxBufferSize,
+      );
     }
     this.flushTimer = setInterval(() => {
       void this.flush();
@@ -99,6 +102,10 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   }
 
   onEmit(logRecord: ReadableLogRecord): void {
+    if (this.isShutdown) {
+      return;
+    }
+
     const name = sanitizeSpanName(logRecord.body);
     const startTime = logRecord.hrTime;
 
@@ -264,6 +271,10 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   }
 
   async shutdown(): Promise<void> {
+    if (this.isShutdown) {
+      return;
+    }
+    this.isShutdown = true;
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
       this.flushTimer = undefined;
@@ -278,12 +289,22 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   }
 
   async forceFlush(): Promise<void> {
+    if (this.isShutdown) {
+      return;
+    }
     if (this.inFlightExport) {
       await this.inFlightExport;
     }
     await this.flush();
     await this.spanExporter.forceFlush?.();
   }
+}
+
+function normalizeMaxBufferSize(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) {
+    return DEFAULT_MAX_BUFFER_SIZE;
+  }
+  return Math.floor(value);
 }
 
 interface ReadableSpanLike {
@@ -340,10 +361,10 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
 } {
   if (!attrs) return { code: SpanStatusCode.OK };
   if (!!attrs['error'] || !!attrs['error_message'] || !!attrs['error_type']) {
-    const msg = String(
-      attrs['error_message'] ?? attrs['error'] ?? attrs['error_type'] ?? '',
-    );
-    return { code: SpanStatusCode.ERROR, ...(msg && { message: msg }) };
+    return {
+      code: SpanStatusCode.ERROR,
+      message: LOG_EVENT_ERROR_STATUS_MESSAGE,
+    };
   }
   return { code: SpanStatusCode.OK };
 }

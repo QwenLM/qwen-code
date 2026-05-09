@@ -491,4 +491,17 @@ describe('refreshSessionContext', () => {
     expect(createSessionRootContext).not.toHaveBeenCalled();
     expect(setSessionContext).not.toHaveBeenCalled();
   });
+
+  it('should not throw when refreshing session context fails', () => {
+    initializeTelemetry(mockConfig);
+    vi.clearAllMocks();
+    vi.mocked(createSessionRootContext).mockImplementationOnce(() => {
+      throw new Error('session context failed');
+    });
+
+    expect(() => refreshSessionContext('bad-session')).not.toThrow();
+
+    expect(createSessionRootContext).toHaveBeenCalledWith('bad-session');
+    expect(setSessionContext).not.toHaveBeenCalled();
+  });
 });

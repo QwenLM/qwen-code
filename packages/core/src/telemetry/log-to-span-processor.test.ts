@@ -341,6 +341,69 @@ describe('LogToSpanProcessor', () => {
     }
   });
 
+  it('falls back to the default buffer size for invalid configured limits', async () => {
+    await processor.shutdown();
+    processor = new LogToSpanProcessor(mockExporter, 60000, 0);
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      for (const body of ['event1', 'event2', 'event3']) {
+        processor.onEmit({
+          body,
+          hrTime: [1000, 0] as [number, number],
+          attributes: {},
+        } as unknown as ReadableLogRecord);
+      }
+
+      await processor.forceFlush();
+
+      expect(exportedSpans.map((span) => span.name)).toEqual([
+        'event1',
+        'event2',
+        'event3',
+      ]);
+      expect(stderrWrite).not.toHaveBeenCalledWith(
+        expect.stringContaining('buffer exceeded max size'),
+      );
+    } finally {
+      stderrWrite.mockRestore();
+    }
+  });
+
+  it('floors fractional configured buffer limits', async () => {
+    await processor.shutdown();
+    processor = new LogToSpanProcessor(mockExporter, 60000, 2.9);
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      for (const body of ['event1', 'event2', 'event3']) {
+        processor.onEmit({
+          body,
+          hrTime: [1000, 0] as [number, number],
+          attributes: {},
+        } as unknown as ReadableLogRecord);
+      }
+
+      await processor.forceFlush();
+
+      expect(exportedSpans.map((span) => span.name)).toEqual([
+        'event2',
+        'event3',
+      ]);
+      expect(stderrWrite).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'dropped 1 oldest span(s) since last warning, 1 total',
+        ),
+      );
+    } finally {
+      stderrWrite.mockRestore();
+    }
+  });
+
   it('reports total dropped spans across overflow warnings', async () => {
     await processor.shutdown();
     processor = new LogToSpanProcessor(mockExporter, 60000, 2);
@@ -433,7 +496,13 @@ describe('LogToSpanProcessor', () => {
     await processor.forceFlush();
 
     expect(exportedSpans[0].status.code).toBe(SpanStatusCode.ERROR);
-    expect(exportedSpans[0].status.message).toBe('connection refused');
+    expect(exportedSpans[0].status.message).toBe('Log event recorded error');
+    expect(exportedSpans[0].attributes['error_message']).toBe(
+      'connection refused',
+    );
+    expect(JSON.stringify(exportedSpans[0].status)).not.toContain(
+      'connection refused',
+    );
   });
 
   it('does not set ERROR for success: false (normal decline)', async () => {
@@ -536,5 +605,28 @@ describe('LogToSpanProcessor', () => {
 
     expect(exportedSpans).toHaveLength(1);
     expect(mockExporter.shutdown).toHaveBeenCalled();
+  });
+
+  it('does not collect or flush spans after shutdown', async () => {
+    await processor.shutdown();
+
+    processor.onEmit({
+      body: 'late event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans).toHaveLength(0);
+    expect(mockExporter.export).not.toHaveBeenCalled();
+    expect(mockExporter.forceFlush).not.toHaveBeenCalled();
+    expect(mockExporter.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('shutdown is idempotent', async () => {
+    await processor.shutdown();
+    await processor.shutdown();
+
+    expect(mockExporter.shutdown).toHaveBeenCalledTimes(1);
   });
 });
