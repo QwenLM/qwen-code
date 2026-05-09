@@ -16,6 +16,7 @@ import {
 import type { Settings } from './settings.js';
 import stripJsonComments from 'strip-json-comments';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeWithBackupSync } from '../utils/writeWithBackup.js';
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 
@@ -179,11 +180,8 @@ export function saveTrustedFolders(
       fs.mkdirSync(dirPath, { recursive: true });
     }
 
-    fs.writeFileSync(
-      trustedFoldersFile.path,
-      JSON.stringify(trustedFoldersFile.config, null, 2),
-      { encoding: 'utf-8', mode: 0o600 },
-    );
+    const content = JSON.stringify(trustedFoldersFile.config, null, 2);
+    writeWithBackupSync(trustedFoldersFile.path, content, { mode: 0o600 });
   } catch (error) {
     writeStderrLine('Error saving trusted folders file.');
     writeStderrLine(error instanceof Error ? error.message : String(error));

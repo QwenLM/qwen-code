@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import type {
   OAuthToken,
   OAuthCredentials,
@@ -99,11 +100,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
     const tokenFile = this.getTokenFilePath();
 
     try {
-      await fs.writeFile(
-        tokenFile,
-        JSON.stringify(tokenArray, null, 2),
-        { mode: 0o600 }, // Restrict file permissions
-      );
+      await atomicWriteJSON(tokenFile, tokenArray, { mode: 0o600 });
     } catch (error) {
       debugLogger.error(
         `Failed to save MCP OAuth token: ${getErrorMessage(error)}`,
@@ -179,9 +176,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
           // Remove file if no tokens left
           await fs.unlink(tokenFile);
         } else {
-          await fs.writeFile(tokenFile, JSON.stringify(tokenArray, null, 2), {
-            mode: 0o600,
-          });
+          await atomicWriteJSON(tokenFile, tokenArray, { mode: 0o600 });
         }
       } catch (error) {
         debugLogger.error(

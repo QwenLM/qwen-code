@@ -111,8 +111,6 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       // Background subagent transcripts live under <projectDir>/subagents/ and
       // are advertised to the model as polling targets via read_file.
       path.join(this.config.storage.getProjectDir(), 'subagents'),
-      Storage.getGlobalTempDir(),
-      os.tmpdir(),
       ...this.config.storage.getUserSkillsDirs(),
       Storage.getUserExtensionsDir(),
     ];

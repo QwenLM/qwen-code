@@ -13,6 +13,8 @@ export interface AtomicWriteOptions {
   retries?: number;
   /** Base delay in ms for exponential backoff (default: 50). */
   delayMs?: number;
+  /** File mode (permissions). */
+  mode?: number;
 }
 
 /**
@@ -32,10 +34,14 @@ export async function atomicWriteJSON(
 ): Promise<void> {
   const retries = options?.retries ?? 3;
   const delayMs = options?.delayMs ?? 50;
+  const mode = options?.mode;
 
   const tmpPath = `${filePath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try {
-    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
+    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), {
+      encoding: 'utf-8',
+      mode,
+    });
     await renameWithRetry(tmpPath, filePath, retries, delayMs);
   } catch (error) {
     try {

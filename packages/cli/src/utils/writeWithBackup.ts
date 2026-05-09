@@ -14,6 +14,8 @@ export interface WriteWithBackupOptions {
   backupSuffix?: string;
   /** File encoding (default: 'utf-8') */
   encoding?: BufferEncoding;
+  /** File mode (permissions) */
+  mode?: number;
 }
 
 /**
@@ -63,7 +65,7 @@ export function writeWithBackupSync(
   content: string,
   options: WriteWithBackupOptions = {},
 ): void {
-  const { backupSuffix = '.orig', encoding = 'utf-8' } = options;
+  const { backupSuffix = '.orig', encoding = 'utf-8', mode } = options;
   const tempPath = `${targetPath}.tmp`;
   const backupPath = `${targetPath}${backupSuffix}`;
 
@@ -78,7 +80,7 @@ export function writeWithBackupSync(
 
   try {
     // Step 1: Write to temporary file
-    fs.writeFileSync(tempPath, content, { encoding });
+    fs.writeFileSync(tempPath, content, { encoding, mode });
 
     // Step 2: If target exists, back it up
     if (fs.existsSync(targetPath)) {
@@ -94,6 +96,16 @@ export function writeWithBackupSync(
         throw new Error(
           `Cannot write to '${targetPath}' because it is a directory`,
         );
+      }
+
+      // If a mode was specified, ensure the target file also respects it
+      // before we move the potentially sensitive data to the backup location.
+      if (mode !== undefined) {
+        try {
+          fs.chmodSync(targetPath, mode);
+        } catch (_e) {
+          // Ignore chmod errors on existing file
+        }
       }
 
       try {
@@ -122,6 +134,13 @@ export function writeWithBackupSync(
       if (fs.existsSync(backupPath)) {
         backupExisted = true;
         try {
+          if (mode !== undefined) {
+            try {
+              fs.chmodSync(backupPath, mode);
+            } catch (_e) {
+              // Ignore chmod errors during restore
+            }
+          }
           fs.renameSync(backupPath, targetPath);
         } catch (restoreError) {
           restoreFailedMessage =

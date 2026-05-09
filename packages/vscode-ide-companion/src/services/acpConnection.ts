@@ -447,7 +447,7 @@ export class AcpConnection {
       authMethodId,
     );
     const response = await conn.authenticate({ methodId: authMethodId });
-    console.log('[ACP] Authenticate successful', response);
+    console.log('[ACP] Authenticate successful');
     return response;
   }
 

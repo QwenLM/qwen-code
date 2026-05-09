@@ -29,10 +29,11 @@ export function updateSettingsFilePreservingFormat(
   filePath: string,
   updates: Record<string, unknown>,
   sync = false,
+  mode?: number,
 ): boolean {
   if (!fs.existsSync(filePath)) {
     const content = stringify(updates, null, 2);
-    writeWithBackupSync(filePath, content);
+    writeWithBackupSync(filePath, content, { mode });
     return true;
   }
 
@@ -72,7 +73,7 @@ export function updateSettingsFilePreservingFormat(
     return false;
   }
 
-  writeWithBackupSync(filePath, updatedContent);
+  writeWithBackupSync(filePath, updatedContent, { mode });
   return true;
 }
 

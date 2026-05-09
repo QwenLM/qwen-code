@@ -394,7 +394,7 @@ export async function start_sandbox(
       );
       if (isCustomProjectSandbox) {
         writeStderrLine(`using ${projectSandboxDockerfile} for sandbox`);
-        buildArgs += `-f ${path.resolve(projectSandboxDockerfile)} -i ${image}`;
+        buildArgs += `-f ${path.resolve(projectSandboxDockerfile)} -i ${quote([image])}`;
       }
       execSync(
         `cd ${gcRoot} && node scripts/build_sandbox.js -s ${buildArgs}`,
@@ -842,7 +842,7 @@ export async function start_sandbox(
 
   if (proxyCommand) {
     // run proxyCommand in its own container
-    const proxyContainerCommand = `${config.command} run --rm --init ${userFlag} --name ${SANDBOX_PROXY_NAME} --network ${SANDBOX_PROXY_NAME} -p 8877:8877 -v ${process.cwd()}:${workdir} --workdir ${workdir} ${image} ${proxyCommand}`;
+    const proxyContainerCommand = `${config.command} run --rm --init ${userFlag} --name ${SANDBOX_PROXY_NAME} --network ${SANDBOX_PROXY_NAME} -p 8877:8877 -v ${quote([process.cwd()])}:${quote([workdir])} --workdir ${quote([workdir])} ${quote([image])} ${proxyCommand}`;
     const isWindows = os.platform() === 'win32';
     const proxyShell = isWindows ? 'cmd.exe' : 'bash';
     const proxyShellArgs = isWindows

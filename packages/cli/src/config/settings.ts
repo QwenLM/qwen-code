@@ -937,10 +937,14 @@ export function loadSettings(
             // while preserving comments and formatting from the original file.
             // updateSettingsFilePreservingFormat handles atomicity internally
             // via temp-file + rename writes.
+            //
+            // Use mode 0o600 (owner read/write only) because settings contain
+            // sensitive data like API keys and OAuth tokens.
             const written = updateSettingsFilePreservingFormat(
               filePath,
               settingsObject,
               true,
+              0o600,
             );
             if (!written) {
               debugLogger.error(
@@ -1147,8 +1151,10 @@ export function saveSettings(
       fs.mkdirSync(dirPath, { recursive: true });
     }
 
-    // Use the format-preserving update function
-    updateSettingsFilePreservingFormat(settingsFile.path, updates);
+    // Use the format-preserving update function.
+    // Use mode 0o600 (owner read/write only) because settings contain
+    // sensitive data like API keys and OAuth tokens.
+    updateSettingsFilePreservingFormat(settingsFile.path, updates, false, 0o600);
   } catch (error) {
     debugLogger.error('Error saving user settings file.');
     debugLogger.error(error instanceof Error ? error.message : String(error));
