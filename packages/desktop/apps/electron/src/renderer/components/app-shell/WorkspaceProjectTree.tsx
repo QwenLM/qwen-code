@@ -286,34 +286,32 @@ function ProjectSessionRow({
       type="button"
       onClick={onSelect}
       className={cn(
-        "group/session ml-7 mr-2 grid h-8 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-[6px] px-2 text-left transition-colors",
+        "group/session ml-7 mr-2 grid h-8 min-w-0 grid-cols-[minmax(0,1fr)_2.5rem_0.375rem] items-center gap-2 rounded-[6px] px-2 text-left transition-colors",
         "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         isSelected ? "bg-foreground/[0.055] text-foreground" : "text-foreground/78",
       )}
       data-session-id={session.id}
     >
       <span className="flex min-w-0 items-center gap-1.5">
-        {session.isProcessing ? (
-          <Spinner className="text-[10px] text-muted-foreground" />
-        ) : (
-          <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground/60" />
-        )}
+        {session.isProcessing && <Spinner className="text-[10px] text-muted-foreground" />}
         <span className={cn(
           "truncate text-[13px] font-medium",
           hasUnreadMeta(session) && "text-foreground",
         )}>
           {title}
         </span>
-        {hasUnreadMeta(session) && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
       </span>
-      {session.lastMessageAt && (
-        <span className="text-[11px] text-foreground/38 tabular-nums">
-          {formatDistanceToNowStrict(new Date(session.lastMessageAt), {
+      <span className="justify-self-end text-[11px] text-foreground/38 tabular-nums">
+        {session.lastMessageAt && (
+          formatDistanceToNowStrict(new Date(session.lastMessageAt), {
             locale: shortTimeLocale as Locale,
             roundingMethod: "floor",
-          })}
-        </span>
-      )}
+          })
+        )}
+      </span>
+      <span className="flex h-1.5 w-1.5 items-center justify-center justify-self-center">
+        {hasUnreadMeta(session) && <span className="h-1.5 w-1.5 rounded-full bg-accent" />}
+      </span>
     </button>
   )
 
