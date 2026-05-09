@@ -340,7 +340,6 @@ class BridgeClient implements Client {
   ): Promise<ReadTextFileResponse> {
     const content = await fs.readFile(params.path, 'utf8');
     if (typeof params.line === 'number' || typeof params.limit === 'number') {
-      const lines = content.split('\n');
       // ACP `ReadTextFileRequest.line` is 1-based per spec — clients passing
       // `{ line: 1, limit: 2 }` mean "the first two lines", not "skip the
       // first then take two". Convert to a 0-based slice index, clamping
@@ -348,7 +347,13 @@ class BridgeClient implements Client {
       const startLine = params.line ?? 1;
       const start = startLine > 0 ? startLine - 1 : 0;
       const end = params.limit != null ? start + params.limit : undefined;
-      return { content: lines.slice(start, end).join('\n') };
+      // Avoid `content.split('\n')` — allocating a per-line String[] for
+      // a 100 MB file roughly doubles the memory footprint just to
+      // extract a few lines. Manual scan walks `indexOf('\n', …)` only
+      // until the end-of-range boundary is found, then slices a single
+      // range of the original string. Stage 2 in-process replaces this
+      // proxy entirely (the bridge stops reading user fs).
+      return { content: sliceLineRange(content, start, end) };
     }
     return { content };
   }
@@ -1014,6 +1019,39 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       ]);
     },
   };
+}
+
+/**
+ * Extract the line range `[startLine, endLine)` (0-based) from a string
+ * without allocating a per-line array. Equivalent to
+ * `content.split('\n').slice(startLine, endLine).join('\n')` but
+ * O(file size) string scan rather than O(file size) string + O(line
+ * count) array. Matters for the partial-read path of `readTextFile`
+ * where the limit is small and the file is large.
+ */
+function sliceLineRange(
+  content: string,
+  startLine: number,
+  endLine: number | undefined,
+): string {
+  // Find the byte offset where line `startLine` begins.
+  let offset = 0;
+  for (let i = 0; i < startLine; i++) {
+    const nl = content.indexOf('\n', offset);
+    if (nl === -1) return '';
+    offset = nl + 1;
+  }
+  if (endLine === undefined) return content.slice(offset);
+  // Walk `endLine - startLine` newlines forward to find the end byte.
+  let end = offset;
+  const want = endLine - startLine;
+  for (let i = 0; i < want; i++) {
+    const nl = content.indexOf('\n', end);
+    if (nl === -1) return content.slice(offset);
+    end = nl + 1;
+  }
+  // Trim the trailing `\n` so the slice mirrors `lines.slice(...).join('\n')`.
+  return content.slice(offset, end > offset ? end - 1 : end);
 }
 
 /**

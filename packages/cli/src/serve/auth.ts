@@ -46,7 +46,12 @@ export function hostAllowlist(
   }
   return (req: Request, res: Response, next: NextFunction) => {
     const port = getPort();
-    const host = req.headers.host || '';
+    // Per RFC 7230 §5.4, Host is case-insensitive. Express normalizes
+    // header *names* to lowercase but NOT values, so a Docker-proxy
+    // that capitalizes the hostname (`Host: Localhost:4170`) or a
+    // platform with case-preserving DNS (`HOST.docker.internal`) would
+    // get 403 with an exact-string compare. Lowercase both sides.
+    const host = (req.headers.host || '').toLowerCase();
     if (
       host !== `localhost:${port}` &&
       host !== `127.0.0.1:${port}` &&

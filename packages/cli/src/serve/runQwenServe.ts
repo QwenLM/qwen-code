@@ -54,7 +54,17 @@ export async function runQwenServe(
   optsIn: Omit<ServeOptions, 'token'> & { token?: string },
   deps: RunQwenServeDeps = {},
 ): Promise<RunHandle> {
-  const token = optsIn.token ?? process.env[QWEN_SERVER_TOKEN_ENV];
+  // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
+  // token.txt)` keeps the file's trailing `\n` in the env value, so the
+  // hashed-then-compared token never matches what well-behaved clients
+  // send. Every request returns the generic 401 with no breadcrumb
+  // pointing at the whitespace, and operators chase ghosts. Trim once
+  // at boot so the comparison is over what humans intended to set.
+  const rawToken = optsIn.token ?? process.env[QWEN_SERVER_TOKEN_ENV];
+  const token =
+    typeof rawToken === 'string' && rawToken.trim().length > 0
+      ? rawToken.trim()
+      : undefined;
   const opts: ServeOptions = { ...optsIn, token };
 
   if (!isLoopbackBind(opts.hostname) && !token) {
