@@ -11,6 +11,10 @@ import {
   CommandKind,
 } from './types.js';
 import { t } from '../../i18n/index.js';
+import {
+  escapeShellArg,
+  getShellConfiguration,
+} from '@qwen-code/qwen-code-core';
 
 export const commitCommand: SlashCommand = {
   name: 'commit',
@@ -37,15 +41,17 @@ export const commitCommand: SlashCommand = {
       };
     }
 
-    // Escape backslashes and double quotes to prevent shell injection.
-    const escapedMessage = trimmed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    // Use the repo's shell argument escaping utility to safely handle
+    // all shell metacharacters ($, $(), ``, $VAR, ;, |, etc.).
+    const { shell } = getShellConfiguration();
+    const quotedMessage = escapeShellArg(trimmed, shell);
 
     return {
       type: 'tool',
       toolName: 'run_shell_command',
       toolArgs: {
         description: t('Stage all changes and commit'),
-        command: `git add -A && git commit -m "${escapedMessage}"`,
+        command: `git add -A && git commit -m ${quotedMessage}`,
         is_background: false,
       },
     };
