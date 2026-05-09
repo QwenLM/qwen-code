@@ -6,6 +6,10 @@
 
 import { Agent, ProxyAgent, type Dispatcher } from 'undici';
 
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('RUNTIME_FETCH');
+
 /**
  * JavaScript runtime type
  */
@@ -80,10 +84,11 @@ export function buildRuntimeFetchOptions(
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   const runtime = detectRuntime();
 
-  // Always disable undici timeouts (set to 0) to let SDK's timeout parameter
-  // control the total request time. bodyTimeout monitors intervals between data
-  // chunks, headersTimeout waits for response headers, so we disable both to
-  // ensure user-configured timeouts work as expected for long-running requests.
+  // When using a custom dispatcher (proxy mode), disable undici timeouts (set to 0)
+  // to let SDK's timeout parameter control the total request time. This ensures
+  // user-configured timeouts work as expected for long-running requests.
+  // When no proxy is configured, the runtime's built-in fetch is used with its
+  // default timeout behavior.
 
   switch (runtime) {
     case 'bun': {
@@ -180,10 +185,26 @@ function buildFetchOptionsWithDispatcher(
   sdkType: SDKType,
   proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
+  // When no proxy is configured, skip the custom dispatcher and let the SDK
+  // use the runtime's built-in fetch. This avoids version-mismatch issues
+  // between the project's bundled undici and the Node.js built-in undici
+  // (e.g., Node v26 ships undici v8 while the project bundles v6, causing
+  // "InvalidArgumentError: invalid onError method" on dispatch).
+  if (!proxyUrl) {
+    return sdkType === 'openai' ? undefined : {};
+  }
+
   try {
     const dispatcher = getOrCreateSharedDispatcher(proxyUrl);
     return { fetchOptions: { dispatcher } };
-  } catch {
+  } catch (error) {
+    // Log dispatcher creation failure - requests will fallback to direct connection
+    // bypassing the configured proxy. This is important for environments requiring
+    // proxy for security controls (TLS inspection, traffic logging).
+    debugLogger.warn(
+      'Failed to create proxy dispatcher, falling back to direct connection:',
+      error,
+    );
     return sdkType === 'openai' ? undefined : {};
   }
 }
