@@ -2680,10 +2680,10 @@ export class SessionManager implements ISessionManager {
   private shouldAttemptExternalMessageLoad(managed: ManagedSession): boolean {
     if (this.isQwenCanonicalMessageSession(managed)) {
       if (managed.isProcessing) return false
-      if (managed.messages.length === 0) return true
 
-      const externalUpdatedAt = managed.lastMessageAt ?? managed.lastUsedAt ?? 0
+      const externalUpdatedAt = managed.lastMessageAt ?? managed.lastUsedAt ?? managed.createdAt ?? 0
       const loadedThroughAt = managed.externalMessagesLoadedThroughAt ?? 0
+      if (managed.messages.length === 0 && managed.externalMessagesLoadedThroughAt == null) return true
       return externalUpdatedAt > loadedThroughAt
     }
 

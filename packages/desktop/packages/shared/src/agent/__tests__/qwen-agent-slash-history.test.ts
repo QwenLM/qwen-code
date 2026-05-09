@@ -4,7 +4,8 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentEvent, Message } from '@craft-agent/core/types';
 import { QwenAgent } from '../qwen-agent.ts';
-import type { BackendConfig } from '../backend/types.ts';
+
+type QwenAgentConfig = ConstructorParameters<typeof QwenAgent>[0];
 
 type QwenHistoryInternals = {
   mergeSlashCommandInvocationMessages: (sessionId: string, messages: Message[], cwd: string) => Message[];
@@ -77,8 +78,8 @@ const originalRuntimeDir = process.env.QWEN_RUNTIME_DIR;
 
 function createAgent(
   cwd: string,
-  onSdkSessionIdUpdate?: BackendConfig['onSdkSessionIdUpdate'],
-  onMidTurnMessagesDrained?: BackendConfig['onMidTurnMessagesDrained'],
+  onSdkSessionIdUpdate?: QwenAgentConfig['onSdkSessionIdUpdate'],
+  onMidTurnMessagesDrained?: QwenAgentConfig['onMidTurnMessagesDrained'],
 ): QwenAgent {
   return new QwenAgent({
     provider: 'qwen',
@@ -100,7 +101,7 @@ function createAgent(
     isHeadless: true,
     onSdkSessionIdUpdate,
     onMidTurnMessagesDrained,
-  } as BackendConfig);
+  } as QwenAgentConfig);
 }
 
 function writeQwenTranscript(runtimeRoot: string, cwd: string, sessionId: string, records: unknown[]): void {
@@ -943,6 +944,102 @@ describe('QwenAgent slash command history', () => {
     expect(result.messages.map(message => [message.role, message.content])).toEqual([
       ['user', 'hello'],
     ]);
+  });
+
+  it('supplements Qwen history with transcript subagent telemetry', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    tempRoots.push(cwd, runtimeRoot);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'qwen-session';
+    const parentToolUseId = 'call-agent-1';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'user-1',
+        sessionId,
+        timestamp: '2026-05-09T16:38:15.505Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: '调用 sub agent 帮我看看仓库' }],
+        },
+      },
+      {
+        uuid: 'assistant-1',
+        parentUuid: 'user-1',
+        sessionId,
+        timestamp: '2026-05-09T16:38:21.458Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: parentToolUseId,
+                name: 'agent',
+                args: {
+                  description: 'Explore repository structure',
+                  prompt: 'Inspect the repo',
+                  subagent_type: 'Explore',
+                },
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: 'child-read-1',
+        parentUuid: 'assistant-1',
+        sessionId,
+        timestamp: '2026-05-09T16:38:25.836Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.tool_call',
+            function_name: 'read_file',
+            function_args: { file_path: `${cwd}/package.json` },
+            status: 'success',
+            success: true,
+            content_length: 7136,
+            prompt_id: `${sessionId}#Explore-iyza6j#0`,
+          },
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (_method, execute) =>
+      execute({
+        loadSession: async () => ({ models: {}, modes: {} }),
+      });
+
+    const result = await agent.loadSessionMessages(sessionId, { cwd });
+    agent.destroy();
+
+    const parent = result.messages.find(
+      (message) => message.toolUseId === parentToolUseId,
+    );
+    const child = result.messages.find(
+      (message) => message.toolUseId === 'child-read-1',
+    );
+
+    expect(parent).toMatchObject({
+      role: 'tool',
+      toolName: 'agent',
+      toolStatus: 'executing',
+      toolInput: { subagent_type: 'Explore' },
+    });
+    expect(child).toMatchObject({
+      role: 'tool',
+      toolName: 'Read',
+      toolStatus: 'completed',
+      parentToolUseId,
+      toolResult: 'Completed (7136 bytes)',
+    });
   });
 
   it('shares concurrent Qwen ACP process startup for one agent instance', async () => {

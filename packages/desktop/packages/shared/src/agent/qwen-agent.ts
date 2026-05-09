@@ -1663,8 +1663,14 @@ export class QwenAgent extends BaseAgent {
         messages,
         cwd,
       );
+      const messagesWithTranscriptTelemetry =
+        this.mergeQwenTranscriptTelemetryMessages(
+          sessionId,
+          mergedMessages,
+          cwd,
+        );
       const messagesWithTextElements = this.applyQwenTranscriptTextElements(
-        mergedMessages,
+        messagesWithTranscriptTelemetry,
         sessionId,
         cwd,
       );
@@ -2961,6 +2967,243 @@ export class QwenAgent extends BaseAgent {
     }
 
     return messages;
+  }
+
+  private mergeQwenTranscriptTelemetryMessages(
+    sessionId: string,
+    messages: Message[],
+    cwd: string,
+  ): Message[] {
+    const transcriptMessages = this.loadQwenTranscriptTelemetryMessages(
+      sessionId,
+      cwd,
+    );
+    if (transcriptMessages.length === 0) return messages;
+
+    const seenToolUseIds = new Set(
+      messages
+        .map((message) => message.toolUseId)
+        .filter((toolUseId): toolUseId is string => !!toolUseId),
+    );
+
+    const additions = transcriptMessages.filter((candidate) => {
+      if (candidate.toolUseId && seenToolUseIds.has(candidate.toolUseId)) {
+        return false;
+      }
+      if (
+        candidate.role !== 'tool' &&
+        messages.some(
+          (message) =>
+            message.role === candidate.role &&
+            message.content === candidate.content &&
+            Math.abs(message.timestamp - candidate.timestamp) <= 1_000,
+        )
+      ) {
+        return false;
+      }
+      return true;
+    });
+    if (additions.length === 0) return messages;
+
+    return [...messages, ...additions]
+      .map((message, index) => ({ message, index }))
+      .sort((a, b) => {
+        const timestampDelta = a.message.timestamp - b.message.timestamp;
+        return timestampDelta !== 0 ? timestampDelta : a.index - b.index;
+      })
+      .map(({ message }) => message);
+  }
+
+  private loadQwenTranscriptTelemetryMessages(
+    sessionId: string,
+    cwd: string,
+  ): Message[] {
+    const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
+    if (!existsSync(transcriptPath)) return [];
+
+    let fileContent: string;
+    try {
+      fileContent = readFileSync(transcriptPath, 'utf8');
+    } catch (error) {
+      this.debug(
+        `Failed to read Qwen transcript telemetry from ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+
+    const messages: Message[] = [];
+    const parentToolUseIdsBySubagent = new Map<string, string>();
+    let fallbackParentToolUseId: string | undefined;
+    let idCounter = 0;
+
+    const nextId = () => `qwen-${sessionId}-transcript-${++idCounter}`;
+
+    for (const line of fileContent.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+
+      let record: JsonRecord;
+      try {
+        record = JSON.parse(line) as JsonRecord;
+      } catch {
+        continue;
+      }
+
+      if (record.sessionId !== sessionId) continue;
+      const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now();
+
+      if (record.type === 'user') {
+        const content = this.extractQwenRecordText(record);
+        if (!content) continue;
+        messages.push({
+          id: nextId(),
+          role: 'user',
+          content,
+          timestamp,
+        });
+        continue;
+      }
+
+      if (record.type === 'assistant') {
+        const message = toRecord(record.message);
+        const parts = Array.isArray(message.parts)
+          ? message.parts.filter(isRecord)
+          : [];
+
+        for (const part of parts) {
+          const text = asString(part.text);
+          if (text) {
+            const isThought = part.thought === true;
+            messages.push({
+              id: nextId(),
+              role: 'assistant',
+              content: isThought ? text : normalizeQwenAssistantText(text),
+              timestamp,
+              ...(isThought
+                ? {
+                    isIntermediate: true,
+                    intermediateKind: 'thought' as const,
+                  }
+                : {}),
+            });
+          }
+
+          const functionCall = toRecord(part.functionCall);
+          const functionName = asString(functionCall.name);
+          if (!functionName) continue;
+
+          const toolName = normalizeToolName(functionName);
+          const toolUseId =
+            asString(functionCall.id) ||
+            `qwen-transcript-tool-${++idCounter}`;
+          const rawInput = toRecord(functionCall.args);
+          messages.push({
+            id: nextId(),
+            role: 'tool',
+            content: `Running ${toolName}...`,
+            timestamp,
+            toolName,
+            toolUseId,
+            toolInput: rawInput,
+            toolStatus: 'executing',
+            toolIntent: asString(rawInput.description),
+            toolDisplayName: displayNameForTool(toolName),
+          });
+
+          if (isParentTaskTool(toolName)) {
+            fallbackParentToolUseId = toolUseId;
+            const subagentType = asString(rawInput.subagent_type);
+            if (subagentType) {
+              parentToolUseIdsBySubagent.set(subagentType, toolUseId);
+            }
+          }
+        }
+        continue;
+      }
+
+      const telemetryMessage = this.buildQwenTranscriptTelemetryMessage({
+        record,
+        timestamp,
+        nextId,
+        parentToolUseIdsBySubagent,
+        fallbackParentToolUseId,
+      });
+      if (telemetryMessage) messages.push(telemetryMessage);
+    }
+
+    return messages;
+  }
+
+  private buildQwenTranscriptTelemetryMessage(args: {
+    record: JsonRecord;
+    timestamp: number;
+    nextId: () => string;
+    parentToolUseIdsBySubagent: ReadonlyMap<string, string>;
+    fallbackParentToolUseId?: string;
+  }): Message | undefined {
+    const { record, timestamp, nextId, parentToolUseIdsBySubagent } = args;
+    if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
+      return undefined;
+    }
+
+    const payload = toRecord(record.systemPayload);
+    const uiEvent = toRecord(payload.uiEvent);
+    if (uiEvent['event.name'] !== 'qwen-code.tool_call') return undefined;
+
+    const toolName = normalizeToolName(asString(uiEvent.function_name));
+    const toolUseId =
+      asString(record.uuid) || `qwen-transcript-tool-${nextId()}`;
+    const input = toRecord(uiEvent.function_args);
+    const isError = uiEvent.success === false || uiEvent.status === 'error';
+    const error = asString(uiEvent.error);
+    const contentLength = asNumber(uiEvent.content_length);
+    const toolResult = isError
+      ? error || 'Tool failed'
+      : contentLength != null
+        ? `Completed (${contentLength} bytes)`
+        : 'Completed';
+
+    return {
+      id: nextId(),
+      role: 'tool',
+      content: '',
+      timestamp,
+      toolName,
+      toolUseId,
+      toolInput: input,
+      toolResult,
+      toolStatus: isError ? 'error' : 'completed',
+      toolDisplayName: displayNameForTool(toolName),
+      parentToolUseId: this.resolveQwenTranscriptTelemetryParent(
+        uiEvent,
+        parentToolUseIdsBySubagent,
+        args.fallbackParentToolUseId,
+      ),
+      ...(isError ? { isError } : {}),
+    };
+  }
+
+  private resolveQwenTranscriptTelemetryParent(
+    uiEvent: JsonRecord,
+    parentToolUseIdsBySubagent: ReadonlyMap<string, string>,
+    fallbackParentToolUseId?: string,
+  ): string | undefined {
+    const subagentName = asString(uiEvent.subagent_name);
+    if (subagentName) {
+      const parentToolUseId = parentToolUseIdsBySubagent.get(subagentName);
+      if (parentToolUseId) return parentToolUseId;
+    }
+
+    const promptId = asString(uiEvent.prompt_id);
+    const promptSubagentName = promptId?.match(/#([^#]+?)-[^#]+#/)?.[1];
+    if (promptSubagentName) {
+      const parentToolUseId =
+        parentToolUseIdsBySubagent.get(promptSubagentName);
+      if (parentToolUseId) return parentToolUseId;
+    }
+
+    return parentToolUseIdsBySubagent.size === 1
+      ? [...parentToolUseIdsBySubagent.values()][0]
+      : fallbackParentToolUseId;
   }
 
   private mergeSlashCommandInvocationMessages(

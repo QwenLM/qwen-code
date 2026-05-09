@@ -406,6 +406,88 @@ describe('Qwen native history loading', () => {
     expect(manager.getSessions(workspace.id).some(session => session.id === sessionId)).toBe(false)
   })
 
+  it('does not repeatedly reload empty Qwen canonical history for the same external timestamp', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
+    tempRoots.push(workspaceRoot, projectRoot)
+
+    const sessionId = '260510-empty-qwen-native'
+    const sdkSessionId = '7b4ffd3f-c8ad-4a6d-9b37-3309335bb12c'
+    const timestamp = Date.parse('2026-05-09T17:03:17.731Z')
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+
+    await saveSession({
+      id: sessionId,
+      workspaceRootPath: workspaceRoot,
+      sdkSessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: 'empty native history',
+      createdAt: timestamp,
+      lastUsedAt: timestamp,
+      lastMessageAt: timestamp,
+      permissionMode: 'allow-all',
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      thinkingLevel: 'medium',
+      messages: [],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    })
+
+    let loadCalls = 0
+    const manager = new SessionManager({
+      createExternalSessionAgent: () => ({
+        loadSessionMessages: async (requestedSessionId: string, options?: { cwd?: string }) => {
+          loadCalls += 1
+          expect(requestedSessionId).toBe(sdkSessionId)
+          expect(options?.cwd).toBe(projectRoot)
+          return []
+        },
+        destroy: () => {},
+        dispose: () => {},
+      } as unknown as AgentBackend),
+    })
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    }
+    const managed = createManagedSession({
+      id: sessionId,
+      sdkSessionId,
+      sdkCwd: projectRoot,
+      workingDirectory: projectRoot,
+      name: 'empty native history',
+      createdAt: timestamp,
+      lastUsedAt: timestamp,
+      lastMessageAt: timestamp,
+      messageCount: 0,
+      llmConnection: 'qwen-code',
+      connectionLocked: true,
+      thinkingLevel: 'medium',
+    }, workspace)
+    ;(manager as unknown as { sessions: Map<string, typeof managed> }).sessions.set(sessionId, managed)
+
+    await manager.getSession(sessionId)
+    await manager.getSession(sessionId)
+
+    expect(loadCalls).toBe(1)
+  })
+
   it('removes existing empty placeholder mirrors from provider-native sync', async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
     const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
