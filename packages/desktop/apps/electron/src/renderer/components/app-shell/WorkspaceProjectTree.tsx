@@ -613,7 +613,7 @@ export function WorkspaceProjectTree({
       .then((saved) => {
         if (!saved) {
           setOptimisticWorkspaceOrder(null)
-          toast.error(t("toast.failedToSaveSetting", { setting: t("sidebar.projects", "Projects") }))
+          toast.error(t("toast.failedToSaveSetting", { setting: t("sidebar.projects", "Workspaces") }))
           return
         }
         onWorkspaceChanged?.()
@@ -621,7 +621,7 @@ export function WorkspaceProjectTree({
       .catch((error) => {
         setOptimisticWorkspaceOrder(null)
         const message = error instanceof Error ? error.message : t("toast.unknownError")
-        toast.error(t("toast.failedToSaveSetting", { setting: t("sidebar.projects", "Projects") }), {
+        toast.error(t("toast.failedToSaveSetting", { setting: t("sidebar.projects", "Workspaces") }), {
           description: message,
         })
       })
@@ -783,7 +783,7 @@ export function WorkspaceProjectTree({
       <div className="min-h-0 flex-1 overflow-y-auto pb-3 mask-fade-bottom">
         <div className="flex shrink-0 items-center justify-between px-3 pb-2 pt-1">
           <span className="text-[12px] font-semibold text-muted-foreground">
-            {t("sidebar.projects", "Projects")}
+            {t("sidebar.projects", "Workspaces")}
           </span>
           <Tooltip>
             <TooltipTrigger asChild>
