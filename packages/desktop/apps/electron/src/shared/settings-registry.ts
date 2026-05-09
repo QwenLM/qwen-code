@@ -59,11 +59,29 @@ export type SettingsSubpage = (typeof SETTINGS_PAGES)[number]['id']
  */
 export const VALID_SETTINGS_SUBPAGES: readonly SettingsSubpage[] = SETTINGS_PAGES.map(p => p.id)
 
+const HIDDEN_SETTINGS_NAVIGATION_SUBPAGES = new Set<SettingsSubpage>([
+  'workspace',
+  'preferences',
+])
+
+/**
+ * Settings subpages that should be shown in settings navigation surfaces.
+ */
+export const VISIBLE_SETTINGS_SUBPAGES: readonly SettingsSubpage[] =
+  VALID_SETTINGS_SUBPAGES.filter((subpage) => !HIDDEN_SETTINGS_NAVIGATION_SUBPAGES.has(subpage))
+
 /**
  * Type guard to check if a string is a valid settings subpage
  */
 export function isValidSettingsSubpage(value: string): value is SettingsSubpage {
   return VALID_SETTINGS_SUBPAGES.includes(value as SettingsSubpage)
+}
+
+/**
+ * Check if a valid settings subpage should be shown in settings navigation.
+ */
+export function isVisibleSettingsSubpage(value: SettingsSubpage): boolean {
+  return VISIBLE_SETTINGS_SUBPAGES.includes(value)
 }
 
 /**

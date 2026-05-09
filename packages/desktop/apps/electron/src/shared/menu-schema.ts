@@ -217,7 +217,7 @@ export const MENU_SECTIONS: MenuSection[] = [EDIT_MENU, VIEW_MENU, WINDOW_MENU]
  * Settings item definition
  * Used by both AppMenu (logo dropdown) and SettingsNavigator (sidebar panel)
  */
-import { SETTINGS_PAGES, type SettingsSubpage } from './settings-registry'
+import { SETTINGS_PAGES, isVisibleSettingsSubpage, type SettingsSubpage } from './settings-registry'
 
 export interface SettingsMenuItem {
   id: SettingsSubpage
@@ -249,6 +249,7 @@ const SETTINGS_ICONS: Record<SettingsSubpage, string> = {
  * Order is determined by SETTINGS_PAGES in settings-registry.ts
  */
 export const SETTINGS_ITEMS: SettingsMenuItem[] = SETTINGS_PAGES
+  .filter(page => isVisibleSettingsSubpage(page.id))
   .filter(page => page.id !== 'server' || FEATURE_FLAGS.embeddedServer)
   .map(page => ({
     id: page.id,

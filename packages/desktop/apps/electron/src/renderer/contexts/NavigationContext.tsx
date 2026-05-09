@@ -72,7 +72,11 @@ import {
   isAutomationsNavigation,
   DEFAULT_NAVIGATION_STATE,
 } from '../../shared/types'
-import { isValidSettingsSubpage, type SettingsSubpage } from '../../shared/settings-registry'
+import {
+  isValidSettingsSubpage,
+  isVisibleSettingsSubpage,
+  type SettingsSubpage,
+} from '../../shared/settings-registry'
 import { compareSessionsByActivityDesc, sessionMetaMapAtom, updateSessionMetaAtom, type SessionMeta } from '@/atoms/sessions'
 import { sourcesAtom } from '@/atoms/sources'
 import { skillsAtom } from '@/atoms/skills'
@@ -958,10 +962,14 @@ export function NavigationProvider({
         const isBareSettingsRoute = route === 'settings'
         if (isBareSettingsRoute) {
           const savedSubpage = storage.get<string>(storage.KEYS.lastSettingsSubpage, 'app')
-          if (isValidSettingsSubpage(savedSubpage) && savedSubpage !== 'app') {
+          if (
+            isValidSettingsSubpage(savedSubpage) &&
+            isVisibleSettingsSubpage(savedSubpage) &&
+            savedSubpage !== 'app'
+          ) {
             newNavState = { ...newNavState, subpage: savedSubpage as SettingsSubpage }
           }
-        } else {
+        } else if (isVisibleSettingsSubpage(newNavState.subpage)) {
           storage.set(storage.KEYS.lastSettingsSubpage, newNavState.subpage)
         }
       }

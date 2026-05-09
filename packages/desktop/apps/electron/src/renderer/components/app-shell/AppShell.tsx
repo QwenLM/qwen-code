@@ -2169,20 +2169,6 @@ function AppShellContent({
     focusZone('chat', { intent: 'programmatic' })
   }, [activeWorkspaceId, focusZone, onSelectWorkspace])
 
-  // Create a brand new dedicated browser window and focus it.
-  // Intentionally unbound: this action should always create a NEW window.
-  const handleNewBrowserWindow = useCallback(async () => {
-    try {
-      const instanceId = await window.electronAPI.browserPane.create({
-        show: true,
-      })
-      await window.electronAPI.browserPane.focus(instanceId)
-    } catch (error) {
-      console.error('[Chat] Failed to create browser window:', error)
-      toast.error(t('toast.failedToCreateBrowser'))
-    }
-  }, [])
-
   // Delete Source - simplified since agents system is removed
   const handleDeleteSource = useCallback(async (sourceSlug: string) => {
     if (!activeWorkspace) return
@@ -2395,21 +2381,17 @@ function AppShellContent({
           workspaceUnreadMap={workspaceUnreadMap}
           onWorkspaceCreated={() => onRefreshWorkspaces?.()}
           onWorkspaceRemoved={() => onRefreshWorkspaces?.()}
-          activeSessionId={effectiveSessionId}
           onNewChat={() => handleNewChat()}
           onNewWindow={() => window.electronAPI.menuNewWindow()}
           onOpenSettings={onOpenSettings}
           onOpenSettingsSubpage={handleSettingsClick}
           onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
-          onOpenStoredUserPreferences={onOpenStoredUserPreferences}
           onBack={goBack}
           onForward={goForward}
           canGoBack={canGoBack}
           canGoForward={canGoForward}
           onToggleSidebar={handleToggleSidebar}
           onToggleFocusMode={() => setIsSidebarAndNavigatorHidden(prev => !prev)}
-          onAddSessionPanel={() => handleNewChat(true)}
-          onAddBrowserPanel={() => { void handleNewBrowserWindow() }}
           isCompact={isAutoCompact}
         />
 
@@ -2417,7 +2399,7 @@ function AppShellContent({
       <div
         ref={shellRef}
         className="flex items-stretch relative"
-        style={{ height: '100%', paddingRight: PANEL_EDGE_INSET, paddingBottom: PANEL_EDGE_INSET, paddingLeft: 0, gap: PANEL_GAP }}
+        style={{ height: '100%', paddingRight: 0, paddingBottom: 0, paddingLeft: 0, gap: PANEL_GAP }}
       >
         <PanelStackContainer
           sidebarSlot={
@@ -2429,7 +2411,7 @@ function AppShellContent({
               tabIndex={sidebarFocused ? 0 : -1}
               onKeyDown={handleSidebarKeyDown}
             >
-            <div className="flex h-full flex-col select-none">
+            <div className="flex h-full flex-col select-none pt-[48px]">
               {/* Sidebar Top Section */}
               <div className="flex-1 flex flex-col min-h-0">
                 {/* New Session Button - Gmail-style, with context menu for "Open in New Window" */}
