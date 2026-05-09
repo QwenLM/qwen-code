@@ -13,11 +13,14 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { bootstrapHomeEnv, resolvePath } from './lib/qwen-home-bootstrap.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const projectRoot = path.resolve(__dirname, '..');
+
+bootstrapHomeEnv();
 
 /**
  * Generates a unique hash for a project based on its root path.
@@ -33,29 +36,6 @@ function getProjectHash(projectRoot) {
 }
 
 const projectHash = getProjectHash(projectRoot);
-
-// Expand tilde and resolve relative paths (mirrors Storage.resolvePath in core).
-function resolvePath(dir) {
-  let resolved = dir;
-  if (
-    resolved === '~' ||
-    resolved.startsWith('~/') ||
-    resolved.startsWith('~\\')
-  ) {
-    const segments =
-      resolved === '~'
-        ? []
-        : resolved
-            .slice(2)
-            .split(/[/\\]+/)
-            .filter(Boolean);
-    resolved = path.join(os.homedir(), ...segments);
-  }
-  if (!path.isAbsolute(resolved)) {
-    resolved = path.resolve(resolved);
-  }
-  return resolved;
-}
 
 // Runtime base directory for ephemeral data (tmp, otel, etc.)
 // Priority: QWEN_RUNTIME_DIR > QWEN_HOME > ~/.qwen

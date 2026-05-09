@@ -26,6 +26,7 @@ import os from 'node:os';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import dotenv from 'dotenv';
+import { bootstrapHomeEnv, resolvePath } from './lib/qwen-home-bootstrap.js';
 
 const argv = yargs(hideBin(process.argv)).option('q', {
   alias: 'quiet',
@@ -35,57 +36,7 @@ const argv = yargs(hideBin(process.argv)).option('q', {
 
 let qwenSandbox = process.env.QWEN_SANDBOX;
 
-// Expand tilde and resolve relative paths (mirrors Storage.resolvePath in core).
-function resolvePath(dir) {
-  let resolved = dir;
-  if (
-    resolved === '~' ||
-    resolved.startsWith('~/') ||
-    resolved.startsWith('~\\')
-  ) {
-    const segments =
-      resolved === '~'
-        ? []
-        : resolved
-            .slice(2)
-            .split(/[/\\]+/)
-            .filter(Boolean);
-    resolved = path.join(os.homedir(), ...segments);
-  }
-  if (!path.isAbsolute(resolved)) {
-    resolved = path.resolve(resolved);
-  }
-  return resolved;
-}
-
-// Mirror `preResolveHomeEnvOverrides()` from packages/cli/src/config/settings.ts:
-// the main CLI may have read QWEN_HOME from ~/.env or ~/.qwen/.env at startup.
-// Without this bootstrap, the CLI would route to a custom config dir while
-// this helper still reads ~/.qwen/settings.json, splitting sandbox detection.
-// Project .env files are deliberately excluded — only home-scoped files are
-// consulted so a project repo can never redirect global state.
-if (!process.env.QWEN_HOME || !process.env.QWEN_RUNTIME_DIR) {
-  const homeQwenDir = process.env.QWEN_HOME
-    ? resolvePath(process.env.QWEN_HOME)
-    : join(os.homedir(), '.qwen');
-  const candidates = [join(homeQwenDir, '.env')];
-  if (!process.env.QWEN_HOME) {
-    candidates.push(join(os.homedir(), '.env'));
-  }
-  for (const candidate of candidates) {
-    if (!existsSync(candidate)) continue;
-    try {
-      const parsed = dotenv.parse(readFileSync(candidate, 'utf-8'));
-      for (const key of ['QWEN_HOME', 'QWEN_RUNTIME_DIR']) {
-        if (parsed[key] && !Object.hasOwn(process.env, key)) {
-          process.env[key] = parsed[key];
-        }
-      }
-    } catch {
-      // Match dotenv's quiet-mode behavior used elsewhere.
-    }
-  }
-}
+bootstrapHomeEnv();
 
 if (!qwenSandbox) {
   const configDir = process.env.QWEN_HOME

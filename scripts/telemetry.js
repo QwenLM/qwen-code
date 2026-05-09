@@ -10,40 +10,16 @@ import { execSync } from 'node:child_process';
 import path from 'node:path';
 const { join } = path;
 import { existsSync, readFileSync } from 'node:fs';
+import os from 'node:os';
+import { bootstrapHomeEnv, resolvePath } from './lib/qwen-home-bootstrap.js';
 
 const projectRoot = join(import.meta.dirname, '..');
 
-// Expand tilde and resolve relative paths (mirrors Storage.resolvePath in core).
-function resolvePath(dir) {
-  let resolved = dir;
-  if (
-    resolved === '~' ||
-    resolved.startsWith('~/') ||
-    resolved.startsWith('~\\')
-  ) {
-    const segments =
-      resolved === '~'
-        ? []
-        : resolved
-            .slice(2)
-            .split(/[/\\]+/)
-            .filter(Boolean);
-    const home =
-      process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '';
-    resolved = path.join(home, ...segments);
-  }
-  if (!path.isAbsolute(resolved)) {
-    resolved = path.resolve(resolved);
-  }
-  return resolved;
-}
+bootstrapHomeEnv();
 
 const USER_SETTINGS_DIR = process.env.QWEN_HOME
   ? resolvePath(process.env.QWEN_HOME)
-  : join(
-      process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '',
-      '.qwen',
-    );
+  : join(os.homedir(), '.qwen');
 const USER_SETTINGS_PATH = join(USER_SETTINGS_DIR, 'settings.json');
 const WORKSPACE_SETTINGS_PATH = join(projectRoot, '.qwen', 'settings.json');
 

@@ -548,26 +548,43 @@ export function preResolveHomeEnvOverrides(): void {
   // Storage.getGlobalQwenDir() shares the same homedir resolution as the
   // rest of the storage layer; when QWEN_HOME is unset it equals
   // `<homedir>/.qwen`, so path.dirname() recovers `<homedir>`.
-  const globalQwenDir = Storage.getGlobalQwenDir();
-  const candidates: string[] = [path.join(globalQwenDir, '.env')];
-  if (!process.env['QWEN_HOME']) {
-    candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
+  const initialQwenHome = process.env['QWEN_HOME'];
+  const initialQwenDir = Storage.getGlobalQwenDir();
+  const candidates: string[] = [path.join(initialQwenDir, '.env')];
+  if (!initialQwenHome) {
+    candidates.push(path.join(path.dirname(initialQwenDir), '.env'));
   }
 
   for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) {
-      continue;
+    readHomeEnvInto(candidate);
+  }
+
+  // If QWEN_HOME was just discovered, also read <new QWEN_HOME>/.env so
+  // QWEN_RUNTIME_DIR can be sourced from there (mirrors the VS Code
+  // companion's bootstrapHomeEnvOverrides — without this third pass the
+  // CLI and companion would diverge on the runtime dir).
+  const discoveredQwenHome = process.env['QWEN_HOME'];
+  if (discoveredQwenHome && discoveredQwenHome !== initialQwenHome) {
+    const discoveredDir = Storage.getGlobalQwenDir();
+    if (discoveredDir !== initialQwenDir) {
+      readHomeEnvInto(path.join(discoveredDir, '.env'));
     }
-    try {
-      const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
-      for (const key of PROJECT_ENV_HARDCODED_EXCLUSIONS) {
-        if (parsed[key] && !Object.hasOwn(process.env, key)) {
-          process.env[key] = parsed[key];
-        }
+  }
+}
+
+function readHomeEnvInto(file: string): void {
+  if (!fs.existsSync(file)) {
+    return;
+  }
+  try {
+    const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
+    for (const key of PROJECT_ENV_HARDCODED_EXCLUSIONS) {
+      if (parsed[key] && !Object.hasOwn(process.env, key)) {
+        process.env[key] = parsed[key];
       }
-    } catch (_e) {
-      // Match the dotenv quiet-mode behavior used by loadEnvironment below.
     }
+  } catch (_e) {
+    // Match the dotenv quiet-mode behavior used by loadEnvironment below.
   }
 }
 
