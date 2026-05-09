@@ -160,6 +160,13 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT,
   RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT,
 
+  // memory — Qwen managed auto-memory settings
+  RPC_CHANNELS.memory.GET_SETTINGS,
+  RPC_CHANNELS.memory.SET_SETTINGS,
+  RPC_CHANNELS.memory.GET_SETTINGS_PATH,
+  RPC_CHANNELS.memory.GET_PATHS,
+  RPC_CHANNELS.memory.OPEN_PATH,
+
   // tools — local tool settings
   RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED,
   RPC_CHANNELS.tools.SET_BROWSER_TOOL_ENABLED,

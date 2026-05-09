@@ -52,11 +52,13 @@ import type {
   BackendSessionListResult,
   BackendRewindResult,
   ChatOptions,
+  BackendHostRuntimeContext,
   PermissionRequestType,
   SdkMcpServerConfig,
 } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
+import { resolveBackendRuntimePaths } from './backend/internal/runtime-resolver.ts';
 import { EventQueue } from './backend/event-queue.ts';
 import type { PermissionMode } from './mode-manager.ts';
 import {
@@ -65,6 +67,11 @@ import {
   type LLMQueryResult,
 } from './llm-tool.ts';
 import type { PermissionResponseOptions } from '../protocol/dto.ts';
+import type {
+  QwenMemoryPaths,
+  QwenMemorySettings,
+} from '../config/qwen-settings.ts';
+import { normalizeQwenMemorySettings } from '../config/qwen-settings.ts';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -75,7 +82,9 @@ type AcpPermissionOption = {
 };
 
 type PendingPermission = {
-  resolve: (response: RequestPermissionResponse & { answers?: Record<string, string> }) => void;
+  resolve: (
+    response: RequestPermissionResponse & { answers?: Record<string, string> },
+  ) => void;
   options: AcpPermissionOption[];
 };
 
@@ -447,6 +456,157 @@ class SharedQwenAcpProcess {
   }
 }
 
+type QwenSettingsAcpOptions = {
+  hostRuntime: BackendHostRuntimeContext;
+  cwd?: string;
+  envOverrides?: Record<string, string>;
+  timeoutMs?: number;
+  debug?: (message: string) => void;
+};
+
+function buildQwenAcpSpawnCommand(
+  qwenCliPath: string,
+  nodePath: string,
+): { command: string; args: string[] } {
+  const args = ['--acp', '--channel=desktop'];
+
+  if (qwenCliPath.endsWith('.js')) {
+    return { command: nodePath, args: [qwenCliPath, ...args] };
+  }
+
+  return { command: qwenCliPath, args };
+}
+
+function qwenSettingsCwd(hostRuntime: BackendHostRuntimeContext): string {
+  return hostRuntime.appRootPath || homedir() || process.cwd();
+}
+
+function qwenAcpWithTimeout<T>(
+  promise: Promise<T>,
+  method: string,
+  timeoutMs: number,
+): Promise<T> {
+  if (timeoutMs <= 0) return promise;
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`Qwen ACP request timed out: ${method}`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
+async function callQwenSettingsAcpMethod(
+  options: QwenSettingsAcpOptions,
+  method: string,
+  params: JsonRecord = {},
+): Promise<JsonRecord> {
+  const resolvedPaths = resolveBackendRuntimePaths(options.hostRuntime);
+  const qwenCliPath = resolvedPaths.qwenCliPath;
+  if (!qwenCliPath) {
+    throw new Error(
+      'Qwen Code CLI not found. Build the current qwen-code checkout with npm run build && npm run bundle, or set QWEN_CODE_CLI to a dist/cli.js path.',
+    );
+  }
+
+  const nodePath = resolvedPaths.nodeRuntimePath || process.execPath;
+  const { command, args } = buildQwenAcpSpawnCommand(qwenCliPath, nodePath);
+  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime);
+  const key = buildSharedAcpProcessKey({
+    command,
+    spawnArgs: args,
+    workspaceRootPath: cwd,
+    envOverrides: options.envOverrides,
+  });
+
+  const lease = await acquireSharedQwenAcpProcess(
+    {
+      key,
+      command,
+      args,
+      cwd,
+      envOverrides: options.envOverrides,
+    },
+    {
+      onSessionUpdate: () => {},
+      onPermissionRequest: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onExtMethod: async (extMethod) =>
+        extMethod === MID_TURN_QUEUE_DRAIN_METHOD ? { messages: [] } : {},
+      onProcessExit: () => {},
+      onDebug: options.debug ?? (() => {}),
+    },
+  );
+
+  try {
+    return toRecord(
+      await qwenAcpWithTimeout(
+        lease.connection.extMethod(method, params),
+        method,
+        options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      ),
+    );
+  } finally {
+    lease.release();
+  }
+}
+
+export async function getQwenMemorySettingsViaAcp(
+  options: QwenSettingsAcpOptions,
+): Promise<QwenMemorySettings> {
+  const response = await callQwenSettingsAcpMethod(
+    options,
+    'qwen/settings/getMemory',
+  );
+  return normalizeQwenMemorySettings(response.settings);
+}
+
+export async function setQwenMemorySettingsViaAcp(
+  options: QwenSettingsAcpOptions,
+  updates: Partial<QwenMemorySettings>,
+): Promise<QwenMemorySettings> {
+  const response = await callQwenSettingsAcpMethod(
+    options,
+    'qwen/settings/setMemory',
+    { updates },
+  );
+  return normalizeQwenMemorySettings(response.settings);
+}
+
+export async function getQwenSettingsPathViaAcp(
+  options: QwenSettingsAcpOptions,
+): Promise<string> {
+  const response = await callQwenSettingsAcpMethod(
+    options,
+    'qwen/settings/getPath',
+  );
+  const settingsPath = asString(response.path);
+  if (!settingsPath) throw new Error('Qwen ACP did not return settings path');
+  return settingsPath;
+}
+
+export async function getQwenMemoryPathsViaAcp(
+  options: QwenSettingsAcpOptions & { projectRoot?: string },
+): Promise<QwenMemoryPaths> {
+  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime);
+  const response = await callQwenSettingsAcpMethod(
+    { ...options, cwd },
+    'qwen/settings/getMemoryPaths',
+    { cwd, projectRoot: options.projectRoot ?? cwd },
+  );
+  const paths = toRecord(response.paths);
+  const userMemoryFile = asString(paths.userMemoryFile);
+  const projectMemoryFile = asString(paths.projectMemoryFile);
+  const autoMemoryDir = asString(paths.autoMemoryDir);
+  if (!userMemoryFile || !projectMemoryFile || !autoMemoryDir) {
+    throw new Error('Qwen ACP did not return memory paths');
+  }
+  return { userMemoryFile, projectMemoryFile, autoMemoryDir };
+}
+
 function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -467,7 +627,9 @@ function asBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
-function parseAskUserQuestions(value: unknown): AskUserQuestionItem[] | undefined {
+function parseAskUserQuestions(
+  value: unknown,
+): AskUserQuestionItem[] | undefined {
   if (!Array.isArray(value)) return undefined;
 
   const questions = value
@@ -475,12 +637,12 @@ function parseAskUserQuestions(value: unknown): AskUserQuestionItem[] | undefine
     .map((question) => {
       const options = Array.isArray(question.options)
         ? question.options
-          .filter(isRecord)
-          .map((option) => ({
-            label: asString(option.label) || '',
-            description: asString(option.description) || '',
-          }))
-          .filter((option) => option.label)
+            .filter(isRecord)
+            .map((option) => ({
+              label: asString(option.label) || '',
+              description: asString(option.description) || '',
+            }))
+            .filter((option) => option.label)
         : [];
 
       return {
@@ -492,7 +654,10 @@ function parseAskUserQuestions(value: unknown): AskUserQuestionItem[] | undefine
           : {}),
       };
     })
-    .filter((question) => question.question && question.header && question.options.length > 0);
+    .filter(
+      (question) =>
+        question.question && question.header && question.options.length > 0,
+    );
 
   return questions.length > 0 ? questions : undefined;
 }
@@ -1345,7 +1510,9 @@ export class QwenAgent extends BaseAgent {
     if (!trimmed || !this._isProcessing || this.abortReason) return false;
 
     this.midTurnMessageQueue.push(trimmed);
-    this.debug(`Queued mid-turn user message for Qwen ACP injection (${this.midTurnMessageQueue.length} pending)`);
+    this.debug(
+      `Queued mid-turn user message for Qwen ACP injection (${this.midTurnMessageQueue.length} pending)`,
+    );
     return true;
   }
 
@@ -1407,12 +1574,14 @@ export class QwenAgent extends BaseAgent {
     if (!pending) return;
 
     this.pendingPermissions.delete(requestId);
-    pending.resolve(this.createPermissionResponse(
-      pending.options,
-      allowed,
-      !!alwaysAllow,
-      options?.answers,
-    ));
+    pending.resolve(
+      this.createPermissionResponse(
+        pending.options,
+        allowed,
+        !!alwaysAllow,
+        options?.answers,
+      ),
+    );
   }
 
   override setPermissionMode(mode: PermissionMode): void {
@@ -1502,7 +1671,9 @@ export class QwenAgent extends BaseAgent {
     return result.success !== false;
   }
 
-  async rewindToUserTurn(targetTurnIndex: number): Promise<BackendRewindResult> {
+  async rewindToUserTurn(
+    targetTurnIndex: number,
+  ): Promise<BackendRewindResult> {
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw new Error('targetTurnIndex must be a non-negative integer');
     }
@@ -3423,7 +3594,9 @@ export class QwenAgent extends BaseAgent {
           toolName,
           command,
           description: title,
-          type: isAskUserQuestion ? 'ask_user_question' : permissionTypeForKind(kind),
+          type: isAskUserQuestion
+            ? 'ask_user_question'
+            : permissionTypeForKind(kind),
           reason: asString(rawInput.reason),
           impact: this.permissionImpact(toolCall),
           questions,

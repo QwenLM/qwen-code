@@ -86,12 +86,19 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   APPROVAL_MODES: [],
   AuthType: {},
   clearCachedCredentialFile: vi.fn(),
+  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  getAutoMemoryRoot: vi.fn(
+    (projectRoot: string) => `${projectRoot}/.qwen/memory`,
+  ),
   QwenOAuth2Event: {},
   qwenOAuth2Events: { on: vi.fn(), off: vi.fn() },
   MCPServerConfig: vi.fn().mockImplementation((...args: unknown[]) => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  Storage: {
+    getGlobalQwenDir: vi.fn(() => '/tmp/qwen-global-test'),
+  },
   tokenLimit: vi.fn(),
   SessionStartSource: {
     Startup: 'startup',
@@ -108,7 +115,7 @@ vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
 vi.mock('../config/settings.js', () => ({
-  SettingScope: {},
+  SettingScope: { User: 'User', Workspace: 'Workspace' },
   loadSettings: vi.fn(),
 }));
 vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
@@ -761,6 +768,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     } as unknown as LoadedSettings;
   }
 
+  function makeMemorySettings(memory: Record<string, unknown> = {}) {
+    const user = {
+      path: '/home/test/.qwen/settings.json',
+      settings: { memory },
+    };
+    const settings = {
+      merged: { mcpServers: {} },
+      user,
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+      setValue: vi.fn((_scope: string, key: string, value: unknown) => {
+        const [, memoryKey] = key.split('.');
+        if (memoryKey) user.settings.memory[memoryKey] = value;
+      }),
+    };
+    return settings as unknown as LoadedSettings;
+  }
+
   async function setupSessionMocks(sessionId: string) {
     const innerConfig = makeInnerConfig();
     innerConfig.getSessionId = vi.fn().mockReturnValue(sessionId);
@@ -826,6 +851,97 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       undefined,
       { Authorization: 'Bearer token123' },
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings extension methods read and update user memory settings', async () => {
+    const settings = makeMemorySettings({
+      enableManagedAutoMemory: false,
+      enableManagedAutoDream: 'invalid',
+    });
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(agent.extMethod('qwen/settings/getPath', {})).resolves.toEqual(
+      {
+        path: '/home/test/.qwen/settings.json',
+      },
+    );
+    await expect(
+      agent.extMethod('qwen/settings/getMemory', {}),
+    ).resolves.toEqual({
+      settings: {
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: false,
+        enableAutoSkill: false,
+      },
+    });
+    await expect(
+      agent.extMethod('qwen/settings/getMemoryPaths', {
+        cwd: '/tmp/qwen-memory-cwd-test',
+        projectRoot: '/tmp/qwen-memory-root-test',
+      }),
+    ).resolves.toEqual({
+      paths: {
+        userMemoryFile: '/tmp/qwen-global-test/QWEN.md',
+        projectMemoryFile: '/tmp/qwen-memory-cwd-test/QWEN.md',
+        autoMemoryDir: '/tmp/qwen-memory-root-test/.qwen/memory',
+      },
+    });
+    await expect(
+      agent.extMethod('qwen/settings/setMemory', {
+        updates: {
+          enableManagedAutoDream: true,
+          enableAutoSkill: true,
+        },
+      }),
+    ).resolves.toEqual({
+      settings: {
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: true,
+        enableAutoSkill: true,
+      },
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'memory.enableManagedAutoDream',
+      true,
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'memory.enableAutoSkill',
+      true,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings setMemory rejects non-boolean values', async () => {
+    const settings = makeMemorySettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/settings/setMemory', {
+        updates: { enableManagedAutoDream: 'yes' },
+      }),
+    ).rejects.toThrow("Invalid memory setting 'enableManagedAutoDream'");
 
     mockConnectionState.resolve();
     await agentPromise;

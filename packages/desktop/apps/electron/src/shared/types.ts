@@ -537,6 +537,13 @@ export interface ElectronAPI {
   getEnable1MContext(): Promise<boolean>
   setEnable1MContext(enabled: boolean): Promise<void>
 
+  // Memory settings
+  getQwenMemorySettings(): Promise<import('@craft-agent/shared/config').QwenMemorySettings>
+  setQwenMemorySettings(settings: Partial<import('@craft-agent/shared/config').QwenMemorySettings>): Promise<import('@craft-agent/shared/config').QwenMemorySettings>
+  getQwenMemorySettingsPath(): Promise<string>
+  getQwenMemoryPaths(workspaceId?: string): Promise<import('@craft-agent/shared/config').QwenMemoryPaths>
+  openQwenMemoryPath(target: import('@craft-agent/shared/config').QwenMemoryPathTarget, workspaceId?: string): Promise<void>
+
   // Network proxy settings
   getNetworkProxySettings(): Promise<NetworkProxySettings | undefined>
   setNetworkProxySettings(settings: NetworkProxySettings): Promise<void>
