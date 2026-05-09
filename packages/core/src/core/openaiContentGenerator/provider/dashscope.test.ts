@@ -38,6 +38,20 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
+// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value
+vi.mock('../constants.js', () => ({
+  DEFAULT_TIMEOUT: 120000,
+  DEFAULT_MAX_RETRIES: 3,
+  DEFAULT_OPENAI_BASE_URL: 'https://api.openai.com/v1',
+  DEFAULT_DASHSCOPE_BASE_URL:
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  DEFAULT_DEEPSEEK_BASE_URL: 'https://api.deepseek.com/v1',
+  DEFAULT_OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
+  get DASHSCOPE_PROXY_BASE_URL() {
+    return process.env['DASHSCOPE_PROXY_BASE_URL'];
+  },
+}));
+
 describe('DashScopeOpenAICompatibleProvider', () => {
   let provider: DashScopeOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
@@ -161,6 +175,57 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         );
         expect(result).toBe(false);
       });
+    });
+
+    it('should return true when baseUrl matches DASHSCOPE_PROXY_BASE_URL', () => {
+      const originalEnv = process.env['DASHSCOPE_PROXY_BASE_URL'];
+      process.env['DASHSCOPE_PROXY_BASE_URL'] =
+        'https://your-proxy.com/dashscope';
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://your-proxy.com/dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+
+      process.env['DASHSCOPE_PROXY_BASE_URL'] = originalEnv;
+    });
+
+    it('should return false when baseUrl does not match DASHSCOPE_PROXY_BASE_URL', () => {
+      const originalEnv = process.env['DASHSCOPE_PROXY_BASE_URL'];
+      process.env['DASHSCOPE_PROXY_BASE_URL'] =
+        'https://your-proxy.com/dashscope';
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://other-proxy.com/dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+
+      process.env['DASHSCOPE_PROXY_BASE_URL'] = originalEnv;
+    });
+
+    it('should return true when baseUrl matches DASHSCOPE_PROXY_BASE_URL with trailing slash', () => {
+      const originalEnv = process.env['DASHSCOPE_PROXY_BASE_URL'];
+      process.env['DASHSCOPE_PROXY_BASE_URL'] =
+        'https://your-proxy.com/dashscope';
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://your-proxy.com/dashscope/',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+
+      process.env['DASHSCOPE_PROXY_BASE_URL'] = originalEnv;
     });
   });
 

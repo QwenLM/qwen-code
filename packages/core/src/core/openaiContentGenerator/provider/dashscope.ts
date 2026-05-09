@@ -7,6 +7,7 @@ import {
   DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
+  DASHSCOPE_PROXY_BASE_URL,
 } from '../constants.js';
 import type {
   DashScopeRequestMetadata,
@@ -33,8 +34,21 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (authType === AuthType.QWEN_OAUTH) return true;
     if (!baseUrl) return true;
 
+    const normalizedBaseUrl = baseUrl.endsWith('/')
+      ? baseUrl.slice(0, -1)
+      : baseUrl;
+
     // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
-    return /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(baseUrl);
+    const isDashscopeOrigin =
+      /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(baseUrl);
+
+    // Check if proxy is configured and matches
+    const isProxyConfigured = Boolean(
+      DASHSCOPE_PROXY_BASE_URL &&
+        normalizedBaseUrl === DASHSCOPE_PROXY_BASE_URL,
+    );
+
+    return isDashscopeOrigin || isProxyConfigured;
   }
 
   override buildHeaders(): Record<string, string | undefined> {
