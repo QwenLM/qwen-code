@@ -23,9 +23,11 @@ function makeExecutable(path: string): void {
 function makeRuntimeFixture(): string {
   const root = mkdtempSync(join(tmpdir(), 'craft-runtime-'));
   mkdirSync(join(root, 'dist'), { recursive: true });
+  mkdirSync(join(root, 'scripts'), { recursive: true });
   mkdirSync(join(root, 'packages', 'cli'), { recursive: true });
   mkdirSync(join(root, 'packages', 'desktop'), { recursive: true });
   writeFileSync(join(root, 'dist', 'cli.js'), '');
+  writeFileSync(join(root, 'scripts', 'dev.js'), '');
   writeFileSync(join(root, 'packages', 'cli', 'package.json'), '{}');
   writeFileSync(join(root, 'packages', 'desktop', 'package.json'), '{}');
   return root;
@@ -56,10 +58,42 @@ describe('resolveBackendRuntimePaths', () => {
     }
   });
 
-  it('prefers the current checkout Qwen CLI bundle in dev mode', () => {
+  it('prefers the current checkout Qwen CLI source entry in dev mode', () => {
     const root = makeRuntimeFixture();
-    const appRoot = join(root, 'packages', 'desktop', 'apps', 'electron', 'dist');
+    const appRoot = join(
+      root,
+      'packages',
+      'desktop',
+      'apps',
+      'electron',
+      'dist',
+    );
     mkdirSync(appRoot, { recursive: true });
+
+    try {
+      const resolved = resolveBackendRuntimePaths({
+        appRootPath: appRoot,
+        isPackaged: false,
+      });
+
+      expect(resolved.qwenCliPath).toBe(join(root, 'scripts', 'dev.js'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to the current checkout Qwen CLI bundle when source dev entry is absent', () => {
+    const root = makeRuntimeFixture();
+    const appRoot = join(
+      root,
+      'packages',
+      'desktop',
+      'apps',
+      'electron',
+      'dist',
+    );
+    mkdirSync(appRoot, { recursive: true });
+    rmSync(join(root, 'scripts', 'dev.js'));
 
     try {
       const resolved = resolveBackendRuntimePaths({
@@ -75,7 +109,14 @@ describe('resolveBackendRuntimePaths', () => {
 
   it('does not silently fall back to an unrelated Qwen CLI from a source checkout', () => {
     const root = mkdtempSync(join(tmpdir(), 'craft-runtime-'));
-    const appRoot = join(root, 'packages', 'desktop', 'apps', 'electron', 'dist');
+    const appRoot = join(
+      root,
+      'packages',
+      'desktop',
+      'apps',
+      'electron',
+      'dist',
+    );
     const originalCwd = process.cwd();
     mkdirSync(join(root, 'packages', 'cli'), { recursive: true });
     mkdirSync(join(root, 'packages', 'desktop'), { recursive: true });

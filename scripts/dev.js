@@ -109,8 +109,15 @@ const env = {
 
 // On Windows, use tsx.cmd; on Unix, use tsx directly
 const isWin = platform() === 'win32';
-const tsxCmd = isWin ? 'tsx.cmd' : 'tsx';
-const tsxArgs = [cliEntry, ...process.argv.slice(2)];
+const tsxBinName = isWin ? 'tsx.cmd' : 'tsx';
+const localTsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const hasLocalTsxCli = existsSync(localTsxCli);
+const tsxCmd = hasLocalTsxCli ? process.execPath : tsxBinName;
+const tsxArgs = [
+  ...(hasLocalTsxCli ? [localTsxCli] : []),
+  cliEntry,
+  ...process.argv.slice(2),
+];
 
 const child = spawn(tsxCmd, tsxArgs, {
   stdio: 'inherit',

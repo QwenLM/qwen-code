@@ -30,6 +30,7 @@ function isDirectory(path: string): boolean {
 
 function qwenSourceCliCandidates(root: string): string[] {
   return [
+    join(root, 'scripts', 'dev.js'),
     join(root, 'dist', 'cli.js'),
     join(root, 'cli.js'),
     join(root, 'packages', 'cli', 'dist', 'index.js'),
