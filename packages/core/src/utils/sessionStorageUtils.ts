@@ -223,7 +223,7 @@ export function extractLastJsonStringField(
 }
 
 // ---------------------------------------------------------------------------
-// File I/O — tail-first scan with full-file fallback
+// File I/O — tail-first scan with head-window fallback
 // ---------------------------------------------------------------------------
 
 /**

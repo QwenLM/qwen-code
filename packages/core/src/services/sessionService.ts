@@ -177,10 +177,10 @@ export class SessionService {
    *
    * Delegates to {@link readLastJsonStringFieldSync}, which scans the tail
    * window first (fast path; almost always hits because finalize() re-appends
-   * the title on every lifecycle event) and falls back to a full-file scan
-   * when the tail has no match. The `custom_title` line-marker guards against
-   * false matches from user content that happens to include a `customTitle`
-   * field.
+   * the title on every lifecycle event) and falls back to a bounded head
+   * window when the tail has no match. The `custom_title` line-marker guards
+   * against false matches from user content that happens to include a
+   * `customTitle` field.
    */
   private readSessionTitleFromFile(
     filePath: string,
