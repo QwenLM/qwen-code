@@ -70,6 +70,11 @@ public class SDKResultMessage extends MessageBase {
     @JSONField(name = "permission_denials")
     private List<CLIPermissionDenial> permissionDenials;
     /**
+     * Structured output payload, present when --json-schema is used.
+     */
+    @JSONField(name = "structured_output")
+    private Object structuredOutput;
+    /**
      * Error information.
      */
     private Error error;
@@ -260,6 +265,24 @@ public class SDKResultMessage extends MessageBase {
      */
     public void setPermissionDenials(List<CLIPermissionDenial> permissionDenials) {
         this.permissionDenials = permissionDenials;
+    }
+
+    /**
+     * Gets the structured output payload.
+     *
+     * @return The structured output payload
+     */
+    public Object getStructuredOutput() {
+        return structuredOutput;
+    }
+
+    /**
+     * Sets the structured output payload.
+     *
+     * @param structuredOutput The structured output payload
+     */
+    public void setStructuredOutput(Object structuredOutput) {
+        this.structuredOutput = structuredOutput;
     }
 
     /**

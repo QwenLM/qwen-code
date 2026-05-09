@@ -465,6 +465,7 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  structuredOutput?: StructuredOutputConfig;
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
@@ -587,6 +588,11 @@ export interface ConfigParameters {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+}
+
+export interface StructuredOutputConfig {
+  schema: Record<string, unknown>;
+  maxRetries: number;
 }
 
 function normalizeConfigOutputFormat(
@@ -721,6 +727,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly structuredOutput: StructuredOutputConfig | undefined;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -870,6 +877,7 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.structuredOutput = params.structuredOutput;
     this.clearContextOnIdle = {
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
@@ -1681,6 +1689,10 @@ export class Config {
     return this.maxSessionTurns;
   }
 
+  getStructuredOutput(): StructuredOutputConfig | undefined {
+    return this.structuredOutput;
+  }
+
   getClearContextOnIdle(): ClearContextOnIdleSettings {
     return this.clearContextOnIdle;
   }
@@ -1787,7 +1799,19 @@ export class Config {
   }
 
   getAppendSystemPrompt(): string | undefined {
-    return this.appendSystemPrompt;
+    if (!this.structuredOutput) {
+      return this.appendSystemPrompt;
+    }
+
+    const structuredOutputPrompt = [
+      `When you are ready to provide the final answer, call the ${ToolNames.STRUCTURED_OUTPUT} tool exactly once.`,
+      'Do not answer the final result in natural language.',
+      'The tool arguments must match the JSON Schema supplied by the caller.',
+    ].join(' ');
+
+    return this.appendSystemPrompt
+      ? `${this.appendSystemPrompt}\n\n${structuredOutputPrompt}`
+      : structuredOutputPrompt;
   }
 
   /** @deprecated Use getPermissionsAllow() instead. */
@@ -2857,6 +2881,23 @@ export class Config {
       }
     };
 
+    const registerStructuredOutputTool = async (): Promise<void> => {
+      if (!this.structuredOutput) {
+        return;
+      }
+      if (registry.getAllToolNames().includes(ToolNames.STRUCTURED_OUTPUT)) {
+        throw new Error(
+          `Tool name "${ToolNames.STRUCTURED_OUTPUT}" is reserved for structured output.`,
+        );
+      }
+      registry.registerFactory(ToolNames.STRUCTURED_OUTPUT, async () => {
+        const { StructuredOutputTool } = await import(
+          '../tools/structured-output.js'
+        );
+        return new StructuredOutputTool(this.structuredOutput!.schema);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -2870,6 +2911,7 @@ export class Config {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
       });
+      await registerStructuredOutputTool();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );
@@ -3005,6 +3047,7 @@ export class Config {
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();
     }
+    await registerStructuredOutputTool();
     this.debugLogger.debug(
       `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
     );

@@ -468,6 +468,48 @@ describe('JsonOutputAdapter', () => {
       expect(output).toBe('Custom summary text\n');
     });
 
+    it('should emit structured output as raw JSON in text mode', () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+
+      adapter.emitStructuredResult({
+        isError: false,
+        structuredOutput: { summary: 'done', count: 2 },
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      expect(stdoutWriteSpy).toHaveBeenCalled();
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      expect(output).toBe('{"summary":"done","count":2}\n');
+    });
+
+    it('should include structured_output in JSON result', () => {
+      adapter.emitStructuredResult({
+        isError: false,
+        structuredOutput: { summary: 'done', count: 2 },
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+      const resultMessage = parsed.find(
+        (msg: unknown) =>
+          typeof msg === 'object' &&
+          msg !== null &&
+          'type' in msg &&
+          msg.type === 'result',
+      );
+
+      expect(resultMessage.result).toBe('{"summary":"done","count":2}');
+      expect(resultMessage.structured_output).toEqual({
+        summary: 'done',
+        count: 2,
+      });
+    });
+
     it('should handle empty error message in text mode', () => {
       const stderrWriteSpy = vi
         .spyOn(process.stderr, 'write')

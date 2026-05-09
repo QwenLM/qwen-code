@@ -408,6 +408,15 @@ export interface ToolResult {
    * turns within the same agentic loop.
    */
   modelOverride?: string;
+
+  /**
+   * Machine-readable terminal payloads that should end the surrounding
+   * non-interactive loop instead of being treated as display text.
+   */
+  terminalResult?: {
+    kind: 'structured_output';
+    data: unknown;
+  };
 }
 
 /**
@@ -416,13 +425,18 @@ export interface ToolResult {
  * @returns `true` if a cycle is detected, `false` otherwise.
  */
 export function hasCycleInSchema(schema: object): boolean {
+  function decodeJsonPointerSegment(segment: string): string {
+    return segment.replace(/~1/g, '/').replace(/~0/g, '~');
+  }
+
   function resolveRef(ref: string): object | null {
     if (!ref.startsWith('#/')) {
       return null;
     }
     const path = ref.substring(2).split('/');
     let current: unknown = schema;
-    for (const segment of path) {
+    for (const rawSegment of path) {
+      const segment = decodeJsonPointerSegment(rawSegment);
       if (
         typeof current !== 'object' ||
         current === null ||
@@ -455,8 +469,8 @@ export function hasCycleInSchema(schema: object): boolean {
 
     if ('$ref' in node && typeof node.$ref === 'string') {
       const ref = node.$ref;
-      if (ref === '#/' || pathRefs.has(ref)) {
-        // A ref to just '#/' is always a cycle.
+      if (ref === '#' || ref === '#/' || pathRefs.has(ref)) {
+        // A ref to the root is always a cycle.
         return true; // Cycle detected!
       }
       if (visitedRefs.has(ref)) {

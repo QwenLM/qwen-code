@@ -118,6 +118,10 @@ describe('DeclarativeTool', () => {
 });
 
 describe('hasCycleInSchema', () => {
+  it('should detect a root hash self-reference cycle', () => {
+    expect(hasCycleInSchema({ $ref: '#' })).toBe(true);
+  });
+
   it('should detect a simple direct cycle', () => {
     const schema = {
       properties: {
@@ -176,6 +180,24 @@ describe('hasCycleInSchema', () => {
           type: 'object',
           properties: {
             child: { $ref: '#/properties/a' },
+          },
+        },
+      },
+    };
+    expect(hasCycleInSchema(schema)).toBe(true);
+  });
+
+  it('should detect cycles through escaped JSON Pointer segments', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        root: { $ref: '#/definitions/node~1one' },
+      },
+      definitions: {
+        'node/one': {
+          type: 'object',
+          properties: {
+            child: { $ref: '#/definitions/node~1one' },
           },
         },
       },

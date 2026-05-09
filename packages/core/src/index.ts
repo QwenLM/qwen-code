@@ -110,6 +110,11 @@ export type {
   ShellToolInvocation,
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
+export type {
+  StructuredOutputTool,
+  StructuredOutputParams,
+  StructuredOutputToolResult,
+} from './tools/structured-output.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
 export type {
   TodoWriteTool,

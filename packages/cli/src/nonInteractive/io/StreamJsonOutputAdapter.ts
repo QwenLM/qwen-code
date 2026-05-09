@@ -25,6 +25,7 @@ import {
   type MessageState,
   type ResultOptions,
   type JsonOutputAdapterInterface,
+  type StructuredResultOptions,
 } from './BaseJsonOutputAdapter.js';
 
 /**
@@ -108,6 +109,14 @@ export class StreamJsonOutputAdapter
   emitResult(options: ResultOptions): void {
     const resultMessage = this.buildResultMessage(
       options,
+      this.lastAssistantMessage,
+    );
+    this.emitMessageImpl(resultMessage);
+  }
+
+  emitStructuredResult(options: StructuredResultOptions): void {
+    const resultMessage = this.buildResultMessage(
+      { ...options, summary: JSON.stringify(options.structuredOutput) },
       this.lastAssistantMessage,
     );
     this.emitMessageImpl(resultMessage);

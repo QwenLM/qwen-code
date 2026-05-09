@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import AjvPkg, { type AnySchema, type Ajv } from 'ajv';
+import AjvPkg, { type AnySchema, type Ajv, type ValidateFunction } from 'ajv';
 // Ajv2020 is the documented way to use draft-2020-12: https://ajv.js.org/json-schema.html#draft-2020-12
 // eslint-disable-next-line import/no-internal-modules
 import Ajv2020Pkg from 'ajv/dist/2020.js';
@@ -64,6 +64,34 @@ function getValidator(schema: AnySchema): Ajv {
  * Supports both draft-07 (default) and draft-2020-12 schemas.
  */
 export class SchemaValidator {
+  /**
+   * Compiles a schema and throws on compile failure. Unlike validate(), this
+   * never silently skips invalid schemas.
+   */
+  static compileStrict(schema: unknown): ValidateFunction {
+    const anySchema = schema as AnySchema;
+    const validator = getValidator(anySchema);
+    return validator.compile(anySchema);
+  }
+
+  static errorsText(validate: ValidateFunction, dataVar = 'params'): string {
+    const anySchema = validate.schema as AnySchema;
+    const validator = getValidator(anySchema);
+    return validator.errorsText(validate.errors, { dataVar });
+  }
+
+  static validateStrict(
+    schema: unknown | undefined,
+    data: unknown,
+  ): string | null {
+    if (!schema) {
+      return null;
+    }
+    const validate = SchemaValidator.compileStrict(schema);
+    const valid = validate(data);
+    return valid ? null : SchemaValidator.errorsText(validate);
+  }
+
   /**
    * Returns null if the data conforms to the schema described by schema (or if schema
    *  is null). Otherwise, returns a string describing the error.

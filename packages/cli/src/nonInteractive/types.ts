@@ -164,6 +164,7 @@ export interface CLIResultMessageSuccess {
   duration_api_ms: number;
   num_turns: number;
   result: string;
+  structured_output?: unknown;
   usage: ExtendedUsage;
   modelUsage?: Record<string, ModelUsage>;
   permission_denials: CLIPermissionDenial[];
@@ -172,7 +173,10 @@ export interface CLIResultMessageSuccess {
 
 export interface CLIResultMessageError {
   type: 'result';
-  subtype: 'error_max_turns' | 'error_during_execution';
+  subtype:
+    | 'error_max_turns'
+    | 'error_during_execution'
+    | 'error_max_structured_output_retries';
   uuid: string;
   session_id: string;
   is_error: true;

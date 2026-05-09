@@ -68,6 +68,10 @@ export interface ResultOptions {
   readonly subtype?: string;
 }
 
+export interface StructuredResultOptions extends ResultOptions {
+  readonly structuredOutput: unknown;
+}
+
 /**
  * Interface for message emission strategies.
  * Implementations decide whether to emit messages immediately (streaming)
@@ -108,6 +112,7 @@ export interface JsonOutputAdapterInterface extends MessageEmitter {
   processEvent(event: ServerGeminiStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
   emitResult(options: ResultOptions): void;
+  emitStructuredResult(options: StructuredResultOptions): void;
 
   startSubagentAssistantMessage?(parentToolUseId: string): void;
   processSubagentToolCall?(
@@ -1205,6 +1210,12 @@ export abstract class BaseJsonOutputAdapter {
 
       if (options.stats) {
         success.stats = options.stats;
+      }
+
+      if ('structuredOutput' in options) {
+        success.structured_output = (
+          options as StructuredResultOptions
+        ).structuredOutput;
       }
 
       return success;

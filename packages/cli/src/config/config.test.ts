@@ -521,6 +521,42 @@ describe('parseArguments', () => {
     expect(argv.includePartialMessages).toBe(true);
   });
 
+  it('should parse --json-schema for non-interactive prompt mode', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"type":"object","properties":{"summary":{"type":"string"}}}',
+      'Summarize',
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv.jsonSchema).toBe(
+      '{"type":"object","properties":{"summary":{"type":"string"}}}',
+    );
+    expect(argv.structuredOutputMaxRetries).toBe(5);
+  });
+
+  it('should reject --json-schema without a prompt', async () => {
+    process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--json-schema requires a prompt or positional query',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
   it('should allow --approval-mode without --yolo', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'auto-edit'];
     const argv = await parseArguments();
@@ -660,6 +696,140 @@ describe('loadCliConfig', () => {
     expect(config.getOutputFormat()).toBe('stream-json');
     expect(config.getInputFormat()).toBe('stream-json');
     expect(config.getIncludePartialMessages()).toBe(true);
+  });
+
+  it('should propagate structured output schema to config', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"type":"object","properties":{"ok":{"type":"boolean"}}}',
+      'Return status',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getStructuredOutput()).toEqual({
+      schema: {
+        type: 'object',
+        properties: { ok: { type: 'boolean' } },
+      },
+      maxRetries: 5,
+    });
+    expect(config.getAppendSystemPrompt()).toContain('structured_output');
+  });
+
+  it('should accept a root $ref when it resolves to an object schema', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"definitions":{"payload":{"type":"object","properties":{"ok":{"type":"boolean"}}}},"$ref":"#/definitions/payload"}',
+      'Return status',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getStructuredOutput()?.schema).toEqual({
+      definitions: {
+        payload: {
+          type: 'object',
+          properties: { ok: { type: 'boolean' } },
+        },
+      },
+      $ref: '#/definitions/payload',
+    });
+  });
+
+  it('should reject a root $ref that resolves to a scalar schema', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"definitions":{"payload":{"type":"string"}},"$ref":"#/definitions/payload"}',
+      'Return status',
+    ];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig({}, argv)).rejects.toThrow(
+      'Root schema must describe an object',
+    );
+  });
+
+  it('should reject allOf branches that resolve to scalar schemas', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"definitions":{"scalar":{"type":"string"}},"allOf":[{"type":"object","properties":{"ok":{"type":"boolean"}}},{"$ref":"#/definitions/scalar"}]}',
+      'Return status',
+    ];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig({}, argv)).rejects.toThrow(
+      'Root schema must describe an object',
+    );
+  });
+
+  it('should reject type object schemas with scalar allOf siblings', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"type":"object","definitions":{"scalar":{"type":"string"}},"allOf":[{"$ref":"#/definitions/scalar"}]}',
+      'Return status',
+    ];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig({}, argv)).rejects.toThrow(
+      'Root schema must describe an object',
+    );
+  });
+
+  it('should reject object schemas whose combinator siblings exclude objects', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"type":"object","definitions":{"scalar":{"type":"string"}},"allOf":[{"anyOf":[{"type":"object","properties":{"ok":{"type":"boolean"}}}],"allOf":[{"$ref":"#/definitions/scalar"}]}]}',
+      'Return status',
+    ];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig({}, argv)).rejects.toThrow(
+      'Root schema must describe an object',
+    );
+  });
+
+  it('should reject root type unions that allow non-objects', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"type":["object","null"],"properties":{"ok":{"type":"boolean"}}}',
+      'Return status',
+    ];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig({}, argv)).rejects.toThrow(
+      'Root schema must describe an object',
+    );
+  });
+
+  it('should reject root anyOf schemas with non-object branches', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--json-schema',
+      '{"anyOf":[{"type":"object","properties":{"ok":{"type":"boolean"}}},{"type":"string"}]}',
+      'Return status',
+    ];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig({}, argv)).rejects.toThrow(
+      'Root schema must describe an object',
+    );
   });
 
   it('should reset context filenames to defaults when context.fileName is not configured', async () => {

@@ -69,6 +69,18 @@ export async function evaluatePermissionFlow(
     toolParams,
     config.getTargetDir?.() ?? '',
   );
+
+  if (
+    toolName === ToolNames.STRUCTURED_OUTPUT &&
+    config.getStructuredOutput?.()
+  ) {
+    return {
+      finalPermission: 'allow',
+      pmForcedAsk: false,
+      pmCtx,
+    };
+  }
+
   const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
     pm,
     defaultPermission,

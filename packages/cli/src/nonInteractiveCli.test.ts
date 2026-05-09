@@ -21,6 +21,7 @@ import {
   FatalInputError,
   ApprovalMode,
   SendMessageType,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
@@ -171,6 +172,7 @@ describe('runNonInteractive', () => {
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getMaxSessionTurns: vi.fn().mockReturnValue(10),
+      getStructuredOutput: vi.fn().mockReturnValue(undefined),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getTargetDir: vi.fn().mockReturnValue('/test/project'),
       getMcpServers: vi.fn().mockReturnValue(undefined),
@@ -1132,6 +1134,25 @@ describe('runNonInteractive', () => {
     // Should write error message through adapter to stdout (TEXT mode goes through JsonOutputAdapter)
     expect(processStderrSpy).toHaveBeenCalledWith(
       'The command "/help" is not supported in this mode.\n',
+    );
+  });
+
+  it('should reject slash commands when structured output is required', async () => {
+    (mockConfig.getStructuredOutput as Mock).mockReturnValue({
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+      maxRetries: 5,
+    });
+    setupMetricsMock();
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, '/help', 'prompt-id-help'),
+    ).rejects.toThrow('--json-schema is not supported with slash commands.');
+
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--json-schema is not supported with slash commands.',
+      ),
     );
   });
 
@@ -2342,6 +2363,180 @@ describe('runNonInteractive', () => {
         ),
     );
     expect(toolResultMessages.length).toBe(2);
+  });
+
+  it('should terminate with raw JSON when structured output succeeds', async () => {
+    (mockConfig.getStructuredOutput as Mock).mockReturnValue({
+      schema: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          count: { type: 'integer' },
+        },
+        required: ['summary', 'count'],
+      },
+      maxRetries: 5,
+    });
+    setupMetricsMock();
+
+    const toolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'structured-1',
+        name: ToolNames.STRUCTURED_OUTPUT,
+        args: { summary: 'done', count: 2 },
+        isClientInitiated: false,
+        prompt_id: 'prompt-structured',
+      },
+    };
+
+    mockCoreExecuteToolCall.mockResolvedValueOnce({
+      callId: 'structured-1',
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'structured-1',
+            name: ToolNames.STRUCTURED_OUTPUT,
+            response: { output: 'Structured output provided successfully.' },
+          },
+        },
+      ],
+      resultDisplay: '',
+      error: undefined,
+      errorType: undefined,
+      terminalResult: {
+        kind: 'structured_output',
+        data: { summary: 'done', count: 2 },
+      },
+    });
+
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        toolCall,
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 8 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Structured output',
+      'prompt-structured',
+    );
+
+    expect(processStdoutSpy).toHaveBeenCalledWith(
+      '{"summary":"done","count":2}\n',
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not record rejected mixed structured output calls as completed', async () => {
+    (mockConfig.getStructuredOutput as Mock).mockReturnValue({
+      schema: {
+        type: 'object',
+        properties: { ok: { type: 'boolean' } },
+        required: ['ok'],
+      },
+      maxRetries: 5,
+    });
+    setupMetricsMock();
+
+    const mixedStructuredCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'structured-1',
+        name: ToolNames.STRUCTURED_OUTPUT,
+        args: { ok: true },
+        isClientInitiated: false,
+        prompt_id: 'prompt-structured-mixed',
+      },
+    };
+    const mixedWriteCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'write-1',
+        name: 'write_file',
+        args: { file_path: '/test/project/.qwen/skills/example.md' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-structured-mixed',
+      },
+    };
+    const finalStructuredCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'structured-2',
+        name: ToolNames.STRUCTURED_OUTPUT,
+        args: { ok: true },
+        isClientInitiated: false,
+        prompt_id: 'prompt-structured-mixed',
+      },
+    };
+
+    mockCoreExecuteToolCall.mockResolvedValueOnce({
+      callId: 'structured-2',
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'structured-2',
+            name: ToolNames.STRUCTURED_OUTPUT,
+            response: { output: 'Structured output provided successfully.' },
+          },
+        },
+      ],
+      resultDisplay: '',
+      terminalResult: {
+        kind: 'structured_output',
+        data: { ok: true },
+      },
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          mixedStructuredCall,
+          mixedWriteCall,
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 8 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          finalStructuredCall,
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 8 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Structured output',
+      'prompt-structured-mixed',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+      ToolNames.STRUCTURED_OUTPUT,
+      { ok: true },
+    );
+    expect(mockGeminiClient.recordCompletedToolCall).not.toHaveBeenCalledWith(
+      'write_file',
+      { file_path: '/test/project/.qwen/skills/example.md' },
+    );
   });
 
   it('should handle userMessage with text content blocks in stream-json input mode', async () => {

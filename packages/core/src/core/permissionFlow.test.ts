@@ -24,6 +24,7 @@ const mockConfig = (overrides: Partial<Config> = {}): Config =>
     getPermissionManager: vi.fn().mockReturnValue(null),
     getTargetDir: vi.fn().mockReturnValue('/test'),
     getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+    getStructuredOutput: vi.fn().mockReturnValue(undefined),
     ...overrides,
   }) as unknown as Config;
 
@@ -82,6 +83,62 @@ describe('evaluatePermissionFlow', () => {
     expect(result.finalPermission).toBe('deny');
     expect(result.denyMessage).toContain('denied by permission rules');
     expect(result.denyMessage).toContain('Matching deny rule');
+  });
+
+  it('should always allow the structured output terminal tool', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      findMatchingDenyRule: vi.fn().mockReturnValue('structured_output'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+    });
+
+    const result = await evaluatePermissionFlow(
+      mockConfig({
+        getPermissionManager: vi.fn().mockReturnValue(mockPm),
+        getStructuredOutput: vi.fn().mockReturnValue({
+          schema: { type: 'object' },
+          maxRetries: 5,
+        }),
+      }),
+      invocation,
+      ToolNames.STRUCTURED_OUTPUT,
+      { ok: true },
+    );
+
+    expect(result.finalPermission).toBe('allow');
+    expect(result.denyMessage).toBeUndefined();
+    expect(mockPm.evaluate).not.toHaveBeenCalled();
+  });
+
+  it('should apply normal permission rules for structured_output when structured output is disabled', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      findMatchingDenyRule: vi.fn().mockReturnValue('structured_output'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+    });
+
+    const result = await evaluatePermissionFlow(
+      mockConfig({
+        getPermissionManager: vi.fn().mockReturnValue(mockPm),
+      }),
+      invocation,
+      ToolNames.STRUCTURED_OUTPUT,
+      { ok: true },
+    );
+
+    expect(result.finalPermission).toBe('deny');
+    expect(result.denyMessage).toContain('denied by permission rules');
+    expect(mockPm.evaluate).toHaveBeenCalled();
   });
 
   it('should return ask permission when PM has no relevant rules', async () => {

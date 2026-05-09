@@ -8,6 +8,7 @@ import type {
   BackgroundTaskStatus,
   Config,
   ToolCallRequestInfo,
+  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
@@ -25,6 +26,8 @@ import {
   parseAndFormatApiError,
   createDebugLogger,
   SendMessageType,
+  ToolErrorType,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -68,6 +71,39 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
   [LoopType.ACTION_STAGNATION]:
     'the model kept calling the same tool without making progress',
 };
+
+const STRUCTURED_OUTPUT_REQUIRED_REMINDER =
+  `You must call the ${ToolNames.STRUCTURED_OUTPUT} tool to complete this request. ` +
+  'Do not respond with natural language.';
+
+class StructuredOutputMaxRetriesError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StructuredOutputMaxRetriesError';
+  }
+}
+
+function buildStructuredOutputToolError(
+  request: ToolCallRequestInfo,
+  message: string,
+): ToolCallResponseInfo {
+  return {
+    callId: request.callId,
+    error: new Error(message),
+    errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    resultDisplay: message,
+    responseParts: [
+      {
+        functionResponse: {
+          id: request.callId,
+          name: request.name,
+          response: { error: message },
+        },
+      },
+    ],
+    contentLength: message.length,
+  };
+}
 
 function emitLoopDetectedMessage(
   config: Config,
@@ -266,6 +302,11 @@ export async function runNonInteractive(
       if (!initialPartList) {
         let slashHandled = false;
         if (isSlashCommand(input)) {
+          if (config.getStructuredOutput()) {
+            throw new FatalInputError(
+              '--json-schema is not supported with slash commands.',
+            );
+          }
           const slashCommandResult = await handleSlashCommand(
             input,
             abortController,
@@ -413,8 +454,308 @@ export async function runNonInteractive(
         });
       }
 
+      const emitFinalResult = async (structuredOutput?: unknown) => {
+        // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
+        // loop — otherwise a looping cron or a model that keeps replying to
+        // notifications could exceed the cap silently in headless runs.
+        const drainOneItem = async () => {
+          if (localQueue.length === 0) return;
+          const item = localQueue.shift()!;
+
+          emitNotificationToSdk(item);
+
+          turnCount++;
+          if (
+            config.getMaxSessionTurns() >= 0 &&
+            turnCount > config.getMaxSessionTurns()
+          ) {
+            await handleMaxTurnsExceededError(config);
+          }
+
+          const inputFormat =
+            typeof config.getInputFormat === 'function'
+              ? config.getInputFormat()
+              : InputFormat.TEXT;
+          const toolCallUpdateCallback =
+            inputFormat === InputFormat.STREAM_JSON && options.controlService
+              ? options.controlService.permission.getToolCallUpdateCallback()
+              : undefined;
+
+          let itemMessages: Content[] = [
+            { role: 'user', parts: [{ text: item.modelText }] },
+          ];
+          let itemIsFirstTurn = true;
+          let itemModelOverride: string | undefined;
+
+          while (true) {
+            const itemToolCallRequests: ToolCallRequestInfo[] = [];
+            const itemApiStartTime = Date.now();
+            const itemStream = geminiClient.sendMessageStream(
+              itemMessages[0]?.parts || [],
+              abortController.signal,
+              prompt_id,
+              {
+                type: itemIsFirstTurn
+                  ? item.sendMessageType
+                  : SendMessageType.ToolResult,
+                modelOverride: itemModelOverride,
+                ...(itemIsFirstTurn && {
+                  notificationDisplayText: item.displayText,
+                }),
+              },
+            );
+            itemIsFirstTurn = false;
+
+            adapter.startAssistantMessage();
+
+            for await (const event of itemStream) {
+              if (abortController.signal.aborted) {
+                // Pair the startAssistantMessage() above so stream-json mode doesn't
+                // leave an unterminated message_start.
+                adapter.finalizeAssistantMessage();
+                return;
+              }
+              adapter.processEvent(event);
+              if (event.type === GeminiEventType.ToolCallRequest) {
+                itemToolCallRequests.push(event.value);
+              }
+              if (event.type === GeminiEventType.LoopDetected) {
+                emitLoopDetectedMessage(config, event.value?.loopType);
+              }
+              if (
+                outputFormat === OutputFormat.TEXT &&
+                event.type === GeminiEventType.Error
+              ) {
+                const errorText = parseAndFormatApiError(
+                  event.value.error,
+                  config.getContentGeneratorConfig()?.authType,
+                );
+                process.stderr.write(`${errorText}\n`);
+                // See the matching note in the first stream loop above —
+                // we mark the throw so handleError doesn't reformat or
+                // reprint downstream.
+                throw new AlreadyReportedError(errorText);
+              }
+            }
+
+            adapter.finalizeAssistantMessage();
+            totalApiDurationMs += Date.now() - itemApiStartTime;
+
+            if (itemToolCallRequests.length > 0) {
+              const itemToolResponseParts: Part[] = [];
+
+              for (const requestInfo of itemToolCallRequests) {
+                const isAgentTool = requestInfo.name === 'agent';
+                const { handler: outputUpdateHandler } = isAgentTool
+                  ? createAgentToolProgressHandler(
+                      config,
+                      requestInfo.callId,
+                      adapter,
+                    )
+                  : createToolProgressHandler(requestInfo, adapter);
+
+                const toolResponse = await executeToolCall(
+                  config,
+                  requestInfo,
+                  abortController.signal,
+                  {
+                    outputUpdateHandler,
+                    ...(toolCallUpdateCallback && {
+                      onToolCallsUpdate: toolCallUpdateCallback,
+                    }),
+                  },
+                );
+
+                if (toolResponse.error) {
+                  handleToolError(
+                    requestInfo.name,
+                    toolResponse.error,
+                    config,
+                    toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
+                    typeof toolResponse.resultDisplay === 'string'
+                      ? toolResponse.resultDisplay
+                      : undefined,
+                  );
+                }
+
+                adapter.emitToolResult(requestInfo, toolResponse);
+                config
+                  .getGeminiClient()
+                  .recordCompletedToolCall(
+                    requestInfo.name,
+                    requestInfo.args as Record<string, unknown>,
+                  );
+
+                if (toolResponse.responseParts) {
+                  itemToolResponseParts.push(...toolResponse.responseParts);
+                }
+
+                if ('modelOverride' in toolResponse) {
+                  itemModelOverride = toolResponse.modelOverride;
+                }
+              }
+              itemMessages = [{ role: 'user', parts: itemToolResponseParts }];
+            } else {
+              break;
+            }
+          }
+        };
+
+        // Single-flight drain: concurrent callers wait for the running drain so
+        // cron jobs firing mid-stream don't produce overlapping turns.
+        //
+        // Clear via outer `.finally()` rather than inside the async body: when the
+        // queue is empty the body runs synchronously, so an inner finally would
+        // null the slot BEFORE the outer `drainPromise = p` assignment and leave
+        // it stuck forever.
+        let drainPromise: Promise<void> | null = null;
+        const drainLocalQueue = (): Promise<void> => {
+          if (drainPromise) return drainPromise;
+          const p = (async () => {
+            while (localQueue.length > 0) {
+              await drainOneItem();
+            }
+          })();
+          drainPromise = p;
+          void p.finally(() => {
+            if (drainPromise === p) drainPromise = null;
+          });
+          return p;
+        };
+
+        // Start cron scheduler — fires enqueue onto the shared queue.
+        const scheduler = !config.isCronEnabled()
+          ? null
+          : config.getCronScheduler();
+
+        if (scheduler && scheduler.size > 0) {
+          await new Promise<void>((resolve, reject) => {
+            // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
+            // drop scheduler.size to 0 on their own, so without this the
+            // hold-back loop below is unreachable after an abort.
+            const onAbort = () => {
+              scheduler.stop();
+              resolve();
+            };
+            if (abortController.signal.aborted) {
+              onAbort();
+              return;
+            }
+            abortController.signal.addEventListener('abort', onAbort, {
+              once: true,
+            });
+
+            const checkCronDone = () => {
+              if (scheduler.size === 0 && !drainPromise) {
+                abortController.signal.removeEventListener('abort', onAbort);
+                scheduler.stop();
+                resolve();
+              }
+            };
+
+            // Propagate drain failures. Without this, a rejected
+            // drainLocalQueue() (e.g. a text-mode API error surfacing
+            // out of drainOneItem) would be swallowed by `void` and
+            // checkCronDone would never fire — hanging the run.
+            const onDrainError = (err: unknown) => {
+              abortController.signal.removeEventListener('abort', onAbort);
+              scheduler.stop();
+              reject(err);
+            };
+
+            scheduler.start((job: { prompt: string }) => {
+              const label = job.prompt.slice(0, 40);
+              localQueue.push({
+                displayText: `Cron: ${label}`,
+                modelText: job.prompt,
+                sendMessageType: SendMessageType.Cron,
+              });
+              drainLocalQueue().then(checkCronDone, onDrainError);
+            });
+
+            // Check immediately in case jobs were already deleted
+            checkCronDone();
+          });
+        }
+
+        // Wait for running background agents to complete before emitting the final
+        // result. On SIGINT/SIGTERM, abort them and route through
+        // handleCancellationError — otherwise the success emitResult below would
+        // silently convert a cancellation into a completion.
+        while (true) {
+          if (abortController.signal.aborted) {
+            registry.abortAll();
+            // Flush queued terminal notifications before handleCancellationError
+            // exits so stream-json consumers always see a task_notification paired
+            // with every task_started.
+            flushQueuedNotificationsToSdk(localQueue);
+            finalizeOneShotMonitors();
+            await handleCancellationError(config);
+          }
+          // Once we enter the final holdback loop, monitor events should no
+          // longer extend one-shot runtime. Already-queued events still drain
+          // through the model, but later monitor output is SDK-only.
+          captureMonitorTurnsInLocalQueue = false;
+          await drainLocalQueue();
+          // Wait for every background task's terminal notification, not
+          // just the running ones: cancel() marks status 'cancelled'
+          // synchronously but the notification is emitted later by the
+          // natural handler, and SDK consumers need every task_started
+          // paired with one. Monitors are different: they intentionally
+          // continue in the background, so final result emission is not
+          // gated on monitor lifetime.
+          if (!registry.hasUnfinalizedTasks() && localQueue.length === 0) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+
+        const memoryTaskPromises = config
+          .getGeminiClient()
+          .consumePendingMemoryTaskPromises();
+        if (memoryTaskPromises.length > 0) {
+          await Promise.allSettled(memoryTaskPromises);
+        }
+        finalizeOneShotMonitors();
+
+        const metrics = uiTelemetryService.getMetrics();
+        const usage = computeUsageFromMetrics(metrics);
+        // Get stats for JSON format output
+        const stats =
+          outputFormat === OutputFormat.JSON
+            ? uiTelemetryService.getMetrics()
+            : undefined;
+        const resultOptions = {
+          isError: false,
+          durationMs: Date.now() - startTime,
+          apiDurationMs: totalApiDurationMs,
+          numTurns: turnCount,
+          usage,
+          stats,
+        };
+        if (structuredOutput !== undefined) {
+          adapter.emitStructuredResult({
+            ...resultOptions,
+            structuredOutput,
+          });
+        } else {
+          adapter.emitResult(resultOptions);
+        }
+      };
+
       let isFirstTurn = true;
       let modelOverride: string | undefined;
+      const structuredOutputConfig = config.getStructuredOutput();
+      let structuredOutputRetryCount = 0;
+      const noteStructuredOutputRetry = () => {
+        if (!structuredOutputConfig) {
+          return;
+        }
+        structuredOutputRetryCount++;
+        if (structuredOutputRetryCount > structuredOutputConfig.maxRetries) {
+          throw new StructuredOutputMaxRetriesError(
+            `Structured output was not produced after ${structuredOutputConfig.maxRetries} retries.`,
+          );
+        }
+      };
       while (true) {
         turnCount++;
         if (
@@ -481,6 +822,42 @@ export async function runNonInteractive(
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
+          const structuredOutputRequests = structuredOutputConfig
+            ? toolCallRequests.filter(
+                (request) => request.name === ToolNames.STRUCTURED_OUTPUT,
+              )
+            : [];
+
+          if (
+            structuredOutputRequests.length > 0 &&
+            (structuredOutputRequests.length !== 1 ||
+              toolCallRequests.length !== 1)
+          ) {
+            noteStructuredOutputRetry();
+            const message =
+              `${ToolNames.STRUCTURED_OUTPUT} must be the only tool call in the final turn. ` +
+              `Call ${ToolNames.STRUCTURED_OUTPUT} exactly once after all other work is complete.`;
+
+            for (const requestInfo of toolCallRequests) {
+              const toolResponse = buildStructuredOutputToolError(
+                requestInfo,
+                message,
+              );
+              handleToolError(
+                requestInfo.name,
+                toolResponse.error!,
+                config,
+                toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
+                typeof toolResponse.resultDisplay === 'string'
+                  ? toolResponse.resultDisplay
+                  : undefined,
+              );
+              adapter.emitToolResult(requestInfo, toolResponse);
+              toolResponseParts.push(...toolResponse.responseParts);
+            }
+            currentMessages = [{ role: 'user', parts: toolResponseParts }];
+            continue;
+          }
 
           for (const requestInfo of toolCallRequests) {
             const finalRequestInfo = requestInfo;
@@ -553,286 +930,34 @@ export async function runNonInteractive(
             if ('modelOverride' in toolResponse) {
               modelOverride = toolResponse.modelOverride;
             }
+
+            if (
+              structuredOutputConfig &&
+              finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT
+            ) {
+              if (toolResponse.error) {
+                noteStructuredOutputRetry();
+              } else if (
+                toolResponse.terminalResult?.kind === 'structured_output'
+              ) {
+                await emitFinalResult(toolResponse.terminalResult.data);
+                return;
+              }
+            }
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
-          // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
-          // loop — otherwise a looping cron or a model that keeps replying to
-          // notifications could exceed the cap silently in headless runs.
-          const drainOneItem = async () => {
-            if (localQueue.length === 0) return;
-            const item = localQueue.shift()!;
-
-            emitNotificationToSdk(item);
-
-            turnCount++;
-            if (
-              config.getMaxSessionTurns() >= 0 &&
-              turnCount > config.getMaxSessionTurns()
-            ) {
-              await handleMaxTurnsExceededError(config);
-            }
-
-            const inputFormat =
-              typeof config.getInputFormat === 'function'
-                ? config.getInputFormat()
-                : InputFormat.TEXT;
-            const toolCallUpdateCallback =
-              inputFormat === InputFormat.STREAM_JSON && options.controlService
-                ? options.controlService.permission.getToolCallUpdateCallback()
-                : undefined;
-
-            let itemMessages: Content[] = [
-              { role: 'user', parts: [{ text: item.modelText }] },
+          if (structuredOutputConfig) {
+            noteStructuredOutputRetry();
+            currentMessages = [
+              {
+                role: 'user',
+                parts: [{ text: STRUCTURED_OUTPUT_REQUIRED_REMINDER }],
+              },
             ];
-            let itemIsFirstTurn = true;
-            let itemModelOverride: string | undefined;
-
-            while (true) {
-              const itemToolCallRequests: ToolCallRequestInfo[] = [];
-              const itemApiStartTime = Date.now();
-              const itemStream = geminiClient.sendMessageStream(
-                itemMessages[0]?.parts || [],
-                abortController.signal,
-                prompt_id,
-                {
-                  type: itemIsFirstTurn
-                    ? item.sendMessageType
-                    : SendMessageType.ToolResult,
-                  modelOverride: itemModelOverride,
-                  ...(itemIsFirstTurn && {
-                    notificationDisplayText: item.displayText,
-                  }),
-                },
-              );
-              itemIsFirstTurn = false;
-
-              adapter.startAssistantMessage();
-
-              for await (const event of itemStream) {
-                if (abortController.signal.aborted) {
-                  // Pair the startAssistantMessage() above so stream-json mode doesn't
-                  // leave an unterminated message_start.
-                  adapter.finalizeAssistantMessage();
-                  return;
-                }
-                adapter.processEvent(event);
-                if (event.type === GeminiEventType.ToolCallRequest) {
-                  itemToolCallRequests.push(event.value);
-                }
-                if (event.type === GeminiEventType.LoopDetected) {
-                  emitLoopDetectedMessage(config, event.value?.loopType);
-                }
-                if (
-                  outputFormat === OutputFormat.TEXT &&
-                  event.type === GeminiEventType.Error
-                ) {
-                  const errorText = parseAndFormatApiError(
-                    event.value.error,
-                    config.getContentGeneratorConfig()?.authType,
-                  );
-                  process.stderr.write(`${errorText}\n`);
-                  // See the matching note in the first stream loop above —
-                  // we mark the throw so handleError doesn't reformat or
-                  // reprint downstream.
-                  throw new AlreadyReportedError(errorText);
-                }
-              }
-
-              adapter.finalizeAssistantMessage();
-              totalApiDurationMs += Date.now() - itemApiStartTime;
-
-              if (itemToolCallRequests.length > 0) {
-                const itemToolResponseParts: Part[] = [];
-
-                for (const requestInfo of itemToolCallRequests) {
-                  const isAgentTool = requestInfo.name === 'agent';
-                  const { handler: outputUpdateHandler } = isAgentTool
-                    ? createAgentToolProgressHandler(
-                        config,
-                        requestInfo.callId,
-                        adapter,
-                      )
-                    : createToolProgressHandler(requestInfo, adapter);
-
-                  const toolResponse = await executeToolCall(
-                    config,
-                    requestInfo,
-                    abortController.signal,
-                    {
-                      outputUpdateHandler,
-                      ...(toolCallUpdateCallback && {
-                        onToolCallsUpdate: toolCallUpdateCallback,
-                      }),
-                    },
-                  );
-
-                  if (toolResponse.error) {
-                    handleToolError(
-                      requestInfo.name,
-                      toolResponse.error,
-                      config,
-                      toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
-                      typeof toolResponse.resultDisplay === 'string'
-                        ? toolResponse.resultDisplay
-                        : undefined,
-                    );
-                  }
-
-                  adapter.emitToolResult(requestInfo, toolResponse);
-                  config
-                    .getGeminiClient()
-                    .recordCompletedToolCall(
-                      requestInfo.name,
-                      requestInfo.args as Record<string, unknown>,
-                    );
-
-                  if (toolResponse.responseParts) {
-                    itemToolResponseParts.push(...toolResponse.responseParts);
-                  }
-
-                  if ('modelOverride' in toolResponse) {
-                    itemModelOverride = toolResponse.modelOverride;
-                  }
-                }
-                itemMessages = [{ role: 'user', parts: itemToolResponseParts }];
-              } else {
-                break;
-              }
-            }
-          };
-
-          // Single-flight drain: concurrent callers wait for the running drain so
-          // cron jobs firing mid-stream don't produce overlapping turns.
-          //
-          // Clear via outer `.finally()` rather than inside the async body: when the
-          // queue is empty the body runs synchronously, so an inner finally would
-          // null the slot BEFORE the outer `drainPromise = p` assignment and leave
-          // it stuck forever.
-          let drainPromise: Promise<void> | null = null;
-          const drainLocalQueue = (): Promise<void> => {
-            if (drainPromise) return drainPromise;
-            const p = (async () => {
-              while (localQueue.length > 0) {
-                await drainOneItem();
-              }
-            })();
-            drainPromise = p;
-            void p.finally(() => {
-              if (drainPromise === p) drainPromise = null;
-            });
-            return p;
-          };
-
-          // Start cron scheduler — fires enqueue onto the shared queue.
-          const scheduler = !config.isCronEnabled()
-            ? null
-            : config.getCronScheduler();
-
-          if (scheduler && scheduler.size > 0) {
-            await new Promise<void>((resolve, reject) => {
-              // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
-              // drop scheduler.size to 0 on their own, so without this the
-              // hold-back loop below is unreachable after an abort.
-              const onAbort = () => {
-                scheduler.stop();
-                resolve();
-              };
-              if (abortController.signal.aborted) {
-                onAbort();
-                return;
-              }
-              abortController.signal.addEventListener('abort', onAbort, {
-                once: true,
-              });
-
-              const checkCronDone = () => {
-                if (scheduler.size === 0 && !drainPromise) {
-                  abortController.signal.removeEventListener('abort', onAbort);
-                  scheduler.stop();
-                  resolve();
-                }
-              };
-
-              // Propagate drain failures. Without this, a rejected
-              // drainLocalQueue() (e.g. a text-mode API error surfacing
-              // out of drainOneItem) would be swallowed by `void` and
-              // checkCronDone would never fire — hanging the run.
-              const onDrainError = (err: unknown) => {
-                abortController.signal.removeEventListener('abort', onAbort);
-                scheduler.stop();
-                reject(err);
-              };
-
-              scheduler.start((job: { prompt: string }) => {
-                const label = job.prompt.slice(0, 40);
-                localQueue.push({
-                  displayText: `Cron: ${label}`,
-                  modelText: job.prompt,
-                  sendMessageType: SendMessageType.Cron,
-                });
-                drainLocalQueue().then(checkCronDone, onDrainError);
-              });
-
-              // Check immediately in case jobs were already deleted
-              checkCronDone();
-            });
+            continue;
           }
-
-          // Wait for running background agents to complete before emitting the final
-          // result. On SIGINT/SIGTERM, abort them and route through
-          // handleCancellationError — otherwise the success emitResult below would
-          // silently convert a cancellation into a completion.
-          while (true) {
-            if (abortController.signal.aborted) {
-              registry.abortAll();
-              // Flush queued terminal notifications before handleCancellationError
-              // exits so stream-json consumers always see a task_notification paired
-              // with every task_started.
-              flushQueuedNotificationsToSdk(localQueue);
-              finalizeOneShotMonitors();
-              await handleCancellationError(config);
-            }
-            // Once we enter the final holdback loop, monitor events should no
-            // longer extend one-shot runtime. Already-queued events still drain
-            // through the model, but later monitor output is SDK-only.
-            captureMonitorTurnsInLocalQueue = false;
-            await drainLocalQueue();
-            // Wait for every background task's terminal notification, not
-            // just the running ones: cancel() marks status 'cancelled'
-            // synchronously but the notification is emitted later by the
-            // natural handler, and SDK consumers need every task_started
-            // paired with one. Monitors are different: they intentionally
-            // continue in the background, so final result emission is not
-            // gated on monitor lifetime.
-            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
-              break;
-            await new Promise((r) => setTimeout(r, 100));
-          }
-
-          const memoryTaskPromises = config
-            .getGeminiClient()
-            .consumePendingMemoryTaskPromises();
-          if (memoryTaskPromises.length > 0) {
-            await Promise.allSettled(memoryTaskPromises);
-          }
-          finalizeOneShotMonitors();
-
-          const metrics = uiTelemetryService.getMetrics();
-          const usage = computeUsageFromMetrics(metrics);
-          // Get stats for JSON format output
-          const stats =
-            outputFormat === OutputFormat.JSON
-              ? uiTelemetryService.getMetrics()
-              : undefined;
-          adapter.emitResult({
-            isError: false,
-            durationMs: Date.now() - startTime,
-            apiDurationMs: totalApiDurationMs,
-            numTurns: turnCount,
-            usage,
-            stats,
-          });
+          await emitFinalResult();
           return;
         }
       }
@@ -880,6 +1005,10 @@ export async function runNonInteractive(
           errorMessage: message,
           usage,
           stats,
+          subtype:
+            error instanceof StructuredOutputMaxRetriesError
+              ? 'error_max_structured_output_retries'
+              : undefined,
         });
       }
       await handleError(error, config);

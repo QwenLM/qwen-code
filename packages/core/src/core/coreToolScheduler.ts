@@ -2066,6 +2066,9 @@ export class CoreToolScheduler {
           ...('modelOverride' in toolResult
             ? { modelOverride: toolResult.modelOverride }
             : {}),
+          ...(toolResult.terminalResult
+            ? { terminalResult: toolResult.terminalResult }
+            : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
       } else {

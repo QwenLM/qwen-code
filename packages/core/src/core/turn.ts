@@ -113,6 +113,10 @@ export interface ToolCallResponseInfo {
   errorType: ToolErrorType | undefined;
   contentLength?: number;
   modelOverride?: string;
+  terminalResult?: {
+    kind: 'structured_output';
+    data: unknown;
+  };
 }
 
 export interface ServerToolCallConfirmationDetails {

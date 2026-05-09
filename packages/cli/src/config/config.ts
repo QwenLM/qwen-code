@@ -32,6 +32,8 @@ import {
   isToolEnabled,
   type ConfigParameters,
   type MCPServerConfig,
+  SchemaValidator,
+  hasCycleInSchema,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -158,6 +160,8 @@ export interface CliArgs {
   /** Specify a session ID without session resumption */
   sessionId: string | undefined;
   maxSessionTurns: number | undefined;
+  jsonSchema?: string | undefined;
+  structuredOutputMaxRetries?: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -498,6 +502,17 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'number',
           description: 'Maximum number of session turns',
         })
+        .option('json-schema', {
+          type: 'string',
+          description:
+            'Require the final non-interactive response to match a JSON Schema. Accepts a file path or inline JSON.',
+        })
+        .option('structured-output-max-retries', {
+          type: 'number',
+          description:
+            'Maximum structured-output repair retries before failing.',
+          default: DEFAULT_STRUCTURED_OUTPUT_MAX_RETRIES,
+        })
         .option('core-tools', {
           type: 'array',
           string: true,
@@ -593,6 +608,17 @@ export async function parseArguments(): Promise<CliArgs> {
           }
           if (argv['sessionId'] && (argv['continue'] || argv['resume'])) {
             return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
+          }
+          if (argv['jsonSchema']) {
+            if (argv['promptInteractive']) {
+              return '--json-schema is only supported in non-interactive prompt mode';
+            }
+            if (argv['inputFormat'] === 'stream-json') {
+              return '--json-schema is not supported with --input-format stream-json';
+            }
+            if (!argv['prompt'] && !hasPositionalQuery) {
+              return '--json-schema requires a prompt or positional query';
+            }
           }
           if (
             argv['sessionId'] &&
@@ -812,6 +838,299 @@ function parseMcpConfig(
   }
 }
 
+const DEFAULT_STRUCTURED_OUTPUT_MAX_RETRIES = 5;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasRemoteRef(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(hasRemoteRef);
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  const ref = value['$ref'];
+  if (typeof ref === 'string' && ref !== '#' && !ref.startsWith('#/')) {
+    return true;
+  }
+  return Object.values(value).some(hasRemoteRef);
+}
+
+function decodeJsonPointerSegment(segment: string): string {
+  return segment.replace(/~1/g, '/').replace(/~0/g, '~');
+}
+
+function resolveLocalRef(root: Record<string, unknown>, ref: string): unknown {
+  if (ref === '#') {
+    return root;
+  }
+  if (!ref.startsWith('#/')) {
+    return undefined;
+  }
+
+  let current: unknown = root;
+  for (const rawSegment of ref.slice(2).split('/')) {
+    const segment = decodeJsonPointerSegment(rawSegment);
+    if (Array.isArray(current)) {
+      const index = Number(segment);
+      if (!Number.isInteger(index) || index < 0 || index >= current.length) {
+        return undefined;
+      }
+      current = current[index];
+      continue;
+    }
+    if (!isRecord(current)) {
+      return undefined;
+    }
+    current = current[segment];
+  }
+  return current;
+}
+
+function isObjectOnlyType(type: unknown): boolean {
+  if (type === 'object') {
+    return true;
+  }
+  return Array.isArray(type) && type.length > 0
+    ? type.every((entry) => entry === 'object')
+    : false;
+}
+
+function typeAllowsObject(type: unknown): boolean {
+  if (type === 'object') {
+    return true;
+  }
+  return Array.isArray(type) && type.some((entry) => entry === 'object');
+}
+
+function hasObjectShapeKeywords(schema: Record<string, unknown>): boolean {
+  return (
+    isRecord(schema['properties']) ||
+    Array.isArray(schema['required']) ||
+    isRecord(schema['additionalProperties']) ||
+    typeof schema['additionalProperties'] === 'boolean' ||
+    isRecord(schema['patternProperties']) ||
+    isRecord(schema['propertyNames']) ||
+    typeof schema['minProperties'] === 'number' ||
+    typeof schema['maxProperties'] === 'number' ||
+    isRecord(schema['dependentRequired']) ||
+    isRecord(schema['dependentSchemas']) ||
+    isRecord(schema['unevaluatedProperties']) ||
+    typeof schema['unevaluatedProperties'] === 'boolean'
+  );
+}
+
+function allSubschemasDescribeObjects(
+  schemas: unknown,
+  root: Record<string, unknown>,
+  seenRefs: Set<string>,
+): boolean {
+  return (
+    Array.isArray(schemas) &&
+    schemas.length > 0 &&
+    schemas.every(
+      (subschema) =>
+        isRecord(subschema) && isObjectRootSchema(subschema, root, seenRefs),
+    )
+  );
+}
+
+function schemaCanAcceptObject(
+  schema: Record<string, unknown>,
+  root: Record<string, unknown>,
+  seenRefs: Set<string>,
+): boolean {
+  const ref = schema['$ref'];
+  if (typeof ref === 'string') {
+    if (seenRefs.has(ref)) {
+      return false;
+    }
+    const resolved = resolveLocalRef(root, ref);
+    if (!isRecord(resolved)) {
+      return false;
+    }
+    seenRefs.add(ref);
+    const result = schemaCanAcceptObject(resolved, root, seenRefs);
+    seenRefs.delete(ref);
+    return result;
+  }
+
+  const type = schema['type'];
+  if (type !== undefined && !typeAllowsObject(type)) {
+    return false;
+  }
+
+  const anyOf = schema['anyOf'];
+  if (
+    Array.isArray(anyOf) &&
+    !anyOf.some(
+      (subschema) =>
+        isRecord(subschema) && schemaCanAcceptObject(subschema, root, seenRefs),
+    )
+  ) {
+    return false;
+  }
+
+  const oneOf = schema['oneOf'];
+  if (
+    Array.isArray(oneOf) &&
+    !oneOf.some(
+      (subschema) =>
+        isRecord(subschema) && schemaCanAcceptObject(subschema, root, seenRefs),
+    )
+  ) {
+    return false;
+  }
+
+  const allOf = schema['allOf'];
+  if (
+    Array.isArray(allOf) &&
+    !allOf.every(
+      (subschema) =>
+        isRecord(subschema) && schemaCanAcceptObject(subschema, root, seenRefs),
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function isObjectRootSchema(
+  schema: Record<string, unknown>,
+  root: Record<string, unknown> = schema,
+  seenRefs: Set<string> = new Set(),
+): boolean {
+  const ref = schema['$ref'];
+  if (typeof ref === 'string') {
+    if (seenRefs.has(ref)) {
+      return false;
+    }
+    const resolved = resolveLocalRef(root, ref);
+    if (!isRecord(resolved)) {
+      return false;
+    }
+    seenRefs.add(ref);
+    const result = isObjectRootSchema(resolved, root, seenRefs);
+    seenRefs.delete(ref);
+    return result;
+  }
+
+  const type = schema['type'];
+  const hasExplicitType = type !== undefined;
+  if (hasExplicitType && !isObjectOnlyType(type)) {
+    return false;
+  }
+
+  const anyOf = schema['anyOf'];
+  const oneOf = schema['oneOf'];
+  if (Array.isArray(anyOf)) {
+    const anyOfCanProduceObject = hasExplicitType
+      ? anyOf.some(
+          (subschema) =>
+            isRecord(subschema) &&
+            schemaCanAcceptObject(subschema, root, seenRefs),
+        )
+      : allSubschemasDescribeObjects(anyOf, root, seenRefs);
+    if (!anyOfCanProduceObject) {
+      return false;
+    }
+  }
+  if (Array.isArray(oneOf)) {
+    const oneOfCanProduceObject = hasExplicitType
+      ? oneOf.some(
+          (subschema) =>
+            isRecord(subschema) &&
+            schemaCanAcceptObject(subschema, root, seenRefs),
+        )
+      : allSubschemasDescribeObjects(oneOf, root, seenRefs);
+    if (!oneOfCanProduceObject) {
+      return false;
+    }
+  }
+
+  const allOf = schema['allOf'];
+  if (Array.isArray(allOf)) {
+    const allOfCanProduceObject = allOf.every(
+      (subschema) =>
+        isRecord(subschema) && schemaCanAcceptObject(subschema, root, seenRefs),
+    );
+    if (!allOfCanProduceObject) {
+      return false;
+    }
+  }
+
+  if (hasExplicitType) {
+    return true;
+  }
+
+  return (
+    hasObjectShapeKeywords(schema) ||
+    Array.isArray(anyOf) ||
+    Array.isArray(oneOf) ||
+    (Array.isArray(allOf) &&
+      allOf.length > 0 &&
+      allOf.some(
+        (subschema) =>
+          isRecord(subschema) && isObjectRootSchema(subschema, root, seenRefs),
+      ))
+  );
+}
+
+function parseStructuredOutputConfig(
+  jsonSchemaArg: string | undefined,
+  maxRetriesArg: number | undefined,
+): ConfigParameters['structuredOutput'] | undefined {
+  if (!jsonSchemaArg) {
+    return undefined;
+  }
+
+  const maxRetries = maxRetriesArg ?? DEFAULT_STRUCTURED_OUTPUT_MAX_RETRIES;
+  if (!Number.isInteger(maxRetries) || maxRetries < 0) {
+    throw new FatalConfigError(
+      '--structured-output-max-retries must be a non-negative integer.',
+    );
+  }
+
+  try {
+    let parsed: unknown;
+    const schemaPath = resolvePath(jsonSchemaArg);
+    if (fs.existsSync(schemaPath)) {
+      debugLogger.debug(`Reading JSON schema from file: ${schemaPath}`);
+      const content = fs.readFileSync(schemaPath, 'utf-8');
+      parsed = JSON.parse(stripJsonComments(content));
+    } else {
+      debugLogger.debug('Parsing JSON schema as inline JSON');
+      parsed = JSON.parse(jsonSchemaArg);
+    }
+
+    if (!isRecord(parsed)) {
+      throw new Error('Schema must be a JSON object.');
+    }
+    if (hasRemoteRef(parsed)) {
+      throw new Error('Remote $ref values are not supported.');
+    }
+    if (hasCycleInSchema(parsed)) {
+      throw new Error('Cyclic $ref values are not supported.');
+    }
+    SchemaValidator.compileStrict(parsed);
+    if (!isObjectRootSchema(parsed)) {
+      throw new Error(
+        'Root schema must describe an object. Root arrays and scalars are not supported in --json-schema MVP.',
+      );
+    }
+
+    return { schema: parsed, maxRetries };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    throw new FatalConfigError(
+      `Invalid JSON Schema provided via --json-schema: ${errorMessage}`,
+    );
+  }
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -964,6 +1283,17 @@ export async function loadCliConfig(
     // (fallback for edge cases where query/prompt is provided with TEXT output)
     interactive = false;
   }
+
+  const structuredOutput = parseStructuredOutputConfig(
+    argv.jsonSchema,
+    argv.structuredOutputMaxRetries,
+  );
+  if (structuredOutput && interactive) {
+    throw new FatalConfigError(
+      '--json-schema is only supported in non-interactive prompt mode.',
+    );
+  }
+
   // ── Unified permissions construction ─────────────────────────────────────
   // All permission sources are merged here, before constructing Config.
   // The resulting three arrays are the single source of truth that Config /
@@ -1261,6 +1591,7 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
+    structuredOutput,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,

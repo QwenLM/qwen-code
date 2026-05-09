@@ -10,6 +10,7 @@ import {
   BaseJsonOutputAdapter,
   type JsonOutputAdapterInterface,
   type ResultOptions,
+  type StructuredResultOptions,
 } from './BaseJsonOutputAdapter.js';
 
 /**
@@ -75,6 +76,21 @@ export class JsonOutputAdapter
       // Emit the entire messages array as JSON (includes all main agent + subagent messages)
       const json = JSON.stringify(this.messages);
       process.stdout.write(`${json}\n`);
+    }
+  }
+
+  emitStructuredResult(options: StructuredResultOptions): void {
+    const resultText = JSON.stringify(options.structuredOutput);
+    const resultMessage = this.buildResultMessage(
+      { ...options, summary: resultText },
+      this.lastAssistantMessage,
+    );
+    this.messages.push(resultMessage);
+
+    if (this.config.getOutputFormat() === 'text') {
+      process.stdout.write(`${resultText}\n`);
+    } else {
+      process.stdout.write(`${JSON.stringify(this.messages)}\n`);
     }
   }
 

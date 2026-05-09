@@ -132,6 +132,7 @@ class SDKResultMessageSuccess(TypedDict):
     duration_api_ms: int
     num_turns: int
     result: str
+    structured_output: NotRequired[Any]
     usage: ExtendedUsage
     permission_denials: list[CLIPermissionDenial]
 
@@ -143,7 +144,11 @@ class ResultErrorObject(TypedDict):
 
 class SDKResultMessageError(TypedDict):
     type: Literal["result"]
-    subtype: Literal["error_max_turns", "error_during_execution"]
+    subtype: Literal[
+        "error_max_turns",
+        "error_during_execution",
+        "error_max_structured_output_retries",
+    ]
     uuid: str
     session_id: str
     is_error: Literal[True]
