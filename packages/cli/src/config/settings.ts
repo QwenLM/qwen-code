@@ -38,7 +38,6 @@ import {
   V1_TO_V2_MIGRATION_MAP,
   V2_CONTAINER_KEYS,
 } from './migration/versions/v1-to-v2-shared.js';
-import { writeWithBackupSync } from '../utils/writeWithBackup.js';
 
 const debugLogger = createDebugLogger('SETTINGS');
 
@@ -82,7 +81,7 @@ export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 const PROJECT_ENV_HARDCODED_EXCLUSIONS = ['QWEN_HOME', 'QWEN_RUNTIME_DIR'];
 
 // Settings version to track migration state
-export const SETTINGS_VERSION = 3;
+export const SETTINGS_VERSION = 4;
 export const SETTINGS_VERSION_KEY = '$version';
 
 /**
@@ -453,6 +452,10 @@ export class LoadedSettings {
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
     saveSettings(settingsFile, createSettingsUpdate(key, value));
+  }
+
+  recomputeMerged(): void {
+    this._merged = this.computeMergedSettings();
   }
 
   /**
@@ -930,10 +933,20 @@ export function loadSettings(
 
         const persistSettingsObject = (warningPrefix: string) => {
           try {
-            writeWithBackupSync(
+            // Use sync mode to remove deprecated keys (zombie key prevention)
+            // while preserving comments and formatting from the original file.
+            // updateSettingsFilePreservingFormat handles atomicity internally
+            // via temp-file + rename writes.
+            const written = updateSettingsFilePreservingFormat(
               filePath,
-              JSON.stringify(settingsObject, null, 2),
+              settingsObject,
+              true,
             );
+            if (!written) {
+              debugLogger.error(
+                `${warningPrefix}: updateSettingsFilePreservingFormat returned false for ${filePath}`,
+              );
+            }
           } catch (e) {
             debugLogger.error(`${warningPrefix}: ${getErrorMessage(e)}`);
           }

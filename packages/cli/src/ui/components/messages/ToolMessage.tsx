@@ -33,7 +33,11 @@ import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { useCompactMode } from '../../contexts/CompactModeContext.js';
-import { getCachedStringWidth, toCodePoints } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  getCachedStringWidth,
+  toCodePoints,
+} from '../../utils/textUtils.js';
 
 import {
   ToolStatusIndicator,
@@ -252,16 +256,27 @@ const PlanResultRenderer: React.FC<{
  *
  * The verbose inline frame has been retired. Three surfaces remain:
  *
- * - **Live phase (running)**: nothing inline — `LiveAgentPanel` (the
- *   always-on bottom roster) and `BackgroundTasksDialog` (Down-arrow
- *   detail view) own progress reporting.
- * - **Approval prompt (focus-locked)**: full inline approval banner so
- *   the user can answer without context-switching into the dialog;
+ * - **Running**: nothing inline — `LiveAgentPanel` (the always-on
+ *   bottom roster) and `BackgroundTasksDialog` (Down-arrow detail
+ *   view) own progress reporting. `ToolGroupMessage` filters
+ *   running task entries out of the live phase entirely so the
+ *   group container doesn't even attempt to render this renderer.
+ * - **Approval prompt (focus-locked)**: full inline approval banner
+ *   so the user can answer without context-switching into the dialog;
  *   sibling subagents render a queued marker.
- * - **Committed phase (terminal — completed / failed / cancelled)**: a
- *   single-line scrollback summary so the conversation history retains
- *   a permanent record after the panel's 8s window expires and the
- *   dialog closes. Format: `<icon> <type>: <description> · N tools · Xs · Yk tokens`.
+ * - **Terminal (completed / failed / cancelled)**: a single-line
+ *   scrollback summary so the conversation history retains a
+ *   permanent record after the panel evicts. Fires regardless of
+ *   `isPending` — `unregisterForeground`'s post-delete emit drops
+ *   the panel snapshot row immediately, so the inline summary is
+ *   the only surface that bridges the moment a foreground subagent
+ *   finishes mid-parent-turn until the parent commits.
+ *   Format: `<icon> <type>: <description> · N tools · Xs · Yk tokens`.
+ *
+ * `isPending` is no longer used as a render gate here; the live-phase
+ * filter in `ToolGroupMessage` handles the running case before this
+ * renderer is reached. The prop is kept on the signature for future
+ * needs and parity with sibling renderers.
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -269,9 +284,18 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth: number;
   config: Config;
   isFocused?: boolean;
+  isPending?: boolean;
+  // `isPending` stays on the prop signature for parity with sibling
+  // renderers and possible future gating, but isn't read here — the
+  // live-phase filter in `ToolGroupMessage` already keeps running
+  // entries from reaching this renderer (so the terminal-summary path
+  // is the only thing left to gate, and it should fire in both phases).
 }> = ({ data, availableHeight, childWidth, config, isFocused }) => {
   if (data.pendingConfirmation && isFocused) {
-    const agentLabel = data.subagentName || 'agent';
+    // `subagentName` is user-authored / model-chosen and may carry
+    // ANSI control sequences; escape before rendering into Ink Text
+    // (matches LiveAgentPanel + SubagentScrollbackSummary).
+    const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
     return (
       <Box flexDirection="column" paddingLeft={1}>
         <Box>
@@ -293,7 +317,10 @@ const SubagentExecutionRenderer: React.FC<{
     );
   }
   if (data.pendingConfirmation) {
-    const agentLabel = data.subagentName || 'agent';
+    // `subagentName` is user-authored / model-chosen and may carry
+    // ANSI control sequences; escape before rendering into Ink Text
+    // (matches LiveAgentPanel + SubagentScrollbackSummary).
+    const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
     return (
       <Box paddingLeft={1}>
         <Text color={theme.text.secondary} dimColor>
@@ -304,10 +331,14 @@ const SubagentExecutionRenderer: React.FC<{
     );
   }
   // Terminal phase: render a single-line scrollback summary so the
-  // conversation history keeps a permanent record after the panel's
-  // 8s visibility window expires (LiveAgentPanel evicts terminal rows;
-  // BackgroundTasksDialog only retains them while open). Skip
-  // `running` / `background` since the panel + dialog cover those.
+  // conversation history keeps a permanent record. Fires in BOTH
+  // live and committed phases — `unregisterForeground`'s post-delete
+  // emit drops the panel snapshot row immediately, so without an
+  // inline render here a foreground subagent that finishes
+  // mid-parent-turn would simply disappear from screen until commit.
+  // No duplication risk because the panel never re-resurrects a
+  // dropped foreground entry. Skip `running` / `background` since the
+  // panel + dialog cover those.
   if (
     data.status === 'completed' ||
     data.status === 'failed' ||
@@ -356,18 +387,28 @@ const SubagentScrollbackSummary: React.FC<{
   if (stats?.totalTokens && stats.totalTokens > 0) {
     parts.push(`${formatTokenCount(stats.totalTokens)} tokens`);
   }
+  // Sanitize every user/LLM-controlled string before it reaches Ink.
+  // `subagentName` is subagent config (user-authored or model-chosen),
+  // `taskDescription` is LLM-generated, `terminateReason` is whatever
+  // the agent emitted on failure. All can carry terminal control
+  // sequences that would otherwise bleed through Ink's `<Text>` and
+  // corrupt scrollback chrome — same threat model as the panel rows
+  // and HistoryItemDisplay's user-facing content.
   const tail = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
-  const typePrefix = data.subagentName ? `${data.subagentName}: ` : '';
+  const typePrefix = data.subagentName
+    ? `${escapeAnsiCtrlCodes(data.subagentName)}: `
+    : '';
+  const safeDescription = escapeAnsiCtrlCodes(data.taskDescription ?? '');
   const reason =
     data.status !== 'completed' && data.terminateReason
-      ? ` · ${data.terminateReason}`
+      ? ` · ${escapeAnsiCtrlCodes(data.terminateReason)}`
       : '';
   return (
     <Box paddingLeft={1}>
       <Text wrap="truncate-end">
         <Text color={color}>{`${glyph} `}</Text>
         <Text bold>{typePrefix}</Text>
-        <Text color={theme.text.secondary}>{data.taskDescription}</Text>
+        <Text color={theme.text.secondary}>{safeDescription}</Text>
         <Text color={theme.text.secondary}>{tail}</Text>
         <Text color={theme.text.secondary}>{reason}</Text>
       </Text>
@@ -478,6 +519,18 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
    * sibling subagents render a dim "Queued approval" marker instead.
    */
   isFocused?: boolean;
+  /**
+   * True while the tool message is rendered inside `pendingHistoryItems`
+   * (live area), false (or omitted — undefined is treated as false)
+   * once committed to `<Static>`. Forwarded for parity with sibling
+   * renderers and possible future gating; currently inert inside this
+   * component. The live-phase filter for panel-owned subagent entries
+   * lives in `ToolGroupMessage` (the only call site), and the terminal
+   * `SubagentScrollbackSummary` fires regardless of `isPending` so the
+   * inline path can bridge the gap between `unregisterForeground`'s
+   * post-delete panel-snapshot drop and the parent turn committing.
+   */
+  isPending?: boolean;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -495,6 +548,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   isFocused,
+  isPending,
   executionStartTime,
 }) => {
   const settings = useSettings();
@@ -649,6 +703,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={innerWidth}
                 config={config}
                 isFocused={isFocused}
+                isPending={isPending}
               />
             )}
             {effectiveDisplayRenderer.type === 'diff' && (

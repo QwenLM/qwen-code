@@ -160,6 +160,9 @@ export interface OpenDialogActionReturn {
   /** Pre-filtered sessions for the picker (e.g., multiple title matches from /resume <title>). */
   matchedSessions?: SessionListItem[];
 
+  /** Optional session name for /branch — passed through to handleBranch. */
+  name?: string;
+
   dialog:
     | 'help'
     | 'arena_start'
@@ -181,6 +184,7 @@ export interface OpenDialogActionReturn {
     | 'approval-mode'
     | 'resume'
     | 'delete'
+    | 'branch'
     | 'extensions_manage'
     | 'hooks'
     | 'mcp'

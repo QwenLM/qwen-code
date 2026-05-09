@@ -23,7 +23,7 @@ vi.mock('os');
 vi.mock('crypto');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
-import { ShellTool } from './shell.js';
+import { ShellTool, type ShellToolInvocation } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { type Config } from '../config/config.js';
@@ -35,9 +35,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { ToolErrorType } from './tool-error.js';
-import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
+import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 describe('ShellTool', () => {
   let shellTool: ShellTool;
@@ -68,8 +69,10 @@ describe('ShellTool', () => {
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getGeminiClient: vi.fn(),
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
       getGitCoAuthor: vi.fn().mockReturnValue({
-        enabled: true,
+        commit: true,
+        pr: true,
         name: 'Qwen-Coder',
         email: 'qwen-coder@alibabacloud.com',
       }),
@@ -110,6 +113,9 @@ describe('ShellTool', () => {
         }),
       };
     });
+
+    // Ensure attribution singleton is clean between tests
+    CommitAttributionService.resetInstance();
   });
 
   describe('isCommandAllowed', () => {
@@ -1459,10 +1465,49 @@ describe('ShellTool', () => {
         );
       });
 
-      it('should not add co-author when disabled in config', async () => {
-        // Mock config with disabled co-author
+      it('should not add co-author when only pr is enabled (commit off)', async () => {
+        // Commit attribution must be independent from PR attribution:
+        // disabling commit should skip the Co-authored-by trailer even if
+        // pr remains enabled.
         (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          enabled: false,
+          commit: false,
+          pr: true,
+          name: 'Qwen-Coder',
+          email: 'qwen-coder@alibabacloud.com',
+        });
+
+        const command = 'git commit -m "Initial commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should not add co-author when disabled in config', async () => {
+        // Mock config with commit co-author disabled
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: false,
+          pr: false,
           name: 'Qwen-Coder',
           email: 'qwen-coder@alibabacloud.com',
         });
@@ -1497,7 +1542,8 @@ describe('ShellTool', () => {
       it('should use custom name and email from config', async () => {
         // Mock config with custom co-author details
         (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          enabled: true,
+          commit: true,
+          pr: true,
           name: 'Custom Bot',
           email: 'custom@example.com',
         });
@@ -1531,7 +1577,12 @@ describe('ShellTool', () => {
         );
       });
 
-      it('should add co-author when git commit is prefixed with cd command', async () => {
+      // `cd /elsewhere && git commit` could be redirecting the commit
+      // into a different repo than our cwd. We can't take a meaningful
+      // pre-HEAD snapshot or write notes to the right place without
+      // resolving the cd target, so we conservatively skip the
+      // co-author rewrite altogether.
+      it('should NOT add co-author when git commit is preceded by cd', async () => {
         const command = 'cd /tmp/test && git commit -m "Test commit"';
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
@@ -1550,14 +1601,893 @@ describe('ShellTool', () => {
         await promise;
 
         expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
+          expect.not.stringContaining('Co-authored-by:'),
           expect.any(String),
           expect.any(Function),
           expect.any(AbortSignal),
           false,
           {},
+        );
+      });
+
+      // `cd subdir && git commit` (relative cd that doesn't escape
+      // upward) is a very common workflow — entering a subdirectory
+      // before committing. The cd target stays inside the same repo,
+      // so attribution should still apply. The earlier blanket
+      // "any cd shifts cwd" gate broke this; the heuristic now only
+      // marks shifted on absolute paths, `..`-prefixed paths, env-var
+      // expansions, etc.
+      it('should add co-author for cd subdir && git commit (relative same-repo)', async () => {
+        const command = 'cd src && git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `cd ..` could escape the repo root — conservative shift.
+      // Embedded `..` traversal — `cd foo/../../escape` — could
+      // escape the repo just as much as a leading `..`, so the
+      // heuristic must reject it. Without this the trailer would
+      // be appended to a commit landing in a different repo.
+      it('should NOT add co-author for cd with embedded .. (escapes via traversal)', async () => {
+        const command = 'cd foo/../../escape && git commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `env` is a shell wrapper like `sudo`/`command`, with the
+      // additional twist that it accepts `KEY=VALUE` argv entries
+      // before the program. Without explicit handling, the regex
+      // would see `KEY=VALUE` as the program name and skip
+      // attribution entirely.
+      it('should add co-author when git commit is wrapped in env KEY=VAL', async () => {
+        const command =
+          'env GIT_COMMITTER_DATE=now git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `env -u NAME` unsets a variable. The flag takes a value, so
+      // tokeniseSegment has to skip it; otherwise NAME would be left
+      // as the next token and the parser would treat it as the
+      // program, masking the real `git commit`.
+      it('should add co-author when git commit is wrapped in env -u NAME', async () => {
+        const command = 'env -u GIT_AUTHOR_DATE git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `GIT_DIR=...` and friends redirect git's repo selection; a
+      // commit prefixed with one of these lands in a different repo
+      // than our cwd. Stamping the trailer onto it would corrupt a
+      // commit in a repo the user didn't expect us to touch.
+      it.each([
+        ['GIT_DIR', 'GIT_DIR=/tmp/other/.git git commit -m "msg"'],
+        ['GIT_WORK_TREE', 'GIT_WORK_TREE=/tmp/other git commit -m "msg"'],
+        ['GIT_COMMON_DIR', 'GIT_COMMON_DIR=/tmp/other git commit -m "msg"'],
+        [
+          'GIT_INDEX_FILE',
+          'GIT_INDEX_FILE=/tmp/other/index git commit -m "msg"',
+        ],
+        [
+          'env-wrapped GIT_DIR',
+          'env GIT_DIR=/tmp/other/.git git commit -m "msg"',
+        ],
+        // GNU coreutils 8.30+'s `env -C DIR` / `--chdir` relocates
+        // the working directory before exec — same repo-shifting
+        // contract as `cd /elsewhere && git commit`.
+        ['env -C', 'env -C /tmp/other git commit -m "msg"'],
+        ['env --chdir', 'env --chdir /tmp/other git commit -m "msg"'],
+        // Attached-value forms: `shell-quote` tokenises `--chdir=/tmp`
+        // and `-C/tmp` as single argv entries, so the bare-flag set
+        // membership check would miss them. Without explicit
+        // attached-form handling, `sudo --chdir=/tmp git commit` and
+        // `env -C/tmp git commit` would silently land our trailer on
+        // a commit in the wrong repo.
+        ['env --chdir=', 'env --chdir=/tmp/other git commit -m "msg"'],
+        ['env -C attached', 'env -C/tmp/other git commit -m "msg"'],
+        ['sudo --chdir=', 'sudo --chdir=/tmp/other git commit -m "msg"'],
+        ['sudo -D attached', 'sudo -D/tmp/other git commit -m "msg"'],
+      ])(
+        'should NOT add co-author for repo-redirecting %s assignment',
+        async (_label, command) => {
+          const invocation = shellTool.build({ command, is_background: false });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+          await promise;
+          const observed = mockShellExecutionService.mock.calls[0][0];
+          expect(observed).not.toContain('Co-authored-by:');
+        },
+      );
+
+      // GIT_AUTHOR_DATE / GIT_COMMITTER_DATE / etc. tweak commit
+      // metadata but don't relocate the repo — attribution still
+      // applies as normal.
+      it('should still add co-author with benign GIT_COMMITTER_DATE assignment', async () => {
+        const command =
+          'GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        expect(observed).toContain('Co-authored-by:');
+      });
+
+      it('should NOT add co-author for cd .. && git commit (could escape repo)', async () => {
+        const command = 'cd .. && git commit -m "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `cd $HOME && git commit` would land in whatever repo `$HOME`
+      // points to — typically NOT our cwd. With the default
+      // `shell-quote` parse, `$HOME` collapses to `''` and the
+      // `target.includes('$')` repo-shift check silently fails. The
+      // env-preserving parse keeps `$NAME` literal in tokens so this
+      // case is correctly flagged.
+      it.each([
+        ['$HOME', 'cd $HOME && git commit -m "elsewhere"'],
+        ['$REPO_ROOT', 'cd $REPO_ROOT && git commit -m "elsewhere"'],
+      ])(
+        'should NOT add co-author for cd %s && git commit (env-var target)',
+        async (_label, command) => {
+          const invocation = shellTool.build({
+            command,
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+          await promise;
+          expect(mockShellExecutionService).toHaveBeenCalledWith(
+            expect.not.stringContaining('Co-authored-by:'),
+            expect.any(String),
+            expect.any(Function),
+            expect.any(AbortSignal),
+            false,
+            {},
+          );
+        },
+      );
+
+      // A cd that comes AFTER an in-cwd commit doesn't invalidate the
+      // commit's attribution — the commit already landed in our repo.
+      it('should add co-author when cd comes AFTER git commit', async () => {
+        const command = 'git commit -m "Test" && cd /tmp/test';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `git -C <path> commit` runs in <path>, not our cwd — same risk
+      // as the cd case, so the rewrite should be skipped. Also covers
+      // the attached-value form `-C/path` (single token from
+      // shell-quote) and the long-flag attached forms
+      // `--git-dir=/path` / `--work-tree=/path`.
+      it.each([
+        ['git -C /tmp/other commit', 'git -C /tmp/other commit -m "Other"'],
+        [
+          'git -C/tmp/other commit (attached)',
+          'git -C/tmp/other commit -m "Other"',
+        ],
+        [
+          'git --git-dir=/tmp/other/.git commit',
+          'git --git-dir=/tmp/other/.git commit -m "Other"',
+        ],
+        [
+          'git --work-tree=/tmp/other commit',
+          'git --work-tree=/tmp/other commit -m "Other"',
+        ],
+      ])('should NOT add co-author for %s', async (_label, command) => {
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `git -C .` (or `-C ./` or `-C .` attached as `-C.`) is a
+      // semantic no-op — the cwd doesn't actually change. The
+      // previous "any -C → cwd-shifted" rule silently skipped
+      // attribution for what's basically `git commit` with an
+      // explicit cwd marker. Treat dot-form as in-cwd.
+      it.each([
+        ['git -C . commit', 'git -C . commit -m "in cwd"'],
+        ['git -C ./ commit', 'git -C ./ commit -m "in cwd"'],
+        ['git -C. commit (attached)', 'git -C. commit -m "in cwd"'],
+      ])('should add co-author for %s', async (_label, command) => {
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        expect(observed).toContain('Co-authored-by:');
+      });
+
+      // `shell-quote` parses an unresolved env-var (`$HOME`, `$REPO`)
+      // or unknown command-substitution as the empty string, which is
+      // indistinguishable from a literal `-C ""`. Treating that as
+      // no-op would let `git -C $HOME commit` silently land our trailer
+      // on a commit that goes to a different repo. Conservative skip is
+      // safer than the rare `-C $PWD` miss.
+      it.each([
+        ['git -C $HOME commit', 'git -C $HOME commit -m "elsewhere"'],
+        ['git -C "" commit', 'git -C "" commit -m "literal empty"'],
+      ])(
+        'should NOT add co-author for %s (env-var/empty target)',
+        async (_label, command) => {
+          const invocation = shellTool.build({
+            command,
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+          await promise;
+          expect(mockShellExecutionService).toHaveBeenCalledWith(
+            expect.not.stringContaining('Co-authored-by:'),
+            expect.any(String),
+            expect.any(Function),
+            expect.any(AbortSignal),
+            false,
+            {},
+          );
+        },
+      );
+
+      // Trailing shell comments must not confuse the `-m` rewrite:
+      // `git commit -m "real" # -m "fake"` would otherwise have
+      // `lastMatchOf` pick the comment's `-m "fake"` and splice the
+      // trailer into a `-m` flag bash discards, leaving the actual
+      // commit unattributed. The unquoted-`#` truncation in the
+      // segment slicing keeps the rewrite scoped to the live part.
+      it('should add co-author for git commit followed by # comment', async () => {
+        const command = 'git commit -m "real" # -m "fake"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0] as string;
+        // Trailer must land in the live `-m "real"` body, BEFORE the `#`.
+        expect(observed).toContain('Co-authored-by:');
+        const realIdx = observed.indexOf('-m "real');
+        const hashIdx = observed.indexOf(' # ');
+        const coAuthorIdx = observed.indexOf('Co-authored-by:');
+        expect(realIdx).toBeGreaterThanOrEqual(0);
+        expect(hashIdx).toBeGreaterThan(realIdx);
+        expect(coAuthorIdx).toBeGreaterThan(realIdx);
+        expect(coAuthorIdx).toBeLessThan(hashIdx);
+      });
+
+      // A `#` inside a quoted commit body is NOT a comment marker.
+      // `git commit -m "fix #123"` should still get the trailer
+      // appended inside the quoted body.
+      it('should add co-author for git commit -m with # inside body', async () => {
+        const command = 'git commit -m "fix #123 add feature"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+        const observed = mockShellExecutionService.mock.calls[0][0] as string;
+        expect(observed).toContain('Co-authored-by:');
+        // The `#123` MUST still be inside the body (not pushed out by
+        // the comment-truncation logic mistaking it for a comment).
+        expect(observed).toContain('#123');
+      });
+
+      // git's global flags (`-c`, `--no-pager`, etc.) push the
+      // subcommand past index 1; a fixed-position check at arg1 used
+      // to silently skip these forms. Make sure we still inject the
+      // trailer for them.
+      it('should add co-author for git -c key=val commit', async () => {
+        const command = 'git -c user.email=x@y commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should add co-author for git --no-pager commit', async () => {
+        const command = 'git --no-pager commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Common real-world prefixes — env-var assignment and `sudo` — must
+      // still be detected so attribution doesn't silently skip the trailer.
+      it('should add co-author when git commit is prefixed with env vars', async () => {
+        const command = 'GIT_COMMITTER_DATE=now git commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // `sudo -u user git commit` puts the program at index [3], not
+      // [1]; a naive flag-only consumer would leave `user` standing
+      // in for the program name.
+      it('should add co-author for sudo with value-taking flag (-u user)', async () => {
+        const command = 'sudo -u other git commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // git's `-m` can be passed multiple times — `git interpret-trailers`
+      // only recognises trailers that sit at the end of the *last* `-m`
+      // value, so the rewrite must target the last match.
+      it('should add Co-authored-by trailer to the LAST -m when multiple are present', async () => {
+        const command = 'git commit -m "Title" -m "Body line 1"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The trailer must land inside the second `-m` quote pair, not
+        // the first; a simple way to assert this is that `Body line 1`
+        // and the trailer share the same closing quote.
+        expect(observed).toMatch(
+          /-m\s+"Body line 1\s+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud\.com>"/s,
+        );
+        // And the first -m's title is unchanged.
+        expect(observed).toMatch(/-m\s+"Title"\s/);
+      });
+
+      // Concern: a literal `-m '...'` *inside* a quoted commit
+      // message body could be picked up by the regex as if it were a
+      // real later argument, splicing the trailer mid-message and
+      // breaking the command's quoting.
+      it('should not be fooled by a literal -m token inside the quoted message body', async () => {
+        const command =
+          'git commit -m "docs mention -m \'flag\' for completeness"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The original message body must be preserved end-to-end —
+        // no trailer spliced before its closing quote.
+        expect(observed).toContain(
+          "-m \"docs mention -m 'flag' for completeness",
+        );
+        // The trailer must land AFTER the original body, just before
+        // the message's outer closing quote.
+        expect(observed).toMatch(
+          /docs mention -m 'flag' for completeness\s+Co-authored-by:[^"]+"/s,
+        );
+      });
+
+      // Concern: a later `git tag -m "..."` in the same compound
+      // command could be mistaken for the commit message because the
+      // regex was matching across the whole command string.
+      it('should target the commit message, not a later git tag -m in the same chain', async () => {
+        const command =
+          'git commit -m "fix" && git tag -a v1 -m "release notes"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The trailer is appended to the commit message body...
+        expect(observed).toMatch(/git commit -m "fix\s+Co-authored-by:[^"]+"/s);
+        // ...and the later `git tag -m` is left exactly as the user
+        // wrote it.
+        expect(observed).toContain('git tag -a v1 -m "release notes"');
+        // The tag annotation must not have a trailer spliced in.
+        const tagMatch = observed.match(/git tag .*-m "([^"]*)"/);
+        expect(tagMatch?.[1]).toBe('release notes');
+      });
+
+      // The tool description recommends `git commit -m "$(cat <<'EOF'
+      // ... EOF)"` for multi-line messages. The body contains nested
+      // `"` from interior shell tokens — the regex would match only
+      // up to the first interior quote and splice the trailer
+      // mid-substitution, breaking the command. Bail explicitly.
+      it('should NOT rewrite -m bodies that contain $(...) command substitution', async () => {
+        const command =
+          'git commit -m "$(cat <<\'EOF\'\nfix: title\n\ndetails\nEOF\n)"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The original command must reach the executor unchanged.
+        expect(observed).toBe(command);
+        expect(observed).not.toContain('Co-authored-by:');
+      });
+
+      // `--message` is git's documented long alias for `-m`. Without
+      // explicit handling the trailer would be silently skipped on
+      // commits that use the long form.
+      it('should add co-author for git commit --message "..."', async () => {
+        const command = 'git commit --message "Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should add co-author for git commit --message="..."', async () => {
+        const command = 'git commit --message="Test commit"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should add co-author when git commit is prefixed with sudo', async () => {
+        const command = 'sudo git commit -m "Test"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Quoted "git commit" should not look like an executed commit.
+      it('should NOT add co-author when git commit appears only inside quoted text', async () => {
+        const command = 'echo "git commit -m foo"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Co-authored-by:'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Bash's apostrophe-via-`'\''` form (close-escape-reopen) is a
+      // single logical body. The trailer must land at the FINAL
+      // closing `'` — not in the middle of the escape — so the regex
+      // body group has to recognise the escape sequence as a whole.
+      // Mirrors the bodySinglePattern in addAttributionToPR.
+      it("should append trailer after the final ' in -m 'don'\\''t' apostrophe-escape", async () => {
+        const command = "git commit -m 'don'\\''t'";
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The full apostrophe-escape body survives intact and the
+        // trailer lands AFTER it (before the closing `'`), not in the
+        // middle of `'\''`.
+        expect(observed).toMatch(
+          /git commit -m 'don'\\''t[\s\S]*Co-authored-by:[^']*'/,
         );
       });
 
@@ -1592,6 +2522,953 @@ describe('ShellTool', () => {
           false,
           {},
         );
+      });
+
+      // Bash accepts `-mfoo` as well as `-m foo`. The previous regex
+      // required at least one whitespace and silently no-op'd on the
+      // shorthand form, so users who used `git commit -m"msg"` got no
+      // co-author trailer.
+      it('should add co-author to git commit -m"msg" shorthand (no space)', async () => {
+        const command = 'git commit -m"Quick fix"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
+          ),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Without escaping, a co-author name containing `$()`, backticks,
+      // or `"` would either break the user-approved `git commit` command
+      // or be evaluated as command substitution.
+      it('should escape shell metacharacters in name/email', async () => {
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: true,
+          pr: true,
+          name: 'Bot $(rm -rf /) `eval` "danger"',
+          email: 'bot@example.com',
+        });
+
+        const command = 'git commit -m "msg"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observedCmd = mockShellExecutionService.mock.calls[0][0];
+        // Each metacharacter must be escaped, not literal.
+        expect(observedCmd).toContain('\\$');
+        expect(observedCmd).toContain('\\`');
+        expect(observedCmd).toContain('\\"');
+        // The `-m "..."` quote pair must stay closed.
+        expect(observedCmd).toMatch(/-m\s+".+"/s);
+      });
+    });
+
+    describe('addAttributionToPR', () => {
+      // Non-inline-body flows: `--body-file <path>` reads the body
+      // from a file on disk, `--fill` populates it from commit
+      // messages, and bare `gh pr create` opens an editor. None of
+      // these have a body argv we can splice the attribution into.
+      // We can't safely modify them automatically (would either
+      // mutate the user's file on disk or break the editor flow),
+      // so we leave the command untouched and rely on the debug
+      // warning to surface the skip when QWEN_DEBUG_LOG_FILE is set.
+      it.each([
+        ['--body-file', 'gh pr create --title "x" --body-file /tmp/body.md'],
+        ['--fill', 'gh pr create --title "x" --fill'],
+        ['no body flag (editor)', 'gh pr create --title "x"'],
+      ])(
+        'should leave gh pr create %s unchanged (non-inline-body flow)',
+        async (_label, command) => {
+          const invocation = shellTool.build({ command, is_background: false });
+          const promise = invocation.execute(mockAbortSignal);
+
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+
+          await promise;
+
+          const observed = mockShellExecutionService.mock.calls[0][0] as string;
+          expect(observed).toBe(command);
+          expect(observed).not.toContain('Generated with Qwen Code');
+        },
+      );
+
+      // `gh pr new` is a documented alias for `gh pr create`. Without
+      // explicit alias handling the rewrite silently misses it.
+      it('should append attribution to `gh pr new --body "..."` (alias form)', async () => {
+        const command = 'gh pr new --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Same `$(...)` bailout as addCoAuthorToGitCommit: a heredoc
+      // body must not have the trailer spliced in mid-substitution.
+      it('should NOT rewrite --body that contains $(...) command substitution', async () => {
+        const command =
+          'gh pr create --title "x" --body "$(cat <<\'EOF\'\nSummary\nEOF\n)"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        expect(observed).toBe(command);
+        expect(observed).not.toContain('Generated with Qwen Code');
+      });
+
+      // `-b` is gh's documented short alias for `--body`. Without
+      // explicit handling the rewrite would silently miss it.
+      // `curl -b "session=abc" && gh pr create --body "summary"` —
+      // without segment scoping the body regex would match curl's
+      // `-b` cookie flag (since it's the same `-b "..."` shape) and
+      // inject attribution into the cookie value, breaking curl.
+      it('should NOT match -b in earlier non-gh segments of a compound', async () => {
+        const command =
+          'curl -b "session=abc" https://example.com && gh pr create --title "x" --body "summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // curl's -b cookie value must be exactly preserved.
+        expect(observed).toContain('curl -b "session=abc"');
+        // The trailer should land in gh's --body, not in curl's -b.
+        expect(observed).toMatch(
+          /gh pr create --title "x" --body "summary[\s\S]*Generated with Qwen Code"/,
+        );
+      });
+
+      it('should append attribution to gh pr create -b "..." (short form)', async () => {
+        const command = 'gh pr create --title "x" -b "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // A `-b 'flag'` mention literally inside the outer `--body "..."`
+      // text must NOT be picked as the body argument: the trailer
+      // would land mid-body, corrupting the user-approved command.
+      // Mirrors addCoAuthorToGitCommit's nested-match check.
+      it('should pick the OUTER --body when an inner -b appears in body text', async () => {
+        const command =
+          'gh pr create --title "x" --body "docs mention -b \'flag\' here"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+
+        const calls = mockShellExecutionService.mock.calls;
+        const cmd = calls[calls.length - 1]?.[0] as string;
+        // The trailer must appear AFTER the closing `"` of the outer
+        // body, not between `flag` and `here`.
+        expect(cmd).toMatch(
+          /--body "docs mention -b 'flag' here[\s\S]*Generated with Qwen Code"/,
+        );
+        expect(cmd).not.toMatch(
+          /-b 'flag[\s\S]*Generated with Qwen Code[\s\S]*' here"/,
+        );
+      });
+
+      it('should append attribution to gh pr create --body when pr enabled', async () => {
+        const command = 'gh pr create --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // gh CLI uses the *last* `--body` flag when multiple are
+      // provided. Splicing into the first one would silently drop
+      // attribution. Mirrors the matchAll/last-match behaviour in
+      // addCoAuthorToGitCommit.
+      it('should target the LAST --body when gh pr create has multiple', async () => {
+        const command =
+          'gh pr create --title "x" --body "ignored" --body "real summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+
+        const calls = mockShellExecutionService.mock.calls;
+        const cmd = calls[calls.length - 1]?.[0] as string;
+        expect(cmd).toMatch(
+          /--body "ignored" --body "real summary[\s\S]*Generated with Qwen Code/,
+        );
+        // The trailer must NOT be inside the first --body.
+        expect(cmd).not.toMatch(
+          /--body "ignored[\s\S]*Generated with Qwen Code[\s\S]*" --body/,
+        );
+      });
+
+      // `gh --repo owner/repo pr create` shifts pr/create past the
+      // fixed `tokens[1]/tokens[2]` slots; a literal-position check
+      // misses these forms.
+      it('should append attribution when gh has global flags before pr create', async () => {
+        const command =
+          'gh --repo owner/repo pr create --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // The `--body=value` (equals-sign) form is common with gh; the
+      // earlier `\s+` separator only matched `--body value`.
+      it('should append attribution to --body="..." equals-sign form', async () => {
+        const command = 'gh pr create --title "x" --body="Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Quoted "gh pr create" should not look like an executed PR command.
+      it('should NOT rewrite when gh pr create appears only inside quoted text', async () => {
+        const command = 'echo "gh pr create --title x --body \\"Summary\\""';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      it('should skip PR attribution when pr is off even if commit is on', async () => {
+        // Commit and PR toggles must be independent.
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: true,
+          pr: false,
+          name: 'Qwen-Coder',
+          email: 'qwen-coder@alibabacloud.com',
+        });
+
+        const command = 'gh pr create --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        expect(mockShellExecutionService).toHaveBeenCalledWith(
+          expect.not.stringContaining('Generated with Qwen Code'),
+          expect.any(String),
+          expect.any(Function),
+          expect.any(AbortSignal),
+          false,
+          {},
+        );
+      });
+
+      // Without escaping, a generator name containing `"`, `$`, or a
+      // backtick would either break the user-approved `gh pr create`
+      // command or be evaluated as command substitution. The fix was to
+      // shell-escape the appended text for the surrounding quote style.
+      it('should escape generator names with shell metacharacters in double-quoted body', async () => {
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: true,
+          pr: true,
+          // A name designed to break double-quote interpolation if not escaped.
+          name: 'Bot $(rm -rf /) "danger" `eval`',
+          email: 'bot@example.com',
+        });
+        // Generator name only ends up in the attribution when shots > 0.
+        const svc = CommitAttributionService.getInstance();
+        svc.incrementPromptCount();
+
+        const command = 'gh pr create --title "x" --body "Summary"';
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observedCmd = mockShellExecutionService.mock.calls[0][0];
+        // Each metacharacter must be escaped, not literal.
+        expect(observedCmd).toContain('\\$');
+        expect(observedCmd).toContain('\\"');
+        expect(observedCmd).toContain('\\`');
+        // And the original `--body` quote must still close properly
+        // (`s` flag — body contains newlines from the attribution).
+        expect(observedCmd).toMatch(/--body\s+".+"/s);
+      });
+
+      it('should escape single-quoted body containing apostrophes in generator name', async () => {
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          commit: true,
+          pr: true,
+          name: "O'Brien-Bot",
+          email: 'bot@example.com',
+        });
+        const svc = CommitAttributionService.getInstance();
+        svc.incrementPromptCount();
+
+        const command = "gh pr create --title 'x' --body 'Summary'";
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observedCmd = mockShellExecutionService.mock.calls[0][0];
+        // The bash close-escape-reopen trick yields `'\''` in place of `'`.
+        expect(observedCmd).toContain("O'\\''Brien-Bot");
+      });
+
+      // A body that already uses bash's `'\''` apostrophe-escape form
+      // should be matched as a single complete argument so the trailer
+      // appends after the full body, not after the first quote-segment.
+      it("should match the full body across '\\\\'' apostrophe escapes", async () => {
+        const command = "gh pr create --title 'x' --body 'don'\\''t break me'";
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = invocation.execute(mockAbortSignal);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+
+        await promise;
+
+        const observed = mockShellExecutionService.mock.calls[0][0];
+        // The original body content is preserved end-to-end.
+        expect(observed).toContain("don'\\''t break me");
+        // The attribution lands AFTER the original body, not in the
+        // middle of it.
+        expect(observed).toMatch(
+          /don'\\''t break me[\s\S]*Generated with Qwen Code/,
+        );
+      });
+    });
+
+    describe('foreground → background promote (#3831 PR-2)', () => {
+      it("exposes a promote AbortController whose signal is wired into ShellExecutionService.execute's combined signal", async () => {
+        // Pin the operational guarantee: aborting the controller exposed
+        // via `setPromoteAbortControllerCallback` must actually reach
+        // `ShellExecutionService` — the bare "controller is an
+        // AbortController instance" assertion would still pass if
+        // `shell.ts` exposed the controller but forgot to include
+        // `promoteAbortController.signal` in `AbortSignal.any(...)`,
+        // silently breaking the future Ctrl+B keybind.
+        const setPromoteAc = vi.fn();
+        const invocation = shellTool.build({
+          command: 'npm run dev',
+          is_background: false,
+        });
+        // Cast to the concrete invocation type to access the extra
+        // ShellTool-specific execute() params (setPidCallback +
+        // setPromoteAbortControllerCallback) — the base ToolInvocation
+        // type only has the 3-param signature shared across all tools.
+        const promise = (invocation as ShellToolInvocation).execute(
+          mockAbortSignal,
+          undefined,
+          {},
+          undefined,
+          setPromoteAc,
+        );
+        resolveShellExecution({ pid: 12345 });
+        await promise;
+
+        expect(setPromoteAc).toHaveBeenCalledTimes(1);
+        const passedAc = setPromoteAc.mock.calls[0][0] as AbortController;
+        expect(passedAc).toBeInstanceOf(AbortController);
+
+        // Capture the AbortSignal handed to ShellExecutionService.execute
+        // (4th arg per the call signature) and verify firing the promote
+        // controller propagates through it.
+        const passedSignal = mockShellExecutionService.mock
+          .calls[0][3] as AbortSignal;
+        expect(passedSignal.aborted).toBe(false);
+        passedAc.abort({ kind: 'background', shellId: 'bg_unit_test' });
+        expect(passedSignal.aborted).toBe(true);
+      });
+
+      it('registers a bg_xxx entry on `result.promoted: true` and returns promote-flavored ToolResult', async () => {
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockReturnValue(undefined);
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        // Service signals promote: snapshot ready, child still alive.
+        resolveShellExecution({
+          output: 'partial output before promote',
+          exitCode: null,
+          signal: null,
+          aborted: false, // ← per #3831 design question 7
+          promoted: true,
+          pid: 99999,
+        });
+        const result = await promise;
+
+        // Entry registered with the spawn pid + promote AbortController.
+        expect(registry.register).toHaveBeenCalledTimes(1);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(entry.command).toBe('tail -f /tmp/never.log');
+        expect(entry.cwd).toBe('/test/dir');
+        expect(entry.status).toBe('running');
+        expect(entry.pid).toBe(99999);
+        expect(entry.shellId).toMatch(/^bg_/);
+        expect(entry.outputPath).toContain(entry.shellId);
+        expect(entry.abortController).toBeInstanceOf(AbortController);
+
+        // Snapshot written to disk.
+        expect(writeFileSyncSpy).toHaveBeenCalledWith(
+          entry.outputPath,
+          'partial output before promote',
+        );
+
+        // Model-facing copy points at /tasks / dialog / task_stop.
+        expect(result.llmContent).toContain(
+          `promoted to background as ${entry.shellId}`,
+        );
+        expect(result.llmContent).toContain(`PID: 99999`);
+        expect(result.llmContent).toContain('/tasks');
+        expect(result.llmContent).toContain(
+          `task_stop({ task_id: '${entry.shellId}'`,
+        );
+        expect(result.returnDisplay).toContain(
+          `Promoted to background: ${entry.shellId}`,
+        );
+        // No `error` on the result — promote is a success-shaped outcome
+        // per #3831 design question 7 / @tanzhenxin's PR-1 review.
+        expect(result.error).toBeUndefined();
+      });
+
+      it('aborting entry.abortController kills the child via SIGTERM/SIGKILL and marks the registry entry cancelled', async () => {
+        // Pin the core operational guarantee for promoted shells:
+        // `task_stop bg_xxx` (which goes through
+        // `registry.requestCancel` → `entry.abortController.abort()`)
+        // must actually stop the child + transition the entry to
+        // `'cancelled'`. The bare "fresh controller" check below
+        // doesn't exercise the full kill path.
+        vi.useFakeTimers();
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        try {
+          const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+          writeFileSyncSpy.mockReturnValue(undefined);
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 55555,
+          });
+          await promise;
+
+          const entry = (registry.register as Mock).mock.calls[0][0];
+          // Trigger the cancellation path the way `task_stop` does.
+          entry.abortController.abort();
+          // Sync part of cancelChild runs as a microtask after abort:
+          // SIGTERM is dispatched, then the listener awaits a 200ms
+          // timer before SIGKILL + registry.cancel. Flush microtasks +
+          // advance fake time past the SIGKILL window.
+          await Promise.resolve();
+          expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGTERM');
+          // Advance past PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS (200ms).
+          await vi.advanceTimersByTimeAsync(250);
+          expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGKILL');
+          // Registry entry transitions to 'cancelled' synchronously
+          // after SIGKILL — so /tasks reflects user intent without
+          // waiting for the (non-existent) settle path.
+          expect(registry.cancel).toHaveBeenCalledWith(
+            entry.shellId,
+            expect.any(Number),
+          );
+        } finally {
+          processKillSpy.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+
+      it("entry.abortController is a FRESH controller (not the already-aborted promote controller) so task_stop's abort() actually fires kill listeners", async () => {
+        // Real-bug regression: if `entry.abortController` were the
+        // same `promoteAbortController` that triggered the promote,
+        // it would already be in the `aborted: true` state by the time
+        // it landed in the registry. `task_stop bg_xxx` calls
+        // `entry.abortController.abort()` which is a no-op on an
+        // already-aborted controller, AND `ShellExecutionService` has
+        // detached its abort listener as part of the promote handoff,
+        // so the still-running child would survive task_stop forever.
+        // Pin: entry.abortController.signal.aborted === false at
+        // registration.
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockReturnValue(undefined);
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 77777,
+        });
+        await promise;
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(entry.abortController.signal.aborted).toBe(false);
+      });
+
+      it('survives a snapshot write failure — registry entry still registered', async () => {
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockImplementation(() => {
+          throw new Error('ENOSPC: no space left on device');
+        });
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: 'pre-promote',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 88888,
+        });
+        const result = await promise;
+
+        // The disk write failure is logged + swallowed: the entry is
+        // still valuable on its own; the file is the inspection
+        // surface, not the source of truth.
+        expect(registry.register).toHaveBeenCalledTimes(1);
+        expect(result.llmContent).toContain('promoted to background');
+      });
+
+      it('entry.command holds the post-co-author-rewrite form (commandToExecute), not raw params.command', async () => {
+        // #3894 review: previously `entry.command` used
+        // `this.params.command`, which diverges from what actually ran
+        // for `git commit -m` invocations that
+        // `addCoAuthorToGitCommit()` rewrote into a multi-line form
+        // with `-m "Co-Authored-By: …"`. Pin: registered entry MUST
+        // mirror the post-rewrite command so /tasks shows what the OS
+        // actually executed.
+        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+        writeFileSyncSpy.mockReturnValue(undefined);
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const rawCommand = 'git commit -m "feat: ship promote"';
+        const invocation = shellTool.build({
+          command: rawCommand,
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 33333,
+        });
+        const result = await promise;
+
+        // The actual command passed to ShellExecutionService.execute is
+        // the post-rewrite form — capture it from the service mock.
+        const commandPassedToService = mockShellExecutionService.mock
+          .calls[0][0] as string;
+        expect(commandPassedToService).not.toBe(rawCommand); // sanity: rewrite happened
+        expect(commandPassedToService).toContain('Co-authored-by');
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(entry.command).toBe(commandPassedToService);
+        expect(entry.command).not.toBe(rawCommand);
+
+        // llmContent also references the post-rewrite form so the
+        // model sees consistent state.
+        expect(result.llmContent).toContain(commandPassedToService);
+      });
+
+      it('rethrows + kills child when mkdirSync(outputDir) throws — no orphan zombie', async () => {
+        // @tanzhenxin's review on #3894: mkdirSync ran before any
+        // try/catch, so an unwritable output dir (read-only mount,
+        // sandbox perms, ENOSPC on metadata) rejected the handler
+        // BEFORE the registry's kill listener was wired — the still-
+        // running child became an orphan with no kill path until the
+        // OS reaped it on session end. Pin the regression: mkdir-throw
+        // is re-raised AND the child gets SIGTERM right away.
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        const mkdirSyncSpy = vi.mocked(fs.mkdirSync);
+        try {
+          mkdirSyncSpy.mockImplementation(() => {
+            throw new Error('EROFS: read-only file system');
+          });
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 22222,
+          });
+
+          await expect(promise).rejects.toThrow('EROFS');
+          // SIGTERM is sync after the throw — no fake timers needed.
+          expect(processKillSpy).toHaveBeenCalledWith(-22222, 'SIGTERM');
+        } finally {
+          mkdirSyncSpy.mockReturnValue(undefined);
+          processKillSpy.mockRestore();
+        }
+      });
+
+      it('promote-refused race (aborted: true, promoted: false after promote signal) is reported as benign race, not "Command timed out"', async () => {
+        // @tanzhenxin's review on #3894: when PR-3's Ctrl+B keybind
+        // fires `promoteAbortController.abort` but the service's race
+        // guard refuses promotion (the child terminated a beat
+        // earlier), the result lands `aborted: true, promoted: false`.
+        // Without excluding the promote signal from the timeout
+        // discriminator, the foreground path falsely reports
+        // "Command timed out" for a process that finished naturally.
+        const setPromoteAc = vi.fn();
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = (invocation as ShellToolInvocation).execute(
+          mockAbortSignal,
+          undefined,
+          {},
+          undefined,
+          setPromoteAc,
+        );
+        // Capture the promote AC the foreground path exposes.
+        await Promise.resolve();
+        const promoteAc = setPromoteAc.mock.calls[0]?.[0] as
+          | AbortController
+          | undefined;
+        expect(promoteAc).toBeInstanceOf(AbortController);
+        // Fire promote AFTER the child supposedly terminated — the
+        // service refuses with `aborted: true, promoted: false`.
+        promoteAc!.abort({ kind: 'background', shellId: 'bg_late' });
+        resolveShellExecution({
+          output: 'oops too late\n',
+          exitCode: null,
+          signal: null,
+          aborted: true,
+          promoted: false,
+          pid: 33333,
+        });
+        const result = await promise;
+
+        // Must NOT say "timed out" — the child finished naturally.
+        expect(String(result.llmContent)).not.toContain('timed out');
+        // Should explain the benign race so the agent doesn't retry as
+        // a cancellation/timeout.
+        expect(String(result.llmContent)).toContain(
+          'Command finished before the background-promote',
+        );
+        // Captured output is preserved.
+        expect(String(result.llmContent)).toContain('oops too late');
+      });
+
+      it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
+        // #3894 review: today `BackgroundShellRegistry.register` is
+        // internally safe (Map.set + emit) but if a future
+        // implementation throws, the promoted child is already
+        // detached from the service's listeners and would become an
+        // orphan zombie with no kill path. Pin: register-throw is
+        // re-raised AND the child gets SIGTERM (best-effort kill via
+        // the entry's abort listener).
+        vi.useFakeTimers();
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        try {
+          const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
+          writeFileSyncSpy.mockReturnValue(undefined);
+          const registry = mockConfig.getBackgroundShellRegistry();
+          (registry.register as Mock).mockImplementation(() => {
+            throw new Error('boom: registry borked');
+          });
+          const invocation = shellTool.build({
+            command: 'tail -f /tmp/never.log',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 44444,
+          });
+
+          // Re-thrown to caller (scheduler will surface as tool error).
+          await expect(promise).rejects.toThrow('boom: registry borked');
+
+          // The catch path fired entryAc.abort() → cancelChild → SIGTERM.
+          await Promise.resolve();
+          expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGTERM');
+          // SIGKILL fires after the 200ms timer; advance + assert.
+          await vi.advanceTimersByTimeAsync(250);
+          expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGKILL');
+        } finally {
+          processKillSpy.mockRestore();
+          vi.useRealTimers();
+        }
       });
     });
   });
@@ -1940,6 +3817,45 @@ describe('ShellTool', () => {
         {},
       );
     });
+  });
+});
+
+describe('parseNumstat', () => {
+  it('parses text-diff entries as (additions + deletions) * 40', () => {
+    // Format: "<adds>\t<dels>\t<path>"
+    const out = '2\t3\tsrc/main.ts';
+    expect(parseNumstat(out).get('src/main.ts')).toBe(200);
+  });
+
+  it('uses a fixed fallback for binary entries (- - path)', () => {
+    const out = ['-\t-\tassets/logo.png', '5\t0\tsrc/main.ts'].join('\n');
+    const sizes = parseNumstat(out);
+    // Binary file still lands in the map so attribution doesn't drop
+    // it via diffSize=0; exact size doesn't matter, the constant just
+    // needs to be > 0.
+    expect(sizes.get('assets/logo.png')).toBeGreaterThan(0);
+    expect(sizes.get('src/main.ts')).toBe(200);
+  });
+
+  it('normalizes brace rename notation to the new path', () => {
+    const out = '3\t1\tsrc/{old => new}/file.ts';
+    expect([...parseNumstat(out).keys()]).toEqual(['src/new/file.ts']);
+  });
+
+  it('normalizes bare cross-directory rename to the new path', () => {
+    const out = '1\t1\told/dir/file.ts => new/dir/file.ts';
+    expect([...parseNumstat(out).keys()]).toEqual(['new/dir/file.ts']);
+  });
+
+  it('ignores malformed lines instead of crashing', () => {
+    const out = [
+      '',
+      'garbage line',
+      '5\t2\tsrc/ok.ts',
+      'a\tb\tsrc/bad.ts',
+    ].join('\n');
+    const sizes = parseNumstat(out);
+    expect([...sizes.keys()]).toEqual(['src/ok.ts']);
   });
 });
 

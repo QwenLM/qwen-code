@@ -90,6 +90,12 @@ vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');
 vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
+vi.mock('./hooks/useProviderUpdates.js', () => ({
+  useProviderUpdates: vi.fn(() => ({
+    providerUpdateRequest: undefined,
+    dismissProviderUpdate: vi.fn(),
+  })),
+}));
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
 vi.mock('./contexts/AgentViewContext.js', () => ({
@@ -213,12 +219,36 @@ describe('AppContainer State Management', () => {
         authStatus: 'idle',
         authMessage: null,
       },
+      state: {
+        authError: null,
+        isAuthDialogOpen: false,
+        isAuthenticating: false,
+        pendingAuthType: undefined,
+        externalAuthState: null,
+        qwenAuthState: {
+          deviceAuth: null,
+          authStatus: 'idle',
+          authMessage: null,
+        },
+      },
       handleAuthSelect: vi.fn(),
+      handleSubscriptionPlanSubmit: vi.fn(),
       handleCodingPlanSubmit: vi.fn(),
-      handleAlibabaStandardSubmit: vi.fn(),
+      handleTokenPlanSubmit: vi.fn(),
+      handleApiKeyProviderSubmit: vi.fn(),
       handleOpenRouterSubmit: vi.fn(),
+      handleCustomApiKeySubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
+      actions: {
+        setAuthState: vi.fn(),
+        onAuthError: vi.fn(),
+        handleAuthSelect: vi.fn(),
+        handleProviderSubmit: vi.fn(),
+        handleOpenRouterSubmit: vi.fn(),
+        openAuthDialog: vi.fn(),
+        cancelAuthentication: vi.fn(),
+      },
     });
     mockedUseEditorSettings.mockReturnValue({
       isEditorDialogOpen: false,
@@ -1628,12 +1658,36 @@ describe('AppContainer State Management', () => {
           authStatus: 'idle',
           authMessage: null,
         },
+        state: {
+          authError: null,
+          isAuthDialogOpen: false,
+          isAuthenticating: true,
+          pendingAuthType: undefined,
+          externalAuthState: null,
+          qwenAuthState: {
+            deviceAuth: null,
+            authStatus: 'idle',
+            authMessage: null,
+          },
+        },
         handleAuthSelect: vi.fn(),
+        handleSubscriptionPlanSubmit: vi.fn(),
         handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
+        handleTokenPlanSubmit: vi.fn(),
+        handleApiKeyProviderSubmit: vi.fn(),
         handleOpenRouterSubmit: vi.fn(),
+        handleCustomApiKeySubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
+        actions: {
+          setAuthState: vi.fn(),
+          onAuthError: vi.fn(),
+          handleAuthSelect: vi.fn(),
+          handleProviderSubmit: vi.fn(),
+          handleOpenRouterSubmit: vi.fn(),
+          openAuthDialog: vi.fn(),
+          cancelAuthentication: vi.fn(),
+        },
       });
 
       const mockHandleSlashCommand = vi.fn();

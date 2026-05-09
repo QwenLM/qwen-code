@@ -1140,7 +1140,23 @@ export default {
     '\n⚠ Qwen OAuth 免費額度已於 2026-04-15 停用。請選擇其他選項。\n',
   'Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models':
     '付費 · 每 5 小時最多 6,000 次請求 · 支持阿里雲百鍊 Coding Plan 全部模型',
+  'For teams · Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models':
+    '適合團隊 · 付費 · 每 5 小時最多 6,000 次請求 · 支援阿里雲百鍊 Coding Plan 全部模型',
+  'For individual developers · Pay per model call · 5-hour/weekly quotas':
+    '適合個人開發場景 · 按模型調用次數計費 · 每 5 小時/每週限額',
+  Subscribe: '訂閱計劃',
+  'Paid subscription plans from Alibaba Cloud ModelStudio':
+    '阿里雲百鍊付費訂閱計劃',
+  'Select Subscription Plan': '選擇訂閱計劃',
   'Alibaba Cloud Coding Plan': '阿里雲百鍊 Coding Plan',
+  'Alibaba Cloud Token Plan': '阿里雲百鍊 Token Plan',
+  'Pay-as-you-go tokens · Configure ModelStudio standard API key':
+    '按 Token 付費 · 配置百鍊標準 API Key',
+  'For individuals · Pay-as-you-go tokens · Dedicated Token Plan endpoint':
+    '適合個人 · 按 Token 付費 · 使用獨立 Token Plan Endpoint',
+  'For teams/companies · Credits deducted by token usage · Dedicated API key and base URL':
+    '適合一人公司/團隊/企業 · 按 Token 消耗抵扣 Credits · 專屬 API Key 和 Base URL',
+  'Token Plan documentation': 'Token Plan 參考文檔',
   'Bring your own API key': '使用自己的 API 密鑰',
   'API-KEY': 'API-KEY',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
@@ -1510,6 +1526,8 @@ export default {
     '無效的 API Key，Coding Plan API Key 均以 "sk-sp-" 開頭，請檢查',
   'You can get your Coding Plan API key here':
     '您可以在這裏獲取 Coding Plan API Key',
+  'You can get your Token Plan API key here':
+    '您可以在這裏獲取 Token Plan API Key',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
     'API Key 已存儲在 settings.env 中。您可以將其遷移到 .env 文件以獲得更好的安全性。',
   'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
@@ -1536,6 +1554,7 @@ export default {
   'Choose based on where your account is registered':
     '請根據您的賬號註冊地區選擇',
   'Enter Coding Plan API Key': '輸入 Coding Plan API Key',
+  'Enter Token Plan API Key': '輸入 Token Plan API Key',
   'New model configurations are available for {{region}}. Update now?':
     '{{region}} 有新的模型配置可用。是否立即更新？',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':

@@ -11,7 +11,7 @@ import type {
   GenerateContentResponse,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
-import type { ContentGenerator } from '../core/contentGenerator.js';
+import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
 import {
   GeminiChat,
   InvalidStreamError,
@@ -1242,6 +1242,382 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[2][1].hasFailedCompressionAttempt).toBe(
         false,
       );
+    });
+
+    it('reactively compresses and retries once after a context overflow error', async () => {
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+        { role: 'user', parts: [{ text: 'latest' }] },
+      ];
+      const expectedRequestContents = structuredClone(compressedHistory);
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 135_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(
+          new Error(
+            "This model's maximum context length is 128000 tokens. However, your messages resulted in 135000 tokens.",
+          ),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-reactive-compact',
+      );
+
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].force).toBe(true);
+      expect(compressSpy.mock.calls[1][1].trigger).toBe('auto');
+      expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(135_000);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+
+      const secondRequest = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[1]![0];
+      expect(secondRequest.contents).toEqual(expectedRequestContents);
+      expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      expect(events[1]?.type).toBe(StreamEventType.RETRY);
+      expect(events[1]).not.toHaveProperty('retryInfo');
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'answer after compact',
+        ),
+      ).toBe(true);
+    });
+
+    it('uses the parsed context limit when reactive overflow lacks an actual token count', async () => {
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 128_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(
+          new Error("This model's maximum context length is 128000 tokens."),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-reactive-limit-only',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(128_000);
+    });
+
+    it('uses the configured context window when reactive overflow has no token counts', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 262_144,
+      });
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 262_144,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(new Error('context_length_exceeded'))
+        .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-reactive-window-fallback',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(262_144);
+    });
+
+    it('does not attempt reactive compression more than once per send', async () => {
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const secondOverflow = new Error(
+        'prompt is too long: 140000 tokens > 128000 maximum',
+      );
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 135_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(
+          new Error('prompt is too long: 135000 tokens > 128000 maximum'),
+        )
+        .mockRejectedValueOnce(secondOverflow);
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-reactive-once',
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toThrow(secondOverflow);
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('does not emit a duplicate RETRY after reactive compression follows another retry', async () => {
+      vi.useFakeTimers();
+      try {
+        const compressedHistory: Content[] = [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+          { role: 'user', parts: [{ text: 'latest' }] },
+        ];
+        vi.spyOn(ChatCompressionService.prototype, 'compress')
+          .mockResolvedValueOnce({
+            newHistory: null,
+            info: {
+              originalTokenCount: 0,
+              newTokenCount: 0,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          })
+          .mockResolvedValueOnce({
+            newHistory: compressedHistory,
+            info: {
+              originalTokenCount: 135_000,
+              newTokenCount: 40_000,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          });
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [{ content: { parts: [{ text: '' }] } }],
+              } as unknown as GenerateContentResponse;
+            })(),
+          )
+          .mockRejectedValueOnce(
+            new Error('prompt is too long: 135000 tokens > 128000 maximum'),
+          )
+          .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'prompt-id-reactive-after-invalid-stream',
+        );
+        const events = await collectStreamWithFakeTimers(stream);
+        const eventTypes = events.map((event) => event.type);
+        const compressedIndex = eventTypes.indexOf(StreamEventType.COMPRESSED);
+
+        expect(compressedIndex).toBeGreaterThanOrEqual(0);
+        expect(eventTypes.slice(compressedIndex)).toEqual([
+          StreamEventType.COMPRESSED,
+          StreamEventType.RETRY,
+          StreamEventType.CHUNK,
+        ]);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('surfaces the original context overflow when reactive compression is a NOOP', async () => {
+      const overflow = new Error(
+        'prompt is too long: 135000 tokens > 128000 maximum',
+      );
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 135_000,
+            newTokenCount: 135_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+        overflow,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-reactive-noop',
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toThrow(overflow);
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+
+    it('releases the send-lock when reactive compression throws', async () => {
+      const overflow = new Error(
+        'prompt is too long: 135000 tokens > 128000 maximum',
+      );
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockRejectedValueOnce(new Error('compression failed'))
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(overflow)
+        .mockResolvedValueOnce(makeStreamResponse('next request ok'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-reactive-throws',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toThrow(overflow);
+
+      const nextStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next' },
+        'prompt-id-after-reactive-throws',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of nextStream) {
+        events.push(event);
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(3);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'next request ok',
+        ),
+      ).toBe(true);
     });
   });
 

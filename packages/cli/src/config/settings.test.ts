@@ -40,6 +40,7 @@ import {
 import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import * as commentJsonUtils from '../utils/commentJson.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
@@ -58,6 +59,22 @@ import {
 } from './settings.js';
 import { needsMigration } from './migration/index.js';
 import { QWEN_DIR } from '@qwen-code/qwen-code-core';
+
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    createDebugLogger: () => mockDebugLogger,
+  };
+});
 
 // Resolve the (mocked) user-settings path once at module load. Tests mock
 // `os.homedir`, so the value is stable across the suite. Production callers
@@ -92,6 +109,7 @@ vi.mock('node:fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
     mkdirSync: vi.fn(),
+    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
     realpathSync: (p: string) => p,
   };
 });
@@ -109,6 +127,7 @@ vi.mock('fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
     mkdirSync: vi.fn(),
+    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
     realpathSync: (p: string) => p,
   };
 });
@@ -120,6 +139,21 @@ vi.mock('./extension.js', () => ({
 vi.mock('strip-json-comments', () => ({
   default: vi.fn((content) => content),
 }));
+
+vi.mock('../utils/commentJson.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/commentJson.js')>();
+  return {
+    ...original,
+    // Wrap with vi.fn so tests can spy/mock, but default to calling through
+    // to the real implementation (which uses writeWithBackupSync).
+    updateSettingsFilePreservingFormat: vi.fn((...args: unknown[]) =>
+      original.updateSettingsFilePreservingFormat(
+        ...(args as [string, Record<string, unknown>, boolean]),
+      ),
+    ),
+  };
+});
 
 describe('Settings Loading and Merging', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
@@ -145,6 +179,8 @@ describe('Settings Loading and Merging', () => {
       source: 'file',
     });
     resetHomeEnvBootstrapForTesting();
+    // Ensure the mock delegates to the real implementation by default
+    // (set up in vi.mock factory above).
   });
 
   afterEach(() => {
@@ -638,8 +674,15 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Verify that fs.writeFileSync was called with migrated settings including version
+      // writeWithBackupSync writes to a .tmp file first, then renames
       expect(fs.writeFileSync).toHaveBeenCalled();
-      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error('Expected temp write call for migrated settings');
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
       expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
     });
@@ -696,7 +739,7 @@ describe('Settings Loading and Merging', () => {
 
       loadSettings(MOCK_WORKSPACE_DIR);
 
-      // Version normalization now uses writeWithBackupSync (temp write + rename)
+      // Version normalization uses writeWithBackupSync (temp write + rename)
       // Verify that writeFileSync was called with the temp file path
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
         (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
@@ -736,8 +779,17 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Verify that the migrated settings preserve the model object correctly
+      // writeWithBackupSync writes to a .tmp file first, then renames
       expect(fs.writeFileSync).toHaveBeenCalled();
-      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error(
+          'Expected temp write call for partially migrated settings',
+        );
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
 
       // Model should remain as an object, not double-nested
@@ -839,7 +891,7 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Version should be bumped to 3 even though no keys needed migration
-      // writeWithBackupSync writes to a temp file first, then renames
+      // writeWithBackupSync writes to a .tmp file first, then renames
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
         (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
       );
@@ -871,6 +923,7 @@ describe('Settings Loading and Merging', () => {
 
       loadSettings(MOCK_WORKSPACE_DIR);
 
+      // Version normalization uses writeWithBackupSync (temp write + rename)
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
         (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
       );
@@ -904,6 +957,7 @@ describe('Settings Loading and Merging', () => {
 
       loadSettings(MOCK_WORKSPACE_DIR);
 
+      // Version normalization uses writeWithBackupSync (temp write + rename)
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
         (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
       );
@@ -2362,6 +2416,36 @@ describe('Settings Loading and Merging', () => {
           [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
         });
       });
+    });
+
+    it('should log error when updateSettingsFilePreservingFormat returns false during migration', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ theme: 'dark' });
+          return '{}';
+        },
+      );
+      // Simulate the write-back being refused (e.g. validation failure)
+      const mockFn =
+        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      mockFn.mockReturnValue(false);
+
+      // Should not throw — the error is caught and logged internally
+      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).not.toThrow();
+
+      // The mock should have been called (the migration path was reached)
+      expect(mockFn).toHaveBeenCalled();
+
+      // Verify the error was logged via debugLogger
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'updateSettingsFilePreservingFormat returned false',
+        ),
+      );
     });
   });
 
