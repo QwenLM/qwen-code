@@ -166,6 +166,14 @@ export function preconnectApi(
     return;
   }
 
+  // Skip dispatcher creation when no proxy configured - SDK uses built-in fetch
+  // with its own connection pool, so warming undici dispatcher provides no benefit.
+  if (!options.proxy) {
+    debugLogger.debug('Skipping preconnect dispatcher: no proxy configured');
+    preconnectFired = true;
+    return;
+  }
+
   const targetUrl = getPreconnectTargetUrl(authType, options.resolvedBaseUrl);
 
   if (!targetUrl) {

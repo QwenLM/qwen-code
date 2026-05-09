@@ -49,8 +49,8 @@ export class DefaultOpenAICompatibleProvider
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
-    // Configure fetch options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling
+    // When proxy is set, timeouts are disabled to let SDK control the request
     const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),

@@ -111,8 +111,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
   ) {
     const defaultHeaders = this.buildHeaders();
     const baseURL = contentGeneratorConfig.baseUrl;
-    // Configure runtime options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let Anthropic SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling
+    // When proxy is set, timeouts are disabled to let SDK control the request
     const runtimeOptions = buildRuntimeFetchOptions(
       'anthropic',
       this.cliConfig.getProxy(),

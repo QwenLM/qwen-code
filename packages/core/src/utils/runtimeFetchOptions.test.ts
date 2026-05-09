@@ -23,8 +23,14 @@ vi.mock('undici', () => {
 
   class MockProxyAgent {
     options: UndiciOptions;
+    uri: string;
     constructor(options: UndiciOptions) {
       this.options = options;
+      this.uri = (options as { uri?: string }).uri || '';
+      // Simulate failure for invalid proxy URLs
+      if (this.uri === 'http://invalid-proxy') {
+        throw new Error('Invalid proxy URL');
+      }
     }
   }
 
@@ -34,23 +40,27 @@ vi.mock('undici', () => {
   };
 });
 
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    debug: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+  }),
+}));
+
 describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {
     resetDispatcherCache();
   });
-  it('disables undici timeouts for Agent in OpenAI options', () => {
+  it('returns undefined for OpenAI when no proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai');
+    expect(result).toBeUndefined();
+  });
 
-    expect(result).toBeDefined();
-    expect(result && 'fetchOptions' in result).toBe(true);
-
-    const dispatcher = (
-      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
-    ).fetchOptions?.dispatcher;
-    expect(dispatcher?.options).toMatchObject({
-      headersTimeout: 0,
-      bodyTimeout: 0,
-    });
+  it('returns empty object for Anthropic when no proxy is set', () => {
+    const result = buildRuntimeFetchOptions('anthropic');
+    expect(result).toEqual({});
   });
 
   it('uses ProxyAgent with disabled timeouts when proxy is set', () => {
@@ -64,21 +74,6 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
       uri: 'http://proxy.local',
-      headersTimeout: 0,
-      bodyTimeout: 0,
-    });
-  });
-
-  it('returns fetchOptions with dispatcher for Anthropic without proxy', () => {
-    const result = buildRuntimeFetchOptions('anthropic');
-
-    expect(result).toBeDefined();
-    expect(result && 'fetchOptions' in result).toBe(true);
-
-    const dispatcher = (
-      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
-    ).fetchOptions?.dispatcher;
-    expect(dispatcher?.options).toMatchObject({
       headersTimeout: 0,
       bodyTimeout: 0,
     });
@@ -98,6 +93,21 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       headersTimeout: 0,
       bodyTimeout: 0,
     });
+  });
+
+  it('returns undefined for OpenAI when dispatcher creation fails', () => {
+    const result = buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
+    // Should fallback to undefined (no dispatcher) on error
+    expect(result).toBeUndefined();
+  });
+
+  it('returns empty object for Anthropic when dispatcher creation fails', () => {
+    const result = buildRuntimeFetchOptions(
+      'anthropic',
+      'http://invalid-proxy',
+    );
+    // Should fallback to empty object on error
+    expect(result).toEqual({});
   });
 });
 
@@ -124,9 +134,14 @@ describe('getOrCreateSharedDispatcher', () => {
     expect(d1).not.toBe(d2);
   });
 
-  it('shares the same dispatcher with buildRuntimeFetchOptions', () => {
-    const shared = getOrCreateSharedDispatcher();
+  it('returns undefined dispatcher for OpenAI without proxy (uses built-in fetch)', () => {
     const result = buildRuntimeFetchOptions('openai');
+    expect(result).toBeUndefined();
+  });
+
+  it('shares the same ProxyAgent dispatcher with buildRuntimeFetchOptions when proxy is set', () => {
+    const shared = getOrCreateSharedDispatcher('http://proxy.local');
+    const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
     const sdkDispatcher = (
       result as { fetchOptions?: { dispatcher?: unknown } }
     ).fetchOptions?.dispatcher;
