@@ -666,8 +666,8 @@ export class GeminiClient {
           timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
         });
         if (skillReviewResult.status === 'scheduled') {
-          // Reset tool-call counter only when a review is actually dispatched,
-          // so the count accumulates correctly across turns within a session.
+          // Reset tool-call counter when a review is dispatched so the next
+          // review only fires after a full new threshold worth of tool calls.
           this.toolCallCount = 0;
           if (skillReviewResult.promise) {
             this.pendingMemoryTaskPromises.push(
@@ -685,6 +685,15 @@ export class GeminiClient {
                 }),
             );
           }
+        } else if (
+          skillReviewResult.status === 'skipped' &&
+          skillReviewResult.skippedReason === 'already_running' &&
+          this.toolCallCount >= AUTO_SKILL_THRESHOLD
+        ) {
+          // A review is already in-flight; reset the counter so that when the
+          // current review completes the next call doesn't immediately trigger
+          // another review without accumulating a fresh threshold of tool calls.
+          this.toolCallCount = 0;
         }
         // Always reset the skills-modified flag after the scheduleSkillReview
         // check, regardless of whether a review was dispatched. This prevents
