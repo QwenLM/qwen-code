@@ -2521,7 +2521,11 @@ describe('GeminiChat', async () => {
 
   describe('output token recovery', () => {
     function makeChunk(
-      parts: Array<{ text?: string; functionCall?: unknown }>,
+      parts: Array<{
+        text?: string;
+        functionCall?: unknown;
+        thought?: boolean;
+      }>,
       finishReason?: string,
     ): GenerateContentResponse {
       return {
@@ -2684,6 +2688,177 @@ describe('GeminiChat', async () => {
           'new suffix',
         ].join('\n'),
       );
+    });
+
+    it('should preserve prose continuation that coincidentally repeats an opener phrase', async () => {
+      // Regression: an earlier version of the contained-prefix fallback would
+      // strip leading prose if a substring appeared anywhere in the previous
+      // response. That silently dropped legitimate continuation text.
+      // Now the contained-prefix path requires a Markdown structural anchor,
+      // so common opener phrases like "In summary," / "In conclusion," are
+      // left intact even when they happen to match the previous tail.
+      const previous =
+        'We covered cats. In summary, this concludes the cat section.';
+      const continuation =
+        'In summary, the answer is 42 and the dog section follows.';
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: continuation }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write something' },
+        'prompt-recovery-prose-opener',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      // Continuation must be appended verbatim — no silent strip of
+      // "In summary, " or "In summary, th".
+      expect(text).toBe(previous + continuation);
+    });
+
+    it('should not strip prose that coincides with a far-earlier substring of the previous turn', async () => {
+      // Even when the continuation accidentally matches a long phrase
+      // hundreds of characters above the truncation tail, the contained-prefix
+      // fallback must not replay-strip it: there is no structural anchor and
+      // the match is not adjacent to the truncation point.
+      const filler = 'lorem ipsum dolor sit amet '.repeat(20);
+      const previous = `Here is the rest of the explanation.\n${filler}\nthe model was cut off here`;
+      const continuation = 'Here is the rest of the explanation continued.';
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: continuation }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write something' },
+        'prompt-recovery-far-prose',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(text).toBe(previous + continuation);
+    });
+
+    it('should drop continuation entirely when it exactly replays the previous tail', async () => {
+      // Covers the full-overlap guard in getRecoveryContinuationSuffix:
+      // previousText.endsWith(continuationText) AND the overlap is significant.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk([{ text: 'leading content. tail-fragment' }], 'MAX_TOKENS'),
+        ]),
+        // The whole continuation matches the previous tail and is significant
+        // (>= RECOVERY_OVERLAP_MIN_BYTES). It should be discarded entirely.
+        makeStream([makeChunk([{ text: 'tail-fragment' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write something' },
+        'prompt-recovery-full-overlap',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(text).toBe('leading content. tail-fragment');
+    });
+
+    it('should leave continuation untouched when the previous turn has no plain text', async () => {
+      // Covers the empty-text branches: getRecoveryContinuationSuffix's
+      // `previousText.length === 0` guard (continuation passed through
+      // verbatim) and buildOutputRecoveryMessage's
+      // `previousText.trim().length === 0` branch (no
+      // <previous_response_suffix> block is appended). The previous turn has
+      // only a thought part, so there is no plain text to dedupe against.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [{ text: 'thinking through the problem', thought: true }],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([makeChunk([{ text: 'fresh continuation text' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      const recoveryPayloads: string[] = [];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (params) => {
+          const contents = (params as { contents?: Content[] }).contents ?? [];
+          const lastTurn = contents[contents.length - 1];
+          if (lastTurn && lastTurn.role === 'user') {
+            const lastPart = lastTurn.parts?.[0];
+            if (
+              lastPart &&
+              typeof (lastPart as { text?: string }).text === 'string'
+            ) {
+              recoveryPayloads.push((lastPart as { text: string }).text);
+            }
+          }
+          return streams[callIndex++]!;
+        },
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write something' },
+        'prompt-recovery-thought-only',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const nonThoughtText = lastEntry.parts
+        ?.filter((part) => !('thought' in part) || !part.thought)
+        .map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      // Continuation is preserved verbatim (empty-input guard).
+      expect(nonThoughtText).toBe('fresh continuation text');
+      // The recovery user message must NOT include a previous_response_suffix
+      // block since there was no plain text to anchor on.
+      const recoveryMessage = recoveryPayloads.find((p) =>
+        p.includes('Output token limit hit'),
+      );
+      expect(recoveryMessage).toBeDefined();
+      expect(recoveryMessage).not.toContain('<previous_response_suffix>');
     });
 
     it('should skip recovery when truncated turn has a functionCall', async () => {

@@ -117,6 +117,17 @@ const OUTPUT_RECOVERY_TAIL_CHARS = 1200;
 const RECOVERY_OVERLAP_MAX_SCAN_CHARS = 4000;
 const RECOVERY_OVERLAP_MIN_BYTES = 6;
 const RECOVERY_STRUCTURAL_OVERLAP_MIN_BYTES = 4;
+// Plain-prose substring matches outside the suffix-anchored path are very
+// prone to false positives on common opener phrases ("In summary, …", "Here is
+// the …"). The contained-prefix replay path is reserved for replayed Markdown
+// blocks (tables, headings, fenced code), so we require both a structural
+// anchor at the start of the prefix and a substantially larger byte floor than
+// the suffix path uses. This intentionally errs on the side of leaving rare
+// duplicates in history rather than silently dropping legitimate continuation.
+const RECOVERY_CONTAINED_PREFIX_MIN_BYTES = 12;
+// Limit the substring search to the immediate truncation tail so a coincidental
+// match thousands of characters earlier in the previous turn cannot win.
+const RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS = 400;
 
 function byteLength(text: string): number {
   return Buffer.byteLength(text, 'utf8');
@@ -132,13 +143,29 @@ function isSignificantRecoveryOverlap(overlap: string): boolean {
   );
 }
 
+/**
+ * Returns true if `text` opens with a Markdown block-level structural marker
+ * (table row, fenced code, ATX heading, blockquote, list item). Leading
+ * blank/newline chars are skipped because providers often prepend them when
+ * restarting a block. The marker must appear at the start of a line and be
+ * followed by the syntactic gap the spec requires (e.g. `# ` not `#abc`), so
+ * incidental `#` or `|` characters in prose do not count.
+ */
+function startsWithMarkdownStructuralAnchor(text: string): boolean {
+  const trimmed = text.replace(/^\n+/, '');
+  return /^(\|[^\n]*\||#{1,6} |```|>\s|[-*+] |\d+\. )/.test(trimmed);
+}
+
 function findContainedRecoveryPrefixReplayLength(
   previousText: string,
   continuationText: string,
 ): number {
+  // Only consider replaying the *immediate* tail of the previous response.
+  // Earlier matches would let a coincidental substring far above the
+  // truncation point silently delete legitimate continuation text.
   const previousTail =
-    previousText.length > RECOVERY_OVERLAP_MAX_SCAN_CHARS
-      ? previousText.slice(-RECOVERY_OVERLAP_MAX_SCAN_CHARS)
+    previousText.length > RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS
+      ? previousText.slice(-RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS)
       : previousText;
   const maxPrefix = Math.min(
     previousTail.length,
@@ -146,9 +173,22 @@ function findContainedRecoveryPrefixReplayLength(
     RECOVERY_OVERLAP_MAX_SCAN_CHARS,
   );
 
+  // The contained-prefix path is intended *only* for replayed Markdown blocks
+  // (tables, headings, fenced code) that providers re-emit when resuming after
+  // MAX_TOKENS. Prose replays — even ones that briefly coincide with the
+  // previous tail — are out of scope: dropping them would silently lose user-
+  // visible content. Require a structural anchor at the very start of the
+  // continuation before considering any contained-prefix match at all.
+  if (!startsWithMarkdownStructuralAnchor(continuationText)) {
+    return 0;
+  }
+
   for (let length = maxPrefix; length > 0; length -= 1) {
     const prefix = continuationText.slice(0, length);
-    if (isSignificantRecoveryOverlap(prefix) && previousTail.includes(prefix)) {
+    if (
+      byteLength(prefix) >= RECOVERY_CONTAINED_PREFIX_MIN_BYTES &&
+      previousTail.includes(prefix)
+    ) {
       return length;
     }
   }
