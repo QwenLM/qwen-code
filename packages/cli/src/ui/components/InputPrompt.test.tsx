@@ -252,11 +252,21 @@ describe('InputPrompt', () => {
   const wait = (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms));
 
   describe('prompt suggestions', () => {
+    // createFollowupController.setSuggestion debounces the visibility
+    // transition by SUGGESTION_DELAY_MS (300ms) before flipping
+    // followup.state.isVisible to true. The Enter handler reads that flag
+    // synchronously, so we must wait for the timer to fire before pressing
+    // Enter — otherwise the suggestion path is skipped and onSubmit never
+    // runs. 350ms left only ~50ms margin and was eaten by ink 7 / React 19.2
+    // mount overhead on slow Windows CI runners. Keep this wait > 300ms +
+    // generous buffer (renderWithProviders cold start can be 100-200ms).
+    const SUGGESTION_VISIBLE_WAIT_MS = 700;
+
     it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(350);
+      await wait(SUGGESTION_VISIBLE_WAIT_MS);
 
       stdin.write('\r');
       await wait();
@@ -273,7 +283,7 @@ describe('InputPrompt', () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(350);
+      await wait(SUGGESTION_VISIBLE_WAIT_MS);
 
       stdin.write('\x1b[Z'); // shift+tab
       await wait();
@@ -295,7 +305,7 @@ describe('InputPrompt', () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(350);
+      await wait(SUGGESTION_VISIBLE_WAIT_MS);
 
       stdin.write('\t');
       await wait();
