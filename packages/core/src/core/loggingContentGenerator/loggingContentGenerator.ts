@@ -39,6 +39,7 @@ import type {
   InputModalities,
 } from '../contentGenerator.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import {
@@ -166,11 +167,13 @@ export class LoggingContentGenerator implements ContentGenerator {
         userPromptId,
       );
     }
-    const openaiRequest = isInternal
-      ? undefined
-      : await this.buildOpenAIRequestForLogging(req);
+
+    const session = this.startCaptureSession(isInternal);
+
     try {
-      const response = await this.wrapped.generateContent(req, userPromptId);
+      const response = await session.wrap(() =>
+        this.wrapped.generateContent(req, userPromptId),
+      );
       const durationMs = Date.now() - startTime;
       const responseText = isInternal
         ? undefined
@@ -184,14 +187,30 @@ export class LoggingContentGenerator implements ContentGenerator {
         responseText,
       );
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, response);
+        // Logging must not discard the successful API response if
+        // resolve() or logOpenAIInteraction throws.
+        try {
+          await this.logOpenAIInteraction(await session.resolve(req), response);
+        } catch {
+          // swallow logging-side error
+        }
       }
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        // Logging must not replace the original API error if
+        // resolve() or logOpenAIInteraction throws.
+        try {
+          await this.logOpenAIInteraction(
+            await session.resolve(req),
+            undefined,
+            error,
+          );
+        } catch {
+          // swallow logging-side error
+        }
       }
       throw error;
     }
@@ -210,29 +229,68 @@ export class LoggingContentGenerator implements ContentGenerator {
         userPromptId,
       );
     }
-    const openaiRequest = isInternal
-      ? undefined
-      : await this.buildOpenAIRequestForLogging(req);
+
+    const session = this.startCaptureSession(isInternal);
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
-      stream = await this.wrapped.generateContentStream(req, userPromptId);
+      stream = await session.wrap(() =>
+        this.wrapped.generateContentStream(req, userPromptId),
+      );
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        // Logging must not replace the original API error if
+        // resolve() or logOpenAIInteraction throws.
+        try {
+          await this.logOpenAIInteraction(
+            await session.resolve(req),
+            undefined,
+            error,
+          );
+        } catch {
+          // swallow logging-side error
+        }
       }
       throw error;
     }
 
+    let resolvedRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+    if (!isInternal) {
+      try {
+        resolvedRequest = await session.resolve(req);
+      } catch {
+        // Resolve must not abort the stream that the SDK already returned.
+      }
+    }
     return this.loggingStreamWrapper(
       stream,
       startTime,
       userPromptId,
       req.model,
-      openaiRequest,
+      resolvedRequest,
     );
+  }
+
+  private startCaptureSession(isInternal: boolean): {
+    wrap: <T>(fn: () => Promise<T>) => Promise<T>;
+    resolve: (
+      req: GenerateContentParameters,
+    ) => Promise<OpenAI.Chat.ChatCompletionCreateParams | undefined>;
+  } {
+    let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+    const skipCapture = isInternal || !this.openaiLogger;
+    return {
+      wrap: <T>(fn: () => Promise<T>): Promise<T> =>
+        skipCapture
+          ? fn()
+          : openaiRequestCaptureContext.run((built) => {
+              captured = built;
+            }, fn),
+      resolve: async (req) =>
+        captured ?? (await this.buildOpenAIRequestForLogging(req)),
+    };
   }
 
   private async *loggingStreamWrapper(
@@ -282,7 +340,12 @@ export class LoggingContentGenerator implements ContentGenerator {
         this.extractResponseText(consolidatedResponse),
       );
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
+        // Logging must not turn a fully-yielded stream into a thrown error.
+        try {
+          await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
+        } catch {
+          // swallow logging-side error
+        }
       }
     } catch (error) {
       const durationMs = Date.now() - startTime;
@@ -294,7 +357,12 @@ export class LoggingContentGenerator implements ContentGenerator {
         userPromptId,
       );
       if (!isInternal) {
-        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        // Logging must not replace the original stream/API error.
+        try {
+          await this.logOpenAIInteraction(openaiRequest, undefined, error);
+        } catch {
+          // swallow logging-side error
+        }
       }
       throw error;
     }

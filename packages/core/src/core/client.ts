@@ -53,6 +53,12 @@ import { buildAgentContentGeneratorConfig } from '../models/content-generator-co
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
+import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import {
+  DEFAULT_AUTO_SKILL_MAX_TURNS,
+  DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+} from '../memory/skillReviewAgentPlanner.js';
+import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
@@ -167,9 +173,17 @@ async function resolveAutoMemoryWithDeadline(
   }
 }
 
+/** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
+const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ToolNames.WRITE_FILE,
+  ToolNames.EDIT,
+]);
+
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
+  private toolCallCount = 0;
+  private skillsModifiedInSession = false;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
@@ -626,11 +640,73 @@ export class GeminiClient {
   private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
   ): void {
-    if (messageType !== SendMessageType.UserQuery) {
-      return;
+    // autoSkill counts tool calls and can trigger on both UserQuery and
+    // ToolResult turns so the threshold can fire mid-session.
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.ToolResult
+    ) {
+      const projectRoot = this.config.getProjectRoot();
+      const sessionId = this.config.getSessionId();
+      const history = this.getHistory();
+      const mgr = this.config.getMemoryManager();
+      const autoSkillEnabled = this.config.getAutoSkillEnabled();
+
+      if (autoSkillEnabled) {
+        const skillReviewResult = mgr.scheduleSkillReview({
+          projectRoot,
+          sessionId,
+          history,
+          config: this.config,
+          toolCallCount: this.toolCallCount,
+          skillsModified: this.skillsModifiedInSession,
+          enabled: autoSkillEnabled,
+          threshold: AUTO_SKILL_THRESHOLD,
+          maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
+          timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+        });
+        if (skillReviewResult.status === 'scheduled') {
+          // Reset tool-call counter when a review is dispatched so the next
+          // review only fires after a full new threshold worth of tool calls.
+          this.toolCallCount = 0;
+          if (skillReviewResult.promise) {
+            this.pendingMemoryTaskPromises.push(
+              skillReviewResult.promise
+                .then((record) => {
+                  const touched = record.metadata?.['touchedSkillFiles'];
+                  return Array.isArray(touched) ? touched.length : 0;
+                })
+                .catch((error: unknown) => {
+                  debugLogger.warn(
+                    'Failed to run managed skill review.',
+                    error,
+                  );
+                  return 0;
+                }),
+            );
+          }
+        } else if (
+          skillReviewResult.status === 'skipped' &&
+          skillReviewResult.skippedReason === 'already_running' &&
+          this.toolCallCount >= AUTO_SKILL_THRESHOLD
+        ) {
+          // A review is already in-flight; reset the counter so that when the
+          // current review completes the next call doesn't immediately trigger
+          // another review without accumulating a fresh threshold of tool calls.
+          this.toolCallCount = 0;
+        }
+        // Always reset the skills-modified flag after the scheduleSkillReview
+        // check, regardless of whether a review was dispatched. This prevents
+        // a deadlock where skillsModifiedInSession stays true forever: when
+        // the flag is set, scheduleSkillReview returns 'skipped' immediately
+        // (never 'scheduled'), so without this reset the flag can never clear.
+        this.skillsModifiedInSession = false;
+      }
     }
 
-    if (!this.config.getManagedAutoMemoryEnabled()) {
+    // extract and dream keep the original UserQuery-only gate to preserve
+    // the existing "once per user turn" semantics and avoid redundant work.
+    if (messageType !== SendMessageType.UserQuery) {
       return;
     }
 
@@ -638,6 +714,10 @@ export class GeminiClient {
     const sessionId = this.config.getSessionId();
     const history = this.getHistory();
     const mgr = this.config.getMemoryManager();
+
+    if (!this.config.getManagedAutoMemoryEnabled()) {
+      return;
+    }
 
     const extractPromise = mgr
       .scheduleExtract({
@@ -692,6 +772,22 @@ export class GeminiClient {
     const promises = this.pendingMemoryTaskPromises;
     this.pendingMemoryTaskPromises = [];
     return promises;
+  }
+
+  recordCompletedToolCall(
+    toolName: string,
+    args?: Record<string, unknown>,
+  ): void {
+    if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
+      const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
+      if (
+        typeof filePath === 'string' &&
+        isProjectSkillPath(filePath, this.config.getProjectRoot())
+      ) {
+        this.skillsModifiedInSession = true;
+      }
+    }
+    this.toolCallCount += 1;
   }
 
   async *sendMessageStream(

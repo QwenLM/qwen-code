@@ -18,6 +18,12 @@ import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
+import {
+  getAllMCPServerStatuses,
+  MCPServerStatus,
+  removeMCPServerStatus,
+  updateMCPServerStatus,
+} from './mcp-client.js';
 import { ToolErrorType } from './tool-error.js';
 
 vi.mock('node:fs');
@@ -528,6 +534,111 @@ describe('ToolRegistry', () => {
 
       // The good tool should still have been loaded despite the failure.
       expect(await toolRegistry.ensureTool('good-tool')).toBe(goodTool);
+    });
+  });
+
+  describe('disableMcpServer', () => {
+    afterEach(() => {
+      for (const name of getAllMCPServerStatuses().keys()) {
+        removeMCPServerStatus(name);
+      }
+    });
+
+    it('still removes the registry entry and updates the exclusion list when disconnect throws', async () => {
+      updateMCPServerStatus('flaky-server', MCPServerStatus.DISCONNECTED);
+      vi.spyOn(config, 'getExcludedMcpServers').mockReturnValue([]);
+      const setExcludedSpy = vi
+        .spyOn(config, 'setExcludedMcpServers')
+        .mockImplementation(() => {});
+      vi.spyOn(
+        McpClientManager.prototype,
+        'disconnectServer',
+      ).mockRejectedValue(new Error('boom'));
+
+      await expect(
+        toolRegistry.disableMcpServer('flaky-server'),
+      ).rejects.toThrow('boom');
+
+      // Even though disconnect threw, the global status entry must be cleared
+      // so the health pill stops counting the server, and the exclusion list
+      // must still be updated so the server doesn't reappear on next discovery.
+      expect(getAllMCPServerStatuses().has('flaky-server')).toBe(false);
+      expect(setExcludedSpy).toHaveBeenCalledWith(['flaky-server']);
+    });
+
+    it('still removes the registry entry when the exclusion-list update throws', async () => {
+      // Defensive: if a future config implementation makes setExcludedMcpServers
+      // throw, the status registry must still be cleaned up — otherwise the
+      // health pill would keep a stale entry forever.
+      updateMCPServerStatus('flaky-server', MCPServerStatus.DISCONNECTED);
+      vi.spyOn(config, 'getExcludedMcpServers').mockReturnValue([]);
+      vi.spyOn(config, 'setExcludedMcpServers').mockImplementation(() => {
+        throw new Error('config write failed');
+      });
+      vi.spyOn(
+        McpClientManager.prototype,
+        'disconnectServer',
+      ).mockResolvedValue(undefined);
+
+      await expect(
+        toolRegistry.disableMcpServer('flaky-server'),
+      ).rejects.toThrow('config write failed');
+
+      expect(getAllMCPServerStatuses().has('flaky-server')).toBe(false);
+    });
+
+    it('removes the server from the global status registry so the health pill stops counting it', async () => {
+      // Simulate an MCP server that connected and then dropped — the global
+      // registry would carry a DISCONNECTED entry for it.
+      updateMCPServerStatus('flaky-server', MCPServerStatus.DISCONNECTED);
+      expect(getAllMCPServerStatuses().has('flaky-server')).toBe(true);
+
+      const setExcludedSpy = vi
+        .spyOn(config, 'setExcludedMcpServers')
+        .mockImplementation(() => {});
+      vi.spyOn(config, 'getExcludedMcpServers').mockReturnValue([]);
+      // disableMcpServer delegates the actual transport teardown to the
+      // McpClientManager — stub it out so we can isolate the status-registry
+      // behavior.
+      vi.spyOn(
+        McpClientManager.prototype,
+        'disconnectServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.disableMcpServer('flaky-server');
+
+      expect(getAllMCPServerStatuses().has('flaky-server')).toBe(false);
+      expect(setExcludedSpy).toHaveBeenCalledWith(['flaky-server']);
+    });
+
+    it('updates the exclusion list before dropping the status entry', async () => {
+      // Order matters: doctorChecks classifies a server as "disabled" only
+      // when it appears in the exclusion list. If the status entry is
+      // dropped before the exclusion list is updated, there's a window
+      // where the server is reported as a connectivity failure instead of
+      // an intentional disable.
+      updateMCPServerStatus('flaky-server', MCPServerStatus.DISCONNECTED);
+      vi.spyOn(config, 'getExcludedMcpServers').mockReturnValue([]);
+      vi.spyOn(
+        McpClientManager.prototype,
+        'disconnectServer',
+      ).mockResolvedValue(undefined);
+
+      const callOrder: string[] = [];
+      vi.spyOn(config, 'setExcludedMcpServers').mockImplementation(() => {
+        callOrder.push(
+          `setExcludedMcpServers:hasStatus=${getAllMCPServerStatuses().has(
+            'flaky-server',
+          )}`,
+        );
+      });
+
+      await toolRegistry.disableMcpServer('flaky-server');
+
+      // When setExcludedMcpServers ran, the status entry must still be
+      // present — i.e. the exclusion list is updated first.
+      expect(callOrder).toEqual(['setExcludedMcpServers:hasStatus=true']);
+      expect(getAllMCPServerStatuses().has('flaky-server')).toBe(false);
     });
   });
 

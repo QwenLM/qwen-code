@@ -12,12 +12,14 @@ import { Session } from './Session.js';
 import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
   PromptRequest,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
+import { CommandKind } from '../../ui/commands/types.js';
 
 vi.mock('../../nonInteractiveCliCommands.js', () => ({
   ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE: [
@@ -158,7 +160,11 @@ describe('Session', () => {
 
     mockSettings = {
       merged: {},
-    } as LoadedSettings;
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
 
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
       .getAvailableCommands as unknown as ReturnType<typeof vi.fn>;
@@ -216,6 +222,16 @@ describe('Session', () => {
         'qwen3-coder-plus',
         undefined,
       );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'qwen3-coder-plus',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'security.auth.selectedType',
+        AuthType.USE_OPENAI,
+      );
     });
 
     it('rejects empty/whitespace model IDs', async () => {
@@ -227,6 +243,24 @@ describe('Session', () => {
       ).rejects.toThrow('Invalid params');
 
       expect(mockConfig.switchModel).not.toHaveBeenCalled();
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
+    it('can switch the session model without persisting a new default', async () => {
+      await session.setModel(
+        {
+          sessionId: 'test-session-id',
+          modelId: `qwen3-coder-flash(${AuthType.USE_OPENAI})`,
+        },
+        { persistDefault: false },
+      );
+
+      expect(mockConfig.switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'qwen3-coder-flash',
+        undefined,
+      );
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
 
     it('propagates errors from config.switchModel', async () => {
@@ -239,6 +273,7 @@ describe('Session', () => {
           modelId: `invalid-model(${AuthType.USE_OPENAI})`,
         }),
       ).rejects.toThrow('Invalid model');
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
   });
 
@@ -250,6 +285,23 @@ describe('Session', () => {
           description: 'Initialize project context',
           kind: 'built-in',
           argumentHint: '[path]',
+          source: 'builtin-command',
+          sourceLabel: 'Built-in',
+          supportedModes: ['interactive', 'non_interactive', 'acp'],
+          modelInvocable: false,
+          subCommands: [
+            {
+              name: 'visible',
+              description: 'Visible subcommand',
+              kind: CommandKind.BUILT_IN,
+            },
+            {
+              name: 'hidden',
+              description: 'Hidden subcommand',
+              kind: CommandKind.BUILT_IN,
+              hidden: true,
+            },
+          ],
         },
       ]);
 
@@ -269,6 +321,14 @@ describe('Session', () => {
               name: 'init',
               description: 'Initialize project context',
               input: { hint: '[path]' },
+              _meta: {
+                argumentHint: '[path]',
+                source: 'builtin-command',
+                sourceLabel: 'Built-in',
+                supportedModes: ['interactive', 'non_interactive', 'acp'],
+                subcommands: ['visible'],
+                modelInvocable: false,
+              },
             },
           ],
         },
@@ -298,6 +358,14 @@ describe('Session', () => {
               name: 'export',
               description: 'Export conversation history',
               input: { hint: '' },
+              _meta: {
+                argumentHint: undefined,
+                source: undefined,
+                sourceLabel: undefined,
+                supportedModes: ['interactive'],
+                subcommands: ['md'],
+                modelInvocable: false,
+              },
             },
           ],
         },
@@ -333,6 +401,14 @@ describe('Session', () => {
               name: 'init',
               description: 'Initialize project context',
               input: null,
+              _meta: {
+                argumentHint: undefined,
+                source: undefined,
+                sourceLabel: undefined,
+                supportedModes: ['interactive'],
+                subcommands: [],
+                modelInvocable: false,
+              },
             },
           ],
           _meta: {

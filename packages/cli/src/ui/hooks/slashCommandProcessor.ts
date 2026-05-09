@@ -39,6 +39,7 @@ import type {
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { type CommandContext, type SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
@@ -78,6 +79,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'new',
   'resume',
   'delete',
+  'branch',
   'btw',
 ]);
 
@@ -95,6 +97,7 @@ export interface SlashCommandProcessorActions {
   openApprovalModeDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => void;
+  handleBranch: (name?: string) => Promise<void>;
   openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
@@ -106,6 +109,7 @@ export interface SlashCommandProcessorActions {
   openMcpDialog: () => void;
   openHooksDialog: () => void;
   openRewindSelector: () => void;
+  openHelpDialog: () => void;
 }
 
 /**
@@ -131,6 +135,9 @@ export const useSlashCommandProcessor = (
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
+  const [recentCommands, setRecentCommands] = useState<
+    ReadonlyMap<string, RecentSlashCommand>
+  >(new Map());
   const [reloadTrigger, setReloadTrigger] = useState(0);
 
   const reloadCommands = useCallback(() => {
@@ -357,6 +364,26 @@ export const useSlashCommandProcessor = (
     };
   }, [config, reloadCommands]);
 
+  // SkillManager already rebuilds its own cache and notifies SkillTool
+  // (which re-runs `setTools()` so `<available_skills>` is fresh). The
+  // slash-command list is a separate consumer: SkillCommandLoader reads
+  // `listSkills()` once during CommandService.create(), so without this
+  // bridge a newly added SKILL.md never produces a `/<skill-name>` entry
+  // until restart. Bumping reloadTrigger re-runs the loader effect below
+  // and CommandService picks up the fresh skill list.
+  useEffect(() => {
+    if (!isConfigInitialized) {
+      return;
+    }
+    const skillManager = config?.getSkillManager();
+    if (!skillManager) {
+      return;
+    }
+    return skillManager.addChangeListener(() => {
+      reloadCommands();
+    });
+  }, [config, isConfigInitialized, reloadCommands]);
+
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
@@ -374,6 +401,10 @@ export const useSlashCommandProcessor = (
           controller.signal,
           disabled.length > 0 ? new Set(disabled) : undefined,
         );
+        // Avoid overwriting newer results from a subsequent effect run
+        if (controller.signal.aborted) {
+          return;
+        }
         // Register model-invocable commands provider so SkillTool can include
         // bundled skills, file commands, and MCP prompts in its description.
         if (config) {
@@ -421,10 +452,7 @@ export const useSlashCommandProcessor = (
             },
           );
         }
-        // Avoid overwriting newer results from a subsequent effect run
-        if (!controller.signal.aborted) {
-          setCommands(commandService.getCommandsForMode('interactive'));
-        }
+        setCommands(commandService.getCommandsForMode('interactive'));
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
       }
@@ -495,6 +523,18 @@ export const useSlashCommandProcessor = (
 
       try {
         if (commandToExecute) {
+          if (!commandToExecute.hidden) {
+            setRecentCommands((previous) => {
+              const next = new Map(previous);
+              const existing = next.get(commandToExecute.name);
+              next.set(commandToExecute.name, {
+                name: commandToExecute.name,
+                usedAt: Date.now(),
+                count: (existing?.count ?? 0) + 1,
+              });
+              return next;
+            });
+          }
           if (commandToExecute.action) {
             const fullCommandContext: CommandContext = {
               ...commandContext,
@@ -633,6 +673,15 @@ export const useSlashCommandProcessor = (
                         actions.openResumeDialog(result.matchedSessions);
                       }
                       return { type: 'handled' };
+                    case 'branch':
+                      // Must be awaited: `/branch` swaps core + UI session
+                      // state asynchronously, and a non-awaited call lets
+                      // this dispatcher return `handled` while the swap is
+                      // still in flight. A fast follow-up prompt could then
+                      // interleave with the swap and be recorded against
+                      // the wrong session.
+                      await actions.handleBranch(result.name);
+                      return { type: 'handled' };
                     case 'delete':
                       actions.openDeleteDialog();
                       return { type: 'handled' };
@@ -643,6 +692,7 @@ export const useSlashCommandProcessor = (
                       actions.openRewindSelector();
                       return { type: 'handled' };
                     case 'help':
+                      actions.openHelpDialog();
                       return { type: 'handled' };
                     default: {
                       const unhandled: never = result.dialog;
@@ -858,6 +908,7 @@ export const useSlashCommandProcessor = (
   return {
     handleSlashCommand,
     slashCommands: commands,
+    recentSlashCommands: recentCommands,
     pendingHistoryItems,
     btwItem,
     setBtwItem,

@@ -538,6 +538,8 @@ export interface ConfigParameters {
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
   enableManagedAutoDream?: boolean;
+  /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
+  enableAutoSkill?: boolean;
   /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
    * When set and valid for the current auth type, forked agents use this model instead of
@@ -768,6 +770,7 @@ export class Config {
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
+  private readonly enableAutoSkill: boolean;
   private fastModel?: string;
   private readonly disableAllHooks: boolean;
   /** User-level hooks (always loaded regardless of trust) */
@@ -969,6 +972,7 @@ export class Config {
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
+    this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     // Store user and project hooks separately for proper source attribution
@@ -2292,6 +2296,10 @@ export class Config {
 
   getManagedAutoDreamEnabled(): boolean {
     return this.enableManagedAutoDream && !this.getBareMode();
+  }
+
+  getAutoSkillEnabled(): boolean {
+    return this.enableAutoSkill && !this.getBareMode();
   }
 
   /**

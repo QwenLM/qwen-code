@@ -16,6 +16,7 @@ import type { Config } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
+import { removeMCPServerStatus } from './mcp-client.js';
 import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
@@ -350,13 +351,29 @@ export class ToolRegistry {
     // Remove prompts
     this.config.getPromptRegistry().removePromptsByServer(serverName);
 
-    // Disconnect the MCP client
-    await this.mcpClientManager.disconnectServer(serverName);
-
-    // Update config's exclusion list
-    const currentExcluded = this.config.getExcludedMcpServers() || [];
-    if (!currentExcluded.includes(serverName)) {
-      this.config.setExcludedMcpServers([...currentExcluded, serverName]);
+    try {
+      // Disconnect the MCP client
+      await this.mcpClientManager.disconnectServer(serverName);
+    } finally {
+      try {
+        // Update the exclusion list before dropping the status entry,
+        // so a server is already marked as disabled by the time it
+        // disappears from the registry. Otherwise there's a (currently
+        // synchronous, but easy to widen) window where doctorChecks
+        // would observe a missing status (falling back to DISCONNECTED)
+        // while isMcpServerDisabled still returns false, mis-reporting
+        // an intentional disable as a connectivity failure.
+        const currentExcluded = this.config.getExcludedMcpServers() || [];
+        if (!currentExcluded.includes(serverName)) {
+          this.config.setExcludedMcpServers([...currentExcluded, serverName]);
+        }
+      } finally {
+        // Always drop the server from the global status registry — even
+        // if disconnect or the exclusion-list update throws — so the
+        // Footer's MCP health pill stops counting it as "offline". A
+        // leftover entry would resurrect the bug from #3895.
+        removeMCPServerStatus(serverName);
+      }
     }
   }
 

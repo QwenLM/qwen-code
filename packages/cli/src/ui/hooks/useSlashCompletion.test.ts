@@ -145,6 +145,10 @@ function useTestHarnessForSlashCompletion(
   query: string | null,
   slashCommands: readonly SlashCommand[],
   commandContext: CommandContext,
+  recentCommands?: ReadonlyMap<
+    string,
+    { name: string; usedAt: number; count: number }
+  >,
 ) {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
@@ -155,6 +159,7 @@ function useTestHarnessForSlashCompletion(
     query,
     slashCommands,
     commandContext,
+    recentCommands,
     setSuggestions,
     setIsLoadingSuggestions,
     setIsPerfectMatch,
@@ -236,12 +241,40 @@ describe('useSlashCompletion', () => {
 
       await waitFor(() => {
         expect(result.current.suggestions).toEqual([
-          {
+          expect.objectContaining({
             label: 'memory',
             value: 'memory',
             description: 'Manage memory',
             commandKind: CommandKind.BUILT_IN,
-          },
+          }),
+        ]);
+      });
+    });
+
+    it('should not include alias noise for primary-name matches', async () => {
+      const slashCommands = [
+        createTestCommand({
+          name: 'help',
+          altNames: ['?'],
+          description: 'for help on Qwen Code',
+        }),
+      ];
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/he',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions).toEqual([
+          expect.objectContaining({
+            label: 'help',
+            value: 'help',
+            matchedAlias: undefined,
+          }),
         ]);
       });
     });
@@ -265,12 +298,13 @@ describe('useSlashCompletion', () => {
 
       await waitFor(() => {
         expect(result.current.suggestions).toEqual([
-          {
+          expect.objectContaining({
             label: 'fix-issue',
             value: 'fix-issue',
             description: 'Fix GitHub issue',
             commandKind: CommandKind.BUILT_IN,
-          },
+            argumentHint: '[issue-number]',
+          }),
         ]);
       });
     });
@@ -324,13 +358,148 @@ describe('useSlashCompletion', () => {
 
       await waitFor(() => {
         expect(result.current.suggestions).toEqual([
-          {
-            label: 'stats (usage)',
+          expect.objectContaining({
+            label: 'stats (alias: usage)',
             value: 'stats',
             description: 'check session stats. Usage: /stats [model|tools]',
-            commandKind: CommandKind.BUILT_IN,
-          },
+            matchedAlias: 'usage',
+          }),
         ]);
+      });
+    });
+
+    it('should include command metadata in slash suggestions', async () => {
+      const slashCommands = [
+        createTestCommand({
+          name: 'review',
+          description: 'Review changed code',
+          argumentHint: '[pr-number]',
+          source: 'bundled-skill',
+          sourceLabel: 'Skill',
+          modelInvocable: true,
+        }),
+      ];
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/rev',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions).toEqual([
+          expect.objectContaining({
+            label: 'review',
+            value: 'review',
+            argumentHint: '[pr-number]',
+            source: 'bundled-skill',
+            sourceLabel: 'Skill',
+            sourceBadge: '[Skill]',
+            modelInvocable: true,
+          }),
+        ]);
+      });
+    });
+
+    it('should boost recent commands for root slash suggestions', async () => {
+      const now = Date.now();
+      const slashCommands = [
+        createTestCommand({
+          name: 'alpha',
+          description: 'Alpha command',
+          completionPriority: 100,
+        }),
+        createTestCommand({ name: 'beta', description: 'Beta command' }),
+      ];
+      const recentCommands = new Map([
+        ['beta', { name: 'beta', usedAt: now, count: 1 }],
+      ]);
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/',
+          slashCommands,
+          mockCommandContext,
+          recentCommands,
+        ),
+      );
+
+      expect(
+        result.current.suggestions.map((suggestion) => suggestion.value),
+      ).toEqual(['beta', 'alpha']);
+    });
+
+    it('should boost recent help command above high-priority model for root slash suggestions', async () => {
+      const now = Date.now();
+      const slashCommands = [
+        createTestCommand({
+          name: 'model',
+          description: 'Model command',
+          completionPriority: 100,
+        }),
+        createTestCommand({
+          name: 'help',
+          altNames: ['?'],
+          description: 'for help on Qwen Code',
+        }),
+      ];
+      const recentCommands = new Map([
+        ['help', { name: 'help', usedAt: now, count: 1 }],
+      ]);
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/',
+          slashCommands,
+          mockCommandContext,
+          recentCommands,
+        ),
+      );
+
+      expect(
+        result.current.suggestions.map((suggestion) => suggestion.value),
+      ).toEqual(['help', 'model']);
+    });
+
+    it('should boost recent commands for non-root prefix suggestions', async () => {
+      const now = Date.now();
+      const slashCommands = [
+        createTestCommand({
+          name: 'model',
+          description: 'Model command',
+          completionPriority: 5,
+        }),
+        createTestCommand({
+          name: 'memory',
+          description: 'Memory command',
+          completionPriority: 5,
+        }),
+      ];
+      // Both commands have equal completionPriority; 'memory' used recently
+      // should be ranked first for '/mo' via recentScore.
+      const recentCommands = new Map([
+        ['memory', { name: 'memory', usedAt: now, count: 1 }],
+      ]);
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/m',
+          slashCommands,
+          mockCommandContext,
+          recentCommands,
+        ),
+      );
+
+      await waitFor(() => {
+        const names = result.current.suggestions.map((s) => s.value);
+        expect(names).toContain('memory');
+        expect(names).toContain('model');
+        expect(names.indexOf('memory')).toBeLessThan(names.indexOf('model'));
       });
     });
 
@@ -468,18 +637,18 @@ describe('useSlashCompletion', () => {
       expect(result.current.suggestions).toHaveLength(2);
       expect(result.current.suggestions).toEqual(
         expect.arrayContaining([
-          {
+          expect.objectContaining({
             label: 'show',
             value: 'show',
             description: 'Show memory',
             commandKind: CommandKind.BUILT_IN,
-          },
-          {
+          }),
+          expect.objectContaining({
             label: 'add',
             value: 'add',
             description: 'Add to memory',
             commandKind: CommandKind.BUILT_IN,
-          },
+          }),
         ]),
       );
     });
@@ -507,18 +676,18 @@ describe('useSlashCompletion', () => {
       expect(result.current.suggestions).toHaveLength(2);
       expect(result.current.suggestions).toEqual(
         expect.arrayContaining([
-          {
+          expect.objectContaining({
             label: 'show',
             value: 'show',
             description: 'Show memory',
             commandKind: CommandKind.BUILT_IN,
-          },
-          {
+          }),
+          expect.objectContaining({
             label: 'add',
             value: 'add',
             description: 'Add to memory',
             commandKind: CommandKind.BUILT_IN,
-          },
+          }),
         ]),
       );
     });
@@ -545,12 +714,12 @@ describe('useSlashCompletion', () => {
 
       await waitFor(() => {
         expect(result.current.suggestions).toEqual([
-          {
+          expect.objectContaining({
             label: 'add',
             value: 'add',
             description: 'Add to memory',
             commandKind: CommandKind.BUILT_IN,
-          },
+          }),
         ]);
       });
     });
@@ -776,18 +945,18 @@ describe('useSlashCompletion', () => {
 
       expect(result.current.suggestions).toEqual(
         expect.arrayContaining([
-          {
+          expect.objectContaining({
             label: 'summarize',
             value: 'summarize',
             description: 'Summarize content',
             commandKind: CommandKind.MCP_PROMPT,
-          },
-          {
+          }),
+          expect.objectContaining({
             label: 'help',
             value: 'help',
             description: 'Show help',
             commandKind: CommandKind.BUILT_IN,
-          },
+          }),
         ]),
       );
     });
@@ -819,12 +988,12 @@ describe('useSlashCompletion', () => {
 
       await waitFor(() => {
         expect(result.current.suggestions).toEqual([
-          {
+          expect.objectContaining({
             label: 'summarize',
             value: 'summarize',
             description: 'Summarize content',
             commandKind: CommandKind.MCP_PROMPT,
-          },
+          }),
         ]);
       });
     });
@@ -863,18 +1032,18 @@ describe('useSlashCompletion', () => {
 
       expect(result.current.suggestions).toEqual(
         expect.arrayContaining([
-          {
+          expect.objectContaining({
             label: 'show',
             value: 'show',
             description: 'Show memory',
             commandKind: CommandKind.BUILT_IN,
-          },
-          {
+          }),
+          expect.objectContaining({
             label: 'add',
             value: 'add',
             description: 'Add to memory',
             commandKind: CommandKind.MCP_PROMPT,
-          },
+          }),
         ]),
       );
     });
@@ -900,12 +1069,12 @@ describe('useSlashCompletion', () => {
 
       await waitFor(() => {
         expect(result.current.suggestions).toEqual([
-          {
+          expect.objectContaining({
             label: 'custom-script',
             value: 'custom-script',
             description: 'Run custom script',
             commandKind: CommandKind.FILE,
-          },
+          }),
         ]);
       });
     });

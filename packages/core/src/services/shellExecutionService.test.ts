@@ -639,7 +639,7 @@ describe('ShellExecutionService', () => {
       );
     });
 
-    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true', async () => {
+    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true (and aborted: false per design question 7)', async () => {
       // Critical: do NOT fire onExit — the child is still alive after the
       // background-promote abort. The result Promise must resolve via the
       // abort handler's own immediate resolve, not via the exit handler.
@@ -653,7 +653,11 @@ describe('ShellExecutionService', () => {
         },
       );
 
-      expect(result.aborted).toBe(true);
+      // `aborted: false` (despite signal.aborted = true) is intentional —
+      // see #3831 design question 7. The flag answers "emit cancel/timeout
+      // copy?" not "did the signal fire?", and a promoted shell is
+      // neither cancelled nor timed out.
+      expect(result.aborted).toBe(false);
       expect(result.promoted).toBe(true);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();
@@ -1410,7 +1414,7 @@ describe('ShellExecutionService child_process fallback', () => {
       );
     });
 
-    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true', async () => {
+    it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true (and aborted: false per design question 7)', async () => {
       mockPlatform.mockReturnValue('linux');
       // Critical: do NOT fire 'exit' — the child is still alive after the
       // background-promote abort. The result Promise must resolve via the
@@ -1427,7 +1431,8 @@ describe('ShellExecutionService child_process fallback', () => {
         },
       );
 
-      expect(result.aborted).toBe(true);
+      // See PTY equivalent test for the rationale on `aborted: false`.
+      expect(result.aborted).toBe(false);
       expect(result.promoted).toBe(true);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();

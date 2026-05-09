@@ -80,6 +80,7 @@ import { useModelCommand } from './hooks/useModelCommand.js';
 import { useManageModelsCommand } from './hooks/useManageModelsCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
@@ -163,6 +164,7 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -252,6 +254,12 @@ const SHELL_HEIGHT_PADDING = 10;
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
   const historyManager = useHistory();
+  // `useHistory()` returns a fresh memoized object whenever `history` changes,
+  // so depending on `historyManager` directly inside event-handler callbacks
+  // would rebuild them on every message. Mirror history into a ref so
+  // handlers can read the latest snapshot at call time without reactive deps.
+  const historyRef = useRef(historyManager.history);
+  historyRef.current = historyManager.history;
   useMemoryMonitor(historyManager);
   const [debugMessage, setDebugMessage] = useState<string>('');
   const [quittingMessages, setQuittingMessages] = useState<
@@ -683,6 +691,14 @@ export const AppContainer = (props: AppContainerProps) => {
     remount: refreshStatic,
   });
 
+  const { handleBranch } = useBranchCommand({
+    config,
+    historyManager,
+    startNewSession,
+    setSessionName,
+    remount: refreshStatic,
+  });
+
   const {
     isDeleteDialogOpen,
     openDeleteDialog,
@@ -692,6 +708,13 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     addItem: historyManager.addItem,
   });
+
+  const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);
+  const [activeHelpTab, setHelpTab] = useState<
+    'general' | 'commands' | 'custom-commands'
+  >('general');
+  const openHelpDialog = useCallback(() => setHelpDialogOpen(true), []);
+  const closeHelpDialog = useCallback(() => setHelpDialogOpen(false), []);
 
   const { toggleVimEnabled } = useVimMode();
 
@@ -751,7 +774,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
       handleResume,
+      handleBranch,
       openDeleteDialog,
+      openHelpDialog,
     }),
     [
       openAuthDialog,
@@ -775,13 +800,16 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openResumeDialog,
       handleResume,
+      handleBranch,
       openDeleteDialog,
+      openHelpDialog,
     ],
   );
 
   const {
     handleSlashCommand,
     slashCommands,
+    recentSlashCommands,
     pendingHistoryItems: pendingSlashCommandHistoryItems,
     btwItem,
     setBtwItem,
@@ -1665,6 +1693,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
+    isHelpDialogOpen ||
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
     bgTasksDialogOpen;
@@ -1991,6 +2020,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
+    isHelpDialogOpen,
+    closeHelpDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
   });
@@ -2223,7 +2254,15 @@ export const AppContainer = (props: AppContainerProps) => {
         const newValue = !compactMode;
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
-        refreshStatic();
+        // Skip the expensive clearTerminal + Static remount when no past
+        // item would render differently (no tool_group / gemini_thought*).
+        // Future items pick up the new mode naturally because Static is
+        // append-only. Issue #3899: this unfreezes Ctrl+O for plain-chat
+        // long sessions; tool/thinking-bearing sessions still go through
+        // the (now chunked) full path in MainContent.
+        if (compactToggleHasVisualEffect(historyRef.current)) {
+          refreshStatic();
+        }
       }
     },
     [
@@ -2362,7 +2401,10 @@ export const AppContainer = (props: AppContainerProps) => {
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
+      isHelpDialogOpen,
+      activeHelpTab,
       slashCommands,
+      recentSlashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
       shellConfirmationRequest,
@@ -2477,7 +2519,10 @@ export const AppContainer = (props: AppContainerProps) => {
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
+      isHelpDialogOpen,
+      activeHelpTab,
       slashCommands,
+      recentSlashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
       shellConfirmationRequest,
@@ -2628,10 +2673,16 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Branch (fork) session
+      handleBranch,
       // Delete session dialog
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      // Help dialog
+      openHelpDialog,
+      closeHelpDialog,
+      setHelpTab,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
@@ -2693,10 +2744,16 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Branch (fork) session
+      handleBranch,
       // Delete session dialog
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      // Help dialog
+      openHelpDialog,
+      closeHelpDialog,
+      setHelpTab,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
