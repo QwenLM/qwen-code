@@ -193,7 +193,7 @@ export function TopBar({
 
   return (
     <div
-      className="fixed top-0 left-0 h-[48px] z-panel titlebar-drag-region"
+      className="fixed top-0 left-0 h-[48px] z-[60] titlebar-drag-region"
     >
       <div className="flex h-full items-center gap-2">
       {/* === LEFT: Sidebar + Menu + Navigation + Workspace === */}
