@@ -3268,13 +3268,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    // Ink 7's input throttle merges or drops the bracketed-paste end +
-    // backspace pair when run through `ink-testing-library`: the backspace
-    // sometimes lands before the buffer commits the placeholder, leaving
-    // mockBuffer.text non-empty and the assertion failing. Skip until
-    // upstream `ink-testing-library` ships an ink-7-compatible release that
-    // flushes input deterministically. Reproduces flakily on macOS Node 22.
-    it.skip('should reuse placeholder ID after deletion', async () => {
+    it('should reuse placeholder ID after deletion', async () => {
       // Set up mocks that actually update buffer state
       vi.mocked(mockBuffer.insert).mockImplementation((text: string) => {
         mockBuffer.text += text;
