@@ -131,29 +131,34 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
   strategy: 'none',
 };
 
-const AUTO_MEMORY_RECALL_BUDGET_MS = 200;
+// Keep auto-memory best-effort for the current turn without reintroducing the
+// previous multi-second blocking behavior. This gives fast/cache-hit recalls a
+// chance to land while bounding user-visible delay.
+const AUTO_MEMORY_RECALL_BUDGET_MS = 1_000;
 
 async function resolveWithBudget<T>(
   promise: Promise<T> | undefined,
   fallback: T,
   budgetMs: number,
+  onTimeout?: () => void,
 ): Promise<T> {
   if (!promise) {
     return fallback;
   }
 
-  let timeout: NodeJS.Timeout | undefined;
+  let timeout: NodeJS.Timeout;
   try {
     return await Promise.race([
       promise,
       new Promise<T>((resolve) => {
-        timeout = setTimeout(() => resolve(fallback), budgetMs);
+        timeout = setTimeout(() => {
+          onTimeout?.();
+          resolve(fallback);
+        }, budgetMs);
       }),
     ]);
   } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
+    clearTimeout(timeout!);
   }
 }
 
@@ -992,6 +997,7 @@ export class GeminiClient {
         relevantAutoMemoryPromise,
         EMPTY_RELEVANT_AUTO_MEMORY_RESULT,
         AUTO_MEMORY_RECALL_BUDGET_MS,
+        () => this.pendingRecallAbortController?.abort(),
       );
       this.pendingRecallAbortController = undefined;
       if (resolvedRelevantAutoMemory.prompt) {

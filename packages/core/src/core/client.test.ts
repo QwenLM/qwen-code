@@ -1188,7 +1188,13 @@ hello
 
     it('should skip relevant managed auto-memory prompt when recall misses the budget', async () => {
       vi.useFakeTimers();
-      mockMemoryManager.recall.mockImplementation(() => new Promise(() => {}));
+      let recallSignal: AbortSignal | undefined;
+      mockMemoryManager.recall.mockImplementation(
+        (_projectRoot, _query, options) => {
+          recallSignal = options.abortSignal;
+          return new Promise(() => {});
+        },
+      );
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -1207,9 +1213,10 @@ hello
         'prompt-id-memory-timeout',
       );
       const consumePromise = fromAsync(stream);
-      await vi.advanceTimersByTimeAsync(200);
+      await vi.advanceTimersByTimeAsync(1_000);
       await consumePromise;
 
+      expect(recallSignal?.aborted).toBe(true);
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         expect.arrayContaining(['Please answer tersely']),

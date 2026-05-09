@@ -62,28 +62,20 @@ async function generateKebabTitle(
     // model when no fast model is configured so this path never fails to
     // start.
     const model = config.getFastModel() ?? config.getModel();
-    const response = await config.getContentGenerator().generateContent(
-      {
-        model,
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: conversationText }],
-          },
-        ],
-        config: {
-          systemInstruction: {
-            role: 'user',
-            parts: [
-              {
-                text: 'Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation. Use lowercase words separated by hyphens. Examples: "fix-login-bug", "add-auth-feature", "refactor-api-client". Reply with ONLY the kebab-case name, nothing else.',
-              },
-            ],
-          },
-          thinkingConfig: { includeThoughts: false },
-          abortSignal: signal,
+    const response = await config.getGeminiClient().generateContent(
+      [
+        {
+          role: 'user',
+          parts: [{ text: conversationText }],
         },
+      ],
+      {
+        systemInstruction:
+          'Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation. Use lowercase words separated by hyphens. Examples: "fix-login-bug", "add-auth-feature", "refactor-api-client". Reply with ONLY the kebab-case name, nothing else.',
+        thinkingConfig: { includeThoughts: false },
       },
+      signal ?? new AbortController().signal,
+      model,
       'rename_generate_title',
     );
 

@@ -60,13 +60,16 @@ export function createRetryAuthTypeForModel(
 
 export function createContentGeneratorForModelResolver(
   config: Config,
-  getMainContentGenerator: () => ContentGenerator,
+  getOwnContentGenerator: () => ContentGenerator,
 ): ContentGeneratorForModel {
+  // This cache follows the owning client/resolver lifetime, not resetChat().
+  // resetChat only resets conversation state; config changes that should affect
+  // model/provider resolution must recreate the owning client.
   const contentGeneratorsByModel = new Map<string, Promise<ContentGenerator>>();
 
   return (model: string): Promise<ContentGenerator> => {
     if (model === config.getModel()) {
-      return Promise.resolve(getMainContentGenerator());
+      return Promise.resolve(getOwnContentGenerator());
     }
 
     const cached = contentGeneratorsByModel.get(model);

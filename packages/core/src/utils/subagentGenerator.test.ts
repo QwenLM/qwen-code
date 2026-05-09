@@ -34,7 +34,7 @@ describe('subagentGenerator', () => {
     // Create a mock config that returns the mock client and model
     mockConfig = {
       getBaseLlmClient: vi.fn().mockReturnValue(mockClient),
-      getFastModel: vi.fn().mockReturnValue(undefined),
+      getFastModel: vi.fn().mockReturnValue('qwen-flash'),
       getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
     } as unknown as Config;
   });

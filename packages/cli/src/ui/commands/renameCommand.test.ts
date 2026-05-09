@@ -202,8 +202,9 @@ describe('renameCommand', () => {
               parts: [{ text: 'Looking at the handler now.' }],
             },
           ]),
+          generateContent,
         }),
-        getContentGenerator: vi.fn().mockReturnValue({ generateContent }),
+        getContentGenerator: vi.fn(),
       };
       return { config, generateContent };
     }
@@ -220,10 +221,15 @@ describe('renameCommand', () => {
       await renameCommand.action!(mockContext, '');
 
       expect(generateContent).toHaveBeenCalledOnce();
-      expect(generateContent.mock.calls[0][0].model).toBe('qwen-turbo');
-      expect(generateContent.mock.calls[0][0].config.thinkingConfig).toEqual({
-        includeThoughts: false,
-      });
+      expect(generateContent).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.objectContaining({
+          thinkingConfig: { includeThoughts: false },
+        }),
+        expect.any(AbortSignal),
+        'qwen-turbo',
+        'rename_generate_title',
+      );
     });
 
     it('falls back to main model when fastModel is unset', async () => {
@@ -238,7 +244,13 @@ describe('renameCommand', () => {
       await renameCommand.action!(mockContext, '');
 
       expect(generateContent).toHaveBeenCalledOnce();
-      expect(generateContent.mock.calls[0][0].model).toBe('main-model');
+      expect(generateContent).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.any(Object),
+        expect.any(AbortSignal),
+        'main-model',
+        'rename_generate_title',
+      );
     });
   });
 

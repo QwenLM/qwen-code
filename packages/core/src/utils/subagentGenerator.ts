@@ -130,6 +130,7 @@ export async function subagentGenerator(
       contents,
       schema: RESPONSE_SCHEMA,
       abortSignal,
+      model: config.getModel(),
       systemInstruction: SYSTEM_PROMPT,
       purpose: 'subagent-generator',
       validate: (response) =>
