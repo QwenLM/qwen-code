@@ -198,7 +198,8 @@ export function registerSessionsHandlers(
 
   server.handle(
     RPC_CHANNELS.sessions.MARK_ALL_READ,
-    async (_ctx, workspaceId: string) => sessionManager.markAllSessionsRead(workspaceId),
+    async (_ctx, workspaceId: string) =>
+      sessionManager.markAllSessionsRead(workspaceId),
   );
 
   // Get a single session with messages (for lazy loading)
@@ -228,9 +229,8 @@ export function registerSessionsHandlers(
   );
 
   // Delete a session
-  server.handle(
-    RPC_CHANNELS.sessions.DELETE,
-    async (_ctx, sessionId: string) => sessionManager.deleteSession(sessionId),
+  server.handle(RPC_CHANNELS.sessions.DELETE, async (_ctx, sessionId: string) =>
+    sessionManager.deleteSession(sessionId),
   );
 
   // Send a message to a session (with optional file attachments)
@@ -291,13 +291,15 @@ export function registerSessionsHandlers(
   // Cancel processing
   server.handle(
     RPC_CHANNELS.sessions.CANCEL,
-    async (_ctx, sessionId: string, silent?: boolean) => sessionManager.cancelProcessing(sessionId, silent),
+    async (_ctx, sessionId: string, silent?: boolean) =>
+      sessionManager.cancelProcessing(sessionId, silent),
   );
 
   // Kill background shell
   server.handle(
     RPC_CHANNELS.sessions.KILL_SHELL,
-    async (_ctx, sessionId: string, shellId: string) => sessionManager.killShell(sessionId, shellId),
+    async (_ctx, sessionId: string, shellId: string) =>
+      sessionManager.killShell(sessionId, shellId),
   );
 
   // Get background task output
@@ -322,7 +324,8 @@ export function registerSessionsHandlers(
       allowed: boolean,
       alwaysAllow: boolean,
       options?: import('@craft-agent/shared/protocol').PermissionResponseOptions,
-    ) => sessionManager.respondToPermission(
+    ) =>
+      sessionManager.respondToPermission(
         sessionId,
         requestId,
         allowed,
@@ -426,6 +429,21 @@ export function registerSessionsHandlers(
         case 'refreshTitle':
           log.info(`IPC: refreshTitle received for session ${sessionId}`);
           return sessionManager.refreshTitle(sessionId);
+        case 'getQwenPermissionSettings':
+          log.info(
+            `IPC: getQwenPermissionSettings received for session ${sessionId}`,
+          );
+          return sessionManager.getSessionPermissionSettings(sessionId);
+        case 'setQwenPermissionRules':
+          log.info(
+            `IPC: setQwenPermissionRules received for session ${sessionId}`,
+          );
+          return sessionManager.setSessionPermissionRules(
+            sessionId,
+            command.scope,
+            command.ruleType,
+            command.rules,
+          );
         case 'refreshAvailableCommands':
           log.info(
             `IPC: refreshAvailableCommands received for session ${sessionId}`,
@@ -491,13 +509,15 @@ export function registerSessionsHandlers(
   // Get pending plan execution state (for reload recovery)
   server.handle(
     RPC_CHANNELS.sessions.GET_PENDING_PLAN_EXECUTION,
-    async (_ctx, sessionId: string) => sessionManager.getPendingPlanExecution(sessionId),
+    async (_ctx, sessionId: string) =>
+      sessionManager.getPendingPlanExecution(sessionId),
   );
 
   // Get authoritative permission mode diagnostics for renderer reconciliation
   server.handle(
     RPC_CHANNELS.sessions.GET_PERMISSION_MODE_STATE,
-    async (_ctx, sessionId: string) => sessionManager.getSessionPermissionModeState(sessionId),
+    async (_ctx, sessionId: string) =>
+      sessionManager.getSessionPermissionModeState(sessionId),
   );
 
   // ============================================================

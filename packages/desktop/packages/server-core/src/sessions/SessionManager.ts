@@ -83,7 +83,7 @@ import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
-import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type AvailableSlashCommand, type RefreshAvailableCommandsOptions, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
+import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type AvailableSlashCommand, type RefreshAvailableCommandsOptions, type PermissionRuleType, type PermissionSettingsScope, type QwenPermissionSettings, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
 import { messageToStored, storedToMessage, type AgentEvent, type Message, type StoredAttachment, type ToolDisplayMeta } from '@craft-agent/core/types'
 import { textElementsToContentBadges } from '@craft-agent/core/utils'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath, truncateTitle } from '@craft-agent/shared/utils'
@@ -592,8 +592,18 @@ type RewindableAgent = AgentBackend & {
   rewindToUserTurn(targetTurnIndex: number): Promise<unknown>
 }
 
+type PermissionSettingsAgent = AgentBackend & {
+  getPermissionSettings(): Promise<QwenPermissionSettings>
+  setPermissionRules(scope: PermissionSettingsScope, ruleType: PermissionRuleType, rules: string[]): Promise<QwenPermissionSettings>
+}
+
 function canRewindToUserTurn(agent: AgentBackend): agent is RewindableAgent {
   return typeof agent.rewindToUserTurn === 'function'
+}
+
+function canManagePermissionSettings(agent: AgentBackend): agent is PermissionSettingsAgent {
+  const candidate = agent as Partial<PermissionSettingsAgent>
+  return typeof candidate.getPermissionSettings === 'function' && typeof candidate.setPermissionRules === 'function'
 }
 
 function isQwenNativeHistoryMessageId(messageId: string, sdkSessionId?: string): boolean {
@@ -6866,6 +6876,39 @@ export class SessionManager implements ISessionManager {
       // Persist to disk
       this.persistSession(managed)
     }
+  }
+
+  async getSessionPermissionSettings(sessionId: string): Promise<QwenPermissionSettings> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      throw new Error(`Session ${sessionId} not found`)
+    }
+
+    const agent = await this.getOrCreateAgent(managed)
+    if (!canManagePermissionSettings(agent)) {
+      throw new Error('This session backend does not expose Qwen permission settings')
+    }
+
+    return agent.getPermissionSettings()
+  }
+
+  async setSessionPermissionRules(
+    sessionId: string,
+    scope: PermissionSettingsScope,
+    ruleType: PermissionRuleType,
+    rules: string[],
+  ): Promise<QwenPermissionSettings> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      throw new Error(`Session ${sessionId} not found`)
+    }
+
+    const agent = await this.getOrCreateAgent(managed)
+    if (!canManagePermissionSettings(agent)) {
+      throw new Error('This session backend does not expose Qwen permission settings')
+    }
+
+    return agent.setPermissionRules(scope, ruleType, rules)
   }
 
   /**

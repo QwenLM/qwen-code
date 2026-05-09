@@ -1,329 +1,505 @@
-/**
- * PermissionsSettingsPage
- *
- * Displays permissions configuration for Plan mode.
- * Shows both default patterns (from ~/.craft-agent/permissions/default.json)
- * and custom workspace additions (from workspace permissions.json).
- *
- * Default patterns can be edited by the user in ~/.craft-agent/permissions/default.json.
- * Custom patterns can be edited via workspace permissions.json file.
- */
-
-import * as React from 'react'
-import { useState, useEffect, useMemo } from 'react'
-import { useTranslation } from 'react-i18next'
-import { PanelHeader } from '@/components/app-shell/PanelHeader'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { HeaderMenu } from '@/components/ui/HeaderMenu'
-import { Loader2 } from 'lucide-react'
-import { useAppShellContext, useActiveWorkspace } from '@/context/AppShellContext'
-import { type PermissionsConfigFile } from '@craft-agent/shared/agent/modes'
-import {
-  PermissionsDataTable,
-  type PermissionRow,
-} from '@/components/info'
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { AlertCircle, Loader2, Plus, ShieldCheck, Trash2 } from 'lucide-react';
+import { PanelHeader } from '@/components/app-shell/PanelHeader';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { HeaderMenu } from '@/components/ui/HeaderMenu';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Info_Badge } from '@/components/info';
 import {
   SettingsSection,
   SettingsCard,
-} from '@/components/settings'
-import { EditPopover, EditButton, getEditConfig } from '@/components/ui/EditPopover'
-import { getDocUrl } from '@craft-agent/shared/docs/doc-links'
-import { routes } from '@/lib/navigate'
-import type { DetailsPageMeta } from '@/lib/navigation-registry'
+  SettingsSegmentedControl,
+} from '@/components/settings';
+import { useAppShellContext } from '@/context/AppShellContext';
+import { routes } from '@/lib/navigate';
+import type { DetailsPageMeta } from '@/lib/navigation-registry';
+import type {
+  PermissionRuleType,
+  PermissionSettingsScope,
+  QwenPermissionSettings,
+} from '@craft-agent/shared/protocol';
 
 export const meta: DetailsPageMeta = {
   navigator: 'settings',
   slug: 'permissions',
-}
+};
 
-/**
- * Build default permissions data from ~/.craft-agent/permissions/default.json.
- * These are the Plan mode patterns that can be customized by the user.
- * Patterns can include comments which are displayed in the table.
- *
- * Note: We only show allowed patterns here. Anything not on this list is implicitly denied.
- */
-function buildDefaultPermissionsData(config: PermissionsConfigFile | null): PermissionRow[] {
-  if (!config) return []
+const RULE_TYPES: PermissionRuleType[] = ['allow', 'ask', 'deny'];
+const SCOPES: PermissionSettingsScope[] = ['user', 'workspace'];
+const QWEN_PERMISSIONS_DOC_URL =
+  'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/#permissions';
 
-  const rows: PermissionRow[] = []
-
-  // Helper to extract pattern and comment from string or object format
-  const extractPatternInfo = (item: string | { pattern: string; comment?: string }): { pattern: string; comment: string | null } => {
-    if (typeof item === 'string') {
-      return { pattern: item, comment: null }
-    }
-    return { pattern: item.pattern, comment: item.comment || null }
+function ruleTypeLabel(type: PermissionRuleType): string {
+  switch (type) {
+    case 'allow':
+      return 'Allow';
+    case 'ask':
+      return 'Ask';
+    case 'deny':
+      return 'Deny';
+    default:
+      const _exhaustive: never = type;
+      return _exhaustive;
   }
-
-  // Note: We don't show blockedTools here - anything not on the allowed list is implicitly denied
-
-  // Allowed bash patterns
-  config.allowedBashPatterns?.forEach((item) => {
-    const { pattern, comment } = extractPatternInfo(item)
-    rows.push({ access: 'allowed', type: 'bash', pattern, comment })
-  })
-
-  // Allowed MCP patterns
-  config.allowedMcpPatterns?.forEach((item) => {
-    const { pattern, comment } = extractPatternInfo(item)
-    rows.push({ access: 'allowed', type: 'mcp', pattern, comment })
-  })
-
-  // API endpoints
-  config.allowedApiEndpoints?.forEach((item) => {
-    const pattern = `${item.method} ${item.path}`
-    rows.push({ access: 'allowed', type: 'api', pattern, comment: item.comment || null })
-  })
-
-  // Write paths
-  config.allowedWritePaths?.forEach((item) => {
-    const { pattern, comment } = extractPatternInfo(item)
-    rows.push({ access: 'allowed', type: 'tool', pattern: `Write to: ${pattern}`, comment })
-  })
-
-  return rows
 }
 
-/**
- * Build custom permissions data from workspace permissions.json.
- * These are user-added patterns that extend the defaults.
- */
-function buildCustomPermissionsData(config: PermissionsConfigFile, fallbackLabels: { blockedTool: string; bashPattern: string; mcpPattern: string; apiEndpoint: string; writePath: string }): PermissionRow[] {
-  const rows: PermissionRow[] = []
+function scopeLabel(scope: PermissionSettingsScope): string {
+  return scope === 'user' ? 'User settings' : 'Project settings';
+}
 
-  // Additional blocked tools
-  config.blockedTools?.forEach((item) => {
-    const pattern = typeof item === 'string' ? item : item.pattern
-    const comment = typeof item === 'string' ? fallbackLabels.blockedTool : (item.comment || fallbackLabels.blockedTool)
-    rows.push({ access: 'blocked', type: 'tool', pattern, comment })
-  })
+function scopeDescription(scope: PermissionSettingsScope): string {
+  return scope === 'user'
+    ? 'Saved globally for your Qwen Code user.'
+    : 'Saved in this workspace project settings.';
+}
 
-  // Additional bash patterns
-  config.allowedBashPatterns?.forEach((item) => {
-    const pattern = typeof item === 'string' ? item : item.pattern
-    const comment = typeof item === 'string' ? fallbackLabels.bashPattern : (item.comment || fallbackLabels.bashPattern)
-    rows.push({ access: 'allowed', type: 'bash', pattern, comment })
-  })
+function ruleTypeDescription(type: PermissionRuleType): string {
+  switch (type) {
+    case 'allow':
+      return "Qwen Code won't ask before using matching tools or commands.";
+    case 'ask':
+      return 'Qwen Code always asks before using matching tools or commands.';
+    case 'deny':
+      return 'Qwen Code blocks matching tools or commands.';
+    default:
+      const _exhaustive: never = type;
+      return _exhaustive;
+  }
+}
 
-  // Additional MCP patterns
-  config.allowedMcpPatterns?.forEach((item) => {
-    const pattern = typeof item === 'string' ? item : item.pattern
-    const comment = typeof item === 'string' ? fallbackLabels.mcpPattern : (item.comment || fallbackLabels.mcpPattern)
-    rows.push({ access: 'allowed', type: 'mcp', pattern, comment })
-  })
-
-  // API endpoints
-  config.allowedApiEndpoints?.forEach((item) => {
-    const pattern = `${item.method} ${item.path}`
-    rows.push({ access: 'allowed', type: 'api', pattern, comment: item.comment || fallbackLabels.apiEndpoint })
-  })
-
-  // Write paths are shown as allowed paths
-  config.allowedWritePaths?.forEach((item) => {
-    const pattern = typeof item === 'string' ? item : item.pattern
-    const comment = typeof item === 'string' ? fallbackLabels.writePath : (item.comment || fallbackLabels.writePath)
-    // Show as a special "tool" type since it's about Write/Edit operations
-    rows.push({ access: 'allowed', type: 'tool', pattern: `Write to: ${pattern}`, comment })
-  })
-
-  return rows
+function normalizeRules(rules: string[]): string[] {
+  return Array.from(new Set(rules.map((rule) => rule.trim()).filter(Boolean)));
 }
 
 export default function PermissionsSettingsPage() {
-  const { t } = useTranslation()
-  const { activeWorkspaceId } = useAppShellContext()
-  const activeWorkspace = useActiveWorkspace()
+  const { t } = useTranslation();
+  const { activeSessionId } = useAppShellContext();
+  const [isLoading, setIsLoading] = useState(true);
+  const [settings, setSettings] = useState<QwenPermissionSettings | null>(null);
+  const [activeRuleType, setActiveRuleType] =
+    useState<PermissionRuleType>('allow');
+  const [drafts, setDrafts] = useState<Record<PermissionSettingsScope, string>>(
+    {
+      user: '',
+      workspace: '',
+    },
+  );
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  // Loading and data state
-  const [isLoading, setIsLoading] = useState(true)
-  const [defaultConfig, setDefaultConfig] = useState<PermissionsConfigFile | null>(null)
-  const [defaultPermissionsPath, setDefaultPermissionsPath] = useState<string | null>(null)
-  const [customConfig, setCustomConfig] = useState<PermissionsConfigFile | null>(null)
+  const tr = useCallback(
+    (key: string, fallback: string) => t(key, { defaultValue: fallback }),
+    [t],
+  );
 
-  // Build default permissions data from ~/.craft-agent/permissions/default.json
-  const defaultPermissionsData = useMemo(() => buildDefaultPermissionsData(defaultConfig), [defaultConfig])
-
-  // Fallback labels for custom permissions (translated)
-  const permissionFallbackLabels = useMemo(() => ({
-    blockedTool: t("settings.permissions.customBlockedTool"),
-    bashPattern: t("settings.permissions.customBashPattern"),
-    mcpPattern: t("settings.permissions.customMcpPattern"),
-    apiEndpoint: t("settings.permissions.customApiEndpoint"),
-    writePath: t("settings.permissions.allowedWritePath"),
-  }), [t])
-
-  // Build custom permissions data from workspace permissions.json
-  const customPermissionsData = useMemo(() => {
-    if (!customConfig) return []
-    return buildCustomPermissionsData(customConfig, permissionFallbackLabels)
-  }, [customConfig, permissionFallbackLabels])
-
-  // Load both default and workspace permissions configs
-  useEffect(() => {
-    const loadPermissions = async () => {
-      if (!window.electronAPI) {
-        setIsLoading(false)
-        return
-      }
-
-      setIsLoading(true)
-      try {
-        // Load default permissions (app-level) - returns both config and path
-        const { config: defaults, path: defaultsPath } = await window.electronAPI.getDefaultPermissionsConfig()
-        setDefaultConfig(defaults)
-        setDefaultPermissionsPath(defaultsPath)
-
-        // Load workspace permissions if we have an active workspace
-        if (activeWorkspaceId) {
-          const workspace = await window.electronAPI.getWorkspacePermissionsConfig(activeWorkspaceId)
-          setCustomConfig(workspace)
-        }
-      } catch (error) {
-        console.error('Failed to load permissions:', error)
-      } finally {
-        setIsLoading(false)
-      }
+  const loadSettings = useCallback(async () => {
+    if (!activeSessionId || !window.electronAPI) {
+      setSettings(null);
+      setIsLoading(false);
+      return;
     }
 
-    loadPermissions()
-  }, [activeWorkspaceId])
+    setIsLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.sessionCommand(activeSessionId, {
+        type: 'getQwenPermissionSettings',
+      });
+      setSettings(result as QwenPermissionSettings);
+    } catch (loadError) {
+      setError(
+        loadError instanceof Error ? loadError.message : String(loadError),
+      );
+      setSettings(null);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [activeSessionId]);
 
-  // Listen for default permissions changes (file watcher)
   useEffect(() => {
-    if (!window.electronAPI?.onDefaultPermissionsChanged) return
+    void loadSettings();
+  }, [loadSettings]);
 
-    const unsubscribe = window.electronAPI.onDefaultPermissionsChanged(async () => {
-      // Reload default permissions when the file changes
-      const { config: defaults } = await window.electronAPI.getDefaultPermissionsConfig()
-      setDefaultConfig(defaults)
-    })
+  const ruleTypeOptions = useMemo(
+    () =>
+      RULE_TYPES.map((type) => ({
+        value: type,
+        label: ruleTypeLabel(type),
+      })),
+    [],
+  );
 
-    return unsubscribe
-  }, [])
+  const saveRules = useCallback(
+    async (
+      scope: PermissionSettingsScope,
+      ruleType: PermissionRuleType,
+      rules: string[],
+    ) => {
+      if (!activeSessionId || !window.electronAPI) return;
+      const key = `${scope}:${ruleType}`;
+      setSavingKey(key);
+      setError(null);
+      try {
+        const result = await window.electronAPI.sessionCommand(
+          activeSessionId,
+          {
+            type: 'setQwenPermissionRules',
+            scope,
+            ruleType,
+            rules: normalizeRules(rules),
+          },
+        );
+        setSettings(result as QwenPermissionSettings);
+      } catch (saveError) {
+        setError(
+          saveError instanceof Error ? saveError.message : String(saveError),
+        );
+      } finally {
+        setSavingKey(null);
+      }
+    },
+    [activeSessionId],
+  );
+
+  const addRule = useCallback(
+    async (scope: PermissionSettingsScope) => {
+      if (!settings) return;
+      const draft = drafts[scope].trim();
+      if (!draft) return;
+      const nextRules = normalizeRules([
+        ...settings[scope].rules[activeRuleType],
+        draft,
+      ]);
+      setDrafts((current) => ({ ...current, [scope]: '' }));
+      await saveRules(scope, activeRuleType, nextRules);
+    },
+    [activeRuleType, drafts, saveRules, settings],
+  );
+
+  const removeRule = useCallback(
+    async (scope: PermissionSettingsScope, rule: string) => {
+      if (!settings) return;
+      const nextRules = settings[scope].rules[activeRuleType].filter(
+        (item) => item !== rule,
+      );
+      await saveRules(scope, activeRuleType, nextRules);
+    },
+    [activeRuleType, saveRules, settings],
+  );
 
   return (
     <div className="h-full flex flex-col">
-      <PanelHeader title={t("settings.permissions.title")} actions={<HeaderMenu route={routes.view.settings('permissions')} helpFeature="permissions" />} />
+      <PanelHeader
+        title={t('settings.permissions.title')}
+        actions={
+          <HeaderMenu
+            route={routes.view.settings('permissions')}
+            helpFeature="permissions"
+          />
+        }
+      />
       <div className="flex-1 min-h-0 mask-fade-y">
         <ScrollArea className="h-full">
           <div className="px-5 py-7 max-w-3xl mx-auto">
             <div className="space-y-8">
+              <SettingsSection
+                title={tr(
+                  'settings.permissions.aboutPermissions',
+                  'About Permissions',
+                )}
+              >
+                <SettingsCard className="px-4 py-3.5">
+                  <div className="text-sm text-muted-foreground leading-relaxed space-y-2">
+                    <p>
+                      {tr(
+                        'settings.permissions.cliAlignedIntro',
+                        'Manage Qwen Code permission policy for tool and command requests. Requests are evaluated in priority order: Deny, Ask, then Allow.',
+                      )}
+                    </p>
+                    <p>
+                      {tr(
+                        'settings.permissions.cliAlignedFormat',
+                        'Rules may target an entire tool or a specific operation. Changes are persisted to Qwen settings through ACP and apply to subsequent tool requests.',
+                      )}
+                    </p>
+                    <div className="rounded-md border border-border/70 bg-muted/35 px-3 py-2.5 text-xs text-muted-foreground">
+                      <div className="font-medium text-foreground/80">
+                        {tr(
+                          'settings.permissions.quickGuideTitle',
+                          'How to write a rule',
+                        )}
+                      </div>
+                      <div className="mt-1.5 space-y-1">
+                        <p>
+                          {tr(
+                            'settings.permissions.quickGuideTools',
+                            'Enter a tool name to cover all uses of that tool, for example WebFetch or Edit.',
+                          )}
+                        </p>
+                        <p>
+                          {tr(
+                            'settings.permissions.quickGuideCommands',
+                            'Use ToolName(specifier) to restrict the rule to a specific operation, for example Bash(git status) or Bash(npm run build).',
+                          )}
+                        </p>
+                        <p>
+                          {tr(
+                            'settings.permissions.quickGuideScopes',
+                            'User rules apply across workspaces. Project rules apply only to this workspace and are merged with the user policy.',
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        window.electronAPI?.openUrl(QWEN_PERMISSIONS_DOC_URL)
+                      }
+                      className="text-foreground/70 hover:text-foreground underline underline-offset-2"
+                    >
+                      {t('common.learnMore')}
+                    </button>
+                  </div>
+                </SettingsCard>
+              </SettingsSection>
+
               {isLoading ? (
                 <div className="flex items-center justify-center py-12">
                   <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
                 </div>
-              ) : (
+              ) : !activeSessionId ? (
+                <EmptyState
+                  title={tr(
+                    'settings.permissions.noSessionTitle',
+                    'Open a Qwen session to edit permissions',
+                  )}
+                  description={tr(
+                    'settings.permissions.noSessionDesc',
+                    'Permission settings are read and written through Qwen ACP, so this page needs an active session in the workspace.',
+                  )}
+                />
+              ) : error && !settings ? (
+                <EmptyState
+                  title="Permission settings unavailable"
+                  description={error}
+                />
+              ) : settings ? (
                 <>
-                  {/* About Section */}
-                  <SettingsSection title={t("settings.permissions.aboutPermissions")}>
+                  <SettingsSection
+                    title={tr(
+                      'settings.permissions.ruleEditor',
+                      'Permission Rules',
+                    )}
+                    description={ruleTypeDescription(activeRuleType)}
+                  >
+                    <div className="mb-3">
+                      <SettingsSegmentedControl
+                        value={activeRuleType}
+                        onValueChange={setActiveRuleType}
+                        options={ruleTypeOptions}
+                      />
+                    </div>
+                    <div className="space-y-3">
+                      {SCOPES.map((scope) => (
+                        <RuleScopeCard
+                          key={scope}
+                          scope={scope}
+                          ruleType={activeRuleType}
+                          rules={settings[scope].rules[activeRuleType]}
+                          path={settings[scope].path}
+                          draft={drafts[scope]}
+                          isSaving={savingKey === `${scope}:${activeRuleType}`}
+                          onDraftChange={(value) =>
+                            setDrafts((current) => ({
+                              ...current,
+                              [scope]: value,
+                            }))
+                          }
+                          onAdd={() => void addRule(scope)}
+                          onRemove={(rule) => void removeRule(scope, rule)}
+                        />
+                      ))}
+                    </div>
+                    {error ? (
+                      <div className="mt-3 flex items-start gap-2 text-xs text-destructive">
+                        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                        <span>{error}</span>
+                      </div>
+                    ) : null}
+                  </SettingsSection>
+
+                  <SettingsSection
+                    title={tr(
+                      'settings.permissions.effectiveRules',
+                      'Effective Rules',
+                    )}
+                    description={tr(
+                      'settings.permissions.effectiveRulesDesc',
+                      'Merged User and Project rules currently visible to Qwen Code.',
+                    )}
+                  >
                     <SettingsCard className="px-4 py-3.5">
-                      <div className="text-sm text-muted-foreground leading-relaxed space-y-1.5">
-                        <p>
-                          {t("settings.permissions.aboutText1")}
-                        </p>
-                        <p>
-                          {t("settings.permissions.aboutText2")}
-                        </p>
-                        <p>
-                          <button
-                            type="button"
-                            onClick={() => window.electronAPI?.openUrl(getDocUrl('permissions'))}
-                            className="text-foreground/70 hover:text-foreground underline underline-offset-2"
-                          >
-                            {t("common.learnMore")}
-                          </button>
-                        </p>
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        {RULE_TYPES.map((type) => (
+                          <div key={type} className="min-w-0">
+                            <div className="flex items-center gap-2 text-sm font-medium">
+                              <ShieldCheck className="w-4 h-4 text-muted-foreground" />
+                              <span>{ruleTypeLabel(type)}</span>
+                              <Info_Badge color="muted">
+                                {settings.merged[type].length}
+                              </Info_Badge>
+                            </div>
+                            <div className="mt-2 space-y-1">
+                              {settings.merged[type].slice(0, 4).map((rule) => (
+                                <div
+                                  key={rule}
+                                  className="truncate font-mono text-xs text-muted-foreground"
+                                  title={rule}
+                                >
+                                  {rule}
+                                </div>
+                              ))}
+                              {settings.merged[type].length === 0 ? (
+                                <div className="text-xs text-muted-foreground/70">
+                                  {tr(
+                                    'settings.permissions.noRules',
+                                    'No rules',
+                                  )}
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </SettingsCard>
                   </SettingsSection>
-
-                  {/* Default Permissions Section */}
-                  <SettingsSection
-                    title={t("settings.permissions.defaultPermissions")}
-                    description={t("settings.permissions.defaultPermissionsDesc")}
-                    action={
-                      // EditPopover for AI-assisted default permissions editing
-                      defaultPermissionsPath ? (
-                        <EditPopover
-                          trigger={<EditButton />}
-                          {...getEditConfig('default-permissions', defaultPermissionsPath)}
-                          secondaryAction={{
-                            label: t("common.editFile"),
-                            filePath: defaultPermissionsPath,
-                          }}
-                        />
-                      ) : null
-                    }
-                  >
-                    <SettingsCard className="p-0">
-                      {defaultPermissionsData.length > 0 ? (
-                        <PermissionsDataTable
-                          data={defaultPermissionsData}
-                          searchable
-                          maxHeight={350}
-                          fullscreen
-                          fullscreenTitle={t("settings.permissions.defaultPermissions")}
-                        />
-                      ) : (
-                        <div className="p-8 text-center text-muted-foreground">
-                          <p className="text-sm">{t("settings.permissions.noDefaultPermissions")}</p>
-                          <p className="text-xs mt-1 text-foreground/40">
-                            {t("settings.permissions.noDefaultPermissionsDesc")}
-                          </p>
-                        </div>
-                      )}
-                    </SettingsCard>
-                  </SettingsSection>
-
-                  {/* Custom Permissions Section */}
-                  <SettingsSection
-                    title={t("settings.permissions.workspaceCustomizations")}
-                    description={t("settings.permissions.workspaceCustomizationsDesc")}
-                    action={
-                      (() => {
-                        // Get centralized edit config - all strings defined in EditPopover.tsx
-                        const { context, example, displayLabel } = getEditConfig('workspace-permissions', activeWorkspace?.rootPath || '')
-                        return (
-                          <EditPopover
-                            trigger={<EditButton />}
-                            example={example}
-                            context={context}
-                            displayLabel={displayLabel}
-                            secondaryAction={activeWorkspace ? {
-                              label: t("common.editFile"),
-                              filePath: `${activeWorkspace.rootPath}/permissions.json`,
-                            } : undefined}
-                          />
-                        )
-                      })()
-                    }
-                  >
-                    <SettingsCard className="p-0">
-                      {customPermissionsData.length > 0 ? (
-                        <PermissionsDataTable
-                          data={customPermissionsData}
-                          searchable
-                          maxHeight={350}
-                          fullscreen
-                          fullscreenTitle={t("settings.permissions.workspaceCustomizations")}
-                        />
-                      ) : (
-                        <div className="p-8 text-center text-muted-foreground">
-                          <p className="text-sm">{t("settings.permissions.noCustomPermissions")}</p>
-                          <p className="text-xs mt-1 text-foreground/40">
-                            {t("settings.permissions.noCustomPermissionsDesc")}
-                          </p>
-                        </div>
-                      )}
-                    </SettingsCard>
-                  </SettingsSection>
                 </>
-              )}
+              ) : null}
             </div>
           </div>
         </ScrollArea>
       </div>
     </div>
-  )
+  );
+}
+
+function EmptyState({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <SettingsCard className="px-4 py-8">
+      <div className="text-center">
+        <p className="text-sm font-medium">{title}</p>
+        <p className="text-xs text-muted-foreground mt-1">{description}</p>
+      </div>
+    </SettingsCard>
+  );
+}
+
+function RuleScopeCard({
+  scope,
+  ruleType,
+  rules,
+  path,
+  draft,
+  isSaving,
+  onDraftChange,
+  onAdd,
+  onRemove,
+}: {
+  scope: PermissionSettingsScope;
+  ruleType: PermissionRuleType;
+  rules: string[];
+  path: string;
+  draft: string;
+  isSaving: boolean;
+  onDraftChange: (value: string) => void;
+  onAdd: () => void;
+  onRemove: (rule: string) => void;
+}) {
+  const { t } = useTranslation();
+  const tr = useCallback(
+    (key: string, fallback: string) => t(key, { defaultValue: fallback }),
+    [t],
+  );
+  const placeholder =
+    ruleType === 'allow' ? 'Bash(git status)' : 'Bash(rm -rf *)';
+
+  return (
+    <SettingsCard className="px-4 py-3.5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{scopeLabel(scope)}</div>
+          <div className="text-xs text-muted-foreground mt-0.5">
+            {scopeDescription(scope)}
+          </div>
+          <div className="text-[11px] text-muted-foreground/70 mt-1 truncate font-mono">
+            {path}
+          </div>
+        </div>
+        {isSaving ? (
+          <Loader2 className="w-4 h-4 animate-spin text-muted-foreground shrink-0 mt-1" />
+        ) : null}
+      </div>
+
+      <div className="mt-3 flex gap-2">
+        <Input
+          value={draft}
+          onChange={(event) => onDraftChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') onAdd();
+          }}
+          placeholder={placeholder}
+          className="h-8 font-mono text-xs"
+        />
+        <Button
+          type="button"
+          size="sm"
+          onClick={onAdd}
+          disabled={!draft.trim() || isSaving}
+          className="h-8 px-2.5"
+        >
+          <Plus className="w-4 h-4" />
+        </Button>
+      </div>
+      <div className="mt-1.5 text-[11px] text-muted-foreground">
+        {tr(
+          'settings.permissions.inputHint',
+          'Examples: WebFetch, Edit, Bash(git status), Bash(npm run build). Place a rule under Ask to require confirmation, or under Deny to block matching requests.',
+        )}
+      </div>
+
+      <div className="mt-3 divide-y divide-border/60">
+        {rules.length > 0 ? (
+          rules.map((rule) => (
+            <div key={rule} className="flex items-center gap-2 py-2">
+              <code className="min-w-0 flex-1 truncate rounded bg-muted/60 px-2 py-1 font-mono text-xs">
+                {rule}
+              </code>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => onRemove(rule)}
+                disabled={isSaving}
+                className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </Button>
+            </div>
+          ))
+        ) : (
+          <div className="py-3 text-xs text-muted-foreground">
+            No {ruleTypeLabel(ruleType).toLowerCase()} rules in this scope.
+          </div>
+        )}
+      </div>
+    </SettingsCard>
+  );
 }

@@ -76,6 +76,64 @@ import { runExitCleanup } from '../utils/cleanup.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
+type PermissionRuleType = 'allow' | 'ask' | 'deny';
+
+interface PermissionRuleSet {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+}
+
+interface PermissionSettingsScopeState {
+  path: string;
+  rules: PermissionRuleSet;
+}
+
+interface QwenPermissionSettings {
+  user: PermissionSettingsScopeState;
+  workspace: PermissionSettingsScopeState;
+  merged: PermissionRuleSet;
+  isTrusted: boolean;
+}
+
+const PERMISSION_RULE_TYPES: PermissionRuleType[] = ['allow', 'ask', 'deny'];
+
+function readPermissionRuleSet(settings: unknown): PermissionRuleSet {
+  const permissions =
+    settings && typeof settings === 'object'
+      ? (
+          settings as {
+            permissions?: Partial<Record<PermissionRuleType, unknown>>;
+          }
+        ).permissions
+      : undefined;
+
+  const readRules = (type: PermissionRuleType): string[] => {
+    const value = permissions?.[type];
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string')
+      : [];
+  };
+
+  return {
+    allow: readRules('allow'),
+    ask: readRules('ask'),
+    deny: readRules('deny'),
+  };
+}
+
+function normalizePermissionRules(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
 export async function runAcpAgent(
   config: Config,
   settings: LoadedSettings,
@@ -440,6 +498,53 @@ class QwenAgent implements Agent {
     await session.cancelPendingPrompt();
   }
 
+  private loadPermissionSettings(cwd: string): LoadedSettings {
+    this.settings = loadSettings(cwd);
+    return this.settings;
+  }
+
+  private buildPermissionSettings(
+    settings: LoadedSettings,
+  ): QwenPermissionSettings {
+    return {
+      user: {
+        path: settings.user.path,
+        rules: readPermissionRuleSet(settings.user.settings),
+      },
+      workspace: {
+        path: settings.workspace.path,
+        rules: readPermissionRuleSet(settings.workspace.settings),
+      },
+      merged: readPermissionRuleSet(settings.merged),
+      isTrusted: settings.isTrusted,
+    };
+  }
+
+  private syncLivePermissionManagers(
+    before: PermissionRuleSet,
+    after: PermissionRuleSet,
+  ): void {
+    for (const ruleType of PERMISSION_RULE_TYPES) {
+      const oldRules = new Set(before[ruleType]);
+      const newRules = new Set(after[ruleType]);
+      const removed = before[ruleType].filter((rule) => !newRules.has(rule));
+      const added = after[ruleType].filter((rule) => !oldRules.has(rule));
+
+      if (removed.length === 0 && added.length === 0) continue;
+
+      for (const session of this.sessions.values()) {
+        const pm = session.getConfig().getPermissionManager?.();
+        if (!pm) continue;
+        for (const rule of removed) {
+          pm.removePersistentRule(rule, ruleType);
+        }
+        for (const rule of added) {
+          pm.addPersistentRule(rule, ruleType);
+        }
+      }
+    }
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -567,6 +672,44 @@ class QwenAgent implements Agent {
           baseUrl: cfg?.baseUrl ?? null,
           apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
         };
+      }
+      case 'qwen/permissions/getSettings': {
+        const settings = this.loadPermissionSettings(cwd);
+        return this.buildPermissionSettings(settings) as unknown as Record<
+          string,
+          unknown
+        >;
+      }
+      case 'qwen/permissions/setRules': {
+        const scope = params['scope'];
+        const ruleType = params['ruleType'];
+        if (scope !== 'user' && scope !== 'workspace') {
+          throw RequestError.invalidParams(
+            undefined,
+            'scope must be "user" or "workspace"',
+          );
+        }
+        if (ruleType !== 'allow' && ruleType !== 'ask' && ruleType !== 'deny') {
+          throw RequestError.invalidParams(
+            undefined,
+            'ruleType must be "allow", "ask", or "deny"',
+          );
+        }
+
+        const beforeSettings = this.loadPermissionSettings(cwd);
+        const before = readPermissionRuleSet(beforeSettings.merged);
+        const rules = normalizePermissionRules(params['rules']);
+        const settingScope =
+          scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
+
+        beforeSettings.setValue(settingScope, `permissions.${ruleType}`, rules);
+        const afterSettings = this.loadPermissionSettings(cwd);
+        const after = readPermissionRuleSet(afterSettings.merged);
+        this.syncLivePermissionManagers(before, after);
+        return this.buildPermissionSettings(afterSettings) as unknown as Record<
+          string,
+          unknown
+        >;
       }
       default:
         throw RequestError.methodNotFound(method);

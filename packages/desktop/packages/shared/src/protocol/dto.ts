@@ -265,6 +265,8 @@ export type SessionCommand =
   | { type: 'updateShare' }
   | { type: 'revokeShare' }
   | { type: 'refreshTitle' }
+  | { type: 'getQwenPermissionSettings' }
+  | { type: 'setQwenPermissionRules'; scope: PermissionSettingsScope; ruleType: PermissionRuleType; rules: string[] }
   | ({ type: 'refreshAvailableCommands' } & RefreshAvailableCommandsOptions)
   | { type: 'setConnection'; connectionSlug: string }
   | { type: 'setPendingPlanExecution'; planPath: string; draftInputSnapshot?: string }
@@ -279,6 +281,31 @@ export type SessionCommand =
 export interface NewChatActionParams {
   input?: string
   name?: string
+}
+
+// ---------------------------------------------------------------------------
+// Qwen permission settings
+// ---------------------------------------------------------------------------
+
+export type PermissionRuleType = 'allow' | 'ask' | 'deny'
+export type PermissionSettingsScope = 'user' | 'workspace'
+
+export interface PermissionRuleSet {
+  allow: string[]
+  ask: string[]
+  deny: string[]
+}
+
+export interface PermissionSettingsScopeState {
+  path: string
+  rules: PermissionRuleSet
+}
+
+export interface QwenPermissionSettings {
+  user: PermissionSettingsScopeState
+  workspace: PermissionSettingsScopeState
+  merged: PermissionRuleSet
+  isTrusted: boolean
 }
 
 // ---------------------------------------------------------------------------

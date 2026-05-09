@@ -67,7 +67,12 @@ import {
   type LLMQueryRequest,
   type LLMQueryResult,
 } from './llm-tool.ts';
-import type { PermissionResponseOptions } from '../protocol/dto.ts';
+import type {
+  PermissionResponseOptions,
+  PermissionRuleType,
+  PermissionSettingsScope,
+  QwenPermissionSettings,
+} from '../protocol/dto.ts';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1487,6 +1492,39 @@ export class QwenAgent extends BaseAgent {
     this.pendingModeOverride = mode;
     void this.forwardPermissionMode(mode);
     return mode;
+  }
+
+  async getPermissionSettings(): Promise<QwenPermissionSettings> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/permissions/getSettings',
+      (connection) =>
+        connection.extMethod('qwen/permissions/getSettings', {
+          cwd: this.resolvedCwd(),
+        }),
+      10_000,
+    );
+    return result as unknown as QwenPermissionSettings;
+  }
+
+  async setPermissionRules(
+    scope: PermissionSettingsScope,
+    ruleType: PermissionRuleType,
+    rules: string[],
+  ): Promise<QwenPermissionSettings> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/permissions/setRules',
+      (connection) =>
+        connection.extMethod('qwen/permissions/setRules', {
+          cwd: this.resolvedCwd(),
+          scope,
+          ruleType,
+          rules,
+        }),
+      10_000,
+    );
+    return result as unknown as QwenPermissionSettings;
   }
 
   override setModel(model: string): void {
