@@ -16,6 +16,7 @@ import type {
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
 const debugLogger = createDebugLogger('CLIENT');
@@ -355,6 +356,9 @@ export class GeminiClient {
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
+    recordStartupEvent('gemini_tools_updated', {
+      toolCount: toolDeclarations.length,
+    });
   }
 
   async resetChat(): Promise<void> {

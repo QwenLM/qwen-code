@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "broken": {
+      "command": "node",
+      "args": ["../_servers/echo-mcp.mjs"],
+      "env": {
+        "ECHO_MCP_NAME": "broken",
+        "ECHO_MCP_NEVER": "1"
+      },
+      "timeout": 10000
+    }
+  },
+  "$version": 4
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "fast": {
+      "command": "node",
+      "args": ["../_servers/echo-mcp.mjs"],
+      "env": {
+        "ECHO_MCP_NAME": "fast"
+      }
+    }
+  },
+  "$version": 4
+}

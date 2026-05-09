@@ -68,6 +68,10 @@ import {
 } from './utils/todoSnapshot.js';
 import type { TodoItem } from './components/TodoDisplay.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
+import {
+  profileCheckpoint,
+  finalizeStartupProfile,
+} from '../utils/startupProfiler.js';
 import process from 'node:process';
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
@@ -408,8 +412,16 @@ export const AppContainer = (props: AppContainerProps) => {
     (async () => {
       // Note: the program will not work if this fails so let errors be
       // handled by the global catch.
+      profileCheckpoint('config_initialize_start');
       await config.initialize();
+      profileCheckpoint('config_initialize_end');
       setConfigInitialized(true);
+      profileCheckpoint('input_enabled');
+      // Finalize the interactive startup profile here. By this point we have
+      // captured first_paint (from gemini.tsx after Ink render), the
+      // config_initialize_start/end span, input_enabled, and any MCP /
+      // gemini_tools_updated events emitted during initialize().
+      finalizeStartupProfile(config.getSessionId());
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {

@@ -13,6 +13,7 @@ import {
   QWEN_CODE_SIMPLE_ENV_VAR,
   Storage,
   SessionService,
+  setStartupEventSink,
   type Config,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -63,6 +64,8 @@ import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
 import {
   profileCheckpoint,
+  recordStartupEvent,
+  setInteractiveMode,
   finalizeStartupProfile,
 } from './utils/startupProfiler.js';
 import {
@@ -327,6 +330,10 @@ export async function startInteractiveUI(
       isScreenReaderEnabled: config.getScreenReader(),
     },
   );
+  // Records the moment Ink has produced its first frame. AppContainer's mount
+  // effect runs after this — it carries the `config_initialize_*` and
+  // `input_enabled` checkpoints that complete the first-screen picture.
+  profileCheckpoint('first_paint');
 
   // Check for updates only if enableAutoUpdate is not explicitly disabled.
   // Using !== false ensures updates are enabled by default when undefined.
@@ -356,6 +363,11 @@ export async function startInteractiveUI(
 
 export async function main() {
   profileCheckpoint('main_entry');
+  // Bridge core-package startup events (Config.initialize, MCP discovery,
+  // GeminiClient.setTools) into the cli's startup profiler. No-op when
+  // QWEN_CODE_PROFILE_STARTUP is unset because `recordStartupEvent` returns
+  // early in that case.
+  setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
   setupUnhandledRejectionHandler();
 
   if (process.argv.includes('--bare')) {
@@ -685,9 +697,13 @@ export async function main() {
 
     // Render UI, passing necessary config values. Check that there is no command line question.
     profileCheckpoint('before_render');
-    finalizeStartupProfile(config.getSessionId());
 
     if (config.isInteractive()) {
+      // For the interactive path, the profile is finalized by AppContainer
+      // after `config.initialize()` and `input_enabled` are recorded — that's
+      // the only way `first_paint`, `config_initialize_*`, `input_enabled`,
+      // and the MCP events are captured. See AppContainer's mount effect.
+      setInteractiveMode(true);
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
       // Drain the auto-theme probe before render so the OSC 11 response is
@@ -705,6 +721,10 @@ export async function main() {
       return;
     }
 
+    // Non-interactive: defer finalize until after `config.initialize()` runs
+    // so MCP discovery events (mcp_first_tool_registered, mcp_all_servers_settled,
+    // gemini_tools_updated) are captured in the profile.
+
     // Print debug mode notice to stderr for non-interactive mode
     if (config.getDebugMode()) {
       writeStderrLine('Debug mode enabled');
@@ -720,8 +740,14 @@ export async function main() {
 
     // For non-stream-json mode, initialize config here
     if (inputFormat !== InputFormat.STREAM_JSON) {
+      profileCheckpoint('config_initialize_start');
       await config.initialize();
+      profileCheckpoint('config_initialize_end');
     }
+    // Finalize the non-interactive startup profile here so MCP events emitted
+    // during initialize() are captured. Subsequent stdin reads / auth checks /
+    // prompt execution are not part of the "first-screen" budget.
+    finalizeStartupProfile(config.getSessionId());
 
     // Only read stdin if NOT in stream-json mode
     // In stream-json mode, stdin is used for protocol messages (control requests, etc.)

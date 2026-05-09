@@ -1,0 +1,30 @@
+# Per-run artifacts written by benchmark runs into fixture HOMEs.
+# Each fixture is a fake $HOME — qwen-code writes profile reports, debug logs,
+# chat history, OAuth state, settings backups, etc. into it. None of that
+# should be committed.
+#
+# Allow only the canonical files we author by hand (settings.json + the MCP
+# server fixtures) and ignore everything else.
+
+# Anywhere under .qwen/
+*/.qwen/startup-perf/
+*/.qwen/debug/
+*/.qwen/oauth/
+*/.qwen/chats/
+*/.qwen/sessions/
+*/.qwen/output-language.md
+*/.qwen/installation_id
+*/.qwen/settings.json.orig
+*/.qwen/skills/
+*/.qwen/tmp/
+
+# Fixture roots (HOME-level artifacts qwen-code writes outside .qwen/)
+*/debug/
+*/installation_id
+*/output-language.md
+*/.bash_history
+*/.npm/
+*/.cache/
+
+# Migration-flag files
+*/.qwen/migration-version

@@ -1,0 +1,7 @@
+# Per-run raw profiles — large, machine/timestamp-specific, regenerable.
+# Keep them out of git; if needed for a deep dive, rerun the benchmark.
+*.raw.jsonl
+
+# Markdown reports are derived from summary.json by benchmark-startup.mjs.
+# Keep the canonical summary.json (committed); regenerate the report when needed.
+*.report.md

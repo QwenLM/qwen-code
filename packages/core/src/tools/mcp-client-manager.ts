@@ -17,6 +17,7 @@ import {
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { recordStartupEvent } from '../utils/startupEventSink.js';
 import type { EventEmitter } from 'node:events';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
@@ -93,8 +94,18 @@ export class McpClientManager {
     );
 
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
+    recordStartupEvent('mcp_discovery_start', {
+      serverCount: Object.keys(servers).length,
+    });
 
     this.eventEmitter?.emit('mcp-client-update', this.clients);
+    // Tracks the first successful server discover so we can emit the
+    // `mcp_first_tool_registered` event exactly once across the run. We
+    // intentionally use "first successful discover" rather than a tool-count
+    // delta because (a) it doesn't depend on additional ToolRegistry surface
+    // area, and (b) it aligns with the user-perceived metric ("first MCP
+    // server is ready and its tools have been registered into the registry").
+    let firstToolEventFired = false;
     const discoveryPromises = Object.entries(servers).map(
       async ([name, config]) => {
         // Skip disabled servers
@@ -124,8 +135,21 @@ export class McpClientManager {
           await client.connect();
           await client.discover(cliConfig);
           this.eventEmitter?.emit('mcp-client-update', this.clients);
+          if (!firstToolEventFired) {
+            firstToolEventFired = true;
+            recordStartupEvent('mcp_first_tool_registered', {
+              serverName: name,
+            });
+          }
+          recordStartupEvent(`mcp_server_ready:${name}`, {
+            outcome: 'ready',
+          });
         } catch (error) {
           this.eventEmitter?.emit('mcp-client-update', this.clients);
+          recordStartupEvent(`mcp_server_ready:${name}`, {
+            outcome: 'failed',
+            reason: getErrorMessage(error),
+          });
           // Log the error but don't let a single failed server stop the others
           debugLogger.error(
             `Error during discovery for server '${name}': ${getErrorMessage(
@@ -138,6 +162,9 @@ export class McpClientManager {
 
     await Promise.all(discoveryPromises);
     this.discoveryState = MCPDiscoveryState.COMPLETED;
+    recordStartupEvent('mcp_all_servers_settled', {
+      serverCount: Object.keys(servers).length,
+    });
   }
 
   /**

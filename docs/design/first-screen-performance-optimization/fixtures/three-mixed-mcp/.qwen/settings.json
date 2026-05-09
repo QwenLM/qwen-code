@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "fast1": {
+      "command": "node",
+      "args": ["../_servers/echo-mcp.mjs"],
+      "env": {
+        "ECHO_MCP_NAME": "fast1"
+      }
+    },
+    "fast2": {
+      "command": "node",
+      "args": ["../_servers/echo-mcp.mjs"],
+      "env": {
+        "ECHO_MCP_NAME": "fast2"
+      }
+    },
+    "slow": {
+      "command": "node",
+      "args": ["../_servers/echo-mcp.mjs"],
+      "env": {
+        "ECHO_MCP_NAME": "slow",
+        "ECHO_MCP_DELAY_MS": "1500"
+      }
+    }
+  },
+  "$version": 4
+}
