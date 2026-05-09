@@ -233,6 +233,7 @@ export interface SettingsMenuItem {
 const SETTINGS_ICONS: Record<SettingsSubpage, string> = {
   app: 'ToggleRight',
   ai: 'Sparkles',
+  memory: 'Brain',
   appearance: 'Palette',
   input: 'Keyboard',
   workspace: 'Building2',

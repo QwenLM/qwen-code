@@ -54,12 +54,14 @@ import type {
   BackendSessionListResult,
   BackendRewindResult,
   ChatOptions,
+  BackendHostRuntimeContext,
   PermissionRequestType,
   SdkMcpServerConfig,
 } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
 import { withElectronRunAsNodeEnv } from './backend/internal/electron-run-as-node.ts';
+import { resolveBackendRuntimePaths } from './backend/internal/runtime-resolver.ts';
 import { EventQueue } from './backend/event-queue.ts';
 import type { PermissionMode } from './mode-manager.ts';
 import {
@@ -73,6 +75,11 @@ import type {
   PermissionSettingsScope,
   QwenPermissionSettings,
 } from '../protocol/dto.ts';
+import type {
+  QwenMemoryPaths,
+  QwenMemorySettings,
+} from '../config/qwen-settings.ts';
+import { normalizeQwenMemorySettings } from '../config/qwen-settings.ts';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -459,6 +466,157 @@ class SharedQwenAcpProcess {
       subscriber.onDebug(message);
     }
   }
+}
+
+type QwenSettingsAcpOptions = {
+  hostRuntime: BackendHostRuntimeContext;
+  cwd?: string;
+  envOverrides?: Record<string, string>;
+  timeoutMs?: number;
+  debug?: (message: string) => void;
+};
+
+function buildQwenAcpSpawnCommand(
+  qwenCliPath: string,
+  nodePath: string,
+): { command: string; args: string[] } {
+  const args = ['--acp', '--channel=desktop'];
+
+  if (qwenCliPath.endsWith('.js')) {
+    return { command: nodePath, args: [qwenCliPath, ...args] };
+  }
+
+  return { command: qwenCliPath, args };
+}
+
+function qwenSettingsCwd(hostRuntime: BackendHostRuntimeContext): string {
+  return hostRuntime.appRootPath || homedir() || process.cwd();
+}
+
+function qwenAcpWithTimeout<T>(
+  promise: Promise<T>,
+  method: string,
+  timeoutMs: number,
+): Promise<T> {
+  if (timeoutMs <= 0) return promise;
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`Qwen ACP request timed out: ${method}`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
+async function callQwenSettingsAcpMethod(
+  options: QwenSettingsAcpOptions,
+  method: string,
+  params: JsonRecord = {},
+): Promise<JsonRecord> {
+  const resolvedPaths = resolveBackendRuntimePaths(options.hostRuntime);
+  const qwenCliPath = resolvedPaths.qwenCliPath;
+  if (!qwenCliPath) {
+    throw new Error(
+      'Qwen Code CLI not found. Build the current qwen-code checkout with npm run build && npm run bundle, or set QWEN_CODE_CLI to a dist/cli.js path.',
+    );
+  }
+
+  const nodePath = resolvedPaths.nodeRuntimePath || process.execPath;
+  const { command, args } = buildQwenAcpSpawnCommand(qwenCliPath, nodePath);
+  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime);
+  const key = buildSharedAcpProcessKey({
+    command,
+    spawnArgs: args,
+    workspaceRootPath: cwd,
+    envOverrides: options.envOverrides,
+  });
+
+  const lease = await acquireSharedQwenAcpProcess(
+    {
+      key,
+      command,
+      args,
+      cwd,
+      envOverrides: options.envOverrides,
+    },
+    {
+      onSessionUpdate: () => {},
+      onPermissionRequest: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onExtMethod: async (extMethod) =>
+        extMethod === MID_TURN_QUEUE_DRAIN_METHOD ? { messages: [] } : {},
+      onProcessExit: () => {},
+      onDebug: options.debug ?? (() => {}),
+    },
+  );
+
+  try {
+    return toRecord(
+      await qwenAcpWithTimeout(
+        lease.connection.extMethod(method, params),
+        method,
+        options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      ),
+    );
+  } finally {
+    lease.release();
+  }
+}
+
+export async function getQwenMemorySettingsViaAcp(
+  options: QwenSettingsAcpOptions,
+): Promise<QwenMemorySettings> {
+  const response = await callQwenSettingsAcpMethod(
+    options,
+    'qwen/settings/getMemory',
+  );
+  return normalizeQwenMemorySettings(response.settings);
+}
+
+export async function setQwenMemorySettingsViaAcp(
+  options: QwenSettingsAcpOptions,
+  updates: Partial<QwenMemorySettings>,
+): Promise<QwenMemorySettings> {
+  const response = await callQwenSettingsAcpMethod(
+    options,
+    'qwen/settings/setMemory',
+    { updates },
+  );
+  return normalizeQwenMemorySettings(response.settings);
+}
+
+export async function getQwenSettingsPathViaAcp(
+  options: QwenSettingsAcpOptions,
+): Promise<string> {
+  const response = await callQwenSettingsAcpMethod(
+    options,
+    'qwen/settings/getPath',
+  );
+  const settingsPath = asString(response.path);
+  if (!settingsPath) throw new Error('Qwen ACP did not return settings path');
+  return settingsPath;
+}
+
+export async function getQwenMemoryPathsViaAcp(
+  options: QwenSettingsAcpOptions & { projectRoot?: string },
+): Promise<QwenMemoryPaths> {
+  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime);
+  const response = await callQwenSettingsAcpMethod(
+    { ...options, cwd },
+    'qwen/settings/getMemoryPaths',
+    { cwd, projectRoot: options.projectRoot ?? cwd },
+  );
+  const paths = toRecord(response.paths);
+  const userMemoryFile = asString(paths.userMemoryFile);
+  const projectMemoryFile = asString(paths.projectMemoryFile);
+  const autoMemoryDir = asString(paths.autoMemoryDir);
+  if (!userMemoryFile || !projectMemoryFile || !autoMemoryDir) {
+    throw new Error('Qwen ACP did not return memory paths');
+  }
+  return { userMemoryFile, projectMemoryFile, autoMemoryDir };
 }
 
 function isRecord(value: unknown): value is JsonRecord {

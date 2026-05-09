@@ -1,6 +1,13 @@
 export * from './conversation-summary.ts';
 
-export { QwenAgent, QwenBackend } from './qwen-agent.ts';
+export {
+  QwenAgent,
+  QwenBackend,
+  getQwenMemorySettingsViaAcp,
+  setQwenMemorySettingsViaAcp,
+  getQwenSettingsPathViaAcp,
+  getQwenMemoryPathsViaAcp,
+} from './qwen-agent.ts';
 export * from './errors.ts';
 
 // Export session-scoped-tools - tools scoped to a specific session

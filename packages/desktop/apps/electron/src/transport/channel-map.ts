@@ -284,6 +284,13 @@ export const CHANNEL_MAP = {
   getEnable1MContext: invoke(RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT),
   setEnable1MContext: invoke(RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT),
 
+  // Memory settings
+  getQwenMemorySettings: invoke(RPC_CHANNELS.memory.GET_SETTINGS),
+  setQwenMemorySettings: invoke(RPC_CHANNELS.memory.SET_SETTINGS),
+  getQwenMemorySettingsPath: invoke(RPC_CHANNELS.memory.GET_SETTINGS_PATH),
+  getQwenMemoryPaths: invoke(RPC_CHANNELS.memory.GET_PATHS),
+  openQwenMemoryPath: invoke(RPC_CHANNELS.memory.OPEN_PATH),
+
   // Badge
   refreshBadge: invoke(RPC_CHANNELS.badge.REFRESH),
   setDockIconWithBadge: invoke(RPC_CHANNELS.badge.SET_ICON),

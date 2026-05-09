@@ -295,6 +295,13 @@ export const RPC_CHANNELS = {
     GET_ENABLE_1M_CONTEXT: 'caching:getEnable1MContext',
     SET_ENABLE_1M_CONTEXT: 'caching:setEnable1MContext',
   },
+  memory: {
+    GET_SETTINGS: 'memory:getSettings',
+    SET_SETTINGS: 'memory:setSettings',
+    GET_SETTINGS_PATH: 'memory:getSettingsPath',
+    GET_PATHS: 'memory:getPaths',
+    OPEN_PATH: 'memory:openPath',
+  },
   badge: {
     REFRESH: 'badge:refresh',
     SET_ICON: 'badge:setIcon',

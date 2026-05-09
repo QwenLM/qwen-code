@@ -10,11 +10,14 @@ import {
   AuthType,
   clearCachedCredentialFile,
   createDebugLogger,
+  getAllGeminiMdFilenames,
+  getAutoMemoryRoot,
   QwenOAuth2Event,
   qwenOAuth2Events,
   MCPServerConfig,
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
+  Storage,
   tokenLimit,
   type Config,
   type ConversationRecord,
@@ -63,6 +66,8 @@ import type {
 import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import type { ApprovalModeValue } from './session/types.js';
@@ -132,6 +137,112 @@ function normalizePermissionRules(value: unknown): string[] {
         .filter(Boolean),
     ),
   );
+}
+
+type QwenMemorySettings = {
+  enableManagedAutoMemory: boolean;
+  enableManagedAutoDream: boolean;
+  enableAutoSkill: boolean;
+};
+
+type QwenMemoryPaths = {
+  userMemoryFile: string;
+  projectMemoryFile: string;
+  autoMemoryDir: string;
+};
+
+const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
+  enableManagedAutoMemory: true,
+  enableManagedAutoDream: false,
+  enableAutoSkill: false,
+};
+
+const QWEN_MEMORY_SETTING_KEYS = [
+  'enableManagedAutoMemory',
+  'enableManagedAutoDream',
+  'enableAutoSkill',
+] as const satisfies ReadonlyArray<keyof QwenMemorySettings>;
+
+function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ...DEFAULT_QWEN_MEMORY_SETTINGS };
+  }
+
+  const record = value as Record<string, unknown>;
+  return {
+    enableManagedAutoMemory:
+      typeof record['enableManagedAutoMemory'] === 'boolean'
+        ? record['enableManagedAutoMemory']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableManagedAutoMemory,
+    enableManagedAutoDream:
+      typeof record['enableManagedAutoDream'] === 'boolean'
+        ? record['enableManagedAutoDream']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableManagedAutoDream,
+    enableAutoSkill:
+      typeof record['enableAutoSkill'] === 'boolean'
+        ? record['enableAutoSkill']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableAutoSkill,
+  };
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+async function resolvePreferredMemoryFile(
+  dir: string,
+  fallbackFilename: string,
+): Promise<string> {
+  for (const filename of getAllGeminiMdFilenames()) {
+    const filePath = path.join(dir, filename);
+    try {
+      await fs.access(filePath);
+      return filePath;
+    } catch {
+      // Try the next configured file name.
+    }
+  }
+
+  return path.join(dir, fallbackFilename);
+}
+
+async function ensureMemoryFile(filePath: string): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  try {
+    await fs.access(filePath);
+  } catch {
+    await fs.writeFile(filePath, '', 'utf-8');
+  }
+}
+
+async function resolveQwenMemoryPaths(params: {
+  cwd: string;
+  projectRoot: string;
+}): Promise<QwenMemoryPaths> {
+  const fallbackFilename = getAllGeminiMdFilenames()[0] ?? 'QWEN.md';
+  const userMemoryFile = await resolvePreferredMemoryFile(
+    Storage.getGlobalQwenDir(),
+    fallbackFilename,
+  );
+  const projectMemoryFile = await resolvePreferredMemoryFile(
+    params.cwd,
+    fallbackFilename,
+  );
+  const autoMemoryDir = getAutoMemoryRoot(params.projectRoot);
+
+  await Promise.all([
+    ensureMemoryFile(userMemoryFile),
+    ensureMemoryFile(projectMemoryFile),
+    fs.mkdir(autoMemoryDir, { recursive: true }),
+  ]);
+
+  return {
+    userMemoryFile,
+    projectMemoryFile,
+    autoMemoryDir,
+  };
 }
 
 export async function runAcpAgent(
@@ -553,6 +664,47 @@ class QwenAgent implements Agent {
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
+      case 'qwen/settings/getMemory': {
+        return {
+          settings: normalizeQwenMemorySettings(
+            this.settings.user.settings.memory,
+          ),
+        };
+      }
+      case 'qwen/settings/setMemory': {
+        const updates = toRecord(params['updates']);
+        for (const key of QWEN_MEMORY_SETTING_KEYS) {
+          if (updates[key] === undefined) continue;
+          if (typeof updates[key] !== 'boolean') {
+            throw RequestError.invalidParams(
+              undefined,
+              `Invalid memory setting '${key}': expected boolean`,
+            );
+          }
+          this.settings.setValue(
+            SettingScope.User,
+            `memory.${key}`,
+            updates[key],
+          );
+        }
+        return {
+          settings: normalizeQwenMemorySettings(
+            this.settings.user.settings.memory,
+          ),
+        };
+      }
+      case 'qwen/settings/getPath': {
+        return { path: this.settings.user.path };
+      }
+      case 'qwen/settings/getMemoryPaths': {
+        const projectRoot =
+          typeof params['projectRoot'] === 'string'
+            ? params['projectRoot']
+            : cwd;
+        return {
+          paths: await resolveQwenMemoryPaths({ cwd, projectRoot }),
+        };
+      }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
         if (!sessionId || !SESSION_ID_RE.test(sessionId)) {

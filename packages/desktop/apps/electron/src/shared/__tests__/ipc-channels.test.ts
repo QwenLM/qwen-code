@@ -2,10 +2,12 @@ import { describe, it, expect } from 'bun:test'
 import { RPC_CHANNELS, type BroadcastEventMap } from '../types'
 
 function flattenValues(obj: Record<string, unknown>): string[] {
-  return Object.values(obj).flatMap(v =>
-    typeof v === 'string' ? [v]
-      : typeof v === 'object' && v !== null ? flattenValues(v as Record<string, unknown>)
-      : []
+  return Object.values(obj).flatMap((v) =>
+    typeof v === 'string'
+      ? [v]
+      : typeof v === 'object' && v !== null
+        ? flattenValues(v as Record<string, unknown>)
+        : [],
   )
 }
 
@@ -30,6 +32,7 @@ const EXPECTED_CHANNELS: string[] = [
   'automations:changed',
   'automations:delete',
   'automations:duplicate',
+  'automations:get',
   'automations:getHistory',
   'automations:getLastExecuted',
   'automations:replay',
@@ -97,6 +100,11 @@ const EXPECTED_CHANNELS: string[] = [
   'labels:delete',
   'labels:list',
   'logo:getUrl',
+  'memory:getPaths',
+  'memory:getSettings',
+  'memory:getSettingsPath',
+  'memory:openPath',
+  'memory:setSettings',
   'menu:copy',
   'menu:cut',
   'menu:keyboardShortcuts',
@@ -116,6 +124,32 @@ const EXPECTED_CHANNELS: string[] = [
   'menu:zoomIn',
   'menu:zoomOut',
   'menu:zoomReset',
+  'messaging:bindingChanged',
+  'messaging:disconnect',
+  'messaging:forget',
+  'messaging:generateCode',
+  'messaging:getBindings',
+  'messaging:getConfig',
+  'messaging:platformStatus',
+  'messaging:saveTelegram',
+  'messaging:testTelegram',
+  'messaging:unbind',
+  'messaging:unbindBinding',
+  'messaging:updateConfig',
+  'messaging:wa:buttonPress',
+  'messaging:wa:connect',
+  'messaging:wa:disconnect',
+  'messaging:wa:incoming',
+  'messaging:wa:qr',
+  'messaging:wa:register',
+  'messaging:wa:send',
+  'messaging:wa:sendButtons',
+  'messaging:wa:sendFile',
+  'messaging:wa:sendTyping',
+  'messaging:wa:startConnect',
+  'messaging:wa:status',
+  'messaging:wa:submitPhone',
+  'messaging:wa:uiEvent',
   'notification:getEnabled',
   'notification:navigate',
   'notification:setEnabled',
@@ -137,6 +171,8 @@ const EXPECTED_CHANNELS: string[] = [
   'releaseNotes:get',
   'releaseNotes:getLatestVersion',
   'remote:testConnection',
+  'resources:export',
+  'resources:import',
   'server:createWorkspace',
   'server:getActiveSessions',
   'server:getHealth',
@@ -157,6 +193,7 @@ const EXPECTED_CHANNELS: string[] = [
   'sessions:filesChanged',
   'sessions:get',
   'sessions:getFiles',
+  'sessions:getForWorkspace',
   'sessions:getMessages',
   'sessions:getNotes',
   'sessions:getPendingPlanExecution',
@@ -223,6 +260,12 @@ const EXPECTED_CHANNELS: string[] = [
   'theme:systemChanged',
   'theme:workspaceThemeChanged',
   'toolIcons:getMappings',
+  'tools:getBrowserToolEnabled',
+  'tools:setBrowserToolEnabled',
+  'transfer:abort',
+  'transfer:chunk',
+  'transfer:commit',
+  'transfer:start',
   'update:available',
   'update:check',
   'update:dismiss',
@@ -279,8 +322,10 @@ describe('RPC_CHANNELS wire-format stability', () => {
 // ── BroadcastEventMap payload shape assertions ──────────────────────────
 // These compile-time checks prevent the emitter/listener payload mismatch
 // that caused sources:changed to silently send undefined after OAuth flows.
-type AssertTuple<T extends readonly unknown[], N extends number> =
-  T['length'] extends N ? true : false
+type AssertTuple<
+  T extends readonly unknown[],
+  N extends number,
+> = T['length'] extends N ? true : false
 
 describe('BroadcastEventMap payload shapes', () => {
   it('sources:changed carries (workspaceId, sources)', () => {

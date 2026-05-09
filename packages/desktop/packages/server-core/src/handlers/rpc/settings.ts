@@ -2,13 +2,20 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'path'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getPreferencesPath, getSessionDraft, setSessionDraft, deleteSessionDraft, getAllSessionDrafts, getWorkspaceByNameOrId, getDefaultThinkingLevel, setDefaultThinkingLevel, isProtectedWorkspace } from '@craft-agent/shared/config'
+import type { QwenMemoryPathTarget, QwenMemorySettings } from '@craft-agent/shared/config'
 import { isValidThinkingLevel, normalizeThinkingLevel, THINKING_LEVEL_IDS } from '@craft-agent/shared/agent/thinking-levels'
+import {
+  getQwenMemorySettingsViaAcp,
+  setQwenMemorySettingsViaAcp,
+  getQwenSettingsPathViaAcp,
+  getQwenMemoryPathsViaAcp,
+} from '@craft-agent/shared/agent'
 
 const VALID_THINKING_LEVELS_LIST = THINKING_LEVEL_IDS.map(id => `'${id}'`).join(', ')
-import { getWorkspaceOrThrow } from '@craft-agent/server-core/handlers'
-import type { RpcServer } from '@craft-agent/server-core/transport'
+import { getWorkspaceOrThrow, buildBackendHostRuntimeContext } from '@craft-agent/server-core/handlers'
+import type { RequestContext, RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
-import { requestClientOpenFileDialog } from '@craft-agent/server-core/transport'
+import { requestClientOpenFileDialog, requestClientOpenPath } from '@craft-agent/server-core/transport'
 import { isValidWorkingDirectory } from '../../utils/path-validation'
 
 export const HANDLED_CHANNELS = [
@@ -33,6 +40,11 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE,
   RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT,
   RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT,
+  RPC_CHANNELS.memory.GET_SETTINGS,
+  RPC_CHANNELS.memory.SET_SETTINGS,
+  RPC_CHANNELS.memory.GET_SETTINGS_PATH,
+  RPC_CHANNELS.memory.GET_PATHS,
+  RPC_CHANNELS.memory.OPEN_PATH,
   RPC_CHANNELS.sessions.GET_MODEL,
   RPC_CHANNELS.sessions.SET_MODEL,
   RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL,
@@ -43,14 +55,35 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.dialog.OPEN_FOLDER,
 ] as const
 
+async function getQwenMemoryAcpOptions(
+  deps: HandlerDeps,
+  ctx: RequestContext,
+  workspaceId?: string,
+) {
+  const resolvedWorkspaceId = workspaceId ?? ctx.workspaceId ?? (
+    ctx.webContentsId
+      ? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId)
+      : undefined
+  )
+  const workspace = resolvedWorkspaceId ? getWorkspaceByNameOrId(resolvedWorkspaceId) : null
+  const { loadWorkspaceConfig } = await import('@craft-agent/shared/workspaces')
+  const workspaceConfig = workspace ? loadWorkspaceConfig(workspace.rootPath) : null
+  const projectRoot = workspace?.rootPath
+  const cwd = workspaceConfig?.defaults?.workingDirectory || projectRoot
+
+  return {
+    hostRuntime: buildBackendHostRuntimeContext(deps.platform),
+    ...(cwd ? { cwd } : {}),
+    ...(projectRoot ? { projectRoot } : {}),
+  }
+}
+
 export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): void {
   // ============================================================
   // Settings - Default Thinking Level (App-Level)
   // ============================================================
 
-  server.handle(RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL, async () => {
-    return getDefaultThinkingLevel()
-  })
+  server.handle(RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL, async () => getDefaultThinkingLevel())
 
   server.handle(RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL, async (_ctx, level: string) => {
     if (!isValidThinkingLevel(level)) {
@@ -209,9 +242,7 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   // ============================================================
 
   // Get draft for a session (text + attachment refs)
-  server.handle(RPC_CHANNELS.drafts.GET, async (_ctx, sessionId: string) => {
-    return getSessionDraft(sessionId)
-  })
+  server.handle(RPC_CHANNELS.drafts.GET, async (_ctx, sessionId: string) => getSessionDraft(sessionId))
 
   // Set draft for a session (empty drafts are cleared)
   server.handle(RPC_CHANNELS.drafts.SET, async (_ctx, sessionId: string, draft: import('@craft-agent/shared/config').SessionDraft) => {
@@ -224,9 +255,7 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   })
 
   // Get all drafts (for loading on app start)
-  server.handle(RPC_CHANNELS.drafts.GET_ALL, async () => {
-    return getAllSessionDrafts()
-  })
+  server.handle(RPC_CHANNELS.drafts.GET_ALL, async () => getAllSessionDrafts())
 
   // ============================================================
   // Input Settings
@@ -320,6 +349,53 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   server.handle(RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT, async (_ctx, enabled: boolean) => {
     const { setEnable1MContext } = await import('@craft-agent/shared/config/storage')
     setEnable1MContext(enabled)
+  })
+
+  // ============================================================
+  // Memory Settings
+  // ============================================================
+
+  server.handle(RPC_CHANNELS.memory.GET_SETTINGS, async () =>
+    getQwenMemorySettingsViaAcp({
+      hostRuntime: buildBackendHostRuntimeContext(deps.platform),
+    }))
+
+  server.handle(RPC_CHANNELS.memory.SET_SETTINGS, async (_ctx, updates: Partial<QwenMemorySettings>) =>
+    setQwenMemorySettingsViaAcp(
+      {
+        hostRuntime: buildBackendHostRuntimeContext(deps.platform),
+      },
+      updates,
+    ))
+
+  server.handle(RPC_CHANNELS.memory.GET_SETTINGS_PATH, async () =>
+    getQwenSettingsPathViaAcp({
+      hostRuntime: buildBackendHostRuntimeContext(deps.platform),
+    }))
+
+  server.handle(RPC_CHANNELS.memory.GET_PATHS, async (ctx, workspaceId?: string) =>
+    getQwenMemoryPathsViaAcp(
+      await getQwenMemoryAcpOptions(deps, ctx, workspaceId),
+    ))
+
+  server.handle(RPC_CHANNELS.memory.OPEN_PATH, async (ctx, target: QwenMemoryPathTarget, workspaceId?: string) => {
+    const validTargets: readonly QwenMemoryPathTarget[] = ['user', 'project', 'auto']
+    if (!validTargets.includes(target)) {
+      throw new Error(`Invalid memory path target: ${String(target)}`)
+    }
+
+    const paths = await getQwenMemoryPathsViaAcp(
+      await getQwenMemoryAcpOptions(deps, ctx, workspaceId),
+    )
+    const targetPath = target === 'user'
+      ? paths.userMemoryFile
+      : target === 'project'
+        ? paths.projectMemoryFile
+        : paths.autoMemoryDir
+    const result = await requestClientOpenPath(server, ctx.clientId, targetPath)
+    if (result.error) {
+      throw new Error(result.error)
+    }
   })
 
   // ============================================================
