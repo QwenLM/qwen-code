@@ -85,12 +85,59 @@ describe('useDeleteCommand', () => {
 
       expect(removeSessions).toHaveBeenCalledWith(['a', 'b']);
       expect(result.current.isDeleteDialogOpen).toBe(false);
-      const [item] = addItem.mock.calls[0] as [
+      // Read the last call — the progress toast occupies [0].
+      const [item] = addItem.mock.calls.at(-1) as [
         { type: string; text: string },
         number,
       ];
       expect(item.type).toBe('info');
       expect(item.text).toContain('2');
+    });
+
+    it('emits a progress toast before awaiting the batch', async () => {
+      // Block removeSessions so we can observe the toast that lands
+      // *before* it resolves — without this, a refactor that drops the
+      // pre-await toast (or moves it after the await) would still look
+      // green by reading the final addItem state.
+      let resolveRemove: (value: RemoveSessionsResult) => void = () => {};
+      const removeSessions = vi.fn(
+        () =>
+          new Promise<RemoveSessionsResult>((resolve) => {
+            resolveRemove = resolve;
+          }),
+      );
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['a', 'b', 'c']);
+        await flushAsync();
+      });
+
+      // Progress toast must already be in place while the batch is in
+      // flight, so a slow filesystem doesn't leave the user staring at
+      // a closed dialog with no feedback.
+      expect(addItem).toHaveBeenCalledTimes(1);
+      const [progress] = addItem.mock.calls[0] as [
+        { type: string; text: string },
+        number,
+      ];
+      expect(progress.type).toBe('info');
+      expect(progress.text).toContain('3');
+
+      await act(async () => {
+        resolveRemove({ removed: ['a', 'b', 'c'], notFound: [], errors: [] });
+        await flushAsync();
+      });
+
+      // Result toast lands on top of the progress toast.
+      expect(addItem).toHaveBeenCalledTimes(2);
     });
 
     it('strips the active session id before deleting', async () => {
@@ -169,7 +216,9 @@ describe('useDeleteCommand', () => {
         await flushAsync();
       });
 
-      const [item] = addItem.mock.calls[0] as [
+      // First call is the "Deleting N session(s)..." progress toast;
+      // the result toast lands afterwards.
+      const [item] = addItem.mock.calls.at(-1) as [
         { type: string; text: string },
         number,
       ];
@@ -205,7 +254,7 @@ describe('useDeleteCommand', () => {
         await flushAsync();
       });
 
-      const [item] = addItem.mock.calls[0] as [
+      const [item] = addItem.mock.calls.at(-1) as [
         { type: string; text: string },
         number,
       ];
@@ -232,11 +281,14 @@ describe('useDeleteCommand', () => {
         await flushAsync();
       });
 
-      const [item] = addItem.mock.calls[0] as [
+      const [item] = addItem.mock.calls.at(-1) as [
         { type: string; text: string },
         number,
       ];
       expect(item.type).toBe('error');
+      // The original error message must surface for diagnostics — bare
+      // "Failed to delete sessions." would hide the root cause.
+      expect(item.text).toContain('nope');
     });
   });
 });

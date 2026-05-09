@@ -692,7 +692,7 @@ export class SessionService {
    *
    * Each session is processed independently — a failure on one does not
    * abort the rest. Sessions that don't exist (or belong to a different
-   * project) are reported in {@link removed}=false; thrown filesystem
+   * project) are reported in {@link notFound}; thrown filesystem
    * errors are surfaced per-id in {@link errors} so callers can decide
    * whether to retry.
    *

@@ -120,6 +120,20 @@ export function useDeleteCommand(
         return;
       }
 
+      // Surface progress before awaiting the batch — N sequential unlinkSync
+      // calls can take a while on slow filesystems, and without this the
+      // user sees nothing between dialog-close and the result toast (and
+      // may re-run /delete, queueing a second concurrent batch).
+      addItem?.(
+        {
+          type: 'info',
+          text: t('Deleting {{count}} session(s)...', {
+            count: String(filtered.length),
+          }),
+        },
+        Date.now(),
+      );
+
       try {
         const sessionService = config.getSessionService();
         const result = await sessionService.removeSessions(filtered);
@@ -170,19 +184,45 @@ export function useDeleteCommand(
             Date.now(),
           );
         } else {
+          // Symmetric with the partial-failure branch: surface failed ids
+          // and the first error so a user staring at "Failed to delete N
+          // sessions" still has something to grep for. Generic message
+          // alone hides filesystem permissions / disk-full / corruption.
+          const sampleIds = failedIds
+            .slice(0, 3)
+            .map((id) => id.slice(0, 8))
+            .join(', ');
+          const overflow = failedCount > 3 ? `, +${failedCount - 3} more` : '';
+          const firstError = result.errors[0]?.error.message;
+          const reason = firstError ? ` — ${firstError}` : '';
           addItem?.(
             {
               type: 'error',
-              text: t('Failed to delete sessions.'),
+              text: t(
+                'Failed to delete {{failed}} session(s) ({{ids}}{{overflow}}){{reason}}.',
+                {
+                  failed: String(failedCount),
+                  ids: sampleIds,
+                  overflow,
+                  reason,
+                },
+              ),
             },
             Date.now(),
           );
         }
-      } catch {
+      } catch (error) {
+        // Don't swallow: the per-session paths above already report
+        // notFound/errors; reaching this catch means removeSessions
+        // itself threw (service init, fs corruption, etc). Log + surface
+        // so on-call has something to work with.
+        // eslint-disable-next-line no-console
+        console.error('handleDeleteMany failed:', error);
+        const detail = error instanceof Error ? error.message : String(error);
         addItem?.(
           {
             type: 'error',
-            text: t('Failed to delete sessions.'),
+            text: t('Failed to delete sessions: {{error}}', { error: detail }),
           },
           Date.now(),
         );

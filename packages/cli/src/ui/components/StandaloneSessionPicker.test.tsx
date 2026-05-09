@@ -944,6 +944,43 @@ describe('SessionPicker', () => {
       expect(onConfirmMulti).toHaveBeenCalledWith(['s2']);
     });
 
+    it('should not commit a disabled row via single-select fallback when nothing is checked', async () => {
+      // Cursor sits on the disabled row, no Space pressed → checkedIds
+      // is empty, so Enter would otherwise fall through to onSelect on
+      // the cursor row. The picker contract says disabled rows are
+      // never deletable; honor that even when the user hasn't engaged
+      // multi-select yet.
+      const sessions = [
+        createMockSession({ sessionId: 'current', prompt: 'current' }),
+        createMockSession({ sessionId: 's2', prompt: 'two' }),
+      ];
+      const service = createMockSessionService(sessions);
+      const onSelect = vi.fn();
+      const onConfirmMulti = vi.fn();
+
+      const { stdin } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={service as never}
+            onSelect={onSelect}
+            onCancel={() => {}}
+            enableMultiSelect
+            onConfirmMulti={onConfirmMulti}
+            disabledIds={['current']}
+          />
+        </KeypressProvider>,
+      );
+
+      await wait(100);
+      // Press Enter without Space — cursor is on the disabled "current"
+      // row. Neither callback should fire.
+      stdin.write('\r');
+      await wait(50);
+
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(onConfirmMulti).not.toHaveBeenCalled();
+    });
+
     it('should render the multi-select footer hint with selected count', async () => {
       const sessions = [
         createMockSession({ sessionId: 's1', prompt: 'one' }),
@@ -1024,7 +1061,7 @@ describe('SessionPicker', () => {
 
       // Toggle branch filter — only "main" sessions remain visible; both
       // checked items are now hidden.
-      stdin.write('B');
+      stdin.write(CTRL_B);
       await wait(50);
 
       // Enter should NOT silently delete the visible main session.
@@ -1092,7 +1129,7 @@ describe('SessionPicker', () => {
 
       // Apply branch filter — feature sessions are hidden, so the
       // committable count drops to 0 even though checkedIds.size === 2.
-      stdin.write('B');
+      stdin.write(CTRL_B);
       await wait(50);
 
       const afterFilter = lastFrame() ?? '';

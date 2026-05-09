@@ -141,6 +141,15 @@ export function useSessionPicker({
       'useSessionPicker: enableMultiSelect and enablePreview both bind Space; pick one or wire a different chord.',
     );
   }
+  // Without onConfirmMulti the Enter handler skips the multi-select branch
+  // and silently falls through to single-select on the cursor row — Space
+  // still toggles checkboxes and the footer reads "N selected", so the
+  // user thinks N items will be deleted but only 1 is. Refuse the config.
+  if (enableMultiSelect && !onConfirmMulti) {
+    throw new Error(
+      'useSessionPicker: enableMultiSelect requires onConfirmMulti.',
+    );
+  }
 
   const hasInitialSessions = initialSessions !== undefined;
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -415,7 +424,10 @@ export function useSessionPicker({
           return;
         }
         const session = filteredSessions[selectedIndex];
-        if (session) {
+        // Disabled rows render dimmed with a "cannot delete" hint; honor
+        // that here so a stray Enter on the active session doesn't close
+        // the dialog and leave the receiver to bounce back with an error.
+        if (session && !disabledIdSet.has(session.sessionId)) {
           onSelect(session.sessionId);
         }
         return;
