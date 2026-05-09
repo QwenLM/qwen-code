@@ -259,7 +259,11 @@ describe('InputPrompt', () => {
       await wait(350);
 
       stdin.write('\r');
-      await wait();
+      // First test in this describe block — renderer cold-start on slow
+      // macOS-22.x runners can push the Enter→onSubmit microtask past the
+      // default 150ms window. Use 350ms here to match the initial render
+      // wait above.
+      await wait(350);
 
       expect(props.onSubmit).toHaveBeenCalledWith('commit this');
       // Enter path must NOT call buffer.insert — it passes text directly to
