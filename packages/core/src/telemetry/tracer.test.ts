@@ -140,6 +140,32 @@ beforeEach(() => {
 });
 
 describe('withSpan', () => {
+  it('rate-limits repeated telemetry operation warnings and reports suppressed count', async () => {
+    mockState.throwOnSetStatus = true;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+
+      await withSpan('test.status-fail-1', {}, async () => 1);
+      await withSpan('test.status-fail-2', {}, async () => 2);
+      await withSpan('test.status-fail-3', {}, async () => 3);
+
+      expect(debugWarnCalls).toHaveLength(1);
+      expect(debugWarnCalls[0]?.[0]).toContain('OTel span setStatus failed');
+      expect(debugWarnCalls[0]?.[0]).not.toContain('suppressed');
+
+      vi.setSystemTime(30_001);
+      await withSpan('test.status-fail-4', {}, async () => 4);
+
+      expect(debugWarnCalls).toHaveLength(2);
+      expect(debugWarnCalls[1]?.[0]).toContain(
+        'suppressed 2 similar warning(s)',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('sets OK status when callback resolves without setting status', async () => {
     const result = await withSpan('test.op', { key: 'value' }, async () => 42);
 

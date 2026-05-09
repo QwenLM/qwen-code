@@ -170,6 +170,18 @@ const clientSpanCalls = vi.hoisted(
 const mockWithSpan = vi.hoisted(() => vi.fn());
 
 vi.mock('../telemetry/tracer.js', () => ({
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
+  safeSetStatus: (
+    span: { setStatus: (status: { code: number; message?: string }) => void },
+    status: { code: number; message?: string },
+  ) => {
+    try {
+      span.setStatus(status);
+    } catch {
+      // Match production best-effort telemetry behavior.
+    }
+  },
   withSpan: mockWithSpan,
 }));
 

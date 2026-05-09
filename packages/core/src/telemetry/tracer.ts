@@ -21,6 +21,8 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const tracer = trace.getTracer(SERVICE_NAME);
 const debugLogger = createDebugLogger('OTEL_TRACER');
 const TELEMETRY_WARNING_INTERVAL_MS = 30_000;
+export const API_CALL_FAILED_SPAN_STATUS_MESSAGE = 'API call failed';
+export const API_CALL_ABORTED_SPAN_STATUS_MESSAGE = 'API call aborted';
 const OPERATION_FAILED_SPAN_STATUS_MESSAGE = 'Operation failed';
 let lastTelemetryWarningMs: number | undefined;
 let suppressedTelemetryWarnings = 0;
@@ -51,7 +53,7 @@ function warnTelemetryOperationFailed(operation: string, error: unknown): void {
   }
 }
 
-function safeSetStatus(
+export function safeSetStatus(
   span: Span,
   status: Parameters<Span['setStatus']>[0],
 ): void {

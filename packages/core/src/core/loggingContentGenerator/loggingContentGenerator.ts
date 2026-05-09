@@ -55,7 +55,12 @@ import {
   getErrorStatus,
   getErrorType,
 } from '../../utils/errors.js';
-import { withSpan, startSpanWithContext } from '../../telemetry/tracer.js';
+import {
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+  safeSetStatus,
+  startSpanWithContext,
+  withSpan,
+} from '../../telemetry/tracer.js';
 
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
@@ -63,7 +68,6 @@ const MAX_RESPONSE_TEXT_LENGTH = 4096;
 const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
 const MAX_RESPONSE_TEXT_PREFIX_LENGTH =
   MAX_RESPONSE_TEXT_LENGTH - RESPONSE_TEXT_TRUNCATION_SUFFIX.length;
-const API_CALL_FAILED_SPAN_STATUS_MESSAGE = 'API call failed';
 
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
@@ -273,14 +277,10 @@ export class LoggingContentGenerator implements ContentGenerator {
               );
             }
           }
-          try {
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-            });
-          } catch {
-            // OTel errors must not mask the original API error
-          }
+          safeSetStatus(span, {
+            code: SpanStatusCode.ERROR,
+            message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+          });
           throw error;
         }
       },
@@ -319,14 +319,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         );
       });
     } catch (error) {
-      try {
-        span.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-        });
-      } catch {
-        // OTel errors must not mask the original API error
-      }
+      safeSetStatus(span, {
+        code: SpanStatusCode.ERROR,
+        message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+      });
       const durationMs = Date.now() - startTime;
       runInContext(() =>
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId),
@@ -455,11 +451,9 @@ export class LoggingContentGenerator implements ContentGenerator {
           this.safelyLogOpenAIInteraction(openaiRequest, consolidatedResponse),
         );
       }
-      try {
-        terminalStatusAttempted = true;
-        span?.setStatus({ code: SpanStatusCode.OK });
-      } catch {
-        // OTel errors must not mask successful stream consumption
+      terminalStatusAttempted = true;
+      if (span) {
+        safeSetStatus(span, { code: SpanStatusCode.OK });
       }
     } catch (error) {
       const durationMs = Date.now() - startTime;
@@ -477,22 +471,18 @@ export class LoggingContentGenerator implements ContentGenerator {
           this.safelyLogOpenAIInteraction(openaiRequest, undefined, error),
         );
       }
-      try {
-        terminalStatusAttempted = true;
-        span?.setStatus({
+      terminalStatusAttempted = true;
+      if (span) {
+        safeSetStatus(span, {
           code: SpanStatusCode.ERROR,
           message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
         });
-      } catch {
-        // OTel errors must not mask the original API error
       }
       throw error;
     } finally {
       if (!terminalStatusAttempted) {
-        try {
-          span?.setStatus({ code: SpanStatusCode.OK });
-        } catch {
-          // OTel errors must not mask stream cleanup
+        if (span) {
+          safeSetStatus(span, { code: SpanStatusCode.OK });
         }
       }
       try {

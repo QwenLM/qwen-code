@@ -75,7 +75,7 @@ import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
 import { IdeClient } from '../ide/ide-client.js';
-import { withSpan } from '../telemetry/tracer.js';
+import { safeSetStatus, withSpan } from '../telemetry/tracer.js';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
@@ -119,14 +119,10 @@ function setToolSpanFailure(
   } catch {
     // OTel errors must not block the failure status update.
   }
-  try {
-    span.setStatus({
-      code: SpanStatusCode.ERROR,
-      message,
-    });
-  } catch {
-    // OTel errors must not block tool failure handling.
-  }
+  safeSetStatus(span, {
+    code: SpanStatusCode.ERROR,
+    message,
+  });
 }
 
 function setToolSpanCancelled(span: Span): void {
@@ -135,13 +131,9 @@ function setToolSpanCancelled(span: Span): void {
   } catch {
     // OTel errors must not block the cancellation status update.
   }
-  try {
-    span.setStatus({
-      code: SpanStatusCode.UNSET,
-    });
-  } catch {
-    // OTel errors must not block tool cancellation handling.
-  }
+  safeSetStatus(span, {
+    code: SpanStatusCode.UNSET,
+  });
 }
 
 async function safelyFirePostToolUseFailureHook(

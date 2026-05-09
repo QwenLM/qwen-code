@@ -20,8 +20,6 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
 const debugLogger = createDebugLogger('CLIENT');
-const API_CALL_FAILED_SPAN_STATUS_MESSAGE = 'API call failed';
-const API_CALL_ABORTED_SPAN_STATUS_MESSAGE = 'API call aborted';
 
 // Core modules
 import type { ContentGenerator } from './contentGenerator.js';
@@ -106,7 +104,12 @@ import { createHookOutput } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
-import { withSpan } from '../telemetry/tracer.js';
+import {
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+  safeSetStatus,
+  withSpan,
+} from '../telemetry/tracer.js';
 
 const MAX_TURNS = 100;
 
@@ -1431,25 +1434,17 @@ export class GeminiClient {
           return result;
         } catch (error: unknown) {
           if (abortSignal.aborted) {
-            try {
-              span.setStatus({
-                code: SpanStatusCode.ERROR,
-                message: API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
-              });
-            } catch {
-              // OTel errors must not mask the original API error.
-            }
+            safeSetStatus(span, {
+              code: SpanStatusCode.ERROR,
+              message: API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
+            });
             throw error;
           }
 
-          try {
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-            });
-          } catch {
-            // OTel errors must not mask the original API error.
-          }
+          safeSetStatus(span, {
+            code: SpanStatusCode.ERROR,
+            message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+          });
           await reportError(
             error,
             `Error generating content via API with model ${currentAttemptModel}.`,

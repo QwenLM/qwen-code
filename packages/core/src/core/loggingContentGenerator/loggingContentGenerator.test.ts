@@ -146,6 +146,17 @@ vi.mock('../../telemetry/tracer.js', () => {
   }
 
   return {
+    API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
+    safeSetStatus: (
+      span: { setStatus: (status: { code: number; message?: string }) => void },
+      status: { code: number; message?: string },
+    ) => {
+      try {
+        span.setStatus(status);
+      } catch {
+        // Match production best-effort telemetry behavior.
+      }
+    },
     withSpan: vi.fn(
       async (
         name: string,
