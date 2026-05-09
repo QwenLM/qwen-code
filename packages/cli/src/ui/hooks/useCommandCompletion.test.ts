@@ -712,5 +712,38 @@ describe('useCommandCompletion', () => {
 
       expect(result.current.midInputGhostText).toBeNull();
     });
+
+    it('returns null midInputGhostText when only non-modelInvocable commands match', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'clear',
+          description: 'Clear conversation',
+          kind: CommandKind.BUILT_IN,
+          modelInvocable: false,
+        },
+        {
+          name: 'compress',
+          description: 'Compress context',
+          kind: CommandKind.BUILT_IN,
+          modelInvocable: false,
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /cl');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      // '/cl' matches 'clear' but it is not modelInvocable, so no ghost text
+      expect(result.current.midInputGhostText).toBeNull();
+    });
   });
 });

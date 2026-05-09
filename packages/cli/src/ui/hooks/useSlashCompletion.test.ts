@@ -465,6 +465,44 @@ describe('useSlashCompletion', () => {
       ).toEqual(['help', 'model']);
     });
 
+    it('should boost recent commands for non-root prefix suggestions', async () => {
+      const now = Date.now();
+      const slashCommands = [
+        createTestCommand({
+          name: 'model',
+          description: 'Model command',
+          completionPriority: 5,
+        }),
+        createTestCommand({
+          name: 'memory',
+          description: 'Memory command',
+          completionPriority: 5,
+        }),
+      ];
+      // Both commands have equal completionPriority; 'memory' used recently
+      // should be ranked first for '/mo' via recentScore.
+      const recentCommands = new Map([
+        ['memory', { name: 'memory', usedAt: now, count: 1 }],
+      ]);
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/m',
+          slashCommands,
+          mockCommandContext,
+          recentCommands,
+        ),
+      );
+
+      await waitFor(() => {
+        const names = result.current.suggestions.map((s) => s.value);
+        expect(names).toContain('memory');
+        expect(names).toContain('model');
+        expect(names.indexOf('memory')).toBeLessThan(names.indexOf('model'));
+      });
+    });
+
     it('should NOT provide suggestions for a perfectly typed command that is a leaf node', async () => {
       const slashCommands = [
         createTestCommand({
