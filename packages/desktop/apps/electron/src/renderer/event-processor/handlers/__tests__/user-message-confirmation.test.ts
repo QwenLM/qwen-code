@@ -88,4 +88,69 @@ describe('handleUserMessage confirmation', () => {
     expect(message?.isQueued).toBe(false)
     expect(result.state.session.isProcessing).toBe(true)
   })
+
+  it('keeps newly queued messages out of the chat transcript', () => {
+    const state = makeState(makeUserMessage(), true)
+    state.session.messages = []
+
+    const queuedMessage = makeUserMessage({
+      id: 'backend-queued-1',
+      content: 'follow up while tool runs',
+      isPending: false,
+      isQueued: true,
+    })
+    const event: UserMessageEvent = {
+      type: 'user_message',
+      sessionId: 'session-1',
+      optimisticMessageId: 'optimistic-queued-1',
+      status: 'queued',
+      message: queuedMessage,
+    }
+
+    const result = handleUserMessage(state, event)
+
+    expect(result.state.session.messages).toHaveLength(0)
+    expect(result.state.session.isProcessing).toBe(true)
+    expect(result.effects).toEqual([
+      {
+        type: 'queued_input_add',
+        message: queuedMessage,
+        optimisticMessageId: 'optimistic-queued-1',
+      },
+    ])
+  })
+
+  it('moves a drained queued message into the chat transcript', () => {
+    const state = makeState(makeUserMessage(), true)
+    state.session.messages = []
+
+    const acceptedMessage = makeUserMessage({
+      id: 'backend-queued-1',
+      content: 'follow up while tool runs',
+      isPending: false,
+      isQueued: false,
+    })
+    const event: UserMessageEvent = {
+      type: 'user_message',
+      sessionId: 'session-1',
+      optimisticMessageId: 'optimistic-queued-1',
+      status: 'accepted',
+      message: acceptedMessage,
+    }
+
+    const result = handleUserMessage(state, event)
+
+    expect(result.state.session.messages).toHaveLength(1)
+    expect(result.state.session.messages[0]).toMatchObject({
+      id: 'backend-queued-1',
+      isQueued: false,
+    })
+    expect(result.effects).toEqual([
+      {
+        type: 'queued_input_remove',
+        messageId: 'backend-queued-1',
+        optimisticMessageId: 'optimistic-queued-1',
+      },
+    ])
+  })
 })

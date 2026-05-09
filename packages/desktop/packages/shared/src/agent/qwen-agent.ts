@@ -83,6 +83,7 @@ type SlashCommandInvocation = {
   timestamp: number;
 };
 
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 60_000;
 const INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS = false;
@@ -624,6 +625,7 @@ export class QwenAgent extends BaseAgent {
   private currentIsSlashCommand = false;
   private toolNames = new Map<string, string>();
   private toolInputs = new Map<string, Record<string, unknown>>();
+  private midTurnMessageQueue: string[] = [];
 
   private stderrBuffer: string[] = [];
   private stderrBufferBytes = 0;
@@ -727,6 +729,7 @@ export class QwenAgent extends BaseAgent {
     this.currentTurnId = `qwen-turn-${promptRunId}`;
     this.toolNames.clear();
     this.toolInputs.clear();
+    this.midTurnMessageQueue = [];
 
     this.emitAutomationEvent('UserPromptSubmit', {
       hook_event_name: 'UserPromptSubmit',
@@ -823,11 +826,21 @@ export class QwenAgent extends BaseAgent {
       this.currentAssistantText = '';
       this.currentThoughtText = '';
       this.currentIsSlashCommand = false;
+      this.midTurnMessageQueue = [];
     }
   }
 
   isProcessing(): boolean {
     return this._isProcessing;
+  }
+
+  enqueueMidTurnMessage(message: string): boolean {
+    const trimmed = message.trim();
+    if (!trimmed || !this._isProcessing || this.abortReason) return false;
+
+    this.midTurnMessageQueue.push(trimmed);
+    this.debug(`Queued mid-turn user message for Qwen ACP injection (${this.midTurnMessageQueue.length} pending)`);
+    return true;
   }
 
   async abort(reason?: string): Promise<void> {
@@ -836,6 +849,7 @@ export class QwenAgent extends BaseAgent {
     this.abortReason = AbortReason.UserStop;
     this._isProcessing = false;
     this.activePromptRunId = null;
+    this.midTurnMessageQueue = [];
     this.cancelPendingPermissions();
 
     const sessionId = this.qwenSessionId;
@@ -857,6 +871,7 @@ export class QwenAgent extends BaseAgent {
     this.abortReason = reason;
     this._isProcessing = false;
     this.activePromptRunId = null;
+    this.midTurnMessageQueue = [];
     this.cancelPendingPermissions();
     this.eventQueue.complete();
 
@@ -1107,7 +1122,9 @@ export class QwenAgent extends BaseAgent {
     const runtime = getBackendRuntime(this.config);
     const qwenCliPath = runtime.paths?.qwenCli;
     if (!qwenCliPath) {
-      throw new Error('Qwen Code CLI not found. Set QWEN_CODE_CLI to the qwen dist/cli.js path or install qwen on PATH.');
+      throw new Error(
+        'Qwen Code CLI not found. Build the current qwen-code checkout with npm run build && npm run bundle, or set QWEN_CODE_CLI to a dist/cli.js path.',
+      );
     }
 
     const nodePath = runtime.paths?.node || process.execPath;
@@ -1199,6 +1216,34 @@ export class QwenAgent extends BaseAgent {
       requestPermission: (params) => this.handlePermissionRequest(params),
       sessionUpdate: async (params) => {
         this.handleSessionUpdate(params);
+      },
+      extMethod: async (method, params) => {
+        if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
+          return {};
+        }
+
+        const sessionId = asString(params.sessionId);
+        const managedSessionId = this.config.session?.id;
+        const isCurrentSession =
+          !!sessionId &&
+          (sessionId === this.qwenSessionId || sessionId === managedSessionId);
+        if (!isCurrentSession) {
+          if (sessionId) {
+            this.debug(
+              `Ignored mid-turn queue drain for non-current session ${sessionId}`,
+            );
+          }
+          return { messages: [] };
+        }
+
+        const messages = this.midTurnMessageQueue.splice(0);
+        if (messages.length > 0) {
+          this.debug(
+            `Drained ${messages.length} mid-turn user message(s) to Qwen ACP`,
+          );
+          this.config.onMidTurnMessagesDrained?.(messages);
+        }
+        return { messages };
       },
     };
   }

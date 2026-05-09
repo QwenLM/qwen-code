@@ -547,6 +547,8 @@ export type Effect =
   | { type: 'permission_mode_changed'; sessionId: string; permissionMode: PermissionMode; previousPermissionMode?: PermissionMode; transitionDisplay?: string; modeVersion?: number; changedAt?: string; changedBy?: 'user' | 'system' | 'restore' | 'automation' | 'unknown' }
   | { type: 'auto_retry'; sessionId: string; originalMessage: string; sourceSlug: string }
   | { type: 'restore_input'; text: string }
+  | { type: 'queued_input_add'; message: Message; optimisticMessageId?: string }
+  | { type: 'queued_input_remove'; messageId: string; optimisticMessageId?: string }
   | { type: 'toast_error'; message: string }
 
 /**

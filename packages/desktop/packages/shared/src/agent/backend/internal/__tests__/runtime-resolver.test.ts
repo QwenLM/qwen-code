@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
   chmodSync,
   mkdirSync,
@@ -11,6 +11,10 @@ import { join } from 'node:path';
 
 import { resolveBackendRuntimePaths } from '../runtime-resolver.ts';
 
+const originalQwenCodeCli = process.env.QWEN_CODE_CLI;
+const originalQwenCodePath = process.env.QWEN_CODE_PATH;
+const originalQwenCodeRoot = process.env.QWEN_CODE_ROOT;
+
 function makeExecutable(path: string): void {
   writeFileSync(path, '');
   chmodSync(path, 0o755);
@@ -19,11 +23,80 @@ function makeExecutable(path: string): void {
 function makeRuntimeFixture(): string {
   const root = mkdtempSync(join(tmpdir(), 'craft-runtime-'));
   mkdirSync(join(root, 'dist'), { recursive: true });
+  mkdirSync(join(root, 'packages', 'cli'), { recursive: true });
+  mkdirSync(join(root, 'packages', 'desktop'), { recursive: true });
   writeFileSync(join(root, 'dist', 'cli.js'), '');
+  writeFileSync(join(root, 'packages', 'cli', 'package.json'), '{}');
+  writeFileSync(join(root, 'packages', 'desktop', 'package.json'), '{}');
   return root;
 }
 
 describe('resolveBackendRuntimePaths', () => {
+  beforeEach(() => {
+    delete process.env.QWEN_CODE_CLI;
+    delete process.env.QWEN_CODE_PATH;
+    delete process.env.QWEN_CODE_ROOT;
+  });
+
+  afterEach(() => {
+    if (originalQwenCodeCli === undefined) {
+      delete process.env.QWEN_CODE_CLI;
+    } else {
+      process.env.QWEN_CODE_CLI = originalQwenCodeCli;
+    }
+    if (originalQwenCodePath === undefined) {
+      delete process.env.QWEN_CODE_PATH;
+    } else {
+      process.env.QWEN_CODE_PATH = originalQwenCodePath;
+    }
+    if (originalQwenCodeRoot === undefined) {
+      delete process.env.QWEN_CODE_ROOT;
+    } else {
+      process.env.QWEN_CODE_ROOT = originalQwenCodeRoot;
+    }
+  });
+
+  it('prefers the current checkout Qwen CLI bundle in dev mode', () => {
+    const root = makeRuntimeFixture();
+    const appRoot = join(root, 'packages', 'desktop', 'apps', 'electron', 'dist');
+    mkdirSync(appRoot, { recursive: true });
+
+    try {
+      const resolved = resolveBackendRuntimePaths({
+        appRootPath: appRoot,
+        isPackaged: false,
+      });
+
+      expect(resolved.qwenCliPath).toBe(join(root, 'dist', 'cli.js'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not silently fall back to an unrelated Qwen CLI from a source checkout', () => {
+    const root = mkdtempSync(join(tmpdir(), 'craft-runtime-'));
+    const appRoot = join(root, 'packages', 'desktop', 'apps', 'electron', 'dist');
+    const originalCwd = process.cwd();
+    mkdirSync(join(root, 'packages', 'cli'), { recursive: true });
+    mkdirSync(join(root, 'packages', 'desktop'), { recursive: true });
+    mkdirSync(appRoot, { recursive: true });
+    writeFileSync(join(root, 'packages', 'cli', 'package.json'), '{}');
+    writeFileSync(join(root, 'packages', 'desktop', 'package.json'), '{}');
+
+    try {
+      process.chdir(root);
+      const resolved = resolveBackendRuntimePaths({
+        appRootPath: appRoot,
+        isPackaged: false,
+      });
+
+      expect(resolved.qwenCliPath).toBeUndefined();
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('uses bundled Node instead of Bun as the Node runtime', () => {
     const root = makeRuntimeFixture();
     const bunName = process.platform === 'win32' ? 'bun.exe' : 'bun';

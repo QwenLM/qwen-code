@@ -698,8 +698,8 @@ interface ManagedSession {
   createdAt?: number
   // Total message count (pre-computed in JSONL header for fast list loading)
   messageCount?: number
-  // Message queue for handling new messages while processing
-  // When a message arrives during processing, we interrupt and queue
+  // Message queue for handling new messages while processing. Qwen can consume
+  // some entries mid-turn; those stay here as backup until ACP acknowledges.
   messageQueue: Array<{
     message: string
     attachments?: FileAttachment[]
@@ -707,6 +707,7 @@ interface ManagedSession {
     options?: SendMessageOptions
     messageId?: string  // Pre-generated ID for matching with UI
     optimisticMessageId?: string  // Frontend's ID for reliable event matching
+    midTurnPending?: boolean  // Backup replay until ACP confirms injection
   }>
   // Map of shellId -> command for killing background shells
   backgroundShellCommands: Map<string, string>
@@ -3308,6 +3309,42 @@ export class SessionManager implements ISessionManager {
         })
       }
 
+      const onMidTurnMessagesDrained = (messages: string[]) => {
+        const drainedEntries: Array<{
+          messageId?: string
+          optimisticMessageId?: string
+        }> = []
+        for (const message of messages) {
+          const index = managed.messageQueue.findIndex(entry =>
+            entry.midTurnPending && entry.message === message
+          )
+          if (index >= 0) {
+            const [entry] = managed.messageQueue.splice(index, 1)
+            drainedEntries.push({
+              messageId: entry.messageId,
+              optimisticMessageId: entry.optimisticMessageId,
+            })
+          }
+        }
+        if (drainedEntries.length > 0) {
+          sessionLog.info(`Acknowledged ${drainedEntries.length} mid-turn queued message(s) for session ${managed.id}`)
+          for (const entry of drainedEntries) {
+            if (!entry.messageId) continue
+            const existingMessage = managed.messages.find(m => m.id === entry.messageId)
+            if (!existingMessage) continue
+            existingMessage.isQueued = false
+            this.sendEvent({
+              type: 'user_message',
+              sessionId: managed.id,
+              message: existingMessage,
+              status: 'accepted',
+              optimisticMessageId: entry.optimisticMessageId
+            }, managed.workspace.id)
+          }
+          this.persistSession(managed)
+        }
+      }
+
       // ============================================================
       // Construct backend via factory
       // ============================================================
@@ -3322,6 +3359,7 @@ export class SessionManager implements ISessionManager {
           session: sessionConfig,
           onSdkSessionIdUpdate,
           onSdkSessionIdCleared,
+          onMidTurnMessagesDrained,
           onAvailableModelsUpdate: connection?.providerType === 'qwen'
             ? (models, currentModelId) => this.updateQwenConnectionModels(connection.slug, models, currentModelId)
             : undefined,
@@ -5584,13 +5622,18 @@ export class SessionManager implements ISessionManager {
     // Ensure messages are loaded before we try to add new ones
     await this.ensureMessagesLoaded(managed)
 
-    // If currently processing, redirect mid-stream. The backend may steer in place
-    // or abort and let the session layer queue a re-send.
+    // If currently processing, prefer a non-interrupting mid-turn queue. ACP
+    // backends can drain these messages alongside the next tool-result payload
+    // so the model sees them before the whole turn finishes. If no safe
+    // injection point is available, keep the message queued for the next turn.
     if (managed.isProcessing) {
       const agent = managed.agent
-      const steered = agent?.redirect(message) ?? false
+      const canInjectMidTurn =
+        !attachments?.length &&
+        !storedAttachments?.length &&
+        (agent?.enqueueMidTurnMessage?.(message) ?? false)
 
-      sessionLog.info(`Session ${sessionId} ${steered ? 'redirected mid-stream (steer)' : 'aborting to queue message'}`)
+      sessionLog.info(`Session ${sessionId} ${canInjectMidTurn ? 'queued message for mid-turn injection' : 'queued message for next turn'}`)
 
       // Create user message for UI
       const userMessage: Message = {
@@ -5600,37 +5643,67 @@ export class SessionManager implements ISessionManager {
         timestamp: this.monotonic(),
         attachments: storedAttachments,
         textElements: options?.textElements,
+        isQueued: true,
       }
       managed.messages.push(userMessage)
 
-      // Emit to UI — 'accepted' if steered (processing now), 'queued' if aborted (will re-send)
+      // Always show the message as queued while the current turn is still
+      // running. Mid-turn candidates flip to accepted only once ACP actually
+      // drains them at a tool-result boundary.
       this.sendEvent({
         type: 'user_message',
         sessionId,
         message: userMessage,
-        status: steered ? 'accepted' : 'queued',
+        status: 'queued',
         optimisticMessageId: options?.optimisticMessageId
       }, managed.workspace.id)
 
-      if (!steered) {
-        // Backend aborted — queue message for re-send after processing stops.
-        // forceAbort(Redirect) was already called by redirect().
-        managed.messageQueue.push({ message, attachments, storedAttachments, options, messageId: userMessage.id, optimisticMessageId: options?.optimisticMessageId })
-        managed.wasInterrupted = true
-      }
+      managed.messageQueue.push({
+        message,
+        attachments,
+        storedAttachments,
+        options,
+        messageId: userMessage.id,
+        optimisticMessageId: options?.optimisticMessageId,
+        midTurnPending: canInjectMidTurn,
+      })
 
       this.persistSession(managed)
       return
     }
 
-    // Add user message with stored attachments for persistence
-    // Skip if existingMessageId is provided (message was already created when queued)
+    // Add user message with stored attachments for persistence. Queued replay
+    // normally reuses the message created when the user typed it, but provider-
+    // native history reloads can clear local messages while the runtime queue
+    // still has the replay entry. In that case, recreate the message with the
+    // queued ID instead of failing the send.
     let userMessage: Message
     if (existingMessageId) {
       // Find existing message (already added when queued)
-      userMessage = managed.messages.find(m => m.id === existingMessageId)!
-      if (!userMessage) {
-        throw new Error(`Existing message ${existingMessageId} not found`)
+      const existingMessage = managed.messages.find(m => m.id === existingMessageId)
+      if (existingMessage) {
+        userMessage = existingMessage
+      } else {
+        sessionLog.warn(`Queued message ${existingMessageId} missing from session ${sessionId}; recreating before replay`)
+        userMessage = {
+          id: existingMessageId,
+          role: 'user',
+          content: message,
+          timestamp: this.monotonic(),
+          attachments: storedAttachments,
+          textElements: options?.textElements,
+          isQueued: false,
+        }
+        managed.messages.push(userMessage)
+        managed.lastMessageRole = 'user'
+
+        this.sendEvent({
+          type: 'user_message',
+          sessionId,
+          message: userMessage,
+          status: 'accepted',
+          optimisticMessageId: options?.optimisticMessageId
+        }, managed.workspace.id)
       }
     } else {
       // Create new message

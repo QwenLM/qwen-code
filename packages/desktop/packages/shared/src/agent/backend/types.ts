@@ -220,6 +220,12 @@ export interface CoreBackendConfig {
   /** Callback when SDK session ID is cleared (e.g., after failed resume) */
   onSdkSessionIdCleared?: () => void;
 
+  /**
+   * Callback when ACP has consumed queued mid-turn user messages.
+   * Hosts can use this as an acknowledgement to remove replay fallbacks.
+   */
+  onMidTurnMessagesDrained?: (messages: string[]) => void;
+
   /** Callback when a backend reports its live model list for the session. */
   onAvailableModelsUpdate?: (models: ModelDefinition[], currentModelId?: string) => void;
 
@@ -401,6 +407,16 @@ export interface AgentBackend {
    *          false if aborted (session layer must queue + re-send)
    */
   redirect(message: string): boolean;
+
+  /**
+   * Queue a user message for injection at the next safe tool-result boundary
+   * inside the current turn.
+   *
+   * The session layer keeps its own replay fallback until the backend confirms
+   * the message was drained, so backends can accept candidates before knowing
+   * whether this turn will actually produce a tool boundary.
+   */
+  enqueueMidTurnMessage?(message: string): boolean;
 
   /**
    * Run a simple text completion using the backend's auth infrastructure.

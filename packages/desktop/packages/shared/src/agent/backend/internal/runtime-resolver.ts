@@ -1,6 +1,5 @@
 import { existsSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { BackendHostRuntimeContext } from '../types.ts';
 
@@ -35,6 +34,32 @@ function qwenSourceCliCandidates(root: string): string[] {
     join(root, 'cli.js'),
     join(root, 'packages', 'cli', 'dist', 'index.js'),
   ];
+}
+
+function isQwenSourceRoot(root: string): boolean {
+  return (
+    existsSync(join(root, 'packages', 'cli', 'package.json')) &&
+    existsSync(join(root, 'packages', 'desktop', 'package.json'))
+  );
+}
+
+function resolveQwenSourceCliFromAncestors(
+  base: string,
+  maxLevels = 10,
+): { path?: string; foundSourceRoot: boolean } {
+  let dir = resolve(base);
+  for (let i = 0; i <= maxLevels; i++) {
+    if (isQwenSourceRoot(dir)) {
+      return {
+        path: firstExistingPath(qwenSourceCliCandidates(dir)),
+        foundSourceRoot: true,
+      };
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return { foundSourceRoot: false };
 }
 
 function resolveQwenCliOverride(): string | undefined {
@@ -178,19 +203,16 @@ function resolveQwenCliPath(
     'dist',
     'index.js',
   );
-  const siblingCliRelative = join('..', 'qwen-code', 'dist', 'cli.js');
-  const siblingIndexRelative = join(
-    '..',
-    'qwen-code',
-    'packages',
-    'cli',
-    'dist',
-    'index.js',
+  const appRootCheckout = resolveQwenSourceCliFromAncestors(
+    hostRuntime.appRootPath,
   );
-  const localSourceCandidates = [
-    ...qwenSourceCliCandidates(join(homedir(), 'Documents', 'qwen-code')),
-    ...qwenSourceCliCandidates(join(homedir(), 'qwen-code')),
-  ];
+  const cwdCheckout = resolveQwenSourceCliFromAncestors(process.cwd());
+  const currentCheckoutCli = appRootCheckout.path ?? cwdCheckout.path;
+  if (currentCheckoutCli) return currentCheckoutCli;
+
+  if (appRootCheckout.foundSourceRoot || cwdCheckout.foundSourceRoot) {
+    return undefined;
+  }
 
   const fromHostRoot = firstExistingPath([
     ...packagedCandidates,
@@ -200,20 +222,13 @@ function resolveQwenCliPath(
     join(hostRuntime.appRootPath, '..', '..', packageCliRelative),
     join(hostRuntime.appRootPath, '..', '..', packageRootCliRelative),
     join(hostRuntime.appRootPath, '..', '..', packageIndexRelative),
-    join(hostRuntime.appRootPath, siblingCliRelative),
-    join(hostRuntime.appRootPath, siblingIndexRelative),
-    join(process.cwd(), siblingCliRelative),
-    join(process.cwd(), siblingIndexRelative),
-    ...localSourceCandidates,
   ]);
   if (fromHostRoot) return fromHostRoot;
 
   const walked =
     resolveUpwards(hostRuntime.appRootPath, packageCliRelative, 10) ??
     resolveUpwards(hostRuntime.appRootPath, packageRootCliRelative, 10) ??
-    resolveUpwards(hostRuntime.appRootPath, packageIndexRelative, 10) ??
-    resolveUpwards(hostRuntime.appRootPath, siblingCliRelative, 10) ??
-    resolveUpwards(hostRuntime.appRootPath, siblingIndexRelative, 10);
+    resolveUpwards(hostRuntime.appRootPath, packageIndexRelative, 10);
   if (walked) return walked;
 
   if (!hostRuntime.isPackaged) {

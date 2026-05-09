@@ -1040,6 +1040,26 @@ export default function App() {
             }))
             break
           }
+          case 'queued_input_add': {
+            window.dispatchEvent(new CustomEvent('craft:queued-input-add', {
+              detail: {
+                sessionId,
+                message: effect.message,
+                optimisticMessageId: effect.optimisticMessageId,
+              },
+            }))
+            break
+          }
+          case 'queued_input_remove': {
+            window.dispatchEvent(new CustomEvent('craft:queued-input-remove', {
+              detail: {
+                sessionId,
+                messageId: effect.messageId,
+                optimisticMessageId: effect.optimisticMessageId,
+              },
+            }))
+            break
+          }
           case 'toast_error': {
             toast.error(effect.message, { duration: 5000 })
             break
@@ -1396,6 +1416,8 @@ export default function App() {
   }, [updateSessionById])
 
   const handleSendMessage = useCallback(async (sessionId: string, message: string, attachments?: FileAttachment[], skillSlugs?: string[], externalBadges?: ContentBadge[]) => {
+    let optimisticUserMessage: Message | undefined
+    let queuedOptimisticMessage = false
     try {
       // Step 1: Store attachments and get persistent metadata
       let storedAttachments: StoredAttachment[] | undefined
@@ -1510,13 +1532,37 @@ export default function App() {
         textElements,
         isPending: true,  // Optimistic - will be confirmed by backend
       }
+      optimisticUserMessage = userMessage
 
-      // Optimistic UI update - add user message and set processing state
-      updateSessionById(sessionId, (s) => ({
-        messages: [...s.messages, userMessage],
-        isProcessing: true,
-        lastMessageAt: Date.now()
-      }))
+      const currentSession = store.get(sessionAtomFamily(sessionId))
+      const shouldQueueInInput = currentSession?.isProcessing === true
+
+      if (shouldQueueInInput) {
+        queuedOptimisticMessage = true
+        window.dispatchEvent(new CustomEvent('craft:queued-input-add', {
+          detail: {
+            sessionId,
+            message: {
+              ...userMessage,
+              isPending: false,
+              isQueued: true,
+            },
+            optimisticMessageId: userMessage.id,
+          },
+        }))
+        updateSessionById(sessionId, {
+          isProcessing: true,
+          lastMessageAt: Date.now(),
+          lastMessageRole: 'user',
+        })
+      } else {
+        // Optimistic UI update - add user message and set processing state
+        updateSessionById(sessionId, (s) => ({
+          messages: [...s.messages, userMessage],
+          isProcessing: true,
+          lastMessageAt: Date.now()
+        }))
+      }
 
       // Step 6: Send with processed attachments + stored attachments for persistence
       await window.electronAPI.sendMessage(sessionId, message, processedAttachments, storedAttachments, {
@@ -1526,6 +1572,15 @@ export default function App() {
       })
     } catch (error) {
       console.error('Failed to send message:', error)
+      if (queuedOptimisticMessage && optimisticUserMessage) {
+        window.dispatchEvent(new CustomEvent('craft:queued-input-remove', {
+          detail: {
+            sessionId,
+            messageId: optimisticUserMessage.id,
+            optimisticMessageId: optimisticUserMessage.id,
+          },
+        }))
+      }
       updateSessionById(sessionId, (s) => ({
         isProcessing: false,
         messages: [
@@ -1539,7 +1594,7 @@ export default function App() {
         ]
       }))
     }
-  }, [sessionOptions, updateSessionById, skills, sources, windowWorkspaceSlug])
+  }, [sessionOptions, updateSessionById, store, skills, sources, windowWorkspaceSlug])
 
   /**
    * Unified handler for all session option changes.
