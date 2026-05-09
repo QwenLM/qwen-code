@@ -249,18 +249,31 @@ class ToolSearchInvocation extends BaseToolInvocation<
         missing.push(requested);
         continue;
       }
-      const wasRevealed = registry.isDeferredToolRevealed(canonical);
-      registry.revealDeferredTool(canonical);
-      if (!wasRevealed) {
-        newlyRevealed.push(canonical);
+      // Only reveal + count toward the setTools() trigger when the tool
+      // is actually deferred. `select:` mode also accepts already-loaded
+      // / alwaysLoad tools (the model may use it to re-inspect a schema)
+      // — those don't need reveal (they're already in the declaration
+      // list) and pulling them through setTools() would risk a spurious
+      // "GeminiClient not initialised" failure for what is just a
+      // schema-inspection call.
+      const isLoadable = tool.shouldDefer && !tool.alwaysLoad;
+      if (isLoadable) {
+        const wasRevealed = registry.isDeferredToolRevealed(canonical);
+        registry.revealDeferredTool(canonical);
+        if (!wasRevealed) {
+          newlyRevealed.push(canonical);
+        }
       }
       loaded.push(tool);
     }
 
-    // Re-sync the active chat's tool list so the revealed tools appear in the
-    // next API request.
+    // Re-sync the active chat's tool list ONLY when this call newly
+    // revealed deferred tools (otherwise the declaration list is
+    // already correct and setTools() is wasted work — and worse, a
+    // null/uninitialised client would surface as a fake error for
+    // what is just a schema-inspection request).
     let setToolsError: string | undefined;
-    if (loaded.length > 0) {
+    if (newlyRevealed.length > 0) {
       const geminiClient = this.config.getGeminiClient();
       if (!geminiClient) {
         // Optional chaining (`?.setTools()`) used to silently no-op here,

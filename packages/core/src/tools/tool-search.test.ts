@@ -425,6 +425,61 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).toContain('"name":"core_tool"');
   });
 
+  it('select: a non-deferred tool does NOT reveal it or re-sync setTools', async () => {
+    // Re-inspecting an already-loaded tool's schema must not pollute
+    // the revealedDeferred set (which is meant to track on-demand
+    // reveals only) and must not trigger setTools(): the tool is
+    // already in the chat's declaration list. Triggering setTools()
+    // here also risks a spurious "GeminiClient not initialised"
+    // failure when the inspection happens before init completes.
+    registry.registerTool(
+      new MockTool({ name: 'core_tool', shouldDefer: false }),
+    );
+    const setToolsSpy = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: setToolsSpy,
+    } as never);
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:core_tool' })
+      .execute(new AbortController().signal);
+
+    // Schema returned (re-inspection works).
+    expect(String(result.llmContent)).toContain('"name":"core_tool"');
+    // No reveal pollution.
+    expect(registry.isDeferredToolRevealed('core_tool')).toBe(false);
+    // No setTools() — declaration list was already correct.
+    expect(setToolsSpy).not.toHaveBeenCalled();
+  });
+
+  it('select: an alwaysLoad tool also skips reveal + setTools', async () => {
+    // alwaysLoad tools are deferred-flag-aware (shouldDefer may be
+    // true) but always included in the declaration list regardless.
+    // Same skip rationale as non-deferred: no reveal needed, no
+    // setTools sync needed.
+    registry.registerTool(
+      new MockTool({
+        name: 'always_loaded',
+        shouldDefer: true,
+        alwaysLoad: true,
+      }),
+    );
+    const setToolsSpy = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: setToolsSpy,
+    } as never);
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:always_loaded' })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain('"name":"always_loaded"');
+    expect(registry.isDeferredToolRevealed('always_loaded')).toBe(false);
+    expect(setToolsSpy).not.toHaveBeenCalled();
+  });
+
   it('+must-word filters candidates whose name does not contain the required term', async () => {
     // Both tools would match on "send" in description; only one has "slack"
     // in its name. The +slack prefix should narrow the result to that one.

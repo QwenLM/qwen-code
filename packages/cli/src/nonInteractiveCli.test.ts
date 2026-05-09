@@ -2885,6 +2885,9 @@ describe('runNonInteractive', () => {
       // adapter sees the contract violation as an error result, with
       // diagnostic context: turn count + truncated preview of model's
       // plain-text output ("plain answer" from the mocked stream).
+      // The adapter is responsible for surfacing the message per output
+      // format (TEXT → stderr; JSON / STREAM_JSON → structured result);
+      // runNonInteractive no longer writes a duplicate stderr line.
       expect(adapter.emitResult).toHaveBeenCalledTimes(1);
       expect(adapter.emitResult).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -2893,15 +2896,6 @@ describe('runNonInteractive', () => {
             /Model produced plain text.+after 1 turn\(s\).+Output preview.+plain answer/s,
           ),
         }),
-      );
-      // TEXT-mode users get a visible stderr line — emitResult is a no-op
-      // in TEXT mode for the isError-true path, so the stderr write is
-      // the only feedback they'd see if --output-format is unset.
-      expect(processStderrSpy).toHaveBeenCalledWith(
-        expect.stringMatching(/qwen --json-schema: Model produced plain text/),
-      );
-      expect(processStderrSpy).toHaveBeenCalledWith(
-        expect.stringMatching(/plain answer/),
       );
     } finally {
       process.exitCode = priorExitCode;

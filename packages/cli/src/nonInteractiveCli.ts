@@ -51,7 +51,6 @@ import {
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
-import { writeStderrLine } from './utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -955,11 +954,13 @@ export async function runNonInteractive(
               usage,
               stats,
             });
-            // Text-format users only see the exit code (1) without
-            // visible context — `emitResult` is a no-op in TEXT mode for
-            // the isError-true path. Echo to stderr so the failure mode
-            // is discoverable without scraping `--output-format json`.
-            writeStderrLine(`qwen --json-schema: ${errorMessage}`);
+            // Adapter handles user-visible feedback per output format:
+            //   - TEXT: writes errorMessage to stderr (JsonOutputAdapter
+            //     emitResult, line ~70).
+            //   - JSON / STREAM_JSON: emits the structured result with
+            //     is_error=true.
+            // No extra stderr write here — duplicating in TEXT mode
+            // produced two copies of the same line in headless runs.
             process.exitCode = 1;
             return;
           }
