@@ -8,6 +8,7 @@ import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { TextBuffer } from './shared/text-buffer.js';
@@ -75,6 +76,7 @@ export interface InputPromptProps {
   config: Config;
   slashCommands: readonly SlashCommand[];
   commandContext: CommandContext;
+  recentSlashCommands?: RecentSlashCommands;
   placeholder?: string;
   focus?: boolean;
   inputWidth: number;
@@ -109,6 +111,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   config,
   slashCommands,
   commandContext,
+  recentSlashCommands,
   placeholder,
   focus = true,
   suggestionsWidth,
@@ -204,6 +207,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     config,
     // Suppress completion when history navigation just occurred
     !justNavigatedHistory,
+    recentSlashCommands,
   );
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
@@ -1215,7 +1219,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       const mapEntry = buf.visualToLogicalMap[absoluteVisualIndex];
       const [logicalLineIdx, logicalStartCol] = mapEntry;
       const logicalLine = buf.lines[logicalLineIdx] || '';
-      const tokens = parseInputForHighlighting(logicalLine, logicalLineIdx);
+      const tokens = parseInputForHighlighting(
+        logicalLine,
+        logicalLineIdx,
+        slashCommands,
+      );
 
       const visualStart = logicalStartCol;
       const visualEnd = logicalStartCol + cpLen(lineText);
@@ -1307,7 +1315,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       return <Text>{renderedLine}</Text>;
     },
-    [],
+    [slashCommands],
   );
 
   const getActiveCompletion = () => {

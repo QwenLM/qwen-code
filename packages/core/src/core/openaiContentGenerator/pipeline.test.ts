@@ -12,6 +12,7 @@ import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { ErrorHandler, PipelineConfig } from './types.js';
 import { ContentGenerationPipeline, StreamContentError } from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
+import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
@@ -1932,6 +1933,158 @@ describe('ContentGenerationPipeline', () => {
       // Should only yield the final response (empty ones are filtered)
       expect(responses).toHaveLength(1);
       expect(responses[0]).toBe(finalGeminiResponse);
+    });
+  });
+
+  describe('openaiRequestCaptureContext integration', () => {
+    it('forwards the provider-enhanced request to the active capture', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [],
+        created: 0,
+        model: 'test-model',
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      // Provider injects extra_body and metadata, mimicking real DashScope behavior.
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        extra_body: { thinking: { type: 'enabled' } },
+        metadata: { user_id: 'abc' },
+      }));
+
+      let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+      await openaiRequestCaptureContext.run(
+        (built) => {
+          captured = built;
+        },
+        () => pipeline.execute(request, 'p'),
+      );
+
+      expect(captured).toBeDefined();
+      // The captured request must be the same object passed to the SDK.
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        captured,
+        expect.anything(),
+      );
+      expect(captured).toEqual(
+        expect.objectContaining({
+          model: 'test-model',
+          messages: mockMessages,
+          extra_body: { thinking: { type: 'enabled' } },
+          metadata: { user_id: 'abc' },
+        }),
+      );
+    });
+
+    it('captures the streaming request including stream/stream_options', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      const fakeStream = (async function* () {
+        // empty stream
+      })();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        fakeStream,
+      );
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        extra_body: { enable_thinking: true },
+      }));
+
+      let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+      await openaiRequestCaptureContext.run(
+        (built) => {
+          captured = built;
+        },
+        async () => {
+          const stream = await pipeline.executeStream(request, 'p');
+          for await (const _ of stream) {
+            // drain
+          }
+        },
+      );
+
+      expect(captured).toBeDefined();
+      expect(captured).toEqual(
+        expect.objectContaining({
+          stream: true,
+          stream_options: { include_usage: true },
+          extra_body: { enable_thinking: true },
+        }),
+      );
+    });
+
+    it('isolates concurrent captures', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [],
+        created: 0,
+        model: 'test-model',
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      let n = 0;
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        extra_body: { call_index: ++n },
+      }));
+
+      const runOne = async () => {
+        let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+        await openaiRequestCaptureContext.run(
+          (built) => {
+            captured = built;
+          },
+          () => pipeline.execute(request, 'p'),
+        );
+        return captured;
+      };
+
+      const [a, b] = await Promise.all([runOne(), runOne()]);
+      expect(a).toBeDefined();
+      expect(b).toBeDefined();
+      // Each call's capture must have received its own object —
+      // the outer AsyncLocalStorage stores must not bleed across awaits.
+      const aExtra = (a as unknown as { extra_body: { call_index: number } })
+        .extra_body;
+      const bExtra = (b as unknown as { extra_body: { call_index: number } })
+        .extra_body;
+      expect(aExtra).not.toEqual(bExtra);
     });
   });
 });

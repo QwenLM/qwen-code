@@ -22,6 +22,7 @@ export const statsCommand: SlashCommand = {
   get description() {
     return t('check session stats. Usage: /stats [model|tools]');
   },
+  argumentHint: '[model|tools]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: (context: CommandContext): MessageActionReturn | void => {

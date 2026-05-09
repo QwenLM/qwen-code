@@ -24,6 +24,11 @@ import { TelemetryTarget } from './index.js';
 
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { promises as fs } from 'node:fs';
+import {
+  resetDebugLoggingState,
+  setDebugLogSession,
+} from '../utils/debugLogger.js';
 
 vi.mock('@opentelemetry/exporter-trace-otlp-grpc');
 vi.mock('@opentelemetry/exporter-logs-otlp-grpc');
@@ -141,6 +146,77 @@ describe('Telemetry SDK', () => {
     expect(NodeSDK).toHaveBeenCalledWith(
       expect.objectContaining({ autoDetectResources: false }),
     );
+  });
+
+  it('should route OpenTelemetry diagnostics to debug log instead of console output', async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const consoleWarnSpy = vi
+      .spyOn(console, 'warn')
+      .mockImplementation(() => {});
+    const mkdirSpy = vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    const appendFileSpy = vi
+      .spyOn(fs, 'appendFile')
+      .mockResolvedValue(undefined);
+    const unlinkSpy = vi.spyOn(fs, 'unlink').mockResolvedValue(undefined);
+    const symlinkSpy = vi.spyOn(fs, 'symlink').mockResolvedValue(undefined);
+    const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+    try {
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      setDebugLogSession({ getSessionId: () => 'otel-diag-test-session' });
+
+      diag.error(
+        JSON.stringify({
+          message:
+            'Error: PeriodicExportingMetricReader: metrics export failed (error Error: connect ECONNREFUSED)',
+        }),
+      );
+
+      diag.error('A different OpenTelemetry diagnostic');
+      diag.warn('An OpenTelemetry warning');
+
+      await vi.waitFor(() => {
+        expect(appendFileSpy).toHaveBeenCalledTimes(3);
+      });
+
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(mkdirSpy).toHaveBeenCalled();
+      expect(appendFileSpy).toHaveBeenCalledWith(
+        expect.stringContaining('otel-diag-test-session'),
+        expect.stringContaining(
+          '[ERROR] [OTEL] {"message":"Error: PeriodicExportingMetricReader: metrics export failed (error Error: connect ECONNREFUSED)"}',
+        ),
+        'utf8',
+      );
+      expect(appendFileSpy).toHaveBeenCalledWith(
+        expect.stringContaining('otel-diag-test-session'),
+        expect.stringContaining(
+          '[ERROR] [OTEL] A different OpenTelemetry diagnostic',
+        ),
+        'utf8',
+      );
+      expect(appendFileSpy).toHaveBeenCalledWith(
+        expect.stringContaining('otel-diag-test-session'),
+        expect.stringContaining('[WARN] [OTEL] An OpenTelemetry warning'),
+        'utf8',
+      );
+    } finally {
+      consoleErrorSpy.mockRestore();
+      consoleWarnSpy.mockRestore();
+      mkdirSpy.mockRestore();
+      appendFileSpy.mockRestore();
+      unlinkSpy.mockRestore();
+      symlinkSpy.mockRestore();
+      setDebugLogSession(null);
+      resetDebugLoggingState();
+      if (previousDebugLogFileEnv === undefined) {
+        delete process.env['QWEN_DEBUG_LOG_FILE'];
+      } else {
+        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+      }
+    }
   });
 
   it('should use HTTP exporters with signal-specific paths when protocol is http', () => {

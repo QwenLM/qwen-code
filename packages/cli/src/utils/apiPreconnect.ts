@@ -21,7 +21,7 @@ import {
   getOrCreateSharedDispatcher,
 } from '@qwen-code/qwen-code-core';
 
-import { ALIBABA_STANDARD_API_KEY_ENDPOINTS } from '../constants/alibabaStandardApiKey.js';
+import { getAllProviderBaseUrls } from '../auth/allProviders.js';
 
 const debugLogger = createDebugLogger('PRECONNECT');
 
@@ -29,8 +29,6 @@ let preconnectFired = false;
 
 /**
  * Default API base URLs by AuthType.
- * DashScope regional endpoints are derived from ALIBABA_STANDARD_API_KEY_ENDPOINTS
- * so preconnect covers all supported regions (cn-beijing, sg-singapore, us-virginia, cn-hongkong).
  */
 const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: 'https://api.openai.com',
@@ -40,12 +38,12 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 };
 
 /**
- * All known default base URLs, including DashScope regional endpoints.
+ * All known default base URLs, including all registered provider endpoints.
  * Used by isDefaultBaseUrl() to accept any supported default endpoint.
  */
 const ALL_DEFAULT_URLS: string[] = [
   ...Object.values(DEFAULT_BASE_URLS),
-  ...Object.values(ALIBABA_STANDARD_API_KEY_ENDPOINTS),
+  ...getAllProviderBaseUrls(),
 ];
 
 /**

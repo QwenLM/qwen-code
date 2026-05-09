@@ -32,6 +32,7 @@ export {
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
   ModelRegistry,
+  modelRegistryKey,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,
@@ -44,19 +45,6 @@ export {
   type ResolvedModelConfig,
   validateModelConfig,
 } from './models/index.js';
-
-// Coding Plan constants
-export {
-  CodingPlanRegion,
-  type CodingPlanTemplate,
-  CODING_PLAN_ENV_KEY,
-  computeCodingPlanVersion,
-  generateCodingPlanTemplate,
-  getCodingPlanConfig,
-  getCodingPlanBaseUrls,
-  isCodingPlanConfig,
-  getRegionFromBaseUrl,
-} from './constants/codingPlan.js';
 
 // Output formatting
 export * from './output/json-formatter.js';
