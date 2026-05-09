@@ -243,7 +243,19 @@ class ToolSearchInvocation extends BaseToolInvocation<
       try {
         tool = await registry.ensureTool(canonical);
       } catch (err) {
+        // Surface to stderr in production: debugLogger.warn is a no-op
+        // unless DEBUG is set, so without a stderr write, factory
+        // failures (network, missing module, etc.) would be invisible
+        // to operators running headless and the agent would just see
+        // a "missing" entry with no diagnosis. Use process.stderr.write
+        // directly; the package-level eslint config bans console.* in
+        // core src and there's no shared logger that surfaces in prod.
         debugLogger.warn(`ensureTool failed for ${canonical}:`, err);
+        process.stderr.write(
+          `[ToolSearch] ensureTool failed for "${canonical}": ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
       }
       if (!tool) {
         missing.push(requested);
@@ -287,9 +299,17 @@ class ToolSearchInvocation extends BaseToolInvocation<
           await geminiClient.setTools();
         } catch (err) {
           setToolsError = err instanceof Error ? err.message : String(err);
+          // Same rationale as ensureTool above: debugLogger.warn is
+          // off in production, so a setTools() failure during reveal
+          // would be invisible to operators. The error already lands
+          // in the tool's ToolResult, but a stderr write helps when
+          // someone is debugging from outside the agent transcript.
           debugLogger.warn(
             'setTools() failed while revealing deferred tools:',
             err,
+          );
+          process.stderr.write(
+            `[ToolSearch] setTools() failed while revealing deferred tools: ${setToolsError}\n`,
           );
         }
       }
