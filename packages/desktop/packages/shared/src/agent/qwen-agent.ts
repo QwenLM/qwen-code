@@ -1,3 +1,4 @@
+/* eslint-disable import/no-internal-modules */
 /**
  * Qwen Code Backend (ACP SDK Client)
  *
@@ -57,6 +58,7 @@ import type {
 } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
+import { withElectronRunAsNodeEnv } from './backend/internal/electron-run-as-node.ts';
 import { EventQueue } from './backend/event-queue.ts';
 import type { PermissionMode } from './mode-manager.ts';
 import {
@@ -75,7 +77,9 @@ type AcpPermissionOption = {
 };
 
 type PendingPermission = {
-  resolve: (response: RequestPermissionResponse & { answers?: Record<string, string> }) => void;
+  resolve: (
+    response: RequestPermissionResponse & { answers?: Record<string, string> },
+  ) => void;
   options: AcpPermissionOption[];
 };
 
@@ -307,7 +311,11 @@ class SharedQwenAcpProcess {
       ...this.options.envOverrides,
     };
     delete env.CRAFT_SESSION_DIR;
-    return env;
+    return withElectronRunAsNodeEnv(
+      env,
+      this.options.command,
+      this.options.args,
+    );
   }
 
   private createAcpClient(): Client {
@@ -467,7 +475,9 @@ function asBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
-function parseAskUserQuestions(value: unknown): AskUserQuestionItem[] | undefined {
+function parseAskUserQuestions(
+  value: unknown,
+): AskUserQuestionItem[] | undefined {
   if (!Array.isArray(value)) return undefined;
 
   const questions = value
@@ -475,12 +485,12 @@ function parseAskUserQuestions(value: unknown): AskUserQuestionItem[] | undefine
     .map((question) => {
       const options = Array.isArray(question.options)
         ? question.options
-          .filter(isRecord)
-          .map((option) => ({
-            label: asString(option.label) || '',
-            description: asString(option.description) || '',
-          }))
-          .filter((option) => option.label)
+            .filter(isRecord)
+            .map((option) => ({
+              label: asString(option.label) || '',
+              description: asString(option.description) || '',
+            }))
+            .filter((option) => option.label)
         : [];
 
       return {
@@ -492,7 +502,10 @@ function parseAskUserQuestions(value: unknown): AskUserQuestionItem[] | undefine
           : {}),
       };
     })
-    .filter((question) => question.question && question.header && question.options.length > 0);
+    .filter(
+      (question) =>
+        question.question && question.header && question.options.length > 0,
+    );
 
   return questions.length > 0 ? questions : undefined;
 }
@@ -1345,7 +1358,9 @@ export class QwenAgent extends BaseAgent {
     if (!trimmed || !this._isProcessing || this.abortReason) return false;
 
     this.midTurnMessageQueue.push(trimmed);
-    this.debug(`Queued mid-turn user message for Qwen ACP injection (${this.midTurnMessageQueue.length} pending)`);
+    this.debug(
+      `Queued mid-turn user message for Qwen ACP injection (${this.midTurnMessageQueue.length} pending)`,
+    );
     return true;
   }
 
@@ -1407,12 +1422,14 @@ export class QwenAgent extends BaseAgent {
     if (!pending) return;
 
     this.pendingPermissions.delete(requestId);
-    pending.resolve(this.createPermissionResponse(
-      pending.options,
-      allowed,
-      !!alwaysAllow,
-      options?.answers,
-    ));
+    pending.resolve(
+      this.createPermissionResponse(
+        pending.options,
+        allowed,
+        !!alwaysAllow,
+        options?.answers,
+      ),
+    );
   }
 
   override setPermissionMode(mode: PermissionMode): void {
@@ -1502,7 +1519,9 @@ export class QwenAgent extends BaseAgent {
     return result.success !== false;
   }
 
-  async rewindToUserTurn(targetTurnIndex: number): Promise<BackendRewindResult> {
+  async rewindToUserTurn(
+    targetTurnIndex: number,
+  ): Promise<BackendRewindResult> {
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw new Error('targetTurnIndex must be a non-negative integer');
     }
@@ -3423,7 +3442,9 @@ export class QwenAgent extends BaseAgent {
           toolName,
           command,
           description: title,
-          type: isAskUserQuestion ? 'ask_user_question' : permissionTypeForKind(kind),
+          type: isAskUserQuestion
+            ? 'ask_user_question'
+            : permissionTypeForKind(kind),
           reason: asString(rawInput.reason),
           impact: this.permissionImpact(toolCall),
           questions,

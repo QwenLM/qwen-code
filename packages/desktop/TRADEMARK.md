@@ -42,7 +42,7 @@ If you create a fork or derivative work, you **must**:
 
 - Choose a different name that does not include "Craft"
 - Remove or replace all Craft logos and icons
-- Update the bundle identifier (e.g., `com.lukilabs.craft-agent`) to your own
+- Update the bundle identifier (e.g., `com.alibaba.qwen-code`) to your own
 - Remove references to `craft.do` domains unless connecting to official Craft services
 
 ### Imply Official Endorsement
@@ -66,11 +66,11 @@ You may not use the trademarks in any way that:
 
 For those creating forks, the following files contain branding that should be updated:
 
-| File | Contains |
-|------|----------|
+| File                                 | Contains                           |
+| ------------------------------------ | ---------------------------------- |
 | `apps/electron/electron-builder.yml` | Product name, bundle ID, copyright |
-| `apps/electron/resources/` | Application icons |
-| `packages/shared/src/branding.ts` | Service URLs |
+| `apps/electron/resources/`           | Application icons                  |
+| `packages/shared/src/branding.ts`    | Service URLs                       |
 
 ## Examples
 
@@ -97,4 +97,4 @@ This policy may be updated from time to time. The current version will always be
 
 ---
 
-*This trademark policy is inspired by similar policies from Mozilla, WordPress, and the Apache Software Foundation.*
+_This trademark policy is inspired by similar policies from Mozilla, WordPress, and the Apache Software Foundation._

@@ -4,14 +4,7 @@
 
 import { $ } from 'bun';
 import { execSync } from 'child_process';
-import {
-  existsSync,
-  mkdirSync,
-  rmSync,
-  copyFileSync,
-  cpSync,
-  readdirSync,
-} from 'fs';
+import { existsSync, mkdirSync, rmSync, copyFileSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { createHash } from 'crypto';
 
@@ -78,12 +71,18 @@ export function getBunDownloadName(platform: Platform, arch: Arch): string {
  * Get uv release artifact filename for a platform/arch combination.
  */
 export function getUvDownloadName(platform: Platform, arch: Arch): string {
-  if (platform === 'darwin' && arch === 'arm64') return 'uv-aarch64-apple-darwin.tar.gz';
-  if (platform === 'darwin' && arch === 'x64') return 'uv-x86_64-apple-darwin.tar.gz';
-  if (platform === 'linux' && arch === 'arm64') return 'uv-aarch64-unknown-linux-gnu.tar.gz';
-  if (platform === 'linux' && arch === 'x64') return 'uv-x86_64-unknown-linux-gnu.tar.gz';
-  if (platform === 'win32' && arch === 'arm64') return 'uv-aarch64-pc-windows-msvc.zip';
-  if (platform === 'win32' && arch === 'x64') return 'uv-x86_64-pc-windows-msvc.zip';
+  if (platform === 'darwin' && arch === 'arm64')
+    return 'uv-aarch64-apple-darwin.tar.gz';
+  if (platform === 'darwin' && arch === 'x64')
+    return 'uv-x86_64-apple-darwin.tar.gz';
+  if (platform === 'linux' && arch === 'arm64')
+    return 'uv-aarch64-unknown-linux-gnu.tar.gz';
+  if (platform === 'linux' && arch === 'x64')
+    return 'uv-x86_64-unknown-linux-gnu.tar.gz';
+  if (platform === 'win32' && arch === 'arm64')
+    return 'uv-aarch64-pc-windows-msvc.zip';
+  if (platform === 'win32' && arch === 'x64')
+    return 'uv-x86_64-pc-windows-msvc.zip';
 
   throw new Error(`Unsupported uv target: ${platform}-${arch}`);
 }
@@ -91,7 +90,10 @@ export function getUvDownloadName(platform: Platform, arch: Arch): string {
 /**
  * Verify SHA256 checksum of a file
  */
-export async function verifySha256(filePath: string, expectedHash: string): Promise<boolean> {
+export async function verifySha256(
+  filePath: string,
+  expectedHash: string,
+): Promise<boolean> {
   const file = Bun.file(filePath);
   const buffer = await file.arrayBuffer();
   const hash = createHash('sha256').update(Buffer.from(buffer)).digest('hex');
@@ -315,11 +317,24 @@ export async function installDependencies(config: BuildConfig): Promise<void> {
 export function copySessionServer(config: BuildConfig): void {
   const { rootDir, electronDir } = config;
 
-  const sessionSource = join(rootDir, 'packages', 'session-mcp-server', 'dist', 'index.js');
-  const sessionDest = join(electronDir, 'resources', 'session-mcp-server', 'index.js');
+  const sessionSource = join(
+    rootDir,
+    'packages',
+    'session-mcp-server',
+    'dist',
+    'index.js',
+  );
+  const sessionDest = join(
+    electronDir,
+    'resources',
+    'session-mcp-server',
+    'index.js',
+  );
 
   if (!existsSync(sessionSource)) {
-    console.warn(`Warning: Session server not found at ${sessionSource}. Session-scoped tools will not work.`);
+    console.warn(
+      `Warning: Session server not found at ${sessionSource}. Session-scoped tools will not work.`,
+    );
     return;
   }
 
@@ -344,7 +359,7 @@ export function buildMcpServers(config: BuildConfig): void {
 
   execSync(
     `bun build ${join(sessionDir, 'src', 'index.ts')} --outfile ${sessionOut} --target node --format cjs`,
-    { cwd: rootDir, stdio: 'inherit', shell: true }
+    { cwd: rootDir, stdio: 'inherit', shell: true },
   );
 
   if (!existsSync(sessionOut)) {
@@ -359,11 +374,21 @@ export function buildMcpServers(config: BuildConfig): void {
  */
 export function buildWhatsAppWorker(config: BuildConfig): void {
   const { rootDir } = config;
-  const workerOut = join(rootDir, 'packages', 'messaging-whatsapp-worker', 'dist', 'worker.cjs');
+  const workerOut = join(
+    rootDir,
+    'packages',
+    'messaging-whatsapp-worker',
+    'dist',
+    'worker.cjs',
+  );
 
   console.log('Building WhatsApp worker...');
 
-  execSync('bun run build:wa-worker', { cwd: rootDir, stdio: 'inherit', shell: true });
+  execSync('bun run build:wa-worker', {
+    cwd: rootDir,
+    stdio: 'inherit',
+    shell: true,
+  });
 
   if (!existsSync(workerOut)) {
     throw new Error(`WhatsApp worker output not found at ${workerOut}`);
@@ -376,7 +401,12 @@ export function buildWhatsAppWorker(config: BuildConfig): void {
 export function verifyMcpServersExist(config: BuildConfig): void {
   const { electronDir } = config;
 
-  const sessionPath = join(electronDir, 'resources', 'session-mcp-server', 'index.js');
+  const sessionPath = join(
+    electronDir,
+    'resources',
+    'session-mcp-server',
+    'index.js',
+  );
 
   if (!existsSync(sessionPath)) {
     throw new Error(`Session MCP server not found at ${sessionPath}`);
@@ -470,10 +500,10 @@ export async function loadEnvFile(config: BuildConfig): Promise<void> {
 export function getArtifactName(platform: Platform, arch: Arch): string {
   switch (platform) {
     case 'darwin':
-      return `Craft-Agents-${arch}.dmg`;
+      return `Qwen-Code-${arch}.dmg`;
     case 'win32':
-      return `Craft-Agents-${arch}.exe`;
+      return `Qwen-Code-${arch}.exe`;
     case 'linux':
-      return `Craft-Agents-${arch}.AppImage`;
+      return `Qwen-Code-${arch}.AppImage`;
   }
 }

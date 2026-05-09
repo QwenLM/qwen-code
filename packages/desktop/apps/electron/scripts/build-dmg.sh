@@ -167,8 +167,8 @@ fi
 npx electron-builder $BUILDER_ARGS
 
 # 9. Verify the DMG was built
-# electron-builder.yml uses artifactName to output: Craft-Agents-${arch}.dmg
-DMG_NAME="Craft-Agents-${ARCH}.dmg"
+# electron-builder.yml uses artifactName to output: Qwen-Code-${arch}.dmg
+DMG_NAME="Qwen-Code-${ARCH}.dmg"
 DMG_PATH="$ELECTRON_DIR/release/$DMG_NAME"
 
 if [ ! -f "$DMG_PATH" ]; then

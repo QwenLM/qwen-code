@@ -13,17 +13,20 @@ Thank you for your interest in contributing to Qwen Code! This document provides
 ### Development Setup
 
 1. Clone the repository:
+
    ```bash
-   git clone https://github.com/lukilabs/craft-agents-oss.git
-   cd craft-agents-oss
+   git clone https://github.com/QwenLM/qwen-code.git
+   cd qwen-code
    ```
 
 2. Install dependencies:
+
    ```bash
    bun install
    ```
 
 3. Set up environment variables:
+
    ```bash
    cp .env.example .env
    # Edit .env with your credentials
@@ -39,6 +42,7 @@ Thank you for your interest in contributing to Qwen Code! This document provides
 ### Branch Naming
 
 Use descriptive branch names:
+
 - `feature/add-new-tool` - New features
 - `fix/resolve-auth-issue` - Bug fixes
 - `refactor/simplify-agent-loop` - Code refactoring
@@ -78,13 +82,16 @@ bun run typecheck:all
 
 ```markdown
 ## Summary
+
 Brief description of changes
 
 ## Changes
+
 - Change 1
 - Change 2
 
 ## Testing
+
 How you tested these changes
 
 ## Screenshots (if applicable)
@@ -93,7 +100,7 @@ How you tested these changes
 ## Project Structure
 
 ```
-craft-agents/
+qwen-code/
 ├── apps/
 │   ├── electron/    # Desktop GUI (primary interface)
 │   └── tui/         # Terminal CLI (deprecated)

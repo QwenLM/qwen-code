@@ -1,3 +1,4 @@
+/* eslint-disable import/no-internal-modules */
 import { spawn } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 
@@ -12,6 +13,7 @@ import type { ModelDefinition } from '../../../../config/models.ts';
 import { getProxyEnvVars } from '../../../../config/proxy-env.ts';
 import type { ModelFetchResult } from '../../../../config/model-fetcher.ts';
 import type { ProviderDriver } from '../driver-types.ts';
+import { withElectronRunAsNodeEnv } from '../electron-run-as-node.ts';
 import type { ResolvedBackendRuntimePaths } from '../runtime-resolver.ts';
 
 type JsonRecord = Record<string, unknown>;
@@ -29,7 +31,8 @@ function asString(value: unknown): string | undefined {
 }
 
 function asNumber(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0)
+    return value;
   if (typeof value !== 'string') return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
@@ -114,7 +117,10 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
   };
 }
 
-function buildSpawnCommand(qwenCliPath: string, nodePath: string): { command: string; args: string[] } {
+function buildSpawnCommand(
+  qwenCliPath: string,
+  nodePath: string,
+): { command: string; args: string[] } {
   const args = ['--acp'];
   if (qwenCliPath.endsWith('.js')) {
     return { command: nodePath, args: [qwenCliPath, ...args] };
@@ -122,12 +128,19 @@ function buildSpawnCommand(qwenCliPath: string, nodePath: string): { command: st
   return { command: qwenCliPath, args };
 }
 
-function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs: number): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  label: string,
+  timeoutMs: number,
+): Promise<T> {
   if (timeoutMs <= 0) return promise;
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => reject(new Error(`Qwen ACP model discovery timed out: ${label}`)), timeoutMs);
+    timeout = setTimeout(
+      () => reject(new Error(`Qwen ACP model discovery timed out: ${label}`)),
+      timeoutMs,
+    );
   });
 
   return Promise.race([promise, timeoutPromise]).finally(() => {
@@ -156,13 +169,18 @@ async function fetchQwenModelsFromAcp(args: {
 
   const nodePath = args.resolvedPaths.nodeRuntimePath || process.execPath;
   const { command, args: spawnArgs } = buildSpawnCommand(qwenCliPath, nodePath);
-  const child = spawn(command, spawnArgs, {
-    cwd: args.cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: {
+  const env = withElectronRunAsNodeEnv(
+    {
       ...process.env,
       ...getProxyEnvVars(),
     },
+    command,
+    spawnArgs,
+  );
+  const child = spawn(command, spawnArgs, {
+    cwd: args.cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env,
     shell: false,
   });
 
@@ -180,29 +198,45 @@ async function fetchQwenModelsFromAcp(args: {
   );
 
   try {
-    await withTimeout(connection.initialize({
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {},
-    }), 'initialize', args.timeoutMs);
+    await withTimeout(
+      connection.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {},
+      }),
+      'initialize',
+      args.timeoutMs,
+    );
 
-    const result = toRecord(await withTimeout(connection.newSession({
-      cwd: args.cwd,
-      mcpServers: [],
-    }), 'session/new', args.timeoutMs));
+    const result = toRecord(
+      await withTimeout(
+        connection.newSession({
+          cwd: args.cwd,
+          mcpServers: [],
+        }),
+        'session/new',
+        args.timeoutMs,
+      ),
+    );
     const modelState = toRecord(result.models);
     const models = Array.isArray(modelState.availableModels)
-      ? modelState.availableModels.map(toQwenModelDefinition).filter((model): model is ModelDefinition => !!model)
+      ? modelState.availableModels
+          .map(toQwenModelDefinition)
+          .filter((model): model is ModelDefinition => !!model)
       : [];
     const serverDefault = asString(modelState.currentModelId);
 
     if (models.length === 0) {
-      throw new Error('Qwen ACP session/new did not return models.availableModels');
+      throw new Error(
+        'Qwen ACP session/new did not return models.availableModels',
+      );
     }
 
     return { models, serverDefault };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const stderrSuffix = stderr.trim() ? ` Recent stderr: ${stderr.trim().slice(-1000)}` : '';
+    const stderrSuffix = stderr.trim()
+      ? ` Recent stderr: ${stderr.trim().slice(-1000)}`
+      : '';
     throw new Error(`${message}${stderrSuffix}`);
   } finally {
     if (!child.killed) {
@@ -219,11 +253,15 @@ export const qwenDriver: ProviderDriver = {
       node: resolvedPaths.nodeRuntimePath,
     },
   }),
-  fetchModels: ({ hostRuntime, resolvedPaths, timeoutMs }) => fetchQwenModelsFromAcp({
-    resolvedPaths,
-    cwd: hostRuntime.appRootPath || process.cwd(),
-    timeoutMs,
+  fetchModels: ({ hostRuntime, resolvedPaths, timeoutMs }) =>
+    fetchQwenModelsFromAcp({
+      resolvedPaths,
+      cwd: hostRuntime.appRootPath || process.cwd(),
+      timeoutMs,
+    }),
+  validateStoredConnection: async () => ({
+    success: true,
+    shouldRefreshModels: true,
   }),
-  validateStoredConnection: async () => ({ success: true, shouldRefreshModels: true }),
   testConnection: async () => null,
 };

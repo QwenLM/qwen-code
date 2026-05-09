@@ -24,13 +24,20 @@ export async function packageDarwin(config: BuildConfig): Promise<string> {
   // Add code signing if identity is available
   if (process.env.APPLE_SIGNING_IDENTITY) {
     // Strip "Developer ID Application: " prefix if present (electron-builder adds it automatically)
-    const cscName = process.env.APPLE_SIGNING_IDENTITY.replace('Developer ID Application: ', '');
+    const cscName = process.env.APPLE_SIGNING_IDENTITY.replace(
+      'Developer ID Application: ',
+      '',
+    );
     console.log(`  Using signing identity: ${cscName}`);
     process.env.CSC_NAME = cscName;
   }
 
   // Add notarization if all credentials are available
-  if (process.env.APPLE_ID && process.env.APPLE_TEAM_ID && process.env.APPLE_APP_SPECIFIC_PASSWORD) {
+  if (
+    process.env.APPLE_ID &&
+    process.env.APPLE_TEAM_ID &&
+    process.env.APPLE_APP_SPECIFIC_PASSWORD
+  ) {
     console.log('  Notarization enabled');
     process.env.NOTARIZE = 'true';
   }
@@ -39,8 +46,8 @@ export async function packageDarwin(config: BuildConfig): Promise<string> {
   await $`cd ${electronDir} && npx electron-builder ${builderArgs}`;
 
   // Verify the DMG and ZIP were built (ZIP is used by electron-updater for auto-updates)
-  const dmgName = `Craft-Agents-${arch}.dmg`;
-  const zipName = `Craft-Agents-${arch}.zip`;
+  const dmgName = `Qwen-Code-${arch}.dmg`;
+  const zipName = `Qwen-Code-${arch}.zip`;
   const dmgPath = join(electronDir, 'release', dmgName);
   const zipPath = join(electronDir, 'release', zipName);
 
@@ -51,7 +58,9 @@ export async function packageDarwin(config: BuildConfig): Promise<string> {
   }
 
   if (!existsSync(zipPath)) {
-    console.warn(`  Warning: ZIP not found at ${zipPath} (needed for auto-updates)`);
+    console.warn(
+      `  Warning: ZIP not found at ${zipPath} (needed for auto-updates)`,
+    );
   }
 
   // Get file sizes
