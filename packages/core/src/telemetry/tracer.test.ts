@@ -67,7 +67,7 @@ vi.mock('@opentelemetry/api', async () => {
       spanContext: () => ({
         traceId: 'a'.repeat(32),
         spanId: 'b'.repeat(16),
-        traceFlags: 1,
+        traceFlags: TraceFlags.SAMPLED,
       }),
       setStatus(status: object) {
         if (mockState.throwOnSetStatus) {
@@ -323,7 +323,7 @@ describe('startSpanWithContext', () => {
 });
 
 describe('createSessionRootContext', () => {
-  it('derives a deterministic traceId from session ID', () => {
+  it('derives a deterministic traceId from session ID (spanId is random)', () => {
     const ctx = createSessionRootContext('session-123') as unknown as {
       traceId: string;
       spanId: string;
