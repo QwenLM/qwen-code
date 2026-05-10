@@ -62,4 +62,15 @@ describe('SyntheticOutputTool', () => {
     expect(String(result.llmContent)).toMatch(/accepted/i);
     expect(String(result.llmContent)).toMatch(/end/i);
   });
+
+  it('is always loaded (never hidden behind ToolSearch)', () => {
+    // The synthetic terminal tool MUST be visible to the model from the
+    // very first turn. If ToolSearch's deferred-load logic ever hid it,
+    // the structured-output contract would silently break (the model
+    // wouldn't know the tool exists, would emit plain text, and the run
+    // would exit via the "Model produced plain text..." failure path).
+    const tool = makeTool(objectSchema);
+    expect(tool.alwaysLoad).toBe(true);
+    expect(tool.shouldDefer).toBe(false);
+  });
 });

@@ -204,6 +204,25 @@ export abstract class DeclarativeTool<
     readonly parameterSchema: unknown,
     readonly isOutputMarkdown: boolean = true,
     readonly canUpdateOutput: boolean = false,
+    /**
+     * When true, this tool is hidden from the initial function-declaration list
+     * sent to the model to save tokens. The model discovers it on-demand via the
+     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
+     * subsequent API requests. Mirrors the `shouldDefer` field described in
+     * Claude Code's tool framework.
+     */
+    readonly shouldDefer: boolean = false,
+    /**
+     * When true, this tool is always included in the function-declaration list
+     * even in contexts where deferral is the default. Used for meta tools like
+     * ToolSearch itself.
+     */
+    readonly alwaysLoad: boolean = false,
+    /**
+     * Optional space-separated keywords used by ToolSearch's keyword-match
+     * scoring. Complements the tool's name and description.
+     */
+    readonly searchHint?: string,
   ) {}
 
   get schema(): FunctionDeclaration {

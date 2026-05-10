@@ -373,6 +373,12 @@ export class GeminiClient {
       this.pendingRecallAbortController.abort();
       this.pendingRecallAbortController = undefined;
     }
+    // Drop any deferred tools revealed this session so /clear really gives
+    // a clean slate. We don't clear inside startChat itself because that path
+    // is also taken by compression (which preserves the session), and
+    // compression should keep previously-revealed tools so the model can
+    // continue using them without re-running ToolSearch.
+    this.config.getToolRegistry().clearRevealedDeferredTools();
     await this.startChat();
   }
 
@@ -391,7 +397,9 @@ export class GeminiClient {
     });
   }
 
-  private getMainSessionSystemInstruction(): string {
+  private getMainSessionSystemInstruction(
+    deferredTools?: Array<{ name: string; description: string }>,
+  ): string {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
@@ -401,6 +409,7 @@ export class GeminiClient {
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
+        deferredTools,
       );
     }
 
@@ -408,6 +417,7 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
+      deferredTools,
     );
   }
 
@@ -419,7 +429,63 @@ export class GeminiClient {
     const history = await getInitialChatHistory(this.config, extraHistory);
 
     try {
-      const systemInstruction = this.getMainSessionSystemInstruction();
+      // Warm the tool registry before building the system prompt so we know
+      // which tools are marked `shouldDefer`. The deferred list is appended to
+      // the prompt so the model knows which tools are reachable via
+      // ToolSearch. warmAll() is idempotent — setTools() below reuses the
+      // warmed state. Revealed-deferred state is NOT cleared here because
+      // startChat is also taken by the compression path (which preserves the
+      // session); `/clear` clears the revealed set via resetChat() before
+      // calling us.
+      const toolRegistry = this.config.getToolRegistry();
+      await toolRegistry.warmAll();
+      const deferredSummary = toolRegistry.getDeferredToolSummary();
+      // Resume support: when a transcript contains prior calls to a deferred
+      // tool, re-reveal that tool so `setTools()` below sends its schema in
+      // the declaration list. Without this, the model sees history like
+      // "I called foo_tool, got result" but the API rejects a follow-up
+      // call to foo_tool because the schema is absent.
+      if (history.length > 0 && deferredSummary.length > 0) {
+        const deferredNames = new Set(deferredSummary.map((t) => t.name));
+        for (const entry of history) {
+          for (const part of entry.parts ?? []) {
+            const callName = part.functionCall?.name;
+            if (callName && deferredNames.has(callName)) {
+              toolRegistry.revealDeferredTool(callName);
+            }
+          }
+        }
+      }
+      // ToolSearch availability gates two things:
+      //   (a) Whether the deferred-tools discovery section appears in the
+      //       prompt (otherwise we'd be telling the model to call a tool
+      //       that isn't registered).
+      //   (b) Whether deferral itself makes sense at all — if the model
+      //       has no way to reveal a deferred tool, the tool is effectively
+      //       hidden + uncallable. Silent disappearance is the worst
+      //       failure mode (user sees no error, just thinks the tool
+      //       doesn't exist), so when ToolSearch is filtered out (e.g. via
+      //       `--exclude-tools tool_search` or a deny rule), reveal every
+      //       deferred tool eagerly so they all land in the declaration
+      //       list. The token-saving rationale of deferral was predicated
+      //       on the discovery surface being available.
+      const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
+      if (!toolSearchAvailable && deferredSummary.length > 0) {
+        for (const t of deferredSummary) {
+          toolRegistry.revealDeferredTool(t.name);
+        }
+      }
+      // Exclude any tools revealed by the resume scan (or the no-ToolSearch
+      // eager-reveal above): their schemas are already in the declaration
+      // list, so advertising them as "reachable via ToolSearch" would
+      // invite redundant lookup calls.
+      const deferredTools = toolSearchAvailable
+        ? deferredSummary.filter(
+            (t) => !toolRegistry.isDeferredToolRevealed(t.name),
+          )
+        : undefined;
+      const systemInstruction =
+        this.getMainSessionSystemInstruction(deferredTools);
 
       this.chat = new GeminiChat(
         this.config,

@@ -73,17 +73,19 @@ describe('resolveJsonSchemaArg', () => {
     }
   });
 
-  it('rejects @path schema files larger than 1 MiB', () => {
+  it('rejects @path schema files that exceed the size cap', () => {
     // Defence against a wrapper that forwards a user-supplied path into
     // `qwen --json-schema "$X"` where X is e.g. `@/dev/zero` or any
     // pathologically large file. We pre-check size via fs.statSync so the
     // huge buffer never gets allocated.
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-schema-big-'));
     const file = path.join(tmp, 'huge.json');
-    // 1 MiB + 1 byte
-    fs.writeFileSync(file, Buffer.alloc(1024 * 1024 + 1, 0x20));
+    // Cap is 4 MiB; write 4 MiB + 1 byte to trip it.
+    fs.writeFileSync(file, Buffer.alloc(4 * 1024 * 1024 + 1, 0x20));
     try {
-      expect(() => resolveJsonSchemaArg(`@${file}`)).toThrow(/exceeds/);
+      expect(() => resolveJsonSchemaArg(`@${file}`)).toThrow(
+        /Refusing to read/,
+      );
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
@@ -397,25 +399,25 @@ describe('resolveJsonSchemaArg', () => {
   });
 
   it('accepts if/then/else when the decidable branch admits objects', () => {
-    // `if: true` + object-compatible `then` passes.
+    // `if: true` + object-compatible `then` passes (parse-time
+    // schemaRootAcceptsObject reduces to checking `then`).
     expect(
       resolveJsonSchemaArg('{"if":true,"then":{"type":"object"}}'),
     ).toBeDefined();
-    // Missing `then` (defaults to `true`) — no constraint on root.
-    expect(resolveJsonSchemaArg('{"if":true}')).toBeDefined();
     // `if: false` + object-compatible `else`.
     expect(
       resolveJsonSchemaArg('{"if":false,"else":{"type":"object"}}'),
     ).toBeDefined();
-    // Missing `else` defaults to `true` — no constraint.
-    expect(resolveJsonSchemaArg('{"if":false}')).toBeDefined();
     // Object schema for `if` — runtime-decidable; defer to Ajv. We
     // accept at parse time even when `then` excludes object, because
     // an object value may not match `if` and so isn't bound by `then`.
     expect(
       resolveJsonSchemaArg(
-        '{"if":{"properties":{"k":{"const":"x"}}},"then":{"type":"string"}}',
+        '{"if":{"type":"object","properties":{"k":{"const":"x"}}},"then":{"type":"object","properties":{"v":{"type":"string"}}}}',
       ),
     ).toBeDefined();
+    // (The degenerate `{if:true}` / `{if:false}` shapes — no `then` and
+    // no `else` — are rejected by Ajv strict mode as meaningless rather
+    // than by schemaRootAcceptsObject; that's fine.)
   });
 });

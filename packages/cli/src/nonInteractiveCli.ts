@@ -457,6 +457,12 @@ export async function runNonInteractive(
       // first wins, and both paths need to surface the same structured
       // result envelope.
       let structuredSubmission: unknown = undefined;
+      // Captures the first ~200 chars of model-emitted plain text across
+      // turns. Used only to enrich the --json-schema "produced plain
+      // text" error: the user/operator gets a hint of what the model
+      // actually said instead of a static, context-free message.
+      let plainTextPreview = '';
+      const PLAIN_TEXT_PREVIEW_LIMIT = 200;
 
       // Shared terminal block for the structured-output success
       // contract. Both the main-turn loop and the drain-turn post-loop
@@ -544,6 +550,14 @@ export async function runNonInteractive(
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
+          if (
+            event.type === GeminiEventType.Content &&
+            plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
+          ) {
+            const remaining =
+              PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
+            plainTextPreview += String(event.value).slice(0, remaining);
+          }
           if (event.type === GeminiEventType.LoopDetected) {
             emitLoopDetectedMessage(config, event.value?.loopType);
           }
@@ -570,10 +584,11 @@ export async function runNonInteractive(
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
-          // The session-scoped `structuredSubmission` is the output of
-          // the synthetic structured_output tool. Set in either the main
-          // turn or a drain turn; whichever path captures it terminates
-          // the session.
+          // The session-scoped `structuredSubmission` (declared at
+          // the function scope above) is the output of the synthetic
+          // structured_output tool. Set in either the main turn or a
+          // drain turn; whichever path captures it terminates the
+          // session.
 
           // If --json-schema is active and the model emitted a
           // `structured_output` call in the same assistant turn as other
@@ -1110,13 +1125,26 @@ export async function runNonInteractive(
           // Returning a non-zero exit code (rather than throwing) avoids
           // the outer catch re-emitting the result a second time.
           if (config.getJsonSchema()) {
+            // Enrich the static contract message with diagnostic context:
+            // turn count (how many tries the model got) + a preview of
+            // what it actually said (truncated). Operators debugging a
+            // headless run shouldn't have to scrape `--output-format
+            // json` to understand why the contract failed.
+            const previewSnippet = plainTextPreview.trim();
+            const previewSuffix = previewSnippet
+              ? ` Output preview (${plainTextPreview.length}${
+                  plainTextPreview.length >= PLAIN_TEXT_PREVIEW_LIMIT ? '+' : ''
+                } chars): ${JSON.stringify(previewSnippet)}.`
+              : '';
+            const errorMessage =
+              `Model produced plain text instead of calling the structured_output tool as required by --json-schema after ${turnCount} turn(s).` +
+              previewSuffix;
             adapter.emitResult({
               isError: true,
               durationMs: Date.now() - startTime,
               apiDurationMs: totalApiDurationMs,
               numTurns: turnCount,
-              errorMessage:
-                'Model produced plain text instead of calling the structured_output tool as required by --json-schema.',
+              errorMessage,
               usage,
               stats,
             });

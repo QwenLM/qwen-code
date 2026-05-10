@@ -136,6 +136,28 @@ export default {
   'Configure authentication information for login': '配置登錄認證信息',
   'Copy the last result or code snippet to clipboard':
     '將最後的結果或代碼片段複製到剪貼板',
+  'Show working-tree change stats versus HEAD':
+    '顯示工作區相對 HEAD 的變更統計',
+  'Could not determine current working directory.': '無法確定當前工作目錄。',
+  'Failed to compute git diff stats': '計算 git diff 統計失敗',
+  'No diff available. Either this is not a git repository, HEAD is missing, or a merge/rebase/cherry-pick/revert is in progress.':
+    '無可用 diff。可能不是 Git 倉庫、HEAD 缺失，或正在執行 merge/rebase/cherry-pick/revert。',
+  'Clean working tree — no changes against HEAD.':
+    '工作區乾淨 —— 與 HEAD 無差異。',
+  '{{count}} file changed, +{{added}} / -{{removed}}':
+    '{{count}} 個檔案變更，+{{added}} / -{{removed}}',
+  '{{count}} files changed, +{{added}} / -{{removed}}':
+    '{{count}} 個檔案變更，+{{added}} / -{{removed}}',
+  '{{count}} file changed': '{{count}} 個檔案變更',
+  '{{count}} files changed': '{{count}} 個檔案變更',
+  '…and {{hidden}} more (showing first {{shown}})':
+    '…還有 {{hidden}} 個（僅顯示前 {{shown}} 個）',
+  '(binary)': '（二進位）',
+  '(binary, new)': '（二進位，新增）',
+  '(new)': '（新增）',
+  '(new, partial)': '（新增，部分統計）',
+  '(deleted)': '（已刪除）',
+  '(binary, deleted)': '（二進位，已刪除）',
   'Manage subagents for specialized task delegation.':
     '管理用於專門任務委派的子智能體',
   'Manage existing subagents (view, edit, delete).':

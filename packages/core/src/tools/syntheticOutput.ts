@@ -24,6 +24,11 @@ export type StructuredOutputParams = Record<string, unknown>;
  *
  * The caller (nonInteractiveCli) recognizes a successful invocation of this
  * tool and ends the session, using request.args as the structured result.
+ *
+ * Wired into the ToolSearch infrastructure with `alwaysLoad: true` so the
+ * tool is never hidden behind on-demand schema loading — the model has to
+ * see this tool in its function-declaration list from the very first turn,
+ * otherwise the structured-output contract can't be honored at all.
  */
 export class SyntheticOutputTool extends BaseDeclarativeTool<
   StructuredOutputParams,
@@ -40,6 +45,9 @@ export class SyntheticOutputTool extends BaseDeclarativeTool<
       userSchema,
       false, // isOutputMarkdown
       false, // canUpdateOutput
+      false, // shouldDefer — must be visible so the model knows to call it
+      true, // alwaysLoad — never hidden behind ToolSearch
+      'structured output json schema final result submit',
     );
   }
 

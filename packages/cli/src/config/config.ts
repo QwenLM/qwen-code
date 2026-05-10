@@ -338,6 +338,11 @@ function schemaRootAcceptsObject(
   return true;
 }
 
+/** 4 MiB — well above any real schema, well below an accidental
+ * gigabyte-sized file that would OOM `fs.readFileSync` + `JSON.parse`.
+ */
+const MAX_JSON_SCHEMA_FILE_BYTES = 4 * 1024 * 1024;
+
 /**
  * Resolves the `--json-schema` argument into a parsed JSON Schema object.
  *
@@ -356,13 +361,6 @@ export function resolveJsonSchemaArg(
     throw new FatalConfigError('--json-schema cannot be empty.');
   }
 
-  // Cap on `@path` schema files. Larger than any realistic JSON Schema
-  // (a deeply-typed OpenAPI schema is in the tens of KiB at most), and
-  // bounded enough that an attacker who can influence the path argument
-  // through a wrapping process can't OOM the run by pointing at a giant
-  // file or a character device that streams forever (`/dev/zero` etc.).
-  const JSON_SCHEMA_FILE_MAX_BYTES = 1024 * 1024; // 1 MiB
-
   let payload: string;
   let payloadSource: 'inline' | 'file' = 'inline';
   let payloadSourcePath: string | undefined;
@@ -374,15 +372,22 @@ export function resolveJsonSchemaArg(
       // Stat first so we can refuse non-regular files (directories,
       // character devices like `/dev/zero`, FIFOs that would block
       // synchronously) and cap by size before pulling bytes into memory.
+      // The cap (`MAX_JSON_SCHEMA_FILE_BYTES`) is set well above any real
+      // schema and well below an accidental gigabyte-sized file that
+      // would OOM `fs.readFileSync` + `JSON.parse`.
       const stat = fs.statSync(resolvedPath);
       if (!stat.isFile()) {
         throw new FatalConfigError(
           `--json-schema "@${resolvedPath}" must be a regular file.`,
         );
       }
-      if (stat.size > JSON_SCHEMA_FILE_MAX_BYTES) {
+      if (stat.size > MAX_JSON_SCHEMA_FILE_BYTES) {
         throw new FatalConfigError(
-          `--json-schema "@${resolvedPath}" exceeds ${JSON_SCHEMA_FILE_MAX_BYTES} bytes (got ${stat.size}).`,
+          `--json-schema file "${resolvedPath}" is ${stat.size} bytes ` +
+            `(>${MAX_JSON_SCHEMA_FILE_BYTES}). Refusing to read; this is ` +
+            'almost certainly a wrong-path argument. Schemas should be ' +
+            'small enough to fit in a few KiB; decompose with `$ref` if ' +
+            'you need a large family of types.',
         );
       }
       payload = fs.readFileSync(resolvedPath, 'utf8');
@@ -428,9 +433,11 @@ export function resolveJsonSchemaArg(
   // The schema will be installed as a TOOL PARAMETER schema. All function-
   // calling APIs (Gemini/OpenAI/Anthropic) require tool arguments to be a
   // JSON object, so a schema that cannot accept objects registers an
-  // unusable synthetic tool the model could never satisfy. Check the root
-  // *and* any top-level anyOf/oneOf narrowing — a schema without a root
-  // `type` but whose only anyOf branches are non-object is equally broken.
+  // unusable synthetic tool the model could never satisfy. `schemaRootAcceptsObject`
+  // walks `type`/`const`/`enum`/`anyOf`/`oneOf`/`allOf`/`not`/`if` (with
+  // best-effort decidable cases for the harder shapes); the strict Ajv
+  // compile below catches structural validity. The two together cover both
+  // "schema can be parsed" and "schema can be satisfied by an object value".
   if (!schemaRootAcceptsObject(parsed as Record<string, unknown>)) {
     throw new FatalConfigError(
       '--json-schema root must accept object-typed values (tool parameters ' +
@@ -921,12 +928,22 @@ export async function parseArguments(): Promise<CliArgs> {
               // open and silently ignoring --json-schema.
               return '--json-schema cannot be used with --acp; structured output is only honoured by the headless non-interactive flow.';
             }
-            // We deliberately do NOT reject the no-prompt / no-positional
-            // case here: the headless CLI still accepts a prompt piped via
-            // stdin (e.g. `cat prompt.txt | qwen --json-schema '...'`),
-            // and stdin availability isn't known at parse time. The
-            // existing "No input provided via stdin..." runtime error
-            // (gemini.tsx) covers genuinely empty input.
+            const hasPrompt = !!argv['prompt'];
+            const query = argv['query'] as string | string[] | undefined;
+            const hasPositionalQuery = Array.isArray(query)
+              ? query.length > 0
+              : !!query;
+            // Allow stdin piping (`echo "..." | qwen --json-schema ...`):
+            // when stdin is not a TTY, the prompt is supplied via the pipe
+            // and headless mode runs normally. Only reject true interactive
+            // invocations with neither flag nor positional nor pipe — the
+            // synthetic tool's "session ends now" llmContent has no
+            // termination handler in the TUI loop, so silently launching
+            // the TUI would strand the run.
+            const stdinIsPiped = !process.stdin.isTTY;
+            if (!hasPrompt && !hasPositionalQuery && !stdinIsPiped) {
+              return '--json-schema only applies to non-interactive mode; pass a prompt via -p, as a positional argument, or piped via stdin.';
+            }
           }
           return true;
         }),
