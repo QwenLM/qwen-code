@@ -234,6 +234,46 @@ describe('useDeleteCommand', () => {
       expect(item.text).toContain('disk full');
     });
 
+    it('reports a full failure with type=error and surfaces failing ids + reason', async () => {
+      const removeSessions = vi.fn().mockResolvedValue({
+        removed: [],
+        notFound: ['xxxxxxxx-missing'],
+        errors: [
+          {
+            sessionId: 'yyyyyyyy-failed',
+            error: new Error('permission denied'),
+          },
+        ],
+      });
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany([
+          'xxxxxxxx-missing',
+          'yyyyyyyy-failed',
+        ]);
+        await flushAsync();
+      });
+
+      const [item] = addItem.mock.calls.at(-1) as [
+        { type: string; text: string },
+        number,
+      ];
+      expect(item.type).toBe('error');
+      expect(item.text).toContain('Failed to delete');
+      expect(item.text).toContain('2');
+      expect(item.text).toContain('xxxxxxxx');
+      expect(item.text).toContain('yyyyyyyy');
+      expect(item.text).toContain('permission denied');
+    });
+
     it('truncates failing-id list to 3 with overflow indicator', async () => {
       const removeSessions = vi.fn().mockResolvedValue({
         removed: ['ok'],
