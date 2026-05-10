@@ -202,11 +202,20 @@ export function resetDispatcherCache(): void {
  * matches only the userinfo portion without over-consuming hostname or unrelated '@'.
  * The /g flag ensures all credential occurrences in multi-line error chains are redacted.
  *
+ * Two patterns are supported:
+ * - With scheme: `http://user:pass@proxy.local` → `http://<redacted>@proxy.local`
+ * - Without scheme (Node.js native errors): `user:pass@proxy.local:8080` → `<redacted>@proxy.local:8080`
+ *
  * @param message - Error message that may contain proxy URLs with credentials
  * @returns Message with all proxy credentials replaced by '<redacted>'
  */
 export function redactProxyCredentials(message: string): string {
-  return message.replace(/\/\/[^/\s]*@/g, '//<redacted>@');
+  // Primary: match URLs with scheme (http://user:pass@host or https://user:pass@host)
+  let result = message.replace(/\/\/[^/\s]*@/g, '//<redacted>@');
+  // Fallback: match bare credential patterns without scheme (e.g., Node.js native errors)
+  // Negative lookbehind for :// avoids matching already-handled URLs or schemes
+  result = result.replace(/(?<!:\/\/)[^\s/]+:[^\s/@]*@/g, '<redacted>@');
+  return result;
 }
 
 function buildFetchOptionsWithDispatcher(
@@ -230,9 +239,10 @@ function buildFetchOptionsWithDispatcher(
     // Log dispatcher creation failure - requests will fallback to direct connection
     // bypassing the configured proxy. This is important for environments requiring
     // proxy for security controls (TLS inspection, traffic logging).
-    // Only log once per proxy URL to avoid duplicate warnings in long conversations.
-    if (!rejectedProxyCache.has(proxyUrl)) {
-      rejectedProxyCache.add(proxyUrl);
+    // Use redacted proxyUrl as cache key to avoid storing plaintext credentials in memory.
+    const cacheKey = redactProxyCredentials(proxyUrl);
+    if (!rejectedProxyCache.has(cacheKey)) {
+      rejectedProxyCache.add(cacheKey);
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       const redactedMessage = redactProxyCredentials(errorMessage);

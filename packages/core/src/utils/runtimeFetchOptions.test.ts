@@ -42,9 +42,9 @@ vi.mock('undici', () => {
       // Simulate failure for invalid proxy URLs or URLs with credentials
       if (
         this.uri === 'http://invalid-proxy' ||
-        this.uri === 'http://user:secret@proxy.local'
+        this.uri.includes('@') // Any URL with credentials fails
       ) {
-        throw new Error('Invalid proxy URL: http://user:secret@proxy.local');
+        throw new Error(`Invalid proxy URL: ${this.uri}`);
       }
     }
   }
@@ -187,6 +187,15 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(mockWarn).toHaveBeenCalledTimes(2);
     expect(mockConsoleError).toHaveBeenCalledTimes(2);
   });
+
+  it('deduplicates by redacted cache key (same host, different credentials)', () => {
+    // Different credentials for same proxy host → same redacted cache key
+    buildRuntimeFetchOptions('openai', 'http://user1:pass1@proxy.local');
+    buildRuntimeFetchOptions('openai', 'http://user2:pass2@proxy.local');
+    // Should log only once because cache key is redacted (same host)
+    expect(mockWarn).toHaveBeenCalledOnce();
+    expect(mockConsoleError).toHaveBeenCalledOnce();
+  });
 });
 
 describe('getOrCreateSharedDispatcher', () => {
@@ -249,5 +258,21 @@ describe('redactProxyCredentials', () => {
   it('preserves messages without proxy URLs unchanged', () => {
     const msg = 'Network timeout occurred';
     expect(redactProxyCredentials(msg)).toBe(msg);
+  });
+
+  it('redacts credentials in Node.js native error format (no scheme)', () => {
+    const msg = 'connect ECONNREFUSED user:pass@proxy.local:8080';
+    expect(redactProxyCredentials(msg)).toBe(
+      'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+  });
+
+  it('does not double-redact when both patterns are present', () => {
+    const msg =
+      'http://user:pass@proxy.local — cause: connect ECONNREFUSED user:pass@proxy.local:8080';
+    const result = redactProxyCredentials(msg);
+    expect(result).not.toContain('user');
+    expect(result).not.toContain('pass');
+    expect(result).toContain('proxy.local');
   });
 });
