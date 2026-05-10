@@ -101,7 +101,10 @@ import { computeWindowTitle } from '../utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
-import { useGeminiStream } from './hooks/useGeminiStream.js';
+import {
+  useGeminiStream,
+  type CancelSubmitInfo,
+} from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
 import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
@@ -916,7 +919,7 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [config, historyManager, settings.merged]);
 
-  const cancelHandlerRef = useRef<() => void>(() => {});
+  const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);
 
   const {
@@ -948,11 +951,12 @@ export const AppContainer = (props: AppContainerProps) => {
     modelSwitchedFromQuotaError,
     setModelSwitchedFromQuotaError,
     refreshStatic,
-    () => cancelHandlerRef.current(),
+    (info) => cancelHandlerRef.current(info),
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
     midTurnDrainRef,
+    logger,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -1355,73 +1359,85 @@ export const AppContainer = (props: AppContainerProps) => {
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
 
-  cancelHandlerRef.current = useCallback(() => {
-    const pendingHistoryItems = [
-      ...pendingSlashCommandHistoryItems,
-      ...pendingGeminiHistoryItems,
-    ];
-    const draftWasEmpty = buffer.text.length === 0;
+  cancelHandlerRef.current = useCallback(
+    (info?: CancelSubmitInfo) => {
+      // Combine the React-state pending items (slash command, retry countdown,
+      // tool group, etc.) with the synchronous snapshot of the Gemini pending
+      // item from `useGeminiStream`. The snapshot closes the race where a
+      // stream chunk just set `pendingHistoryItem` but the consumer's React
+      // state still reads as empty — without it, auto-restore could wrongly
+      // truncate just-committed meaningful content.
+      const pendingHistoryItems: HistoryItemWithoutId[] = [
+        ...pendingSlashCommandHistoryItems,
+        ...pendingGeminiHistoryItems,
+      ];
+      if (info?.pendingItem) {
+        pendingHistoryItems.push(info.pendingItem);
+      }
+      const draftWasEmpty = buffer.text.length === 0;
 
-    // Always drain the queue back into the buffer (claude-code parity:
-    // popAllEditable preserves queued text on every cancel path, including
-    // tool-execution cancels — never silently drop the user's queued work).
-    const popped = popAllMessages();
-    if (popped) {
-      const currentText = buffer.text;
-      buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
-    }
+      // Always drain the queue back into the buffer (claude-code parity:
+      // popAllEditable preserves queued text on every cancel path, including
+      // tool-execution cancels — never silently drop the user's queued work).
+      const popped = popAllMessages();
+      if (popped) {
+        const currentText = buffer.text;
+        buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
+      }
 
-    // Auto-restore-on-cancel: if the user hit ESC immediately after submit
-    // (nothing meaningful was produced), pull the just-submitted prompt back
-    // into the input box and rewind the transcript so it doesn't show a
-    // stranded "user prompt + Request cancelled." pair. Mirrors claude-code
-    // (REPL.tsx auto-restore branch).
-    //
-    // Guards (all required):
-    //   - Buffer was empty before the queue drain (don't clobber typed-during-
-    //     loading text).
-    //   - Queue was empty (popped === null): if the user queued more input,
-    //     they've moved on — don't undo their previous prompt.
-    //   - No pending stream item carries meaningful content. `tool_group` is
-    //     non-synthetic regardless of status (executing/canceled/done), so
-    //     this also covers the tool-execution cancel case.
-    //   - Items committed AFTER the last user prompt are all synthetic
-    //     (info/error/warning/cancel notice).
-    //
-    // truncateToItem is functional setState — it observes the latest queued
-    // history, including any INFO/pending item just appended by
-    // cancelOngoingRequest, and slices them all off together with the user
-    // item. No flicker because React batches with the same render pass.
-    if (
-      !draftWasEmpty ||
-      popped !== null ||
-      pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))
-    ) {
-      return;
-    }
+      // Auto-restore-on-cancel: if the user hit ESC immediately after submit
+      // (nothing meaningful was produced), pull the just-submitted prompt back
+      // into the input box and rewind the transcript so it doesn't show a
+      // stranded "user prompt + Request cancelled." pair. Mirrors claude-code
+      // (REPL.tsx auto-restore branch).
+      //
+      // Guards (all required):
+      //   - Buffer was empty before the queue drain (don't clobber typed-during-
+      //     loading text).
+      //   - Queue was empty (popped === null): if the user queued more input,
+      //     they've moved on — don't undo their previous prompt.
+      //   - No pending stream item carries meaningful content. `tool_group` is
+      //     non-synthetic regardless of status (executing/canceled/done), so
+      //     this also covers the tool-execution cancel case.
+      //   - Items committed AFTER the last user prompt are all synthetic
+      //     (info/error/warning/cancel notice).
+      //
+      // truncateToItem is functional setState — it observes the latest queued
+      // history, including any INFO/pending item just appended by
+      // cancelOngoingRequest, and slices them all off together with the user
+      // item. No flicker because React batches with the same render pass.
+      if (
+        !draftWasEmpty ||
+        popped !== null ||
+        pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))
+      ) {
+        return;
+      }
 
-    const history = historyRef.current;
-    const lastUserIdx = findLastUserItemIndex(history);
-    if (lastUserIdx === -1) return;
-    if (!itemsAfterAreOnlySynthetic(history, lastUserIdx)) return;
+      const history = historyRef.current;
+      const lastUserIdx = findLastUserItemIndex(history);
+      if (lastUserIdx === -1) return;
+      if (!itemsAfterAreOnlySynthetic(history, lastUserIdx)) return;
 
-    const lastUserItem = history[lastUserIdx];
-    if (lastUserItem.type !== 'user') return;
-    historyManager.truncateToItem(lastUserItem.id);
-    buffer.setText(lastUserItem.text);
-    // Also undo the cross-session ↑-history disk entry written by
-    // useGeminiStream's `logger.logMessage` — otherwise getPreviousUserMessages
-    // would resurrect the cancelled prompt next session. Fire-and-forget;
-    // the UI restore must not block on disk I/O.
-    void logger?.removeLastUserMessage();
-  }, [
-    buffer,
-    popAllMessages,
-    historyManager,
-    logger,
-    pendingSlashCommandHistoryItems,
-    pendingGeminiHistoryItems,
-  ]);
+      const lastUserItem = history[lastUserIdx];
+      if (lastUserItem.type !== 'user') return;
+      historyManager.truncateToItem(lastUserItem.id);
+      buffer.setText(lastUserItem.text);
+      // Also undo the cross-session ↑-history disk entry written by
+      // useGeminiStream's `logger.logMessage` — otherwise getPreviousUserMessages
+      // would resurrect the cancelled prompt next session. Fire-and-forget;
+      // the UI restore must not block on disk I/O.
+      void logger?.removeLastUserMessage();
+    },
+    [
+      buffer,
+      popAllMessages,
+      historyManager,
+      logger,
+      pendingSlashCommandHistoryItems,
+      pendingGeminiHistoryItems,
+    ],
+  );
 
   const handleClearScreen = useCallback(() => {
     historyManager.clearItems();

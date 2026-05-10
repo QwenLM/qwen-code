@@ -76,6 +76,12 @@ export class Logger {
   private initialized = false;
   private logs: LogEntry[] = []; // In-memory cache, ideally reflects the last known state of the file
   private lastLoggedUserEntry: LogEntry | null = null; // Tracks the most recently persisted USER entry for cancel-undo (mirrors claude-code's lastAddedEntry).
+  // Per-instance write queue. Every disk-mutating op chains here so that
+  // logMessage/removeLastUserMessage can never observe a stale snapshot
+  // produced by a concurrent op on the same Logger (read → splice/append
+  // → writeFile is otherwise non-atomic; a fast cancel + resubmit could
+  // make removeLast clobber the just-appended entry).
+  private writeQueue: Promise<unknown> = Promise.resolve();
   private debugLogger: DebugLogger;
 
   constructor(
@@ -84,6 +90,19 @@ export class Logger {
   ) {
     this.sessionId = sessionId;
     this.debugLogger = createDebugLogger('LOGGER');
+  }
+
+  /**
+   * Run `op` after every previously enqueued op on this Logger settles.
+   * Errors propagate to the caller but do NOT poison the queue (the next
+   * op runs regardless). Single-instance only — a separate Logger pointing
+   * at the same file would have its own queue, which is why callers should
+   * share one Logger per session.
+   */
+  private serialize<T>(op: () => Promise<T>): Promise<T> {
+    const next = this.writeQueue.then(op, op);
+    this.writeQueue = next.catch(() => undefined);
+    return next;
   }
 
   private async _readLogFile(): Promise<LogEntry[]> {
@@ -273,7 +292,9 @@ export class Logger {
     };
 
     try {
-      const writtenEntry = await this._updateLogFile(newEntryObject);
+      const writtenEntry = await this.serialize(() =>
+        this._updateLogFile(newEntryObject),
+      );
       if (writtenEntry) {
         // If an entry was actually written (not a duplicate skip),
         // then this instance can increment its idea of the next messageId for this session.
@@ -312,61 +333,64 @@ export class Logger {
     if (!this.initialized || !this.logFilePath) {
       return false;
     }
-    const target = this.lastLoggedUserEntry;
-    if (!target) return false;
-    this.lastLoggedUserEntry = null;
+    const logFilePath = this.logFilePath;
+    return this.serialize(async () => {
+      const target = this.lastLoggedUserEntry;
+      if (!target) return false;
+      this.lastLoggedUserEntry = null;
 
-    let currentLogsOnDisk: LogEntry[];
-    try {
-      currentLogsOnDisk = await this._readLogFile();
-    } catch (error) {
-      this.debugLogger.debug(
-        'Failed to read log file while undoing last user entry:',
-        error,
-      );
-      return false;
-    }
-
-    const idx = currentLogsOnDisk.findIndex(
-      (e) =>
-        e.sessionId === target.sessionId &&
-        e.messageId === target.messageId &&
-        e.timestamp === target.timestamp &&
-        e.message === target.message &&
-        e.type === target.type,
-    );
-    if (idx === -1) {
-      // Entry already gone (concurrent rotation/clear). Sync the in-memory
-      // cache with disk so callers don't see a stale row.
-      this.logs = currentLogsOnDisk;
-      return false;
-    }
-
-    currentLogsOnDisk.splice(idx, 1);
-
-    try {
-      await fs.writeFile(
-        this.logFilePath,
-        JSON.stringify(currentLogsOnDisk, null, 2),
-        'utf-8',
-      );
-      this.logs = currentLogsOnDisk;
-      // Roll back this instance's nextMessageId so a subsequent log doesn't
-      // skip the freed slot (matters for tests that assert sequential ids).
-      if (
-        target.sessionId === this.sessionId &&
-        this.messageId === target.messageId + 1
-      ) {
-        this.messageId = target.messageId;
+      let currentLogsOnDisk: LogEntry[];
+      try {
+        currentLogsOnDisk = await this._readLogFile();
+      } catch (error) {
+        this.debugLogger.debug(
+          'Failed to read log file while undoing last user entry:',
+          error,
+        );
+        return false;
       }
-      return true;
-    } catch (error) {
-      this.debugLogger.debug(
-        'Failed to write log file while undoing last user entry:',
-        error,
+
+      const idx = currentLogsOnDisk.findIndex(
+        (e) =>
+          e.sessionId === target.sessionId &&
+          e.messageId === target.messageId &&
+          e.timestamp === target.timestamp &&
+          e.message === target.message &&
+          e.type === target.type,
       );
-      return false;
-    }
+      if (idx === -1) {
+        // Entry already gone (concurrent rotation/clear). Sync the in-memory
+        // cache with disk so callers don't see a stale row.
+        this.logs = currentLogsOnDisk;
+        return false;
+      }
+
+      currentLogsOnDisk.splice(idx, 1);
+
+      try {
+        await fs.writeFile(
+          logFilePath,
+          JSON.stringify(currentLogsOnDisk, null, 2),
+          'utf-8',
+        );
+        this.logs = currentLogsOnDisk;
+        // Roll back this instance's nextMessageId so a subsequent log doesn't
+        // skip the freed slot (matters for tests that assert sequential ids).
+        if (
+          target.sessionId === this.sessionId &&
+          this.messageId === target.messageId + 1
+        ) {
+          this.messageId = target.messageId;
+        }
+        return true;
+      } catch (error) {
+        this.debugLogger.debug(
+          'Failed to write log file while undoing last user entry:',
+          error,
+        );
+        return false;
+      }
+    });
   }
 
   private _checkpointPath(tag: string): string {
@@ -543,6 +567,7 @@ export class Logger {
     this.logFilePath = undefined;
     this.logs = [];
     this.lastLoggedUserEntry = null;
+    this.writeQueue = Promise.resolve();
     this.sessionId = undefined;
     this.messageId = 0;
   }

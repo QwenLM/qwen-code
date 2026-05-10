@@ -991,6 +991,77 @@ describe('AppContainer State Management', () => {
       expect(mockSetText).not.toHaveBeenCalled();
     });
 
+    it('does not auto-restore when the sync pendingItem snapshot has meaningful content (closes stale-state race)', async () => {
+      // Race scenario from PR review: stream chunk arrives → cancelOngoingRequest
+      // commits via addItem → fires onCancelSubmit before React re-renders, so
+      // the consumer's pendingGeminiHistoryItems prop reads as [] even though
+      // pendingHistoryItemRef.current was non-null. The synchronous snapshot
+      // passed via info.pendingItem must override the stale React-state copy.
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'what time is it?' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        // React-state pending is empty (the race window).
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Simulate cancelOngoingRequest passing the just-arrived (uncommitted)
+      // pending item via the sync snapshot.
+      capturedOnCancelSubmit!({
+        pendingItem: {
+          type: 'gemini_content',
+          text: 'partial reply…',
+        },
+      });
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
     it('does not auto-restore when the user typed text after submitting (preserves the draft)', async () => {
       const mockSetText = vi.fn();
       const mockTruncateToItem = vi.fn();

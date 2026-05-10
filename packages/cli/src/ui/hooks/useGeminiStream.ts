@@ -25,8 +25,7 @@ import type {
   ToolCallRequestInfo,
   GeminiErrorEventValue,
   StopFailureErrorType,
-} from '@qwen-code/qwen-code-core';
-import {
+
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -50,7 +49,7 @@ import {
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   generateToolUseSummary,
-} from '@qwen-code/qwen-code-core';
+  type Logger} from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
   HistoryItem,
@@ -69,7 +68,6 @@ import { handleAtCommand } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import { useLogger } from './useLogger.js';
 import {
   useReactToolScheduler,
   mapToDisplay as mapTrackedToolCallsToDisplay,
@@ -247,6 +245,18 @@ function showCitations(settings: LoadedSettings): boolean {
 }
 
 /**
+ * Synchronous snapshot passed to `onCancelSubmit` so the cancel handler can
+ * decide whether the model produced meaningful in-flight content WITHOUT
+ * waiting for React state to flush. Closes the race where
+ * `pendingHistoryItem` was just set from a stream chunk but the consumer's
+ * React-state copy still reads as empty.
+ */
+export interface CancelSubmitInfo {
+  /** `pendingHistoryItemRef.current` captured before any cancel mutation. */
+  pendingItem: HistoryItemWithoutId | null;
+}
+
+/**
  * Manages the Gemini stream, including user input, command processing,
  * API interaction, and tool call lifecycle.
  */
@@ -267,11 +277,12 @@ export const useGeminiStream = (
   modelSwitchedFromQuotaError: boolean,
   setModelSwitchedFromQuotaError: React.Dispatch<React.SetStateAction<boolean>>,
   onEditorClose: () => void,
-  onCancelSubmit: () => void,
+  onCancelSubmit: (info?: CancelSubmitInfo) => void,
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
   midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
+  logger?: Logger | null,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -329,7 +340,6 @@ export const useGeminiStream = (
     stats: sessionStates,
   } = useSessionStats();
   const storage = config.storage;
-  const logger = useLogger(storage, sessionStates.sessionId);
   const gitService = useMemo(() => {
     if (!config.getProjectRoot()) {
       return;
@@ -559,6 +569,12 @@ export const useGeminiStream = (
     if (turnCancelledRef.current) {
       return;
     }
+    // Snapshot the pending item BEFORE any flushes / addItem / setPendingHistoryItem(null)
+    // mutate it. This is what `onCancelSubmit` consumers (auto-restore in
+    // AppContainer) need to decide whether the model produced meaningful
+    // in-flight content — reading the React-state copy at the consumer
+    // would race with stream chunks that haven't re-rendered yet.
+    const pendingItemAtCancel = pendingHistoryItemRef.current;
     for (const flushBufferedStreamEvents of flushBufferedStreamEventsRef.current) {
       flushBufferedStreamEvents();
     }
@@ -599,7 +615,7 @@ export const useGeminiStream = (
     );
     setPendingHistoryItem(null);
     clearRetryCountdown();
-    onCancelSubmit();
+    onCancelSubmit({ pendingItem: pendingItemAtCancel });
     setIsResponding(false);
     setShellInputFocused(false);
   }, [

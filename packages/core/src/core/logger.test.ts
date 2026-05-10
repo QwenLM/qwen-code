@@ -761,6 +761,29 @@ describe('Logger', () => {
       expect(await fresh.removeLastUserMessage()).toBe(false);
     });
 
+    it('serializes against a concurrent logMessage so a fast resubmit is not clobbered', async () => {
+      // Race scenario flagged in PR review: cancel A → fire-and-forget
+      // removeLastUserMessage; user immediately submits B → logMessage
+      // appends B. Without serialization the two read/splice/write ops
+      // interleave: removeLast reads [..., A] (no B yet), logMessage reads
+      // [..., A] (no aware of removeLast in flight), logMessage writes
+      // [..., A, B], removeLast writes [...] (lost B). With the
+      // per-instance writeQueue, both ops serialize on the same Logger so
+      // removeLast sees B's write or B's logMessage sees the post-removal
+      // state — either way B survives.
+      await logger.logMessage(MessageSenderType.USER, 'A');
+
+      // Kick off both without awaiting the first.
+      const undoPromise = logger.removeLastUserMessage();
+      const resubmitPromise = logger.logMessage(MessageSenderType.USER, 'B');
+
+      const [undone] = await Promise.all([undoPromise, resubmitPromise]);
+      expect(undone).toBe(true);
+
+      const onDisk = await readLogFile();
+      expect(onDisk.map((e) => e.message)).toEqual(['B']);
+    });
+
     it('clears the tracker when logMessage hits a transient write error', async () => {
       // Regression: without clearing on failed write, a subsequent
       // removeLastUserMessage would target the previous successful
