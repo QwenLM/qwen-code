@@ -387,7 +387,12 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
   message?: string;
 } {
   if (!attrs) return { code: SpanStatusCode.OK };
-  if (!!attrs['error'] || !!attrs['error_message'] || !!attrs['error_type']) {
+  if (
+    !!attrs['error'] ||
+    !!attrs['error.message'] ||
+    !!attrs['error_message'] ||
+    !!attrs['error_type']
+  ) {
     return {
       code: SpanStatusCode.ERROR,
       message: LOG_EVENT_ERROR_STATUS_MESSAGE,

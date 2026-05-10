@@ -596,6 +596,20 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].status.code).toBe(SpanStatusCode.OK);
   });
 
+  it('sets ERROR when only error.message is present (OTel semantic convention)', async () => {
+    const logRecord = {
+      body: 'otel error',
+      hrTime: [1000, 0] as [number, number],
+      attributes: { ['error.message']: 'upstream timeout' },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].status.code).toBe(SpanStatusCode.ERROR);
+    expect(exportedSpans[0].attributes).not.toHaveProperty('error.message');
+  });
+
   it('preserves severity attributes', async () => {
     const logRecord = {
       body: 'event',
