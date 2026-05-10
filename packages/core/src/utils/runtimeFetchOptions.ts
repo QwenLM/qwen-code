@@ -180,10 +180,6 @@ export function getOrCreateSharedDispatcher(proxyUrl?: string): Dispatcher {
 }
 
 /**
- * Reset the dispatcher cache (for testing only)
- * @internal
- */
-/**
  * Reset the rejected proxy cache (for testing only)
  * @internal
  */
@@ -191,6 +187,10 @@ export function resetRejectedProxyCache(): void {
   rejectedProxyCache.clear();
 }
 
+/**
+ * Reset the dispatcher cache (for testing only)
+ * @internal
+ */
 export function resetDispatcherCache(): void {
   dispatcherCache.clear();
 }
@@ -222,8 +222,13 @@ function buildFetchOptionsWithDispatcher(
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       // Redact credentials from proxy URL to prevent credential leakage.
-      // Using greedy match (.+@) to handle edge cases like user@domain:pass@proxy.local
-      const redactedMessage = errorMessage.replace(/\/\/.+@/, '//<redacted>@');
+      // Per RFC 3986, userinfo cannot contain unencoded '@', so [^/\s]* correctly
+      // matches only the userinfo portion without over-consuming hostname or unrelated '@'.
+      // The /g flag ensures all credential occurrences in multi-line error chains are redacted.
+      const redactedMessage = errorMessage.replace(
+        /\/\/[^/\s]*@/g,
+        '//<redacted>@',
+      );
       const logMessage = `Failed to create proxy dispatcher, falling back to direct connection: ${redactedMessage}`;
       debugLogger.warn(logMessage);
       // Dual logging: debugLogger writes to ~/.qwen/debug/ (for local debugging),

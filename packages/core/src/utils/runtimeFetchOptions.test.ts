@@ -168,6 +168,24 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       expect.stringContaining('secret'),
     );
   });
+
+  it('logs only once for repeated failures with the same proxy URL', () => {
+    // Simulate multiple requests failing with the same broken proxy config
+    buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
+    buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
+    buildRuntimeFetchOptions('anthropic', 'http://invalid-proxy');
+    // Should only log once due to rejectedProxyCache dedup
+    expect(mockWarn).toHaveBeenCalledOnce();
+    expect(mockConsoleError).toHaveBeenCalledOnce();
+  });
+
+  it('logs again for a different failing proxy URL', () => {
+    // Different proxy URLs should each trigger separate logging
+    buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
+    buildRuntimeFetchOptions('openai', 'http://user:secret@proxy.local');
+    expect(mockWarn).toHaveBeenCalledTimes(2);
+    expect(mockConsoleError).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('getOrCreateSharedDispatcher', () => {
