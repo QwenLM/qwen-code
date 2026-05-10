@@ -34,7 +34,9 @@ describe('apiPreconnect', () => {
   beforeEach(() => {
     resetPreconnectState();
     mockFetch.mockClear();
+    mockFetch.mockResolvedValue(undefined);
     mockGetOrCreateSharedDispatcher.mockClear();
+    mockDebugLogger.debug.mockClear();
     delete process.env['HTTPS_PROXY'];
     delete process.env['https_proxy'];
     delete process.env['HTTP_PROXY'];
@@ -73,6 +75,7 @@ describe('apiPreconnect', () => {
     it('should skip when resolvedBaseUrl is a custom (non-default) URL', () => {
       preconnectApi('openai', {
         resolvedBaseUrl: 'https://custom.api.com/v1',
+        proxy: 'http://proxy.example.com:8080',
       });
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -80,6 +83,7 @@ describe('apiPreconnect', () => {
     it('should skip when resolvedBaseUrl is a subdomain-spoofed URL', () => {
       preconnectApi('openai', {
         resolvedBaseUrl: 'https://api.openai.com.malicious.com/v1',
+        proxy: 'http://proxy.example.com:8080',
       });
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -98,6 +102,7 @@ describe('apiPreconnect', () => {
     it('should skip when resolvedBaseUrl is a dashscope subdomain-spoofed URL', () => {
       preconnectApi('openai', {
         resolvedBaseUrl: 'https://dashscope.aliyuncs.com.malicious.com/v1',
+        proxy: 'http://proxy.example.com:8080',
       });
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -249,14 +254,18 @@ describe('apiPreconnect', () => {
     it('should handle fetch errors gracefully', async () => {
       mockFetch.mockRejectedValue(new Error('Network error'));
       // Should not throw
-      expect(() => preconnectApi('qwen-oauth')).not.toThrow();
+      expect(() =>
+        preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' }),
+      ).not.toThrow();
     });
 
     it('should handle synchronous dispatcher errors gracefully', () => {
       mockGetOrCreateSharedDispatcher.mockImplementation(() => {
         throw new Error('Failed to create dispatcher');
       });
-      expect(() => preconnectApi('qwen-oauth')).not.toThrow();
+      expect(() =>
+        preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' }),
+      ).not.toThrow();
     });
 
     it('should skip when QWEN_CODE_DISABLE_PRECONNECT is set', () => {
