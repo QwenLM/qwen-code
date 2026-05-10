@@ -27,7 +27,7 @@ import {
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 type AnthropicToolParam = Anthropic.Tool & {
-  cache_control?: { type: 'ephemeral' };
+  cache_control?: { type: 'ephemeral'; scope?: 'global' };
 };
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
@@ -592,7 +592,9 @@ export class AnthropicContentConverter {
       {
         type: 'text',
         text: systemText,
-        cache_control: { type: 'ephemeral' },
+        cache_control: { type: 'ephemeral', scope: 'global' } as {
+          type: 'ephemeral';
+        },
       },
     ];
   }

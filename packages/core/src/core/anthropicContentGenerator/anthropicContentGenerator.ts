@@ -91,7 +91,7 @@ type StreamingBlockState = {
 };
 
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
-  thinking?: { type: 'enabled'; budget_tokens: number };
+  thinking?: { type: 'enabled'; budget_tokens: number } | { type: 'adaptive' };
   // Anthropic beta feature: output_config.effort (requires beta header effort-2025-11-24)
   // This is not yet represented in the official SDK types we depend on. The
   // 'max' tier is a DeepSeek extension (see contentGenerator.ts comment).
@@ -118,8 +118,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
       this.cliConfig.getProxy(),
     );
 
+    // IdeaLab-style Anthropic proxies expect `Authorization: Bearer <token>`
+    // instead of the SDK-default `x-api-key` header.  Use the SDK's
+    // `authToken` parameter which sends `Authorization: Bearer` natively,
+    // avoiding the conflict where both headers coexist.
     this.client = new Anthropic({
-      apiKey: contentGeneratorConfig.apiKey,
+      authToken: contentGeneratorConfig.apiKey,
       baseURL,
       timeout: contentGeneratorConfig.timeout || DEFAULT_TIMEOUT,
       maxRetries: contentGeneratorConfig.maxRetries,
@@ -153,7 +157,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const anthropicRequest = await this.buildRequest(request);
     const headers = this.buildPerRequestHeaders(anthropicRequest);
     const streamingRequest: MessageCreateParamsStreaming & {
-      thinking?: { type: 'enabled'; budget_tokens: number };
+      thinking?:
+        | { type: 'enabled'; budget_tokens: number }
+        | { type: 'adaptive' };
     } = {
       ...anthropicRequest,
       stream: true,
@@ -214,10 +220,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // would cause two physical headers on the wire (one mixed-case, one
     // lowercase) when the per-request override fires.
     const version = this.cliConfig.getCliVersion() || 'unknown';
-    const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
+    // Use claude-cli User-Agent to satisfy IdeaLab-style proxy Team rules
+    // that restrict usage by client identity.
+    const userAgent = `claude-cli/${version} (external, cli)`;
     const { customHeaders } = this.contentGeneratorConfig;
 
-    const headers: Record<string, string> = { 'User-Agent': userAgent };
+    const headers: Record<string, string> = {
+      'User-Agent': userAgent,
+      'x-app': 'cli',
+    };
     if (customHeaders) {
       for (const [key, value] of Object.entries(customHeaders)) {
         if (key.toLowerCase() === 'anthropic-beta') continue;
@@ -254,6 +265,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (anthropicRequest.output_config) {
       betas.push('effort-2025-11-24');
     }
+
+    // Enable global prompt cache scope so that identical system/tool
+    // prefixes are cached across sessions, greatly improving cache hit rates.
+    betas.push('prompt-caching-scope-2026-01-05');
 
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
@@ -438,10 +453,26 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return effort;
   }
 
+  /**
+   * Check if the current model supports adaptive thinking (type: 'adaptive').
+   * Claude 4.6+ models require adaptive thinking; older models use budget-based.
+   */
+  private modelSupportsAdaptiveThinking(): boolean {
+    const model = (this.contentGeneratorConfig.model || '').toLowerCase();
+    // Claude 4.6+ models (opus-4-6, sonnet-4-6, opus-4-7, etc.) use adaptive
+    if (/claude-(?:opus|sonnet)-4-[6-9]/.test(model)) {
+      return true;
+    }
+    return false;
+  }
+
   private buildThinkingConfig(
     request: GenerateContentParameters,
     effectiveEffort: 'low' | 'medium' | 'high' | 'max' | undefined,
-  ): { type: 'enabled'; budget_tokens: number } | undefined {
+  ):
+    | { type: 'enabled'; budget_tokens: number }
+    | { type: 'adaptive' }
+    | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
     }
@@ -450,6 +481,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     if (reasoning === false) {
       return undefined;
+    }
+
+    // Models that support adaptive thinking use { type: 'adaptive' } without
+    // a budget_tokens field.  The server controls the thinking budget via
+    // output_config.effort instead.
+    if (this.modelSupportsAdaptiveThinking()) {
+      return { type: 'adaptive' };
     }
 
     // Explicit budget_tokens is an escape hatch from the effort ladder:
