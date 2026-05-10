@@ -143,6 +143,12 @@ export function buildRuntimeFetchOptions(
 const dispatcherCache = new Map<string | undefined, Dispatcher>();
 
 /**
+ * Set of proxy URLs that have failed dispatcher creation.
+ * Prevents duplicate error logging for the same broken proxy config.
+ */
+const rejectedProxyCache = new Set<string>();
+
+/**
  * Get or create a shared undici dispatcher for the given proxy configuration.
  * The dispatcher is cached so that preconnect and subsequent SDK requests
  * share the same connection pool, enabling TCP+TLS connection reuse.
@@ -177,6 +183,14 @@ export function getOrCreateSharedDispatcher(proxyUrl?: string): Dispatcher {
  * Reset the dispatcher cache (for testing only)
  * @internal
  */
+/**
+ * Reset the rejected proxy cache (for testing only)
+ * @internal
+ */
+export function resetRejectedProxyCache(): void {
+  rejectedProxyCache.clear();
+}
+
 export function resetDispatcherCache(): void {
   dispatcherCache.clear();
 }
@@ -193,6 +207,8 @@ function buildFetchOptionsWithDispatcher(
     return sdkType === 'openai' ? undefined : {};
   }
 
+  // Note: Without a custom dispatcher, Node.js built-in fetch uses its default
+  // 300s bodyTimeout. This is sufficient for all current model streaming responses.
   try {
     const dispatcher = getOrCreateSharedDispatcher(proxyUrl);
     return { fetchOptions: { dispatcher } };
@@ -200,19 +216,22 @@ function buildFetchOptionsWithDispatcher(
     // Log dispatcher creation failure - requests will fallback to direct connection
     // bypassing the configured proxy. This is important for environments requiring
     // proxy for security controls (TLS inspection, traffic logging).
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    // Redact credentials from proxy URL to prevent credential leakage
-    const redactedMessage = errorMessage.replace(
-      /\/\/[^@]*@/g,
-      '//<redacted>@',
-    );
-    const logMessage = `Failed to create proxy dispatcher, falling back to direct connection: ${redactedMessage}`;
-    debugLogger.warn(logMessage);
-    // Dual logging: debugLogger writes to ~/.qwen/debug/ (for local debugging),
-    // console.error writes to stderr (captured by container orchestrators and log aggregators).
-    // This ensures visibility in production even when debug sessions are inactive.
-    // eslint-disable-next-line no-console
-    console.error(`[RUNTIME_FETCH] ${logMessage}`);
+    // Only log once per proxy URL to avoid duplicate warnings in long conversations.
+    if (!rejectedProxyCache.has(proxyUrl)) {
+      rejectedProxyCache.add(proxyUrl);
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      // Redact credentials from proxy URL to prevent credential leakage.
+      // Using greedy match (.+@) to handle edge cases like user@domain:pass@proxy.local
+      const redactedMessage = errorMessage.replace(/\/\/.+@/, '//<redacted>@');
+      const logMessage = `Failed to create proxy dispatcher, falling back to direct connection: ${redactedMessage}`;
+      debugLogger.warn(logMessage);
+      // Dual logging: debugLogger writes to ~/.qwen/debug/ (for local debugging),
+      // console.error writes to stderr (captured by container orchestrators and log aggregators).
+      // This ensures visibility in production even when debug sessions are inactive.
+      // eslint-disable-next-line no-console
+      console.error(`[RUNTIME_FETCH] ${logMessage}`);
+    }
     return sdkType === 'openai' ? undefined : {};
   }
 }

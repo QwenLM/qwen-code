@@ -59,6 +59,7 @@ import {
   buildRuntimeFetchOptions,
   getOrCreateSharedDispatcher,
   resetDispatcherCache,
+  resetRejectedProxyCache,
 } from './runtimeFetchOptions.js';
 
 type UndiciOptions = Record<string, unknown>;
@@ -66,6 +67,7 @@ type UndiciOptions = Record<string, unknown>;
 describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {
     resetDispatcherCache();
+    resetRejectedProxyCache();
     mockWarn.mockClear();
     mockConsoleError.mockClear();
   });
@@ -171,6 +173,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
 describe('getOrCreateSharedDispatcher', () => {
   beforeEach(() => {
     resetDispatcherCache();
+    resetRejectedProxyCache();
   });
 
   it('returns the same instance for repeated calls without proxy', () => {
