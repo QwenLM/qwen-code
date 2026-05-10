@@ -760,5 +760,22 @@ describe('Logger', () => {
       // No initialize() call.
       expect(await fresh.removeLastUserMessage()).toBe(false);
     });
+
+    it('clears the tracker when logMessage hits a transient write error', async () => {
+      // Regression: without clearing on failed write, a subsequent
+      // removeLastUserMessage would target the previous successful
+      // USER entry — silently deleting an unrelated row from disk.
+      await logger.logMessage(MessageSenderType.USER, 'kept');
+      vi.advanceTimersByTime(1000);
+
+      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      await logger.logMessage(MessageSenderType.USER, 'failed write');
+
+      expect(logger['lastLoggedUserEntry']).toBeNull();
+      // No entry to undo → no-op, "kept" stays on disk.
+      expect(await logger.removeLastUserMessage()).toBe(false);
+      const onDisk = await readLogFile();
+      expect(onDisk.map((e) => e.message)).toEqual(['kept']);
+    });
   });
 });

@@ -283,6 +283,12 @@ export class Logger {
         }
       }
     } catch (_error) {
+      // Persist failed — drop the undo target so a later
+      // removeLastUserMessage doesn't delete an unrelated earlier entry
+      // by mistake (e.g., logMessage("A") succeeds, logMessage("B")
+      // throws on a transient disk error, the user cancels B → tracker
+      // would otherwise still point at A's row and remove it).
+      this.lastLoggedUserEntry = null;
       // Error already logged by _updateLogFile or _readLogFile
     }
   }
