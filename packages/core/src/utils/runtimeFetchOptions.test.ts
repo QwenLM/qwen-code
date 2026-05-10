@@ -58,6 +58,7 @@ vi.mock('undici', () => {
 import {
   buildRuntimeFetchOptions,
   getOrCreateSharedDispatcher,
+  redactProxyCredentials,
   resetDispatcherCache,
   resetRejectedProxyCache,
 } from './runtimeFetchOptions.js';
@@ -192,6 +193,8 @@ describe('getOrCreateSharedDispatcher', () => {
   beforeEach(() => {
     resetDispatcherCache();
     resetRejectedProxyCache();
+    mockWarn.mockClear();
+    mockConsoleError.mockClear();
   });
 
   it('returns the same instance for repeated calls without proxy', () => {
@@ -218,5 +221,33 @@ describe('getOrCreateSharedDispatcher', () => {
       result as { fetchOptions?: { dispatcher?: unknown } }
     ).fetchOptions?.dispatcher;
     expect(sdkDispatcher).toBe(shared);
+  });
+});
+
+describe('redactProxyCredentials', () => {
+  it('redacts credentials from a single proxy URL', () => {
+    const msg = 'Failed to connect: http://user:secret@proxy.local';
+    expect(redactProxyCredentials(msg)).toBe(
+      'Failed to connect: http://<redacted>@proxy.local',
+    );
+  });
+
+  it('redacts every credential occurrence in a multi-URL error message', () => {
+    const msg = 'Failed: http://a:b@p1; cause: http://c:d@p2';
+    expect(redactProxyCredentials(msg)).toBe(
+      'Failed: http://<redacted>@p1; cause: http://<redacted>@p2',
+    );
+  });
+
+  it('does not over-redact non-userinfo @ characters past the hostname', () => {
+    const msg = 'http://user:pass@proxy.local/contact@example.com';
+    expect(redactProxyCredentials(msg)).toBe(
+      'http://<redacted>@proxy.local/contact@example.com',
+    );
+  });
+
+  it('preserves messages without proxy URLs unchanged', () => {
+    const msg = 'Network timeout occurred';
+    expect(redactProxyCredentials(msg)).toBe(msg);
   });
 });

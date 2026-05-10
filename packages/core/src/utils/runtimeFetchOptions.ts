@@ -195,6 +195,20 @@ export function resetDispatcherCache(): void {
   dispatcherCache.clear();
 }
 
+/**
+ * Redact proxy credentials from error messages to prevent credential leakage.
+ *
+ * Per RFC 3986, userinfo cannot contain unencoded '@', so `[^/\s]*` correctly
+ * matches only the userinfo portion without over-consuming hostname or unrelated '@'.
+ * The /g flag ensures all credential occurrences in multi-line error chains are redacted.
+ *
+ * @param message - Error message that may contain proxy URLs with credentials
+ * @returns Message with all proxy credentials replaced by '<redacted>'
+ */
+export function redactProxyCredentials(message: string): string {
+  return message.replace(/\/\/[^/\s]*@/g, '//<redacted>@');
+}
+
 function buildFetchOptionsWithDispatcher(
   sdkType: SDKType,
   proxyUrl?: string,
@@ -221,14 +235,7 @@ function buildFetchOptionsWithDispatcher(
       rejectedProxyCache.add(proxyUrl);
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      // Redact credentials from proxy URL to prevent credential leakage.
-      // Per RFC 3986, userinfo cannot contain unencoded '@', so [^/\s]* correctly
-      // matches only the userinfo portion without over-consuming hostname or unrelated '@'.
-      // The /g flag ensures all credential occurrences in multi-line error chains are redacted.
-      const redactedMessage = errorMessage.replace(
-        /\/\/[^/\s]*@/g,
-        '//<redacted>@',
-      );
+      const redactedMessage = redactProxyCredentials(errorMessage);
       const logMessage = `Failed to create proxy dispatcher, falling back to direct connection: ${redactedMessage}`;
       debugLogger.warn(logMessage);
       // Dual logging: debugLogger writes to ~/.qwen/debug/ (for local debugging),
