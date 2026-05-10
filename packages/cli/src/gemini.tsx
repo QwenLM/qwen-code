@@ -749,7 +749,10 @@ export async function main() {
         trimmedInput.length > 0 ? trimmedInput : '',
       );
       await runExitCleanup();
-      process.exit(0);
+      // Honor any exitCode set by the run (e.g. --json-schema plain-text
+      // path sets it to 1). Hardcoding 0 here would silently mask non-zero
+      // shell exits so the caller can't detect failures.
+      process.exit(process.exitCode ?? 0);
     }
 
     if (!input) {
@@ -773,7 +776,10 @@ export async function main() {
     await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
     // Call cleanup before process.exit, which causes cleanup to not run
     await runExitCleanup();
-    process.exit(0);
+    // Honor any exitCode set by the run (e.g. --json-schema plain-text
+    // path sets it to 1). Hardcoding 0 here would silently mask non-zero
+    // shell exits so the caller can't detect failures.
+    process.exit(process.exitCode ?? 0);
   }
 }
 

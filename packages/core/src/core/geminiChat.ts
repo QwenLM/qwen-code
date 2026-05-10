@@ -54,6 +54,14 @@ import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
+function isCompressionFailureStatus(status: CompressionStatus): boolean {
+  return (
+    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
+    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR
+  );
+}
+
 export enum StreamEventType {
   /** A regular content chunk from the API. */
   CHUNK = 'chunk',
@@ -456,14 +464,7 @@ export class GeminiChat {
       // Re-enable auto-compaction so a forced /compress recovers a chat
       // that an earlier auto-attempt latched off.
       this.hasFailedCompressionAttempt = false;
-    } else if (
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR
-    ) {
+    } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only mark as failed if not forced) so we
       // stop spending compression-API calls on a chat that can't shrink.
       if (!force) {
@@ -513,28 +514,34 @@ export class GeminiChat {
     });
     this.sendPromise = streamDonePromise;
 
-    // The send-lock above is held but the generator's `finally` (which
-    // resolves it) has not run yet — if `tryCompress` throws, we must
-    // release the lock here or subsequent sends will block forever at
-    // `await this.sendPromise`.
     let compressionInfo: ChatCompressionInfo;
+    let requestContents: Content[];
+    let userContentAdded = false;
     try {
+      // The send-lock above is held but the generator's `finally` (which
+      // resolves it) has not run yet. Any setup error before returning the
+      // generator must release the lock or subsequent sends will block forever
+      // at `await this.sendPromise`.
       compressionInfo = await this.tryCompress(
         prompt_id,
         model,
         false,
         params.config?.abortSignal,
       );
+
+      const userContent = createUserContent(params.message);
+
+      // Add user content to history ONCE before any attempts.
+      this.history.push(userContent);
+      userContentAdded = true;
+      requestContents = this.getHistory(true);
     } catch (error) {
+      if (userContentAdded) {
+        this.history.pop();
+      }
       streamDoneResolver!();
       throw error;
     }
-
-    const userContent = createUserContent(params.message);
-
-    // Add user content to history ONCE before any attempts.
-    this.history.push(userContent);
-    let requestContents = this.getHistory(true);
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
@@ -714,6 +721,11 @@ export class GeminiChat {
                     `Reactive compression did not recover context overflow: ` +
                       `status=${reactiveInfo.compressionStatus}.`,
                   );
+                  if (
+                    isCompressionFailureStatus(reactiveInfo.compressionStatus)
+                  ) {
+                    self.hasFailedCompressionAttempt = true;
+                  }
                 } catch (compressionError) {
                   if (
                     params.config?.abortSignal?.aborted ||

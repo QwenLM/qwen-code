@@ -1087,6 +1087,51 @@ describe('GeminiChat', async () => {
       expect(compressSpy).toHaveBeenCalledTimes(2);
     });
 
+    it('releases the send-lock when setup throws after compression', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.spyOn(chat, 'getHistory').mockImplementationOnce(() => {
+        throw new Error('history setup failed');
+      });
+
+      await expect(
+        chat.sendMessageStream(
+          'test-model',
+          { message: 'first' },
+          'prompt-id-setup-deadlock-1',
+        ),
+      ).rejects.toThrow('history setup failed');
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('second response'),
+      );
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'second' },
+        'prompt-id-setup-deadlock-2',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(
+        chat
+          .getHistory()
+          .some((content) =>
+            content.parts?.some((part) => part.text === 'first'),
+          ),
+      ).toBe(false);
+    });
+
     it('seeds inherited token count via setLastPromptTokenCount', async () => {
       const subagentChat = new GeminiChat(mockConfig, config, [
         { role: 'user', parts: [{ text: 'inherited' }] },
@@ -1556,6 +1601,69 @@ describe('GeminiChat', async () => {
       expect(compressSpy).toHaveBeenCalledTimes(2);
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         1,
+      );
+    });
+
+    it('marks failed reactive compression attempts for later auto-compaction', async () => {
+      const overflow = new Error(
+        'prompt is too long: 135000 tokens > 128000 maximum',
+      );
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 135_000,
+            newTokenCount: 135_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(overflow)
+        .mockResolvedValueOnce(makeStreamResponse('next request ok'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-reactive-failed-latch',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toThrow(overflow);
+
+      const nextStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next' },
+        'prompt-id-after-reactive-failed-latch',
+      );
+      for await (const _ of nextStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(3);
+      expect(compressSpy.mock.calls[2][1].hasFailedCompressionAttempt).toBe(
+        true,
       );
     });
 

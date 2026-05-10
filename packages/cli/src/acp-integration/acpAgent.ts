@@ -487,6 +487,23 @@ class QwenAgent implements Agent {
             `Title too long (max ${SESSION_TITLE_MAX_LENGTH} chars)`,
           );
         }
+        // When the target session is currently live in this process, route
+        // through its ChatRecordingService so the in-memory `currentCustomTitle`
+        // stays in sync. Writing directly to disk via SessionService here
+        // would leave the live recording's cache stale; the next title
+        // re-anchor (every 32KB of writes) or finalize() would re-emit the
+        // old title and silently revert the rename. The disk-only path
+        // remains for the dead-session case (e.g., another client renaming
+        // a session that isn't active in this process).
+        const liveRecording = this.sessions
+          .get(sessionId)
+          ?.getConfig()
+          .getChatRecordingService();
+        if (liveRecording) {
+          const ok = liveRecording.recordCustomTitle(title, 'manual');
+          await liveRecording.flush();
+          return { success: ok };
+        }
         const success = await runWithAcpRuntimeOutputDir(
           this.settings,
           cwd,

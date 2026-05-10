@@ -32,6 +32,7 @@ import {
   isToolEnabled,
   type ConfigParameters,
   type MCPServerConfig,
+  SchemaValidator,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -165,7 +166,119 @@ export interface CliArgs {
   channel: string | undefined;
   jsonFd?: number | undefined;
   jsonFile?: string | undefined;
+  jsonSchema?: string | undefined;
   inputFile?: string | undefined;
+}
+
+/** 4 MiB — well above any real schema, well below an accidental
+ * gigabyte-sized file that would OOM `fs.readFileSync` + `JSON.parse`.
+ */
+const MAX_JSON_SCHEMA_FILE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Resolves the `--json-schema` argument into a parsed JSON Schema object.
+ *
+ * Accepts either a JSON literal or `@path/to/schema.json`. Fails fast with a
+ * FatalConfigError if the input can't be read/parsed/compiled — invalid
+ * schemas should not silently skip validation at runtime.
+ */
+export function resolveJsonSchemaArg(
+  raw: string | undefined,
+): Record<string, unknown> | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new FatalConfigError('--json-schema cannot be empty.');
+  }
+
+  let payload: string;
+  if (trimmed.startsWith('@')) {
+    const resolvedPath = resolvePath(trimmed.slice(1));
+    try {
+      // Cap the read size at 4 MiB. Real-world JSON schemas are well
+      // under this (the spec encourages decomposition via `$ref`); any
+      // multi-MiB file is almost certainly a wrong-path mistake or a
+      // typo'd argument. Without a cap, a multi-GB file (e.g. accidental
+      // `--json-schema @./node_modules/.cache/*.json`) loads into memory
+      // before `JSON.parse` even runs and OOMs the CLI.
+      const stat = fs.statSync(resolvedPath);
+      if (stat.size > MAX_JSON_SCHEMA_FILE_BYTES) {
+        throw new FatalConfigError(
+          `--json-schema file "${resolvedPath}" is ${stat.size} bytes ` +
+            `(>${MAX_JSON_SCHEMA_FILE_BYTES}). Refusing to read; this is ` +
+            'almost certainly a wrong-path argument. Schemas should be ' +
+            'small enough to fit in a few KiB; decompose with `$ref` if ' +
+            'you need a large family of types.',
+        );
+      }
+      payload = fs.readFileSync(resolvedPath, 'utf8');
+    } catch (err) {
+      if (err instanceof FatalConfigError) throw err;
+      throw new FatalConfigError(
+        `--json-schema could not read "${resolvedPath}": ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  } else {
+    payload = trimmed;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch (err) {
+    throw new FatalConfigError(
+      `--json-schema is not valid JSON: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new FatalConfigError(
+      '--json-schema must be a JSON object describing a schema.',
+    );
+  }
+
+  // Ajv compile-time validation. SchemaValidator.validate is deliberately
+  // lenient at runtime (falls back to no-op on compile failure to support
+  // exotic MCP schemas) — but `--json-schema` is explicit user intent, so
+  // surface a bad schema here rather than letting it silently no-op later.
+  const compileError = SchemaValidator.compileStrict(parsed);
+  if (compileError) {
+    throw new FatalConfigError(
+      `--json-schema is not a valid JSON Schema: ${compileError}`,
+    );
+  }
+
+  // The schema becomes the parameter schema of the synthetic
+  // structured_output tool, and tool-call arguments are object-shaped.
+  // A schema like `{"type":"string"}` would compile fine but be
+  // unsatisfiable as a tool-call argument — fail at parse time so the
+  // user sees the contract violation immediately instead of at runtime.
+  //
+  // We only check the direct `type` field (or array of types). Deeper
+  // analysis of `anyOf`/`oneOf`/`not` is intentionally not done here:
+  // the strict-Ajv compile is the right place for full structural
+  // validation, and a partial check would either give false reassurance
+  // or wrongly reject valid composed schemas. Schemas with no top-level
+  // `type` are allowed through (covers `{}`, plain `properties`, etc).
+  const schemaType = (parsed as { type?: unknown }).type;
+  const isObjectAllowed =
+    schemaType === undefined ||
+    schemaType === 'object' ||
+    (Array.isArray(schemaType) && schemaType.includes('object'));
+  if (!isObjectAllowed) {
+    throw new FatalConfigError(
+      `--json-schema top-level type must include "object" (got ${JSON.stringify(schemaType)}); ` +
+        'wrap your value under an object property if you need a non-object payload.',
+    );
+  }
+
+  return parsed as Record<string, unknown>;
 }
 
 function normalizeOutputFormat(
@@ -471,6 +584,14 @@ export async function parseArguments(): Promise<CliArgs> {
             'File path for structured JSON event output (dual output mode). ' +
             'Can be a regular file, FIFO (named pipe), or /dev/fd/N.',
         })
+        .option('json-schema', {
+          type: 'string',
+          description:
+            "JSON Schema that the model's final output must conform to " +
+            '(headless mode only). Accepts a JSON literal or "@path/to/schema.json". ' +
+            'Registers a synthetic `structured_output` tool; the session ends on ' +
+            'the first valid call.',
+        })
         .option('input-file', {
           type: 'string',
           description:
@@ -603,6 +724,31 @@ export async function parseArguments(): Promise<CliArgs> {
           // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
             return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
+          }
+          if (argv['jsonSchema']) {
+            if (argv['promptInteractive']) {
+              return '--json-schema cannot be used with --prompt-interactive (-i); structured output only terminates the non-interactive flow.';
+            }
+            // Stream-json input runs through runNonInteractiveStreamJson,
+            // which doesn't honor the structured-output termination
+            // contract. Reject the combination explicitly so users see
+            // the mismatch at parse time instead of confusion at runtime.
+            if (argv['inputFormat'] === 'stream-json') {
+              return '--json-schema cannot be used with --input-format stream-json; structured output is a single-shot contract incompatible with stream-json input.';
+            }
+            const hasPrompt = !!argv['prompt'];
+            const query = argv['query'] as string | string[] | undefined;
+            const hasPositionalQuery = Array.isArray(query)
+              ? query.length > 0
+              : !!query;
+            // Allow stdin piping (`echo "..." | qwen --json-schema ...`):
+            // when stdin is not a TTY, the prompt is supplied via the pipe
+            // and headless mode runs normally. Only reject true interactive
+            // invocations with neither flag nor positional nor pipe.
+            const stdinIsPiped = !process.stdin.isTTY;
+            if (!hasPrompt && !hasPositionalQuery && !stdinIsPiped) {
+              return '--json-schema only applies to non-interactive mode; pass a prompt via -p, as a positional argument, or piped via stdin.';
+            }
           }
           return true;
         }),
@@ -1320,6 +1466,7 @@ export async function loadCliConfig(
     // absent.
     jsonFd: argv.jsonFd,
     jsonFile: argv.jsonFile ?? settings.dualOutput?.jsonFile,
+    jsonSchema: resolveJsonSchemaArg(argv.jsonSchema),
     inputFile: argv.inputFile ?? settings.dualOutput?.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will

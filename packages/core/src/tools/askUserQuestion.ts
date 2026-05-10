@@ -279,6 +279,11 @@ export class AskUserQuestionTool extends BaseDeclarativeTool<
         string,
         unknown
       >,
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — rarely needed; loaded on demand via ToolSearch
+      false, // alwaysLoad
+      'ask question user input clarify choose',
     );
   }
 

@@ -92,6 +92,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  SESSION_TITLE_MAX_LENGTH: 200,
   tokenLimit: vi.fn(),
   SessionStartSource: {
     Startup: 'startup',
@@ -101,6 +102,16 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     PromptInputExit: 'prompt_input_exit',
     Other: 'other',
   },
+}));
+
+vi.mock('./runtimeOutputDirContext.js', () => ({
+  runWithAcpRuntimeOutputDir: vi.fn(
+    async <T>(
+      _settings: unknown,
+      _cwd: string,
+      fn: () => T | Promise<T>,
+    ): Promise<T> => fn(),
+  ),
 }));
 
 vi.mock('./authMethods.js', () => ({ buildAuthMethods: vi.fn() }));
@@ -126,7 +137,11 @@ import {
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
-import { SessionEndReason, MCPServerConfig } from '@qwen-code/qwen-code-core';
+import {
+  SessionEndReason,
+  MCPServerConfig,
+  SessionService,
+} from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { loadSettings } from '../config/settings.js';
@@ -1144,6 +1159,225 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       undefined,
       undefined,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+});
+
+// Regression coverage for the MR-review finding that ACP renameSession
+// bypassed any live ChatRecordingService. The disk-only path left the
+// recording service's in-memory `currentCustomTitle` stale, and the next
+// re-anchor (every 32KB) or finalize() silently reverted the rename by
+// re-emitting the cached old title at EOF.
+describe('QwenAgent extMethod renameSession routing', () => {
+  type AgentSideConnectionLike = { closed: Promise<void> };
+  type AgentLike = {
+    initialize: (args: Record<string, unknown>) => Promise<unknown>;
+    newSession: (args: Record<string, unknown>) => Promise<unknown>;
+    extMethod: (
+      method: string,
+      params: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>;
+  };
+
+  let capturedAgentFactory:
+    | ((conn: AgentSideConnectionLike) => AgentLike)
+    | undefined;
+  let mockConfig: Config;
+
+  // Live session sessionId is whatever `getSessionId()` on the inner config
+  // returns; matches the existing test scaffolding.
+  const liveSessionId = '550e8400-e29b-41d4-a716-446655440000';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConnectionState.reset();
+    capturedAgentFactory = undefined;
+
+    vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
+      capturedAgentFactory = factory as typeof capturedAgentFactory;
+      return {
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      } as unknown as InstanceType<typeof AgentSideConnection>;
+    });
+
+    mockConfig = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
+      }),
+      refreshAuth: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Config;
+  });
+
+  function makeRecordingService() {
+    return {
+      recordCustomTitle: vi.fn().mockReturnValue(true),
+      flush: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  function makeLiveSessionInnerConfig(
+    recording: ReturnType<typeof makeRecordingService> | null,
+  ) {
+    return {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
+      }),
+      refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getModel: vi.fn().mockReturnValue('m'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getAvailableModels: vi.fn().mockReturnValue([]),
+      getModes: vi.fn().mockReturnValue([]),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getSessionId: vi.fn().mockReturnValue(liveSessionId),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+      }),
+      getFileSystemService: vi.fn().mockReturnValue(undefined),
+      setFileSystemService: vi.fn(),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getChatRecordingService: vi.fn().mockReturnValue(recording),
+    };
+  }
+
+  function makeAcpSettings() {
+    return {
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+  }
+
+  async function bootAgent(
+    innerConfig: ReturnType<typeof makeLiveSessionInnerConfig>,
+  ) {
+    vi.mocked(loadSettings).mockReturnValue(makeAcpSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue(liveSessionId),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeAcpSettings(),
+      {} as CliArgs,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    return { agent, agentPromise };
+  }
+
+  it('routes through ChatRecordingService.recordCustomTitle when the target session is live', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    // Populate `this.sessions` so the rename target is "live".
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const result = await agent.extMethod('renameSession', {
+      cwd: '/tmp',
+      sessionId: liveSessionId,
+      title: 'New Title',
+    });
+
+    expect(recording.recordCustomTitle).toHaveBeenCalledWith(
+      'New Title',
+      'manual',
+    );
+    // Awaited so the rename is durable before the response returns —
+    // a follow-up listSessions can't race the queued write.
+    expect(recording.flush).toHaveBeenCalledOnce();
+    // The disk-only fallback must NOT fire when a live session exists,
+    // otherwise we'd double-write (and the second writer would be the
+    // SessionService that lacks the in-memory cache update).
+    expect(SessionService).not.toHaveBeenCalled();
+    expect(result).toEqual({ success: true });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('falls back to SessionService.renameSession when no live session matches the sessionId', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const renameSpy = vi.fn().mockResolvedValue(true);
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          renameSession: renameSpy,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+
+    const deadSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const result = await agent.extMethod('renameSession', {
+      cwd: '/tmp',
+      sessionId: deadSessionId,
+      title: 'Renamed Offline',
+    });
+
+    expect(SessionService).toHaveBeenCalledWith('/tmp');
+    expect(renameSpy).toHaveBeenCalledWith(deadSessionId, 'Renamed Offline');
+    // The live recording belongs to a *different* sessionId; it must
+    // be left untouched, otherwise we'd corrupt an unrelated session's
+    // title cache.
+    expect(recording.recordCustomTitle).not.toHaveBeenCalled();
+    expect(result).toEqual({ success: true });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns success=false when the live ChatRecordingService rejects the title (I/O error)', async () => {
+    const recording = makeRecordingService();
+    recording.recordCustomTitle.mockReturnValue(false);
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const result = await agent.extMethod('renameSession', {
+      cwd: '/tmp',
+      sessionId: liveSessionId,
+      title: 'New Title',
+    });
+
+    // Even on failure we still flush so the writeChain settles before
+    // responding — keeps subsequent reads consistent and surfaces any
+    // queued earlier failure to the caller.
+    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(result).toEqual({ success: false });
 
     mockConnectionState.resolve();
     await agentPromise;

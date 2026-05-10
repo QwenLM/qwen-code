@@ -183,6 +183,10 @@ export class ToolRegistry {
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
   // same name share one promise instead of running the factory multiple times.
   private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
+  // Deferred tools that ToolSearch has loaded this session. Once revealed, a
+  // tool's schema is included in subsequent function-declaration lists even
+  // though it would normally be hidden.
+  private revealedDeferred: Set<string> = new Set();
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -307,6 +311,10 @@ export class ToolRegistry {
     for (const tool of this.tools.values()) {
       if (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) {
         this.tools.delete(tool.name);
+        // Drop reveal state too — see `removeMcpToolsByServer`. Without
+        // this a re-discovered tool of the same name would inherit
+        // stale "revealed" state across the disconnect/reconnect.
+        this.revealedDeferred.delete(tool.name);
       }
     }
   }
@@ -319,6 +327,13 @@ export class ToolRegistry {
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
+        // Drop reveal state for the removed tool. Otherwise a server
+        // disconnect → reconnect cycle that re-registers a tool of
+        // the same name would inherit `revealed: true` from the prior
+        // session — `getFunctionDeclarations` would emit it (since it
+        // checks reveal state) before the model has any way to know
+        // the tool exists this session.
+        this.revealedDeferred.delete(name);
       }
     }
   }
@@ -425,6 +440,11 @@ export class ToolRegistry {
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
+        // Drop reveal state too so a re-discovered tool of the same
+        // name doesn't inherit a `revealed: true` from before the
+        // disconnect (would surface in declarations before any
+        // ToolSearch call this session).
+        this.revealedDeferred.delete(name);
       }
     }
 
@@ -562,14 +582,87 @@ export class ToolRegistry {
    * Retrieves the list of tool schemas (FunctionDeclaration array).
    * Extracts the declarations from the ToolListUnion structure.
    * Includes discovered (vs registered) tools if configured.
+   *
+   * By default, tools marked `shouldDefer=true` are excluded (they are
+   * discovered by the model on demand via the ToolSearch tool). Pass
+   * `{ includeDeferred: true }` to include them, e.g. for diagnostics.
+   *
+   * Tools marked `alwaysLoad=true` are always included regardless of
+   * `shouldDefer`.
+   *
    * @returns An array of FunctionDeclarations.
    */
-  getFunctionDeclarations(): FunctionDeclaration[] {
+  getFunctionDeclarations(options?: {
+    includeDeferred?: boolean;
+  }): FunctionDeclaration[] {
+    const includeDeferred = options?.includeDeferred === true;
     const declarations: FunctionDeclaration[] = [];
     this.tools.forEach((tool) => {
+      if (
+        !includeDeferred &&
+        tool.shouldDefer &&
+        !tool.alwaysLoad &&
+        !this.revealedDeferred.has(tool.name)
+      ) {
+        return;
+      }
       declarations.push(tool.schema);
     });
     return declarations;
+  }
+
+  /**
+   * Marks a deferred tool as revealed. Revealed tools are included in
+   * {@link getFunctionDeclarations} output for the rest of the session, even
+   * though they are normally hidden. Called by the ToolSearch tool after it
+   * successfully loads a tool so the model can invoke it on subsequent turns.
+   */
+  revealDeferredTool(name: string): void {
+    this.revealedDeferred.add(name);
+  }
+
+  /**
+   * Removes a single tool from the revealed-deferred set. Used for rollback
+   * when a `setTools()` re-sync fails after revealing — leaving the tool
+   * "revealed" in the registry while the chat's declaration list never
+   * received the schema would mean future ToolSearch keyword queries
+   * exclude the tool (per `collectCandidates`'s isDeferredToolRevealed
+   * filter), making it unreachable until `/clear`.
+   */
+  unrevealDeferredTool(name: string): void {
+    this.revealedDeferred.delete(name);
+  }
+
+  /** Whether a given tool has been revealed via {@link revealDeferredTool}. */
+  isDeferredToolRevealed(name: string): boolean {
+    return this.revealedDeferred.has(name);
+  }
+
+  /**
+   * Clears the set of revealed deferred tools. Called by {@link GeminiClient}
+   * when a chat session is reset (e.g. `/clear`) so the new session starts
+   * with no revealed tools — the same state as any fresh session.
+   */
+  clearRevealedDeferredTools(): void {
+    this.revealedDeferred.clear();
+  }
+
+  /**
+   * Returns a lightweight summary ({name, description}) of tools that are
+   * deferred from the initial function-declaration list. Used to describe the
+   * set of on-demand tools in the system prompt so the model knows what is
+   * reachable via ToolSearch. `alwaysLoad` tools are excluded.
+   */
+  getDeferredToolSummary(): Array<{ name: string; description: string }> {
+    const summary: Array<{ name: string; description: string }> = [];
+    this.tools.forEach((tool) => {
+      if (tool.shouldDefer && !tool.alwaysLoad) {
+        summary.push({ name: tool.name, description: tool.description });
+      }
+    });
+    // Stable order so the system prompt text is deterministic across runs.
+    summary.sort((a, b) => a.name.localeCompare(b.name));
+    return summary;
   }
 
   /**

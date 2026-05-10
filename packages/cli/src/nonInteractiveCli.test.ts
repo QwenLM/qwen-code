@@ -21,7 +21,9 @@ import {
   FatalInputError,
   ApprovalMode,
   SendMessageType,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
+import type { JsonOutputAdapterInterface } from './nonInteractive/io/BaseJsonOutputAdapter.js';
 import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
@@ -183,6 +185,7 @@ describe('runNonInteractive', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
       getOutputFormat: vi.fn().mockReturnValue('text'),
+      getJsonSchema: vi.fn().mockReturnValue(undefined),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getIncludePartialMessages: vi.fn().mockReturnValue(false),
@@ -2431,5 +2434,471 @@ describe('runNonInteractive', () => {
       'prompt-blocks-content',
       { type: SendMessageType.UserQuery },
     );
+  });
+
+  // ---- --json-schema (structured_output) contract --------------------
+  // These two cover the runtime branches gpt-5.5 review S8 flagged as
+  // missing test coverage. We mock the LLM at sendMessageStream so the
+  // assertions are deterministic; the L2 integration tests in
+  // integration-tests/cli/json-schema.test.ts run the same flow against
+  // a real model as smoke coverage.
+
+  function makeMockAdapter(): JsonOutputAdapterInterface {
+    return {
+      startAssistantMessage: vi.fn(),
+      processEvent: vi.fn(),
+      finalizeAssistantMessage: vi.fn().mockReturnValue({
+        type: 'assistant',
+        uuid: 'mock-uuid',
+        session_id: 'test-session-id',
+        parent_tool_use_id: null,
+        message: {
+          id: 'mock-uuid',
+          type: 'message',
+          role: 'assistant',
+          model: 'test-model',
+          content: [],
+          stop_reason: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      }),
+      emitResult: vi.fn(),
+      emitMessage: vi.fn(),
+      emitUserMessage: vi.fn(),
+      emitToolResult: vi.fn(),
+      emitSystemMessage: vi.fn(),
+      emitToolProgress: vi.fn(),
+      getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getModel: vi.fn().mockReturnValue('test-model'),
+    } as unknown as JsonOutputAdapterInterface;
+  }
+
+  it('emits structuredResult and stops when structured_output is called under --json-schema', async () => {
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'number' } },
+    });
+
+    // Single turn: model fires the synthetic structured_output tool with
+    // its final payload as args, then Finished. No follow-up turn should
+    // run — runNonInteractive's structured-output branch returns early.
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'so-1',
+        name: ToolNames.STRUCTURED_OUTPUT,
+        args: { answer: 42 },
+        isClientInitiated: false,
+        prompt_id: 'p-structured-success',
+      },
+    };
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        toolCallEvent,
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+        },
+      ]),
+    );
+    // No error → runtime sets structuredSubmission and terminates.
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Structured output accepted.' }],
+    });
+
+    const adapter = makeMockAdapter();
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'compute 21*2',
+      'p-structured-success',
+      { adapter },
+    );
+
+    // Single-shot contract: no follow-up turn was issued.
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    // Background tasks aborted so they don't race the terminal emitResult.
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(1);
+    // structuredResult lands in the result message exactly as the model
+    // submitted it (no schema massaging at the runtime layer).
+    expect(adapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(adapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: false,
+        structuredResult: { answer: 42 },
+        numTurns: 1,
+      }),
+    );
+  });
+
+  it('skips remaining tool calls in the same batch after structured_output succeeds', async () => {
+    // Single-shot contract: a model emitting
+    // `[structured_output(...), write_file(...)]` in the same response
+    // must not have write_file run after structured_output records.
+    // This test pins the break-after-success path; structured_output
+    // is at index 0 so the pre-scan reorder is a no-op here. See
+    // sibling test "reorders structured_output before side-effect tools"
+    // for the reorder coverage.
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'number' } },
+    });
+
+    const sideEffectCallId = 'write-1';
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'so-batch',
+            name: ToolNames.STRUCTURED_OUTPUT,
+            args: { answer: 7 },
+            isClientInitiated: false,
+            prompt_id: 'p-batch',
+          },
+        },
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: sideEffectCallId,
+            name: 'write_file',
+            args: { path: '/tmp/should-not-run', content: 'side effect' },
+            isClientInitiated: false,
+            prompt_id: 'p-batch',
+          },
+        },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Structured output accepted.' }],
+    });
+
+    const adapter = makeMockAdapter();
+    await runNonInteractive(mockConfig, mockSettings, 'go', 'p-batch', {
+      adapter,
+    });
+
+    // executeToolCall called exactly once — for structured_output.
+    // write_file would be the second call if the loop hadn't broken.
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ name: ToolNames.STRUCTURED_OUTPUT }),
+      expect.any(AbortSignal),
+      expect.any(Object),
+    );
+    // emitResult landed; side-effect tool name should not appear in any
+    // emitToolResult call.
+    expect(adapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: false,
+        structuredResult: { answer: 7 },
+      }),
+    );
+    const toolResultCalls = vi.mocked(adapter.emitToolResult).mock.calls;
+    const sideEffectEmitted = toolResultCalls.some(
+      ([req]) => req.callId === sideEffectCallId,
+    );
+    expect(sideEffectEmitted).toBe(false);
+  });
+
+  it('reorders structured_output before side-effect tools so siblings never run', async () => {
+    // Pre-scan: when --json-schema is active and the model emitted
+    // [write_file, structured_output] (struct NOT first), the pre-scan
+    // must hoist structured_output to position 0 and then the
+    // break-after-success path skips write_file entirely. Without the
+    // pre-scan, write_file would persist its side effect BEFORE
+    // structured_output's terminal flag fired.
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      properties: { answer: { type: 'number' } },
+    });
+
+    const writeFileCallId = 'write-pre-1';
+    const structuredCallId = 'so-pre-1';
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        // Order matters: write_file FIRST, structured_output second.
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: writeFileCallId,
+            name: 'write_file',
+            args: { path: '/tmp/should-not-run', content: 'side effect' },
+            isClientInitiated: false,
+            prompt_id: 'p-prescan',
+          },
+        },
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: structuredCallId,
+            name: ToolNames.STRUCTURED_OUTPUT,
+            args: { answer: 1 },
+            isClientInitiated: false,
+            prompt_id: 'p-prescan',
+          },
+        },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Structured output accepted.' }],
+    });
+
+    const adapter = makeMockAdapter();
+    await runNonInteractive(mockConfig, mockSettings, 'go', 'p-prescan', {
+      adapter,
+    });
+
+    // Exactly ONE executeToolCall — for structured_output. write_file
+    // never runs because the pre-scan moved it after structured_output
+    // and the break-after-success path skipped it.
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({
+        name: ToolNames.STRUCTURED_OUTPUT,
+        callId: structuredCallId,
+      }),
+      expect.any(AbortSignal),
+      expect.any(Object),
+    );
+    expect(adapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: false,
+        structuredResult: { answer: 1 },
+      }),
+    );
+    // No tool_result emitted for write_file: it never executed.
+    const toolResultCalls = vi.mocked(adapter.emitToolResult).mock.calls;
+    expect(
+      toolResultCalls.some(([req]) => req.callId === writeFileCallId),
+    ).toBe(false);
+  });
+
+  it('lets siblings run when structured_output validation fails so the model can retry', async () => {
+    // Validation-failure fallback: if structured_output execute() fails
+    // (e.g. arg validation rejected the payload), `hasStructuredSubmission`
+    // stays false and the loop continues normally — sibling tools in the
+    // batch SHOULD run, same as a turn that didn't issue structured_output
+    // at all. The model gets the validation error in the tool_result and
+    // can retry next turn.
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'number' } },
+    });
+
+    const writeFileCallId = 'write-fallback';
+    const structuredCallId = 'so-fail';
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: structuredCallId,
+            name: ToolNames.STRUCTURED_OUTPUT,
+            args: { answer: 'not-a-number' },
+            isClientInitiated: false,
+            prompt_id: 'p-fallback',
+          },
+        },
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: writeFileCallId,
+            name: 'write_file',
+            args: { path: '/tmp/x', content: 'sibling' },
+            isClientInitiated: false,
+            prompt_id: 'p-fallback',
+          },
+        },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    // Second turn (after the sibling tool ran) — model gives up cleanly
+    // by emitting plain text so the run terminates without
+    // hasStructuredSubmission ever flipping.
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'gave up' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    // structured_output → error; write_file → success.
+    mockCoreExecuteToolCall.mockImplementation(async (_cfg, req) => {
+      if (req.name === ToolNames.STRUCTURED_OUTPUT) {
+        return {
+          responseParts: [{ text: 'validation error' }],
+          error: new Error('Schema validation failed'),
+          errorType: 'TOOL_EXECUTION_ERROR',
+        } as never;
+      }
+      return { responseParts: [{ text: 'wrote' }] } as never;
+    });
+
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      const adapter = makeMockAdapter();
+      await runNonInteractive(mockConfig, mockSettings, 'go', 'p-fallback', {
+        adapter,
+      });
+
+      // Both tools executed (one successfully, one failed). The
+      // critical assertion is that the sibling DID run — fallback
+      // semantics are restored when structured_output fails.
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ name: ToolNames.STRUCTURED_OUTPUT }),
+        expect.any(AbortSignal),
+        expect.any(Object),
+      );
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ name: 'write_file' }),
+        expect.any(AbortSignal),
+        expect.any(Object),
+      );
+      // No structuredResult emitted — the failure didn't terminate via
+      // the success branch. The plain-text terminal branch fires
+      // instead (model gave up on turn 2).
+      const resultCalls = vi.mocked(adapter.emitResult).mock.calls;
+      const successCall = resultCalls.find(
+        ([opts]) =>
+          'structuredResult' in (opts as Record<string, unknown>) &&
+          !(opts as { isError?: boolean }).isError,
+      );
+      expect(successCall).toBeUndefined();
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+  });
+
+  it('terminates even when structured_output args are undefined under an empty schema', async () => {
+    // Pin the boolean-sentinel contract: the previous
+    // `structuredSubmission !== undefined` check broke if the model
+    // called structured_output with args missing/undefined (which can
+    // happen under a permissive `{}` schema, since validateToolParams
+    // would have already accepted the call). The run must still
+    // terminate on the first successful structured_output call.
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({});
+
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'so-undef',
+            name: ToolNames.STRUCTURED_OUTPUT,
+            args: undefined as unknown as Record<string, unknown>,
+            isClientInitiated: false,
+            prompt_id: 'p-structured-undef',
+          },
+        },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Structured output accepted.' }],
+    });
+
+    const adapter = makeMockAdapter();
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'go',
+      'p-structured-undef',
+      { adapter },
+    );
+
+    // Single turn — boolean sentinel kicked us out even though the args
+    // value itself is undefined.
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    expect(adapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(adapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: false,
+        structuredResult: undefined,
+      }),
+    );
+  });
+
+  it('sets process.exitCode=1 and writes stderr when model emits text under --json-schema', async () => {
+    setupMetricsMock();
+    vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'string' } },
+    });
+
+    // Snapshot/restore the global so a stray exitCode=1 doesn't bleed into
+    // sibling tests in the file.
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+
+    try {
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'plain answer' },
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+      const adapter = makeMockAdapter();
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'q',
+        'p-structured-text',
+        { adapter },
+      );
+
+      expect(process.exitCode).toBe(1);
+      // adapter sees the contract violation as an error result, with
+      // diagnostic context: turn count + truncated preview of model's
+      // plain-text output ("plain answer" from the mocked stream).
+      // The adapter is responsible for surfacing the message per output
+      // format (TEXT → stderr; JSON / STREAM_JSON → structured result);
+      // runNonInteractive no longer writes a duplicate stderr line.
+      expect(adapter.emitResult).toHaveBeenCalledTimes(1);
+      expect(adapter.emitResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isError: true,
+          errorMessage: expect.stringMatching(
+            /Model produced plain text.+after 1 turn\(s\).+Output preview.+plain answer/s,
+          ),
+        }),
+      );
+    } finally {
+      process.exitCode = priorExitCode;
+    }
   });
 });

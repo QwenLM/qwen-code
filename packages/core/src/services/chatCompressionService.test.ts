@@ -643,6 +643,56 @@ describe('ChatCompressionService', () => {
     );
   });
 
+  it('passes abort signal to summary generation', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    const abortController = new AbortController();
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'Summary' }],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      hasFailedCompressionAttempt: false,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      signal: abortController.signal,
+    });
+
+    expect(mockGenerateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          abortSignal: abortController.signal,
+        }),
+      }),
+      mockPromptId,
+    );
+  });
+
   it('should return FAILED if new token count is inflated', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },

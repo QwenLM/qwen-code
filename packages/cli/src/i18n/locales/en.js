@@ -153,6 +153,29 @@ export default {
     'Configure authentication information for login',
   'Copy the last result or code snippet to clipboard':
     'Copy the last result or code snippet to clipboard',
+  'Show working-tree change stats versus HEAD':
+    'Show working-tree change stats versus HEAD',
+  'Could not determine current working directory.':
+    'Could not determine current working directory.',
+  'Failed to compute git diff stats': 'Failed to compute git diff stats',
+  'No diff available. Either this is not a git repository, HEAD is missing, or a merge/rebase/cherry-pick/revert is in progress.':
+    'No diff available. Either this is not a git repository, HEAD is missing, or a merge/rebase/cherry-pick/revert is in progress.',
+  'Clean working tree — no changes against HEAD.':
+    'Clean working tree — no changes against HEAD.',
+  '{{count}} file changed, +{{added}} / -{{removed}}':
+    '{{count}} file changed, +{{added}} / -{{removed}}',
+  '{{count}} files changed, +{{added}} / -{{removed}}':
+    '{{count}} files changed, +{{added}} / -{{removed}}',
+  '{{count}} file changed': '{{count}} file changed',
+  '{{count}} files changed': '{{count}} files changed',
+  '…and {{hidden}} more (showing first {{shown}})':
+    '…and {{hidden}} more (showing first {{shown}})',
+  '(binary)': '(binary)',
+  '(binary, new)': '(binary, new)',
+  '(new)': '(new)',
+  '(new, partial)': '(new, partial)',
+  '(deleted)': '(deleted)',
+  '(binary, deleted)': '(binary, deleted)',
 
   // ============================================================================
   // Commands - Agents

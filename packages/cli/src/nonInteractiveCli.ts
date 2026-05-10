@@ -21,6 +21,7 @@ import {
   OutputFormat,
   InputFormat,
   LoopType,
+  ToolNames,
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
@@ -42,8 +43,6 @@ import {
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
-
-const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -52,6 +51,8 @@ import {
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
 // Human-readable labels for the detectors that can fire mid-stream.
 // Surfaced to stderr in TEXT mode so a headless run that halts on a loop
@@ -415,6 +416,12 @@ export async function runNonInteractive(
 
       let isFirstTurn = true;
       let modelOverride: string | undefined;
+      // Captures the first ~200 chars of model-emitted plain text across
+      // turns. Used only to enrich the --json-schema "produced plain
+      // text" error: the user/operator gets a hint of what the model
+      // actually said instead of a static, context-free message.
+      let plainTextPreview = '';
+      const PLAIN_TEXT_PREVIEW_LIMIT = 200;
       while (true) {
         turnCount++;
         if (
@@ -455,6 +462,14 @@ export async function runNonInteractive(
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
+          if (
+            event.type === GeminiEventType.Content &&
+            plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
+          ) {
+            const remaining =
+              PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
+            plainTextPreview += String(event.value).slice(0, remaining);
+          }
           if (event.type === GeminiEventType.LoopDetected) {
             emitLoopDetectedMessage(config, event.value?.loopType);
           }
@@ -481,8 +496,48 @@ export async function runNonInteractive(
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
+          // When --json-schema is active, the first successful call to the
+          // synthetic structured_output tool terminates the session with the
+          // submitted args as the structured result. A separate boolean
+          // tracks whether a submission happened, since `args` itself may
+          // legitimately be undefined or any falsy value (an empty schema
+          // `{}` accepts any payload, including no fields at all).
+          let structuredSubmission: unknown = undefined;
+          let hasStructuredSubmission = false;
 
-          for (const requestInfo of toolCallRequests) {
+          // Pre-scan: when --json-schema is active and the model emitted
+          // structured_output alongside other tools in the same turn,
+          // execute structured_output FIRST so its terminal-flag wins
+          // before sibling tools' side effects (write_file, shell, …)
+          // get a chance to persist. If structured_output succeeds the
+          // loop breaks immediately and siblings are skipped — no
+          // tool_result is emitted for them; the session terminates via
+          // the emitResult call below so the missing function_response
+          // entries cause no API protocol issue (there is no next turn).
+          // If structured_output fails (validation), `hasStructuredSubmission`
+          // stays false and the siblings still run via the normal loop
+          // body — same behavior as a turn that didn't issue
+          // structured_output at all.
+          //
+          // Without this, [write_file, structured_output] runs write_file
+          // first (irreversible), THEN structured_output sets the flag,
+          // and the user gets back a "successful" structured result with
+          // unrelated side-effects already on disk.
+          let orderedToolCallRequests = toolCallRequests;
+          if (config.getJsonSchema()) {
+            const structIdx = orderedToolCallRequests.findIndex(
+              (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+            );
+            if (structIdx > 0) {
+              orderedToolCallRequests = [
+                orderedToolCallRequests[structIdx],
+                ...orderedToolCallRequests.slice(0, structIdx),
+                ...orderedToolCallRequests.slice(structIdx + 1),
+              ];
+            }
+          }
+
+          for (const requestInfo of orderedToolCallRequests) {
             const finalRequestInfo = requestInfo;
 
             const inputFormat =
@@ -543,6 +598,15 @@ export async function runNonInteractive(
                 finalRequestInfo.args as Record<string, unknown>,
               );
 
+            if (
+              finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+              !toolResponse.error &&
+              !hasStructuredSubmission
+            ) {
+              structuredSubmission = finalRequestInfo.args;
+              hasStructuredSubmission = true;
+            }
+
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
             }
@@ -553,6 +617,40 @@ export async function runNonInteractive(
             if ('modelOverride' in toolResponse) {
               modelOverride = toolResponse.modelOverride;
             }
+
+            // Single-shot contract: structured_output is terminal.
+            // The pre-scan above hoists it to the front of the batch,
+            // so once it succeeds the remaining (now reordered)
+            // entries are guaranteed to be siblings the model
+            // intended for THIS turn — break and let the terminal
+            // emitResult fire below. Unpaired tool_use entries in
+            // the model's record are harmless because no next API
+            // call happens (the session is over).
+            if (hasStructuredSubmission) {
+              break;
+            }
+          }
+          if (hasStructuredSubmission) {
+            // Abort any in-flight background agents so they don't race the
+            // terminal emitResult; structured-output mode is a single-shot
+            // contract and the caller expects a deterministic shutdown.
+            registry.abortAll();
+            const metrics = uiTelemetryService.getMetrics();
+            const usage = computeUsageFromMetrics(metrics);
+            const stats =
+              outputFormat === OutputFormat.JSON
+                ? uiTelemetryService.getMetrics()
+                : undefined;
+            adapter.emitResult({
+              isError: false,
+              durationMs: Date.now() - startTime,
+              apiDurationMs: totalApiDurationMs,
+              numTurns: turnCount,
+              usage,
+              stats,
+              structuredResult: structuredSubmission,
+            });
+            return;
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
@@ -825,6 +923,48 @@ export async function runNonInteractive(
             outputFormat === OutputFormat.JSON
               ? uiTelemetryService.getMetrics()
               : undefined;
+
+          // --json-schema contract: the model MUST terminate via the
+          // structured_output tool. Reaching this branch means it emitted
+          // plain text instead — surface as an error rather than silently
+          // returning whatever free-form summary the adapter collected.
+          // Setting exitCode + returning (rather than throwing) avoids the
+          // outer catch re-emitting the result a second time.
+          if (config.getJsonSchema()) {
+            // Enrich the static contract message with diagnostic context:
+            // turn count (how many tries the model got) + a preview of
+            // what it actually said (truncated). Operators debugging a
+            // headless run shouldn't have to scrape `--output-format
+            // json` to understand why the contract failed.
+            const previewSnippet = plainTextPreview.trim();
+            const previewSuffix = previewSnippet
+              ? ` Output preview (${plainTextPreview.length}${
+                  plainTextPreview.length >= PLAIN_TEXT_PREVIEW_LIMIT ? '+' : ''
+                } chars): ${JSON.stringify(previewSnippet)}.`
+              : '';
+            const errorMessage =
+              `Model produced plain text instead of calling the structured_output tool as required by --json-schema after ${turnCount} turn(s).` +
+              previewSuffix;
+            adapter.emitResult({
+              isError: true,
+              durationMs: Date.now() - startTime,
+              apiDurationMs: totalApiDurationMs,
+              numTurns: turnCount,
+              errorMessage,
+              usage,
+              stats,
+            });
+            // Adapter handles user-visible feedback per output format:
+            //   - TEXT: writes errorMessage to stderr (JsonOutputAdapter
+            //     emitResult, line ~70).
+            //   - JSON / STREAM_JSON: emits the structured result with
+            //     is_error=true.
+            // No extra stderr write here — duplicating in TEXT mode
+            // produced two copies of the same line in headless runs.
+            process.exitCode = 1;
+            return;
+          }
+
           adapter.emitResult({
             isError: false,
             durationMs: Date.now() - startTime,
