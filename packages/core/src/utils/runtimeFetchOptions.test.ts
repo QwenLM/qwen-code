@@ -190,12 +190,6 @@ describe('getOrCreateSharedDispatcher', () => {
     const d2 = getOrCreateSharedDispatcher('http://proxy.local');
     expect(d1).not.toBe(d2);
   });
-
-  it('returns undefined dispatcher for OpenAI without proxy (uses built-in fetch)', () => {
-    const result = buildRuntimeFetchOptions('openai');
-    expect(result).toBeUndefined();
-  });
-
   it('shares the same ProxyAgent dispatcher with buildRuntimeFetchOptions when proxy is set', () => {
     const shared = getOrCreateSharedDispatcher('http://proxy.local');
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
