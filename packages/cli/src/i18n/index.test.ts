@@ -5,6 +5,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { Storage } from '@qwen-code/qwen-code-core';
 
 describe('bundled locale fallback', () => {
   beforeEach(() => {
@@ -44,6 +48,28 @@ describe('bundled locale fallback', () => {
     expect(languageCommand.description).not.toBe(
       'View or change the language setting',
     );
+  }, 20000);
+
+  it('falls back to bundled translations when a user locale default export is null', async () => {
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-i18n-null-locale-'),
+    );
+    const localesDir = path.join(tempDir, 'locales');
+    await fs.mkdir(localesDir, { recursive: true });
+    await fs.writeFile(
+      path.join(localesDir, 'zh.js'),
+      'export default null;\n',
+      'utf-8',
+    );
+
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempDir);
+
+    const { setLanguageAsync, t } = await import('./index.js');
+    await setLanguageAsync('zh');
+
+    expect(t('show version info')).toBe('显示版本信息');
+
+    await fs.rm(tempDir, { recursive: true, force: true });
   }, 20000);
 });
 

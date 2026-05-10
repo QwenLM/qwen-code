@@ -15,13 +15,12 @@ import {
   MUST_TRANSLATE_KEYS,
   SUPPORTED_LANGUAGES,
 } from '../packages/cli/src/i18n/index.js';
+import type { LanguageDefinition } from '../packages/cli/src/i18n/languages.js';
 
 type TranslationValue = string | string[];
 type TranslationDict = Record<string, TranslationValue>;
-type MustTranslateKey = (typeof MUST_TRANSLATE_KEYS)[number];
-const MUST_TRANSLATE_KEY_SET = new Set<MustTranslateKey>(MUST_TRANSLATE_KEYS);
 
-interface LocaleStats {
+export interface LocaleStats {
   code: string;
   id: string;
   totalKeys: number;
@@ -31,7 +30,7 @@ interface LocaleStats {
   untranslatedMustKeys: string[];
 }
 
-interface CheckResult {
+export interface CheckResult {
   success: boolean;
   errors: string[];
   warnings: string[];
@@ -43,12 +42,37 @@ interface CheckResult {
   };
 }
 
+export interface CheckI18nOptions {
+  localesDir?: string;
+  sourceDir?: string;
+  supportedLanguages?: readonly Pick<
+    LanguageDefinition,
+    'code' | 'id' | 'strictParity'
+  >[];
+  mustTranslateKeys?: readonly string[];
+  strictKeyParityLocales?: ReadonlySet<string>;
+}
+
+export interface PrintCheckI18nOptions {
+  writeUnusedKeysJson?: boolean;
+  unusedKeysOutputPath?: string;
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WRITE_UNUSED_KEYS_FLAG = '--write-unused-locale-keys';
 const WRITE_UNUSED_KEYS_ENV = 'QWEN_CHECK_I18N_WRITE_UNUSED_KEYS';
-const STRICT_KEY_PARITY_LOCALES = new Set(['zh', 'zh-TW']);
 
-function shouldWriteUnusedKeysJson(): boolean {
+function getTranslationModuleExport(module: Record<string, unknown>): unknown {
+  return Object.prototype.hasOwnProperty.call(module, 'default')
+    ? module['default']
+    : module;
+}
+
+function isTranslationDict(value: unknown): value is TranslationDict {
+  return value !== null && typeof value === 'object';
+}
+
+export function shouldWriteUnusedKeysJson(): boolean {
   return (
     process.argv.includes(WRITE_UNUSED_KEYS_FLAG) ||
     process.env[WRITE_UNUSED_KEYS_ENV] === '1'
@@ -60,9 +84,9 @@ async function loadTranslationsFile(
 ): Promise<TranslationDict> {
   const fileUrl = pathToFileURL(filePath).href;
   const module = await import(fileUrl);
-  const result = module.default || module;
+  const result = getTranslationModuleExport(module);
 
-  if (!result || typeof result !== 'object') {
+  if (!isTranslationDict(result)) {
     throw new Error(`Invalid locale module: ${filePath}`);
   }
 
@@ -270,14 +294,29 @@ async function findKeysOnlyInLocales(
   return keysOnlyInLocales;
 }
 
-async function checkI18n(): Promise<CheckResult> {
+export async function checkI18n(
+  options: CheckI18nOptions = {},
+): Promise<CheckResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  const localesDir = path.join(__dirname, '../packages/cli/src/i18n/locales');
-  const sourceDir = path.join(__dirname, '../packages/cli/src');
+  const localesDir =
+    options.localesDir ??
+    path.join(__dirname, '../packages/cli/src/i18n/locales');
+  const sourceDir =
+    options.sourceDir ?? path.join(__dirname, '../packages/cli/src');
+  const supportedLanguages = options.supportedLanguages ?? SUPPORTED_LANGUAGES;
+  const mustTranslateKeys = options.mustTranslateKeys ?? MUST_TRANSLATE_KEYS;
+  const mustTranslateKeySet = new Set(mustTranslateKeys);
+  const strictKeyParityLocales =
+    options.strictKeyParityLocales ??
+    new Set(
+      supportedLanguages
+        .filter((language) => language.strictParity)
+        .map((language) => language.code),
+    );
 
-  const localeDefinitions = SUPPORTED_LANGUAGES.map((language) => ({
+  const localeDefinitions = supportedLanguages.map((language) => ({
     code: language.code,
     id: language.id,
     path: path.join(localesDir, `${language.code}.js`),
@@ -334,7 +373,7 @@ async function checkI18n(): Promise<CheckResult> {
     const extraKeys = Array.from(localeKeys)
       .filter((key) => !enKeys.has(key))
       .sort();
-    const untranslatedMustKeys = MUST_TRANSLATE_KEYS.filter((key) => {
+    const untranslatedMustKeys = mustTranslateKeys.filter((key) => {
       const value = translations[key];
       return (
         value === undefined ||
@@ -353,7 +392,7 @@ async function checkI18n(): Promise<CheckResult> {
       untranslatedMustKeys,
     });
 
-    const requiresStrictKeyParity = STRICT_KEY_PARITY_LOCALES.has(locale.code);
+    const requiresStrictKeyParity = strictKeyParityLocales.has(locale.code);
 
     if (missingKeys.length > 0) {
       if (requiresStrictKeyParity) {
@@ -362,7 +401,7 @@ async function checkI18n(): Promise<CheckResult> {
         }
       } else {
         const missingRequiredKeys = missingKeys.filter((key) =>
-          MUST_TRANSLATE_KEY_SET.has(key as MustTranslateKey),
+          mustTranslateKeySet.has(key),
         );
         const missingOptionalKeyCount =
           missingKeys.length - missingRequiredKeys.length;
@@ -426,9 +465,10 @@ async function checkI18n(): Promise<CheckResult> {
   };
 }
 
-async function main() {
-  const result = await checkI18n();
-
+export function printCheckI18nResult(
+  result: CheckResult,
+  options: PrintCheckI18nOptions = {},
+): void {
   console.log('\n=== i18n Check Results ===\n');
   console.log(`Total keys: ${result.stats.totalKeys}\n`);
   console.log('Locale coverage:');
@@ -479,11 +519,10 @@ async function main() {
         console.log(`  - "${key}"`),
       );
 
-      if (shouldWriteUnusedKeysJson()) {
-        const outputPath = path.join(
-          __dirname,
-          'unused-keys-only-in-locales.json',
-        );
+      if (options.writeUnusedKeysJson) {
+        const outputPath =
+          options.unusedKeysOutputPath ??
+          path.join(__dirname, 'unused-keys-only-in-locales.json');
         saveKeysOnlyInLocalesToJson(
           result.stats.unusedKeysOnlyInLocales,
           outputPath,
@@ -497,6 +536,14 @@ async function main() {
 
     console.log();
   }
+}
+
+async function main() {
+  const result = await checkI18n();
+
+  printCheckI18nResult(result, {
+    writeUnusedKeysJson: shouldWriteUnusedKeysJson(),
+  });
 
   if (result.errors.length > 0) {
     console.log('❌ Errors:');
@@ -508,7 +555,12 @@ async function main() {
   console.log('✅ All checks passed!\n');
 }
 
-main().catch((error) => {
-  console.error('❌ Fatal error:', error);
-  process.exit(1);
-});
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main().catch((error) => {
+    console.error('❌ Fatal error:', error);
+    process.exit(1);
+  });
+}

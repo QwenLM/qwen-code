@@ -280,6 +280,13 @@ export type CommandSource =
 // | 'plugin-skill'
 // | 'dynamic-skill'
 
+export type CommandSourceDetail =
+  | 'user'
+  | 'project'
+  | 'custom'
+  | 'extension'
+  | 'plugin';
+
 export interface CommandCompletionItem {
   value: string;
   label?: string;
@@ -317,6 +324,12 @@ export interface SlashCommand {
    * Set by the Loader; may be overridden by the command itself.
    */
   sourceLabel?: string;
+
+  /**
+   * Stable, non-localized source detail for semantic routing and badges.
+   * `sourceLabel` is user-visible display text and may be localized.
+   */
+  sourceDetail?: CommandSourceDetail;
 
   // ── Phase 1: mode capability ───────────────────────────────────────────
   /**

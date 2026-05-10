@@ -21,7 +21,7 @@ export default {
   'plan mode': 'modo planejamento',
   'auto-accept edits': 'aceitar edições automaticamente',
   'Accepting edits': 'Aceitando edições',
-  '(shift + tab to cycle)': '(shift + tab para alternar)',
+  '(shift + tab to cycle)': '(Shift + Tab para alternar)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Execute comandos shell via {{symbol}} (ex: {{example1}}) ou use linguagem natural (ex: {{example2}}).',
   '!': '!',
@@ -63,7 +63,7 @@ export default {
   'Send message': 'Enviar mensagem',
   'Initializing...': 'Inicializando...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
-    'Conectando aos servidores MCP... ({{connected}}/{{total}})',
+    'Conectando aos MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file':
     'Digite sua mensagem ou @caminho/do/arquivo',
   '? for shortcuts': '? para atalhos',
@@ -89,7 +89,7 @@ export default {
   'Fast Model': 'Modelo Rápido',
   Sandbox: 'Sandbox',
   'Session ID': 'ID da Sessão',
-  'Base URL': 'URL Base',
+  'Base URL': 'Base URL',
   Proxy: 'Proxy',
   'Memory Usage': 'Uso de Memória',
   'IDE Client': 'Cliente IDE',
@@ -260,7 +260,7 @@ export default {
   'Read & Edit Tools': 'Ferramentas de Leitura e Edição',
   'Read & Edit & Execution Tools': 'Ferramentas de Leitura, Edição e Execução',
   'All tools selected, including MCP tools':
-    'Todas as ferramentas selecionadas, incluindo ferramentas MCP',
+    'Todas as ferramentas selecionadas, incluindo MCP tools',
   'Selected tools:': 'Ferramentas selecionadas:',
   'Read-only tools:': 'Ferramentas de somente leitura:',
   'Edit tools:': 'Ferramentas de edição:',
@@ -356,7 +356,7 @@ export default {
   'Tool Output Truncation Lines':
     'Linhas de Truncamento de Saída de Ferramenta',
   'Folder Trust': 'Confiança de Pasta',
-  'Tool Schema Compliance': 'Conformidade de Esquema de Ferramenta',
+  'Tool Schema Compliance': 'Conformidade de Tool Schema',
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
@@ -410,7 +410,7 @@ export default {
   '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
     '**As extensões podem introduzir comportamentos inesperados. Certifique-se de ter investigado a fonte da extensão e confie no autor.**',
   'This extension will run the following MCP servers:':
-    'Esta extensão executará os seguintes servidores MCP:',
+    'Esta extensão executará os seguintes MCP servers:',
   local: 'local',
   remote: 'remoto',
   'This extension will add the following commands: {{commands}}.':
@@ -565,7 +565,7 @@ export default {
   'Press Escape, Ctrl+C, or Ctrl+D to cancel':
     'Pressione Escape, Ctrl+C ou Ctrl+D para cancelar',
   'Press Space, Enter, or Escape to dismiss':
-    'Pressione Espaço, Enter ou Escape para dispensar',
+    'Pressione Space, Enter ou Escape para dispensar',
   'No hook selected': 'Nenhum hook selecionado',
   // Hooks - List Step
   'No hook events found.': 'Nenhum evento de hook encontrado.',
@@ -895,7 +895,7 @@ export default {
   No: 'Não',
   'No (esc)': 'Não (esc)',
   // MCP Management - Core translations
-  'Manage MCP servers': 'Gerenciar servidores MCP',
+  'Manage MCP servers': 'Gerenciar MCP servers',
   'Server Detail': 'Detalhes do servidor',
   Tools: 'Ferramentas',
   'Tool Detail': 'Detalhes da ferramenta',
@@ -945,7 +945,7 @@ export default {
   server: 'servidor',
   servers: 'servidores',
   'Add MCP servers to your settings to get started.':
-    'Adicione servidores MCP às suas configurações para começar.',
+    'Adicione MCP servers às suas configurações para começar.',
   'Run qwen --debug to see error logs':
     'Execute qwen --debug para ver os logs de erro',
 
@@ -1002,10 +1002,10 @@ export default {
   'Yes, and manually approve edits': 'Sim, e aprovar edições manualmente',
   'No, keep planning (esc)': 'Não, continuar planejando (esc)',
   'URLs to fetch:': 'URLs para buscar:',
-  'MCP Server: {{server}}': 'Servidor MCP: {{server}}',
+  'MCP Server: {{server}}': 'MCP Server: {{server}}',
   'Tool: {{tool}}': 'Ferramenta: {{tool}}',
   'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
-    'Permitir a execução da ferramenta MCP "{{tool}}" do servidor "{{server}}"?',
+    'Permitir a execução de MCP tool "{{tool}}" de MCP server "{{server}}"?',
   // ============================================================================
   // Dialogs - Shell Confirmation
   // ============================================================================
@@ -1045,7 +1045,7 @@ export default {
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Pago \u00B7 Até 6.000 solicitações/5 hrs \u00B7 Todos os modelos Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
-  'Bring your own API key': 'Traga sua própria chave API',
+  'Bring your own API key': 'Traga sua própria API Key',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Autenticação baseada em navegador com provedores terceiros (por exemplo, OpenRouter, ModelScope)',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
@@ -1067,13 +1067,13 @@ export default {
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     'Aguardando autenticação... (Pressione ESC ou CTRL+C para cancelar)',
   'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
-    'Chave de API ausente para autenticação compatível com OpenAI. Defina settings.security.auth.apiKey ou a variável de ambiente {{envKeyHint}}.',
+    'API Key ausente para autenticação compatível com OpenAI. Defina settings.security.auth.apiKey ou a variável de ambiente {{envKeyHint}}.',
   '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
     'Variável de ambiente {{envKeyHint}} não encontrada. Defina-a no seu arquivo .env ou variáveis de ambiente.',
   '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
     'Variável de ambiente {{envKeyHint}} não encontrada (ou defina settings.security.auth.apiKey). Defina-a no seu arquivo .env ou variáveis de ambiente.',
   'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
-    'Chave de API ausente para autenticação compatível com OpenAI. Defina a variável de ambiente {{envKeyHint}}.',
+    'API Key ausente para autenticação compatível com OpenAI. Defina a variável de ambiente {{envKeyHint}}.',
   'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
     'Provedor Anthropic sem a baseUrl necessária em modelProviders[].baseUrl.',
   'ANTHROPIC_BASE_URL environment variable not found.':
@@ -1090,7 +1090,7 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': 'Selecionar Modelo',
-  'API Key': 'Chave da API',
+  'API Key': 'API Key',
   '(default)': '(padrão)',
   '(not set)': '(não definido)',
   Modality: 'Modalidade',
@@ -1109,7 +1109,7 @@ export default {
   // ============================================================================
   'Manage folder trust settings':
     'Gerenciar configurações de confiança de pasta',
-  'Manage permission rules': 'Gerenciar regras de permissão',
+  'Manage permission rules': 'Gerenciar permission rules',
   Allow: 'Permitir',
   Ask: 'Perguntar',
   Deny: 'Negar',
@@ -1133,19 +1133,19 @@ export default {
   'User settings': 'Configurações do usuário',
   'Saved in at ~/.qwen/settings.json': 'Salvo em ~/.qwen/settings.json',
   'Add a new rule…': 'Adicionar nova regra…',
-  'Add {{type}} permission rule': 'Adicionar regra de permissão {{type}}',
+  'Add {{type}} permission rule': 'Adicionar {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
-    'Regras de permissão são um nome de ferramenta, opcionalmente seguido por um especificador entre parênteses.',
+    'permission rules são um nome de ferramenta, opcionalmente seguido por um especificador entre parênteses.',
   'e.g.,': 'ex.',
   or: 'ou',
-  'Enter permission rule…': 'Insira a regra de permissão…',
+  'Enter permission rule…': 'Insira permission rule…',
   'Enter to submit · Esc to cancel': 'Enter para enviar · Esc para cancelar',
   'Where should this rule be saved?': 'Onde esta regra deve ser salva?',
   'Enter to confirm · Esc to cancel':
     'Enter para confirmar · Esc para cancelar',
   'Delete {{type}} rule?': 'Excluir regra {{type}}?',
   'Are you sure you want to delete this permission rule?':
-    'Tem certeza de que deseja excluir esta regra de permissão?',
+    'Tem certeza de que deseja excluir esta permission rule?',
   'Permissions:': 'Permissões:',
   '(←/→ or tab to cycle)': '(←/→ ou Tab para alternar)',
   'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
@@ -1183,8 +1183,8 @@ export default {
   '(ctrl+g to view)': '(ctrl+g para ver)',
   '{{count}} {{name}} file': '{{count}} arquivo {{name}}',
   '{{count}} {{name}} files': '{{count}} arquivos {{name}}',
-  '{{count}} MCP server': '{{count}} servidor MCP',
-  '{{count}} MCP servers': '{{count}} servidores MCP',
+  '{{count}} MCP server': '{{count}} MCP server',
+  '{{count}} MCP servers': '{{count}} MCP servers',
   '{{count}} Blocked': '{{count}} Bloqueados',
   '(ctrl+t to view)': '(ctrl+t para ver)',
   '(ctrl+t to toggle)': '(ctrl+t para alternar)',
@@ -1197,12 +1197,12 @@ export default {
   // ============================================================================
   // MCP Status
   // ============================================================================
-  'No MCP servers configured.': 'Nenhum servidor MCP configurado.',
+  'No MCP servers configured.': 'Nenhum MCP servers configurado.',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ Servidores MCP estão iniciando ({{count}} inicializando)...',
+    '⏳ MCP servers estão iniciando ({{count}} inicializando)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Nota: A primeira inicialização pode demorar mais. A disponibilidade da ferramenta será atualizada automaticamente.',
-  'Configured MCP servers:': 'Servidores MCP configurados:',
+  'Configured MCP servers:': 'MCP servers configurados:',
   Ready: 'Pronto',
   'Starting... (first startup may take longer)':
     'Iniciando... (a primeira inicialização pode demorar mais)',
@@ -1225,8 +1225,7 @@ export default {
   '💡 Tips:': '💡 Dicas:',
   'to show server and tool descriptions':
     'para mostrar descrições de servidores e ferramentas',
-  'to show tool parameter schemas':
-    'para mostrar esquemas de parâmetros de ferramentas',
+  'to show tool parameter schemas': 'para mostrar tool parameter schemas',
   'to hide descriptions': 'para ocultar descrições',
   'to authenticate with OAuth-enabled servers':
     'para autenticar com servidores habilitados para OAuth',
@@ -1234,7 +1233,7 @@ export default {
   'to toggle tool descriptions on/off':
     'para alternar descrições de ferramentas ligadas/desligadas',
   "Starting OAuth authentication for MCP server '{{name}}'...":
-    "Iniciando autenticação OAuth para servidor MCP '{{name}}'...",
+    "Iniciando autenticação OAuth para MCP server '{{name}}'...",
   // ============================================================================
   // Startup Tips
   // ============================================================================
@@ -1532,16 +1531,16 @@ export default {
   // Custom API Key Configuration
   // ============================================================================
   'You can configure your API key and models in settings.json':
-    'Você pode configurar sua chave de API e modelos em settings.json',
+    'Você pode configurar sua API Key e modelos em settings.json',
   'Refer to the documentation for setup instructions':
     'Consulte a documentação para instruções de configuração',
 
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'API key cannot be empty.': 'A chave de API não pode estar vazia.',
+  'API key cannot be empty.': 'A API Key não pode estar vazia.',
   'You can get your Coding Plan API key here':
-    'Você pode obter sua chave de API do Coding Plan aqui',
+    'Você pode obter sua API Key do Coding Plan aqui',
   'Failed to update Coding Plan configuration: {{message}}':
     'Falha ao atualizar a configuração do Coding Plan: {{message}}',
 
@@ -1553,7 +1552,7 @@ export default {
   'Select Region for Coding Plan': 'Selecionar região do Coding Plan',
   'Choose based on where your account is registered':
     'Escolha com base em onde sua conta está registrada',
-  'Enter Coding Plan API Key': 'Inserir chave de API do Coding Plan',
+  'Enter Coding Plan API Key': 'Inserir API Key do Coding Plan',
 
   // ============================================================================
   // Coding Plan International Updates
@@ -1581,7 +1580,7 @@ export default {
   'Usage by category': 'Uso por categoria',
   'System prompt': 'Prompt do sistema',
   'Built-in tools': 'Ferramentas integradas',
-  'MCP tools': 'Ferramentas MCP',
+  'MCP tools': 'MCP tools',
   'Memory files': 'Arquivos de memória',
   Skills: 'Habilidades',
   Messages: 'Mensagens',
@@ -1593,7 +1592,7 @@ export default {
   '{{region}} configuration updated successfully.':
     'Configuração do {{region}} atualizada com sucesso.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
-    'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json.',
+    'Autenticado com sucesso com {{region}}. API Key e configurações de modelo salvas em settings.json.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Dica: Use /model para alternar entre os modelos disponíveis do Coding Plan.',
   'Type something...': 'Digite algo...',
@@ -1612,7 +1611,7 @@ export default {
     'Autenticar usando Alibaba Cloud Coding Plan',
   'Region for Coding Plan (china/global)':
     'Região para Coding Plan (china/global)',
-  'API key for Coding Plan': 'Chave de API para Coding Plan',
+  'API key for Coding Plan': 'API Key para Coding Plan',
   'Show current authentication status': 'Mostrar status atual de autenticação',
   'Authentication completed successfully.':
     'Autenticação concluída com sucesso.',
@@ -1632,8 +1631,7 @@ export default {
   Global: 'Global',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Selecione a região para Coding Plan:',
-  'Enter your Coding Plan API key: ':
-    'Insira sua chave de API do Coding Plan: ',
+  'Enter your Coding Plan API key: ': 'Insira sua API Key do Coding Plan: ',
   'Select authentication method:': 'Selecione o método de autenticação:',
   '\n=== Authentication Status ===\n': '\n=== Status de Autenticação ===\n',
   '⚠️  No authentication method configured.\n':
@@ -1657,11 +1655,11 @@ export default {
   '  Region: {{region}}': '  Região: {{region}}',
   '  Current Model: {{model}}': '  Modelo atual: {{model}}',
   '  Config Version: {{version}}': '  Versão da configuração: {{version}}',
-  '  Status: API key configured\n': '  Status: Chave de API configurada\n',
+  '  Status: API key configured\n': '  Status: API Key configurada\n',
   '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
     '⚠️  Método de autenticação: Alibaba Cloud Coding Plan (Incompleto)',
   '  Issue: API key not found in environment or settings\n':
-    '  Problema: Chave de API não encontrada no ambiente ou configurações\n',
+    '  Problema: API Key não encontrada no ambiente ou configurações\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
     '  Execute `qwen auth coding-plan` para reconfigurar.\n',
   '✓ Authentication Method: {{type}}': '✓ Método de autenticação: {{type}}',
@@ -1715,7 +1713,7 @@ export default {
   'Extension "{{name}}" updated successfully.':
     'Extensão "{{name}}" atualizada com sucesso.',
   'Name:': 'Nome:',
-  'MCP Servers:': 'Servidores MCP:',
+  'MCP Servers:': 'MCP Servers:',
   'Settings:': 'Configurações:',
   'View Details': 'Ver detalhes',
   'Update failed:': 'Falha na atualização:',
@@ -1812,7 +1810,7 @@ export default {
   '← → select, Delete to remove, ↓ to exit':
     '← → selecionar, Delete para remover, ↓ para sair',
   'Attachments: ': 'Anexos: ',
-  '(tab to cycle)': '(tab para alternar)',
+  '(tab to cycle)': '(Tab para alternar)',
   'Updating...': 'Atualizando...',
   Unknown: 'Desconhecido',
   Error: 'Erro',
@@ -1829,7 +1827,7 @@ export default {
   'Context files:': 'Arquivos de contexto:',
   'Skills:': 'Habilidades:',
   'Agents:': 'Agentes:',
-  'MCP servers:': 'Servidores MCP:',
+  'MCP servers:': 'MCP servers:',
   'Press c to copy the authorization URL to your clipboard.':
     'Pressione c para copiar a URL de autorização para a área de transferência.',
   'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
@@ -1844,7 +1842,13 @@ export default {
   'No failed request to retry.': 'Nenhuma solicitação com falha para repetir.',
   'to retry last request': 'para repetir a última solicitação',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
-    'Chave de API inválida. As chaves de API do Coding Plan começam com "sk-sp-". Verifique.',
+    'API Key inválida. As API Keys do Coding Plan começam com "sk-sp-". Verifique.',
+  'Lock release warning': 'Aviso de liberação de bloqueio',
+  'Metadata write warning': 'Aviso de gravação de metadados',
+  "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
+    'Dreams posteriores podem ser ignorados como bloqueados até que a próxima varredura de sessões obsoletas limpe o arquivo.',
+  "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
+    'O gate do agendador não viu o timestamp deste dream; o próximo ciclo de dream pode disparar novamente antes do normal.',
   // === Same-as-English optimization ===
   '(workspace)': '(espaço de trabalho)',
   'Ref:': 'Referência:',

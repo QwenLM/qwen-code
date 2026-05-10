@@ -12,7 +12,7 @@ export default {
   // ============================================================================
   '↑ to manage attachments': '↑ pour gérer les pièces jointes',
   '← → select, Delete to remove, ↓ to exit':
-    '← → sélectionner, Suppr pour retirer, ↓ pour quitter',
+    '← → sélectionner, Delete pour retirer, ↓ pour quitter',
   'Attachments: ': 'Pièces jointes : ',
   'Basics:': 'Bases :',
   'Add context': 'Ajouter du contexte',
@@ -25,8 +25,8 @@ export default {
   'plan mode': 'mode plan',
   'auto-accept edits': 'acceptation automatique des modifications',
   'Accepting edits': 'Acceptation des modifications',
-  '(shift + tab to cycle)': '(maj + tab pour cycler)',
-  '(tab to cycle)': '(tab pour cycler)',
+  '(shift + tab to cycle)': '(Shift + Tab pour cycler)',
+  '(tab to cycle)': '(Tab pour cycler)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Exécutez des commandes shell via {{symbol}} (ex. {{example1}}) ou utilisez le langage naturel (ex. {{example2}}).',
   '!': '!',
@@ -60,18 +60,18 @@ export default {
     "Fermer les boîtes de dialogue, annuler les requêtes ou quitter l'application",
   'New line': 'Nouvelle ligne',
   'New line (Alt+Enter works for certain linux distros)':
-    'Nouvelle ligne (Alt+Entrée fonctionne sur certaines distributions Linux)',
+    'Nouvelle ligne (Alt+Enter fonctionne sur certaines distributions Linux)',
   'Clear the screen': "Effacer l'écran",
   'Open input in external editor': "Ouvrir l'entrée dans un éditeur externe",
   'Send message': 'Envoyer le message',
   'Initializing...': 'Initialisation...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
-    'Connexion aux serveurs MCP... ({{connected}}/{{total}})',
+    'Connexion aux MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file':
     'Tapez votre message ou @chemin/vers/fichier',
   '? for shortcuts': '? pour les raccourcis',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
-    "Appuyez sur 'i' pour le mode INSERTION et 'Échap' pour le mode NORMAL.",
+    "Appuyez sur 'i' pour le mode INSERTION et 'Esc' pour le mode NORMAL.",
   'Cancel operation / Clear input (double press)':
     "Annuler l'opération / Effacer l'entrée (double appui)",
   'Cycle approval modes': "Cycler les modes d'approbation",
@@ -94,7 +94,7 @@ export default {
   'Fast Model': 'Modèle rapide',
   Sandbox: 'Bac à sable',
   'Session ID': 'ID de session',
-  'Base URL': 'URL de base',
+  'Base URL': 'Base URL',
   Proxy: 'Proxy',
   'Memory Usage': 'Utilisation mémoire',
   'IDE Client': 'Client IDE',
@@ -134,9 +134,9 @@ export default {
   'Select Theme': 'Sélectionner un thème',
   Preview: 'Aperçu',
   '(Use Enter to select, Tab to configure scope)':
-    '(Utilisez Entrée pour sélectionner, Tab pour configurer la portée)',
+    '(Utilisez Enter pour sélectionner, Tab pour configurer la portée)',
   '(Use Enter to apply scope, Tab to go back)':
-    '(Utilisez Entrée pour appliquer la portée, Tab pour revenir)',
+    '(Utilisez Enter pour appliquer la portée, Tab pour revenir)',
   'Theme configuration unavailable due to NO_COLOR env variable.':
     "Configuration du thème indisponible en raison de la variable d'environnement NO_COLOR.",
   'Theme "{{themeName}}" not found.': 'Thème "{{themeName}}" introuvable.',
@@ -174,16 +174,14 @@ export default {
   'Edit Color: {{name}}': 'Modifier la couleur : {{name}}',
   'Delete {{name}}': 'Supprimer {{name}}',
   'Unknown Step': 'Étape inconnue',
-  'Esc to close': 'Échap pour fermer',
+  'Esc to close': 'Esc pour fermer',
   'Enter to select, ↑↓ to navigate, Esc to close':
-    'Entrée pour sélectionner, ↑↓ pour naviguer, Échap pour fermer',
-  'Esc to go back': 'Échap pour revenir',
-  'Enter to confirm, Esc to cancel':
-    'Entrée pour confirmer, Échap pour annuler',
+    'Enter pour sélectionner, ↑↓ pour naviguer, Esc pour fermer',
+  'Esc to go back': 'Esc pour revenir',
+  'Enter to confirm, Esc to cancel': 'Enter pour confirmer, Esc pour annuler',
   'Enter to select, ↑↓ to navigate, Esc to go back':
-    'Entrée pour sélectionner, ↑↓ pour naviguer, Échap pour revenir',
-  'Enter to submit, Esc to go back':
-    'Entrée pour soumettre, Échap pour revenir',
+    'Enter pour sélectionner, ↑↓ pour naviguer, Esc pour revenir',
+  'Enter to submit, Esc to go back': 'Enter pour soumettre, Esc pour revenir',
   'Invalid step: {{step}}': 'Étape invalide : {{step}}',
   'No subagents found.': 'Aucun sous-agent trouvé.',
   "Use '/agents create' to create your first subagent.":
@@ -263,7 +261,7 @@ export default {
   'Read & Edit Tools': 'Outils lecture et édition',
   'Read & Edit & Execution Tools': 'Outils lecture, édition et exécution',
   'All tools selected, including MCP tools':
-    'Tous les outils sélectionnés, y compris les outils MCP',
+    'Tous les outils sélectionnés, y compris les MCP tools',
   'Selected tools:': 'Outils sélectionnés :',
   'Read-only tools:': 'Outils en lecture seule :',
   'Edit tools:': "Outils d'édition :",
@@ -271,11 +269,11 @@ export default {
   'Step {{n}}: Choose Background Color':
     "Étape {{n}} : Choisir la couleur d'arrière-plan",
   'Step {{n}}: Confirm and Save': 'Étape {{n}} : Confirmer et enregistrer',
-  'Esc to cancel': 'Échap pour annuler',
+  'Esc to cancel': 'Esc pour annuler',
   'Press Enter to save, e to save and edit, Esc to go back':
-    'Appuyez sur Entrée pour enregistrer, e pour enregistrer et modifier, Échap pour revenir',
+    'Appuyez sur Enter pour enregistrer, e pour enregistrer et modifier, Esc pour revenir',
   'Press Enter to continue, {{navigation}}Esc to {{action}}':
-    'Appuyez sur Entrée pour continuer, {{navigation}}Échap pour {{action}}',
+    'Appuyez sur Enter pour continuer, {{navigation}}Esc pour {{action}}',
   cancel: 'annuler',
   'go back': 'revenir',
   '↑↓ to navigate, ': '↑↓ pour naviguer, ',
@@ -324,7 +322,7 @@ export default {
   'Extension "{{name}}" updated successfully.':
     'Extension "{{name}}" mise à jour avec succès.',
   'Name:': 'Nom :',
-  'MCP Servers:': 'Serveurs MCP :',
+  'MCP Servers:': 'MCP Servers :',
   'Settings:': 'Paramètres :',
   active: 'actif',
   disabled: 'désactivé',
@@ -409,7 +407,7 @@ export default {
     'Seuil de troncature de sortie des outils',
   'Tool Output Truncation Lines': 'Lignes de troncature de sortie des outils',
   'Folder Trust': 'Confiance des dossiers',
-  'Tool Schema Compliance': 'Conformité au schéma des outils',
+  'Tool Schema Compliance': 'Conformité Tool Schema',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
   'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
   Text: 'Texte',
@@ -463,7 +461,7 @@ export default {
   '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
     "**Les extensions peuvent introduire des comportements inattendus. Assurez-vous d'avoir examiné la source de l'extension et de faire confiance à l'auteur.**",
   'This extension will run the following MCP servers:':
-    'Cette extension exécutera les serveurs MCP suivants :',
+    'Cette extension exécutera les MCP servers suivants :',
   local: 'local',
   remote: 'distant',
   'This extension will add the following commands: {{commands}}.':
@@ -539,7 +537,7 @@ export default {
   'Context files:': 'Fichiers de contexte :',
   'Skills:': 'Compétences :',
   'Agents:': 'Agents :',
-  'MCP servers:': 'Serveurs MCP :',
+  'MCP servers:': 'MCP servers :',
   'Link extension failed to install.':
     "Échec de l'installation de l'extension liée.",
   'Extension "{{name}}" linked successfully and enabled.':
@@ -579,7 +577,7 @@ export default {
   'Plugin selection cancelled.': 'Sélection de plugin annulée.',
   'Select a plugin from "{{name}}"': 'Sélectionner un plugin depuis "{{name}}"',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
-    'Utilisez ↑↓ ou j/k pour naviguer, Entrée pour sélectionner, Échap pour annuler',
+    'Utilisez ↑↓ ou j/k pour naviguer, Enter pour sélectionner, Escape pour annuler',
   '{{count}} more above': '{{count}} de plus au-dessus',
   '{{count}} more below': '{{count}} de plus en dessous',
   'manage IDE integration': "gérer l'intégration IDE",
@@ -605,21 +603,21 @@ export default {
   'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
     "Échec de l'analyse de {{terminalName}} keybindings.json. Le fichier contient du JSON invalide. Veuillez corriger le fichier manuellement ou le supprimer pour permettre la configuration automatique.",
   'Error: {{error}}': 'Erreur : {{error}}',
-  'Shift+Enter binding already exists': 'Le raccourci Maj+Entrée existe déjà',
-  'Ctrl+Enter binding already exists': 'Le raccourci Ctrl+Entrée existe déjà',
+  'Shift+Enter binding already exists': 'Le raccourci Shift+Enter existe déjà',
+  'Ctrl+Enter binding already exists': 'Le raccourci Ctrl+Enter existe déjà',
   'Existing keybindings detected. Will not modify to avoid conflicts.':
     'Raccourcis existants détectés. Aucune modification pour éviter les conflits.',
   'Please check and modify manually if needed: {{file}}':
     'Veuillez vérifier et modifier manuellement si nécessaire : {{file}}',
   'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.':
-    'Raccourcis Maj+Entrée et Ctrl+Entrée ajoutés à {{terminalName}}.',
+    'Raccourcis Shift+Enter et Ctrl+Enter ajoutés à {{terminalName}}.',
   'Modified: {{file}}': 'Modifié : {{file}}',
   '{{terminalName}} keybindings already configured.':
     'Raccourcis {{terminalName}} déjà configurés.',
   'Failed to configure {{terminalName}}.':
     'Échec de la configuration de {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
-    'Votre terminal est déjà configuré pour une expérience optimale avec la saisie multiligne (Maj+Entrée et Ctrl+Entrée).',
+    'Votre terminal est déjà configuré pour une expérience optimale avec la saisie multiligne (Shift+Enter et Ctrl+Enter).',
 
   // ============================================================================
   // Commandes - Hooks
@@ -629,11 +627,11 @@ export default {
   Hooks: 'Hooks',
   'Loading hooks...': 'Chargement des hooks...',
   'Error loading hooks:': 'Erreur lors du chargement des hooks :',
-  'Press Escape to close': 'Appuyez sur Échap pour fermer',
+  'Press Escape to close': 'Appuyez sur Escape pour fermer',
   'Press Escape, Ctrl+C, or Ctrl+D to cancel':
-    'Appuyez sur Échap, Ctrl+C ou Ctrl+D pour annuler',
+    'Appuyez sur Escape, Ctrl+C ou Ctrl+D pour annuler',
   'Press Space, Enter, or Escape to dismiss':
-    'Appuyez sur Espace, Entrée ou Échap pour ignorer',
+    'Appuyez sur Space, Enter ou Escape pour ignorer',
   'No hook selected': 'Aucun hook sélectionné',
   'No hook events found.': 'Aucun événement de hook trouvé.',
   '{{count}} hook configured': '{{count}} hook configuré',
@@ -641,7 +639,7 @@ export default {
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Ce menu est en lecture seule. Pour ajouter ou modifier des hooks, éditez settings.json directement ou demandez à Qwen Code.',
   'Enter to select · Esc to cancel':
-    'Entrée pour sélectionner · Échap pour annuler',
+    'Enter pour sélectionner · Esc pour annuler',
   'Exit codes:': 'Codes de sortie :',
   'Configured hooks:': 'Hooks configurés :',
   'No hooks configured for this event.':
@@ -649,7 +647,7 @@ export default {
   'To add hooks, edit settings.json directly or ask Qwen.':
     'Pour ajouter des hooks, éditez settings.json directement ou demandez à Qwen.',
   'Enter to select · Esc to go back':
-    'Entrée pour sélectionner · Échap pour revenir',
+    'Enter pour sélectionner · Esc pour revenir',
   'Hook details': 'Détails du hook',
   'Event:': 'Événement :',
   'Extension:': 'Extension :',
@@ -845,19 +843,19 @@ export default {
   // ============================================================================
   // Boîte de dialogue de gestion MCP
   // ============================================================================
-  'Manage MCP servers': 'Gérer les serveurs MCP',
+  'Manage MCP servers': 'Gérer les MCP servers',
   'Server Detail': 'Détail du serveur',
   Tools: 'Outils',
   'Tool Detail': "Détail de l'outil",
   'Loading...': 'Chargement...',
   'Unknown step': 'Étape inconnue',
-  'Esc to back': 'Échap pour revenir',
+  'Esc to back': 'Esc pour revenir',
   '↑↓ to navigate · Enter to select · Esc to close':
-    '↑↓ pour naviguer · Entrée pour sélectionner · Échap pour fermer',
+    '↑↓ pour naviguer · Enter pour sélectionner · Esc pour fermer',
   '↑↓ to navigate · Enter to select · Esc to back':
-    '↑↓ pour naviguer · Entrée pour sélectionner · Échap pour revenir',
+    '↑↓ pour naviguer · Enter pour sélectionner · Esc pour revenir',
   '↑↓ to navigate · Enter to confirm · Esc to back':
-    '↑↓ pour naviguer · Entrée pour confirmer · Échap pour revenir',
+    '↑↓ pour naviguer · Enter pour confirmer · Esc pour revenir',
   'User Settings (global)': 'Paramètres utilisateur (global)',
   'Workspace Settings (project-specific)':
     'Paramètres espace de travail (spécifique au projet)',
@@ -865,7 +863,7 @@ export default {
   'Select where to add the server to the exclude list:':
     "Sélectionnez où ajouter le serveur à la liste d'exclusion :",
   'Press Enter to confirm, Esc to cancel':
-    'Appuyez sur Entrée pour confirmer, Échap pour annuler',
+    'Appuyez sur Enter pour confirmer, Esc pour annuler',
   'View tools': 'Voir les outils',
   Reconnect: 'Reconnecter',
   Enable: 'Activer',
@@ -890,7 +888,7 @@ export default {
   server: 'serveur',
   servers: 'serveurs',
   'Add MCP servers to your settings to get started.':
-    'Ajoutez des serveurs MCP à vos paramètres pour commencer.',
+    'Ajoutez des MCP servers à vos paramètres pour commencer.',
   'Run qwen --debug to see error logs':
     "Exécutez qwen --debug pour voir les journaux d'erreurs",
   'OAuth Authentication': 'Authentification OAuth',
@@ -1044,10 +1042,10 @@ export default {
     'Oui, et approuver manuellement les modifications',
   'No, keep planning (esc)': 'Non, continuer la planification (échap)',
   'URLs to fetch:': 'URLs à récupérer :',
-  'MCP Server: {{server}}': 'Serveur MCP : {{server}}',
+  'MCP Server: {{server}}': 'MCP Server : {{server}}',
   'Tool: {{tool}}': 'Outil : {{tool}}',
   'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
-    'Autoriser l\'exécution de l\'outil MCP "{{tool}}" depuis le serveur "{{server}}" ?',
+    'Autoriser l\'exécution de MCP tool "{{tool}}" depuis MCP server "{{server}}" ?',
   // ============================================================================
   // Boîtes de dialogue - Confirmation shell
   // ============================================================================
@@ -1086,8 +1084,8 @@ export default {
     '\n⚠ Le niveau gratuit Qwen OAuth a été abandonné le 2026-04-15. Veuillez sélectionner une autre option.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     "Payant · Jusqu'à 6 000 requêtes/5h · Tous les modèles Alibaba Cloud Coding Plan",
-  'Alibaba Cloud Coding Plan': 'Plan de codage Alibaba Cloud',
-  'Bring your own API key': 'Apportez votre propre clé API',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': 'Apportez votre propre API Key',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Authentification basée sur le navigateur avec des fournisseurs tiers (par exemple OpenRouter, ModelScope)',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
@@ -1109,13 +1107,13 @@ export default {
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     "En attente d'authentification... (Appuyez sur ÉCHAP ou CTRL+C pour annuler)",
   'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
-    "Clé API manquante pour l'authentification compatible OpenAI. Définissez settings.security.auth.apiKey ou la variable d'environnement {{envKeyHint}}.",
+    "API Key manquante pour l'authentification compatible OpenAI. Définissez settings.security.auth.apiKey ou la variable d'environnement {{envKeyHint}}.",
   '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
     "Variable d'environnement {{envKeyHint}} introuvable. Veuillez la définir dans votre fichier .env ou les variables d'environnement.",
   '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
     "Variable d'environnement {{envKeyHint}} introuvable (ou définissez settings.security.auth.apiKey). Veuillez la définir dans votre fichier .env ou les variables d'environnement.",
   'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
-    "Clé API manquante pour l'authentification compatible OpenAI. Définissez la variable d'environnement {{envKeyHint}}.",
+    "API Key manquante pour l'authentification compatible OpenAI. Définissez la variable d'environnement {{envKeyHint}}.",
   'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
     'Le fournisseur Anthropic manque le baseUrl requis dans modelProviders[].baseUrl.',
   'ANTHROPIC_BASE_URL environment variable not found.':
@@ -1132,7 +1130,7 @@ export default {
   // Boîtes de dialogue - Modèle
   // ============================================================================
   'Select Model': 'Sélectionner un modèle',
-  'API Key': 'Clé API',
+  'API Key': 'API Key',
   '(default)': '(par défaut)',
   '(not set)': '(non défini)',
   Modality: 'Modalité',
@@ -1151,7 +1149,7 @@ export default {
   // ============================================================================
   'Manage folder trust settings':
     'Gérer les paramètres de confiance des dossiers',
-  'Manage permission rules': 'Gérer les règles de permission',
+  'Manage permission rules': 'Gérer les permission rules',
   Allow: 'Autoriser',
   Ask: 'Demander',
   Deny: 'Refuser',
@@ -1175,25 +1173,23 @@ export default {
   'User settings': 'Paramètres utilisateur',
   'Saved in at ~/.qwen/settings.json': 'Enregistré dans ~/.qwen/settings.json',
   'Add a new rule…': 'Ajouter une nouvelle règle…',
-  'Add {{type}} permission rule': 'Ajouter une règle de permission {{type}}',
+  'Add {{type}} permission rule': 'Ajouter {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
-    "Les règles de permission sont un nom d'outil, suivi optionnellement d'un spécificateur entre parenthèses.",
+    "Les permission rules sont un nom d'outil, suivi optionnellement d'un spécificateur entre parenthèses.",
   'e.g.,': 'ex.,',
   or: 'ou',
-  'Enter permission rule…': 'Entrer une règle de permission…',
-  'Enter to submit · Esc to cancel':
-    'Entrée pour soumettre · Échap pour annuler',
+  'Enter permission rule…': 'Entrer une permission rule…',
+  'Enter to submit · Esc to cancel': 'Enter pour soumettre · Esc pour annuler',
   'Where should this rule be saved?':
     'Où cette règle doit-elle être enregistrée ?',
-  'Enter to confirm · Esc to cancel':
-    'Entrée pour confirmer · Échap pour annuler',
+  'Enter to confirm · Esc to cancel': 'Enter pour confirmer · Esc pour annuler',
   'Delete {{type}} rule?': 'Supprimer la règle {{type}} ?',
   'Are you sure you want to delete this permission rule?':
-    'Êtes-vous sûr de vouloir supprimer cette règle de permission ?',
+    'Êtes-vous sûr de vouloir supprimer cette permission rule ?',
   'Permissions:': 'Permissions :',
-  '(←/→ or tab to cycle)': '(←/→ ou tab pour cycler)',
+  '(←/→ or tab to cycle)': '(←/→ ou Tab pour cycler)',
   'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
-    'Appuyez sur ↑↓ pour naviguer · Entrée pour sélectionner · Tapez pour rechercher · Échap pour annuler',
+    'Appuyez sur ↑↓ pour naviguer · Enter pour sélectionner · Tapez pour rechercher · Esc pour annuler',
   'Search…': 'Rechercher…',
   'Add directory…': 'Ajouter un répertoire…',
   'Add directory to workspace': "Ajouter un répertoire à l'espace de travail",
@@ -1204,7 +1200,7 @@ export default {
   'Enter the path to the directory:': 'Entrez le chemin vers le répertoire :',
   'Enter directory path…': 'Entrez le chemin du répertoire…',
   'Tab to complete · Enter to add · Esc to cancel':
-    'Tab pour compléter · Entrée pour ajouter · Échap pour annuler',
+    'Tab pour compléter · Enter pour ajouter · Esc pour annuler',
   'Remove directory?': 'Supprimer le répertoire ?',
   'Are you sure you want to remove this directory from the workspace?':
     "Êtes-vous sûr de vouloir supprimer ce répertoire de l'espace de travail ?",
@@ -1226,24 +1222,24 @@ export default {
   '(ctrl+g to view)': '(ctrl+g pour afficher)',
   '{{count}} {{name}} file': '{{count}} fichier {{name}}',
   '{{count}} {{name}} files': '{{count}} fichiers {{name}}',
-  '{{count}} MCP server': '{{count}} serveur MCP',
-  '{{count}} MCP servers': '{{count}} serveurs MCP',
+  '{{count}} MCP server': '{{count}} MCP server',
+  '{{count}} MCP servers': '{{count}} MCP servers',
   '{{count}} Blocked': '{{count}} bloqué(s)',
   '(ctrl+t to view)': '(ctrl+t pour afficher)',
   '(ctrl+t to toggle)': '(ctrl+t pour basculer)',
   'Press Ctrl+C again to exit.': 'Appuyez à nouveau sur Ctrl+C pour quitter.',
   'Press Ctrl+D again to exit.': 'Appuyez à nouveau sur Ctrl+D pour quitter.',
-  'Press Esc again to clear.': 'Appuyez à nouveau sur Échap pour effacer.',
+  'Press Esc again to clear.': 'Appuyez à nouveau sur Esc pour effacer.',
 
   // ============================================================================
   // Statut MCP
   // ============================================================================
-  'No MCP servers configured.': 'Aucun serveur MCP configuré.',
+  'No MCP servers configured.': 'Aucun MCP servers configuré.',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ Les serveurs MCP démarrent ({{count}} en initialisation)...',
+    '⏳ Les MCP servers démarrent ({{count}} en initialisation)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Remarque : Le premier démarrage peut prendre plus de temps. La disponibilité des outils se mettra à jour automatiquement.',
-  'Configured MCP servers:': 'Serveurs MCP configurés :',
+  'Configured MCP servers:': 'MCP servers configurés :',
   Ready: 'Prêt',
   'Starting... (first startup may take longer)':
     'Démarrage... (le premier démarrage peut prendre plus de temps)',
@@ -1267,8 +1263,7 @@ export default {
   Use: 'Utilisez',
   'to show server and tool descriptions':
     'pour afficher les descriptions des serveurs et des outils',
-  'to show tool parameter schemas':
-    'pour afficher les schémas de paramètres des outils',
+  'to show tool parameter schemas': 'pour afficher les tool parameter schemas',
   'to hide descriptions': 'pour masquer les descriptions',
   'to authenticate with OAuth-enabled servers':
     'pour authentifier avec des serveurs compatibles OAuth',
@@ -1276,7 +1271,7 @@ export default {
   'to toggle tool descriptions on/off':
     'pour activer/désactiver les descriptions des outils',
   "Starting OAuth authentication for MCP server '{{name}}'...":
-    "Démarrage de l'authentification OAuth pour le serveur MCP '{{name}}'...",
+    "Démarrage de l'authentification OAuth pour MCP server '{{name}}'...",
   // ============================================================================
   // Conseils de démarrage
   // ============================================================================
@@ -1296,7 +1291,7 @@ export default {
   'You can resume a previous conversation by running qwen --continue or qwen --resume.':
     'Vous pouvez reprendre une conversation précédente en exécutant qwen --continue ou qwen --resume.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
-    'Vous pouvez changer rapidement le mode de permission avec Maj+Tab ou /approval-mode.',
+    'Vous pouvez changer rapidement le mode de permission avec Shift+Tab ou /approval-mode.',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'Vous pouvez changer rapidement le mode de permission avec Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
@@ -1517,7 +1512,7 @@ export default {
   'Enter value...': 'Entrer une valeur...',
   'Enter sensitive value...': 'Entrer une valeur sensible...',
   'Press Enter to submit, Escape to cancel':
-    'Appuyez sur Entrée pour soumettre, Échap pour annuler',
+    'Appuyez sur Enter pour soumettre, Escape pour annuler',
 
   // ============================================================================
   // Outil de migration de commandes
@@ -1573,9 +1568,9 @@ export default {
   // ============================================================================
   // Authentification du plan de codage
   // ============================================================================
-  'API key cannot be empty.': 'La clé API ne peut pas être vide.',
+  'API key cannot be empty.': "L'API Key ne peut pas être vide.",
   'You can get your Coding Plan API key here':
-    'Vous pouvez obtenir votre clé API Coding Plan ici',
+    'Vous pouvez obtenir votre Coding Plan API Key ici',
   'Failed to update Coding Plan configuration: {{message}}':
     'Échec de la mise à jour de la configuration Coding Plan : {{message}}',
 
@@ -1583,19 +1578,19 @@ export default {
   // Configuration de clé API personnalisée
   // ============================================================================
   'You can configure your API key and models in settings.json':
-    'Vous pouvez configurer votre clé API et vos modèles dans settings.json',
+    'Vous pouvez configurer votre API Key et vos modèles dans settings.json',
   'Refer to the documentation for setup instructions':
     'Consultez la documentation pour les instructions de configuration',
 
   // ============================================================================
   // Boîte de dialogue Auth - Titres et étiquettes
   // ============================================================================
-  'Coding Plan': 'Plan de codage',
+  'Coding Plan': 'Coding Plan',
   Custom: 'Personnalisé',
   'Select Region for Coding Plan': 'Sélectionner la région pour Coding Plan',
   'Choose based on where your account is registered':
     "Choisissez en fonction de l'endroit où votre compte est enregistré",
-  'Enter Coding Plan API Key': 'Entrer la clé API Coding Plan',
+  'Enter Coding Plan API Key': 'Entrer la Coding Plan API Key',
 
   // ============================================================================
   // Mises à jour internationales Coding Plan
@@ -1619,7 +1614,7 @@ export default {
   'Usage by category': 'Utilisation par catégorie',
   'System prompt': 'Invite système',
   'Built-in tools': 'Outils intégrés',
-  'MCP tools': 'Outils MCP',
+  'MCP tools': 'MCP tools',
   'Memory files': 'Fichiers mémoire',
   Skills: 'Compétences',
   Messages: 'Messages',
@@ -1630,7 +1625,7 @@ export default {
   '{{region}} configuration updated successfully.':
     'Configuration {{region}} mise à jour avec succès.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
-    'Authentification réussie avec {{region}}. Clé API et configurations de modèle enregistrées dans settings.json.',
+    'Authentification réussie avec {{region}}. API Key et configurations de modèle enregistrées dans settings.json.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Conseil : Utilisez /model pour basculer entre les modèles Coding Plan disponibles.',
   'Type something...': 'Tapez quelque chose...',
@@ -1641,15 +1636,15 @@ export default {
   '(not answered)': '(sans réponse)',
   'Ready to submit your answers?': 'Prêt à soumettre vos réponses ?',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
-    "↑/↓ : Naviguer | ←/→ : Changer d'onglet | Entrée : Sélectionner",
+    "↑/↓ : Naviguer | ←/→ : Changer d'onglet | Enter : Sélectionner",
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
-    '↑/↓ : Naviguer | Entrée : Sélectionner | Échap : Annuler',
+    '↑/↓ : Naviguer | Enter : Sélectionner | Esc : Annuler',
   'Authenticate using Qwen OAuth': 'Authentifier avec Qwen OAuth',
   'Authenticate using Alibaba Cloud Coding Plan':
     'Authentifier avec Alibaba Cloud Coding Plan',
   'Region for Coding Plan (china/global)':
     'Région pour Coding Plan (china/global)',
-  'API key for Coding Plan': 'Clé API pour Coding Plan',
+  'API key for Coding Plan': 'API Key pour Coding Plan',
   'Show current authentication status':
     "Afficher le statut d'authentification actuel",
   'Authentication completed successfully.':
@@ -1670,7 +1665,7 @@ export default {
   Global: 'Global',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Sélectionner la région pour Coding Plan :',
-  'Enter your Coding Plan API key: ': 'Entrez votre clé API Coding Plan : ',
+  'Enter your Coding Plan API key: ': 'Entrez votre Coding Plan API Key : ',
   'Select authentication method:':
     "Sélectionner la méthode d'authentification :",
   '\n=== Authentication Status ===\n': "\n=== Statut d'authentification ===\n",
@@ -1697,11 +1692,11 @@ export default {
   '  Region: {{region}}': '  Région : {{region}}',
   '  Current Model: {{model}}': '  Modèle actuel : {{model}}',
   '  Config Version: {{version}}': '  Version de config : {{version}}',
-  '  Status: API key configured\n': '  Statut : Clé API configurée\n',
+  '  Status: API key configured\n': '  Statut : API Key configurée\n',
   '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
     "⚠️  Méthode d'authentification : Alibaba Cloud Coding Plan (Incomplète)",
   '  Issue: API key not found in environment or settings\n':
-    "  Problème : Clé API introuvable dans l'environnement ou les paramètres\n",
+    "  Problème : API Key introuvable dans l'environnement ou les paramètres\n",
   '  Run `qwen auth coding-plan` to re-configure.\n':
     '  Exécutez `qwen auth coding-plan` pour reconfigurer.\n',
   '✓ Authentication Method: {{type}}':
@@ -1713,7 +1708,7 @@ export default {
   'Raw mode not available. Please run in an interactive terminal.':
     'Mode brut non disponible. Veuillez exécuter dans un terminal interactif.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
-    '(Utilisez les flèches ↑ ↓ pour naviguer, Entrée pour sélectionner, Ctrl+C pour quitter)\n',
+    '(Utilisez les flèches ↑ ↓ pour naviguer, Enter pour sélectionner, Ctrl+C pour quitter)\n',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Masquer la sortie des outils et la réflexion pour une vue plus nette (basculer avec Ctrl+O).',
   'Press Ctrl+O to show full tool output':
@@ -1850,7 +1845,13 @@ export default {
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     'Appuyez sur Ctrl+O pour basculer le mode compact — masquer la sortie des outils et la réflexion pour une vue plus nette.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
-    'Clé API invalide. Les clés API Coding Plan commencent par "sk-sp-". Veuillez vérifier.',
+    'API Key invalide. Les Coding Plan API Keys commencent par "sk-sp-". Veuillez vérifier.',
+  'Lock release warning': 'Avertissement de libération du verrou',
+  'Metadata write warning': "Avertissement d'écriture des métadonnées",
+  "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
+    "Les dreams suivants peuvent être ignorés comme verrouillés jusqu'à ce que le prochain nettoyage des sessions obsolètes supprime le fichier.",
+  "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
+    "La porte du planificateur n'a pas vu l'horodatage de ce dream ; le prochain cycle de dream peut se relancer plus tôt que d'habitude.",
   '% used': '% utilisé',
   '% context used': '% de contexte utilisé',
   'Context exceeds limit! Use /compress or /clear to reduce.':

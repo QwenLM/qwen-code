@@ -86,6 +86,11 @@ export class SkillCommandLoader implements ICommandLoader {
             ? 'plugin-command'
             : 'skill-dir-command') as CommandSource,
           sourceLabel,
+          sourceDetail: isExtension
+            ? 'extension'
+            : skill.level === 'project'
+              ? 'project'
+              : 'user',
           modelInvocable,
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,

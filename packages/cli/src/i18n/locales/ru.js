@@ -27,7 +27,7 @@ export default {
   'plan mode': 'Режим планирования',
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',
-  '(shift + tab to cycle)': '(shift + tab для переключения)',
+  '(shift + tab to cycle)': '(Shift + Tab для переключения)',
   '(tab to cycle)': '(Tab для переключения)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Выполняйте команды терминала через {{symbol}} (например, {{example1}}) или используйте естественный язык (например, {{example2}}).',
@@ -56,7 +56,7 @@ export default {
   'Send message': 'Отправить сообщение',
   'Initializing...': 'Инициализация...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
-    'Подключение к MCP-серверам... ({{connected}}/{{total}})',
+    'Подключение к MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Введите сообщение или @путь/к/файлу',
   '? for shortcuts': '? — горячие клавиши',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
@@ -98,7 +98,7 @@ export default {
   'Fast Model': 'Быстрая модель',
   Sandbox: 'Песочница',
   'Session ID': 'ID сессии',
-  'Base URL': 'Базовый URL',
+  'Base URL': 'Base URL',
   Proxy: 'Прокси',
   'Memory Usage': 'Использование памяти',
   'IDE Client': 'Клиент IDE',
@@ -262,7 +262,7 @@ export default {
   'Read & Edit & Execution Tools':
     'Инструменты для чтения, редактирования и выполнения',
   'All tools selected, including MCP tools':
-    'Все инструменты выбраны, включая инструменты MCP',
+    'Все инструменты выбраны, включая MCP tools',
   'Selected tools:': 'Выбранные инструменты:',
   'Read-only tools:': 'Инструменты только для чтения:',
   'Edit tools:': 'Инструменты редактирования:',
@@ -354,7 +354,7 @@ export default {
   'Tool Output Truncation Threshold': 'Порог обрезки вывода инструментов',
   'Tool Output Truncation Lines': 'Лимит строк вывода инструментов',
   'Folder Trust': 'Доверие к папке',
-  'Tool Schema Compliance': 'Соответствие схеме инструмента',
+  'Tool Schema Compliance': 'Соответствие Tool Schema',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
   'Auto (detect terminal theme)': 'Авто (определить тему терминала)',
@@ -410,7 +410,7 @@ export default {
   '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
     '**Расширения могут вызывать неожиданное поведение. Убедитесь, что вы изучили источник расширения и доверяете автору.**',
   'This extension will run the following MCP servers:':
-    'Это расширение запустит следующие MCP-серверы:',
+    'Это расширение запустит следующие MCP servers:',
   local: 'локальный',
   remote: 'удалённый',
   'This extension will add the following commands: {{commands}}.':
@@ -485,7 +485,7 @@ export default {
   'Context files:': 'Контекстные файлы:',
   'Skills:': 'Навыки:',
   'Agents:': 'Агенты:',
-  'MCP servers:': 'MCP-серверы:',
+  'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'Не удалось установить связанное расширение.',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -575,7 +575,7 @@ export default {
   'Press Escape, Ctrl+C, or Ctrl+D to cancel':
     'Нажмите Escape, Ctrl+C или Ctrl+D для отмены',
   'Press Space, Enter, or Escape to dismiss':
-    'Нажмите Пробел, Enter или Escape для закрытия',
+    'Нажмите Space, Enter или Escape для закрытия',
   'No hook selected': 'Хук не выбран',
   // Hooks - List Step
   'No hook events found.': 'События хуков не найдены.',
@@ -951,10 +951,10 @@ export default {
   'Yes, and manually approve edits': 'Да, и вручную подтверждать правки',
   'No, keep planning (esc)': 'Нет, продолжить планирование (esc)',
   'URLs to fetch:': 'URL для загрузки:',
-  'MCP Server: {{server}}': 'MCP-сервер: {{server}}',
+  'MCP Server: {{server}}': 'MCP Server: {{server}}',
   'Tool: {{tool}}': 'Инструмент: {{tool}}',
   'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
-    'Разрешить выполнение инструмента MCP "{{tool}}" с сервера "{{server}}"?',
+    'Разрешить выполнение MCP tool "{{tool}}" с MCP server "{{server}}"?',
   // ============================================================================
   // Диалоги - Подтверждение оболочки
   // ============================================================================
@@ -994,7 +994,7 @@ export default {
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Платно \u00B7 До 6 000 запросов/5 часов \u00B7 Все модели Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
-  'Bring your own API key': 'Используйте свой API-ключ',
+  'Bring your own API key': 'Используйте свой API Key',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Браузерная аутентификация с использованием сторонних провайдеров (например, OpenRouter, ModelScope)',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
@@ -1016,13 +1016,13 @@ export default {
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     'Ожидание авторизации... (Нажмите ESC или CTRL+C для отмены)',
   'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
-    'Отсутствует API-ключ для аутентификации, совместимой с OpenAI. Укажите settings.security.auth.apiKey или переменную окружения {{envKeyHint}}.',
+    'Отсутствует API Key для аутентификации, совместимой с OpenAI. Укажите settings.security.auth.apiKey или переменную окружения {{envKeyHint}}.',
   '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
     'Переменная окружения {{envKeyHint}} не найдена. Укажите её в файле .env или среди системных переменных.',
   '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
     'Переменная окружения {{envKeyHint}} не найдена (или установите settings.security.auth.apiKey). Укажите её в файле .env или среди системных переменных.',
   'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
-    'Отсутствует API-ключ для аутентификации, совместимой с OpenAI. Установите переменную окружения {{envKeyHint}}.',
+    'Отсутствует API Key для аутентификации, совместимой с OpenAI. Установите переменную окружения {{envKeyHint}}.',
   'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
     'У провайдера Anthropic отсутствует обязательный baseUrl в modelProviders[].baseUrl.',
   'ANTHROPIC_BASE_URL environment variable not found.':
@@ -1038,7 +1038,7 @@ export default {
   // Диалоги - Модель
   // ============================================================================
   'Select Model': 'Выбрать модель',
-  'API Key': 'API-ключ',
+  'API Key': 'API Key',
   '(default)': '(по умолчанию)',
   '(not set)': '(не задано)',
   Modality: 'Модальность',
@@ -1056,7 +1056,7 @@ export default {
   // Диалоги - Разрешения
   // ============================================================================
   'Manage folder trust settings': 'Управление настройками доверия к папкам',
-  'Manage permission rules': 'Управление правилами разрешений',
+  'Manage permission rules': 'Управление permission rules',
   Allow: 'Разрешить',
   Ask: 'Спросить',
   Deny: 'Запретить',
@@ -1080,19 +1080,19 @@ export default {
   'User settings': 'Пользовательские настройки',
   'Saved in at ~/.qwen/settings.json': 'Сохранено в ~/.qwen/settings.json',
   'Add a new rule…': 'Добавить новое правило…',
-  'Add {{type}} permission rule': 'Добавить правило разрешения {{type}}',
+  'Add {{type}} permission rule': 'Добавить {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
-    'Правила разрешений — это имя инструмента, за которым может следовать спецификатор в скобках.',
+    'permission rules — это имя инструмента, за которым может следовать спецификатор в скобках.',
   'e.g.,': 'напр.',
   or: 'или',
-  'Enter permission rule…': 'Введите правило разрешения…',
+  'Enter permission rule…': 'Введите permission rule…',
   'Enter to submit · Esc to cancel': 'Enter для отправки · Esc для отмены',
   'Where should this rule be saved?': 'Где сохранить это правило?',
   'Enter to confirm · Esc to cancel':
     'Enter для подтверждения · Esc для отмены',
   'Delete {{type}} rule?': 'Удалить правило {{type}}?',
   'Are you sure you want to delete this permission rule?':
-    'Вы уверены, что хотите удалить это правило разрешения?',
+    'Вы уверены, что хотите удалить это permission rule?',
   'Permissions:': 'Разрешения:',
   '(←/→ or tab to cycle)': '(←/→ или Tab для переключения)',
   'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
@@ -1130,8 +1130,8 @@ export default {
   '(ctrl+g to view)': '(ctrl+g для просмотра)',
   '{{count}} {{name}} file': '{{count}} файл {{name}}',
   '{{count}} {{name}} files': '{{count}} файла(ов) {{name}}',
-  '{{count}} MCP server': '{{count}} MCP-сервер',
-  '{{count}} MCP servers': '{{count}} MCP-сервера(ов)',
+  '{{count}} MCP server': '{{count}} MCP server',
+  '{{count}} MCP servers': '{{count}} MCP servers',
   '{{count}} Blocked': '{{count}} заблокирован(о)',
   '(ctrl+t to view)': '(ctrl+t для просмотра)',
   '(ctrl+t to toggle)': '(ctrl+t для переключения)',
@@ -1144,12 +1144,12 @@ export default {
   // ============================================================================
   // Статус MCP
   // ============================================================================
-  'No MCP servers configured.': 'Не настроено MCP-серверов.',
+  'No MCP servers configured.': 'MCP servers не настроены.',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP-серверы запускаются ({{count}} инициализируется)...',
+    '⏳ MCP servers запускаются ({{count}} инициализируется)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Примечание: Первый запуск может занять больше времени. Доступность инструментов обновится автоматически.',
-  'Configured MCP servers:': 'Настроенные MCP-серверы:',
+  'Configured MCP servers:': 'Настроенные MCP servers:',
   Ready: 'Готов',
   'Starting... (first startup may take longer)':
     'Запуск... (первый запуск может занять больше времени)',
@@ -1173,7 +1173,7 @@ export default {
   Use: 'Используйте',
   'to show server and tool descriptions':
     'для показа описаний сервера и инструментов',
-  'to show tool parameter schemas': 'для показа схем параметров инструментов',
+  'to show tool parameter schemas': 'для показа tool parameter schemas',
   'to hide descriptions': 'для скрытия описаний',
   'to authenticate with OAuth-enabled servers':
     'для авторизации на серверах с поддержкой OAuth',
@@ -1181,7 +1181,7 @@ export default {
   'to toggle tool descriptions on/off':
     'для переключения описаний инструментов',
   "Starting OAuth authentication for MCP server '{{name}}'...":
-    "Начало авторизации OAuth для MCP-сервера '{{name}}'...",
+    "Начало авторизации OAuth для MCP server '{{name}}'...",
   // ============================================================================
   // Подсказки при запуске
   // ============================================================================
@@ -1484,16 +1484,16 @@ export default {
   // Custom API Key Configuration
   // ============================================================================
   'You can configure your API key and models in settings.json':
-    'Вы можете настроить API-ключ и модели в settings.json',
+    'Вы можете настроить API Key и модели в settings.json',
   'Refer to the documentation for setup instructions':
     'Инструкции по настройке см. в документации',
 
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'API key cannot be empty.': 'API-ключ не может быть пустым.',
+  'API key cannot be empty.': 'API Key не может быть пустым.',
   'You can get your Coding Plan API key here':
-    'Вы можете получить API-ключ Coding Plan здесь',
+    'Вы можете получить API Key Coding Plan здесь',
   'Failed to update Coding Plan configuration: {{message}}':
     'Не удалось обновить конфигурацию Coding Plan: {{message}}',
 
@@ -1505,7 +1505,7 @@ export default {
   'Select Region for Coding Plan': 'Выберите регион Coding Plan',
   'Choose based on where your account is registered':
     'Выберите в зависимости от места регистрации вашего аккаунта',
-  'Enter Coding Plan API Key': 'Введите API-ключ Coding Plan',
+  'Enter Coding Plan API Key': 'Введите API Key Coding Plan',
 
   // ============================================================================
   // Coding Plan International Updates
@@ -1534,7 +1534,7 @@ export default {
   'Usage by category': 'Использование по категориям',
   'System prompt': 'Системная подсказка',
   'Built-in tools': 'Встроенные инструменты',
-  'MCP tools': 'Инструменты MCP',
+  'MCP tools': 'MCP tools',
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',
@@ -1574,7 +1574,7 @@ export default {
   server: 'сервер',
   servers: 'серверов',
   'Add MCP servers to your settings to get started.':
-    'Добавьте серверы MCP в настройки, чтобы начать.',
+    'Добавьте MCP servers в настройки, чтобы начать.',
   'Run qwen --debug to see error logs':
     'Запустите qwen --debug для просмотра журналов ошибок',
 
@@ -1600,7 +1600,7 @@ export default {
   '{{region}} configuration updated successfully.':
     'Конфигурация {{region}} успешно обновлена.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
-    'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json.',
+    'Успешная аутентификация с {{region}}. API Key и конфигурации моделей сохранены в settings.json.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Совет: Используйте /model для переключения между доступными моделями Coding Plan.',
   'Type something...': 'Введите что-то...',
@@ -1619,7 +1619,7 @@ export default {
     'Аутентификация через Alibaba Cloud Coding Plan',
   'Region for Coding Plan (china/global)':
     'Регион для Coding Plan (china/global)',
-  'API key for Coding Plan': 'API-ключ для Coding Plan',
+  'API key for Coding Plan': 'API Key для Coding Plan',
   'Show current authentication status':
     'Показать текущий статус аутентификации',
   'Authentication completed successfully.': 'Аутентификация успешно завершена.',
@@ -1639,7 +1639,7 @@ export default {
   Global: 'Глобальный',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Выберите регион для Coding Plan:',
-  'Enter your Coding Plan API key: ': 'Введите ваш API-ключ Coding Plan: ',
+  'Enter your Coding Plan API key: ': 'Введите ваш API Key Coding Plan: ',
   'Select authentication method:': 'Выберите метод аутентификации:',
   '\n=== Authentication Status ===\n': '\n=== Статус аутентификации ===\n',
   '⚠️  No authentication method configured.\n':
@@ -1663,11 +1663,11 @@ export default {
   '  Region: {{region}}': '  Регион: {{region}}',
   '  Current Model: {{model}}': '  Текущая модель: {{model}}',
   '  Config Version: {{version}}': '  Версия конфигурации: {{version}}',
-  '  Status: API key configured\n': '  Статус: API-ключ настроен\n',
+  '  Status: API key configured\n': '  Статус: API Key настроен\n',
   '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
     '⚠️  Метод аутентификации: Alibaba Cloud Coding Plan (Не завершён)',
   '  Issue: API key not found in environment or settings\n':
-    '  Проблема: API-ключ не найден в окружении или настройках\n',
+    '  Проблема: API Key не найден в окружении или настройках\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
     '  Выполните `qwen auth coding-plan` для повторной настройки.\n',
   '✓ Authentication Method: {{type}}': '✓ Метод аутентификации: {{type}}',
@@ -1705,7 +1705,7 @@ export default {
   tools: 'инструменты',
   'Manage dynamic translation cache': 'Управлять кешем динамического перевода',
   'Open MCP management dialog': 'Открыть диалог управления MCP',
-  'Manage MCP servers': 'Управление MCP-серверами',
+  'Manage MCP servers': 'Управление MCP servers',
   'Manage extension settings': 'Управление настройками расширения',
   'Manage Extensions': 'Управление расширениями',
   'Extension Details': 'Сведения о расширении',
@@ -1724,7 +1724,7 @@ export default {
   'Extension "{{name}}" updated successfully.':
     'Расширение "{{name}}" успешно обновлено.',
   'Name:': 'Имя:',
-  'MCP Servers:': 'MCP-серверы:',
+  'MCP Servers:': 'MCP Servers:',
   'Settings:': 'Настройки:',
   'View Details': 'Просмотреть сведения',
   'Update failed:': 'Ошибка обновления:',
@@ -1835,7 +1835,13 @@ export default {
   'No failed request to retry.': 'Нет неудачного запроса для повтора.',
   'to retry last request': 'чтобы повторить последний запрос',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
-    'Недействительный API-ключ. Ключи API Coding Plan начинаются с "sk-sp-". Проверьте.',
+    'Недействительный API Key. Coding Plan API Keys начинаются с "sk-sp-". Проверьте.',
+  'Lock release warning': 'Предупреждение о снятии блокировки',
+  'Metadata write warning': 'Предупреждение о записи метаданных',
+  "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
+    'Последующие dream-запуски могут пропускаться как заблокированные, пока следующая очистка устаревших сессий не удалит файл.',
+  "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
+    'Планировщик не увидел временную метку этого dream-запуска; следующий цикл dream может запуститься раньше обычного.',
   // === Same-as-English optimization ===
   ' (not in model registry)': ' (не в реестре моделей)',
   'start server': 'запустить сервер',

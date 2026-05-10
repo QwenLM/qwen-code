@@ -25,6 +25,11 @@ export interface LanguageDefinition {
   fullName: string;
   /** The native name of the language (e.g., 'English', '中文'). */
   nativeName?: string;
+  /**
+   * Whether tooling should require this locale to keep exact key parity with
+   * en.js. Locales maintained in-tree can opt in as they reach full coverage.
+   */
+  strictParity?: boolean;
 }
 
 export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
@@ -39,12 +44,14 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
     id: 'zh-TW',
     fullName: 'Traditional Chinese',
     nativeName: '繁體中文',
+    strictParity: true,
   },
   {
     code: 'zh',
     id: 'zh-CN',
     fullName: 'Chinese',
     nativeName: '中文',
+    strictParity: true,
   },
   {
     code: 'ru',
@@ -159,6 +166,35 @@ export function getLanguageNameFromLocale(locale: SupportedLanguage): string {
     ? SUPPORTED_LANGUAGES.find((language) => language.code === resolved)
     : undefined;
   return lang?.fullName || 'English';
+}
+
+/**
+ * Maps a UI locale to an English language name for dynamic translation prompts.
+ * Unknown custom locale codes fall back to Intl.DisplayNames, then the raw code,
+ * so custom language packs do not accidentally request English translations.
+ */
+export function getLanguageNameForTranslationTarget(
+  locale: SupportedLanguage,
+): string {
+  const resolved = resolveSupportedLanguage(locale);
+  const lang = resolved
+    ? SUPPORTED_LANGUAGES.find((language) => language.code === resolved)
+    : undefined;
+  if (lang) {
+    return lang.fullName;
+  }
+
+  try {
+    const displayNames = new Intl.DisplayNames(['en'], { type: 'language' });
+    const displayName = displayNames.of(locale);
+    if (displayName) {
+      return displayName;
+    }
+  } catch {
+    // Fall through to raw locale.
+  }
+
+  return locale;
 }
 
 /**

@@ -14,7 +14,7 @@ export default {
   // Attachment hints
   '↑ to manage attachments': '↑ Anhänge verwalten',
   '← → select, Delete to remove, ↓ to exit':
-    '← → auswählen, Entf zum Löschen, ↓ beenden',
+    '← → auswählen, Delete zum Löschen, ↓ beenden',
   'Attachments: ': 'Anhänge: ',
   'Basics:': 'Grundlagen:',
   'Add context': 'Kontext hinzufügen',
@@ -27,7 +27,7 @@ export default {
   'plan mode': 'Planungsmodus',
   'auto-accept edits': 'Änderungen automatisch akzeptieren',
   'Accepting edits': 'Änderungen werden akzeptiert',
-  '(shift + tab to cycle)': '(Umschalt + Tab zum Wechseln)',
+  '(shift + tab to cycle)': '(Shift + Tab zum Wechseln)',
   '(tab to cycle)': '(Tab zum Wechseln)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Shell-Befehle über {{symbol}} ausführen (z.B. {{example1}}) oder natürliche Sprache verwenden (z.B. {{example2}}).',
@@ -50,7 +50,7 @@ export default {
   'Send message': 'Nachricht senden',
   'Initializing...': 'Initialisierung...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
-    'Verbindung zu MCP-Servern wird hergestellt... ({{connected}}/{{total}})',
+    'Verbindung zu MCP servers wird hergestellt... ({{connected}}/{{total}})',
   'Type your message or @path/to/file':
     'Nachricht eingeben oder @Pfad/zur/Datei',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
@@ -78,7 +78,7 @@ export default {
   'Fast Model': 'Schnelles Modell',
   Sandbox: 'Sandbox',
   'Session ID': 'Sitzungs-ID',
-  'Base URL': 'Basis-URL',
+  'Base URL': 'Base URL',
   Proxy: 'Proxy',
   'Memory Usage': 'Speichernutzung',
   'IDE Client': 'IDE-Client',
@@ -239,7 +239,7 @@ export default {
   'Read & Edit & Execution Tools':
     'Lese-, Bearbeitungs- und Ausführungswerkzeuge',
   'All tools selected, including MCP tools':
-    'Alle Werkzeuge ausgewählt, einschließlich MCP-Werkzeuge',
+    'Alle Tools ausgewählt, einschließlich MCP tools',
   'Selected tools:': 'Ausgewählte Werkzeuge:',
   'Read-only tools:': 'Nur-Lese-Werkzeuge:',
   'Edit tools:': 'Bearbeitungswerkzeuge:',
@@ -334,7 +334,7 @@ export default {
     'Schwellenwert für Werkzeugausgabe-Kürzung',
   'Tool Output Truncation Lines': 'Zeilen für Werkzeugausgabe-Kürzung',
   'Folder Trust': 'Ordnervertrauen',
-  'Tool Schema Compliance': 'Werkzeug-Schema-Konformität',
+  'Tool Schema Compliance': 'Tool Schema-Konformität',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
   'Auto (detect terminal theme)': 'Automatisch (Terminal-Theme erkennen)',
@@ -389,7 +389,7 @@ export default {
   '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
     '**Erweiterungen können unerwartetes Verhalten verursachen. Stellen Sie sicher, dass Sie die Erweiterungsquelle untersucht haben und dem Autor vertrauen.**',
   'This extension will run the following MCP servers:':
-    'Diese Erweiterung wird folgende MCP-Server ausführen:',
+    'Diese Erweiterung wird folgende MCP servers ausführen:',
   local: 'lokal',
   'This extension will add the following commands: {{commands}}.':
     'Diese Erweiterung wird folgende Befehle hinzufügen: {{commands}}.',
@@ -464,7 +464,7 @@ export default {
   'Enabled (User):': 'Aktiviert (Benutzer):',
   'Enabled (Workspace):': 'Aktiviert (Arbeitsbereich):',
   'Context files:': 'Kontextdateien:',
-  'MCP servers:': 'MCP-Server:',
+  'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'Verknüpfte Erweiterung konnte nicht installiert werden.',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -531,21 +531,21 @@ export default {
     'Fehler beim Parsen von {{terminalName}} keybindings.json. Die Datei enthält ungültiges JSON. Bitte korrigieren Sie die Datei manuell oder löschen Sie sie, um automatische Konfiguration zu ermöglichen.',
   'Error: {{error}}': 'Fehler: {{error}}',
   'Shift+Enter binding already exists':
-    'Umschalt+Enter-Belegung existiert bereits',
-  'Ctrl+Enter binding already exists': 'Strg+Enter-Belegung existiert bereits',
+    'Shift+Enter-Belegung existiert bereits',
+  'Ctrl+Enter binding already exists': 'Ctrl+Enter-Belegung existiert bereits',
   'Existing keybindings detected. Will not modify to avoid conflicts.':
     'Bestehende Tastenbelegungen erkannt. Keine Änderungen, um Konflikte zu vermeiden.',
   'Please check and modify manually if needed: {{file}}':
     'Bitte prüfen und bei Bedarf manuell ändern: {{file}}',
   'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.':
-    'Umschalt+Enter und Strg+Enter Tastenbelegungen zu {{terminalName}} hinzugefügt.',
+    'Shift+Enter und Ctrl+Enter Tastenbelegungen zu {{terminalName}} hinzugefügt.',
   'Modified: {{file}}': 'Geändert: {{file}}',
   '{{terminalName}} keybindings already configured.':
     '{{terminalName}}-Tastenbelegungen bereits konfiguriert.',
   'Failed to configure {{terminalName}}.':
     'Fehler beim Konfigurieren von {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
-    'Ihr Terminal ist bereits für optimale Erfahrung mit mehrzeiliger Eingabe konfiguriert (Umschalt+Enter und Strg+Enter).',
+    'Ihr Terminal ist bereits für optimale Erfahrung mit mehrzeiliger Eingabe konfiguriert (Shift+Enter und Ctrl+Enter).',
   // ============================================================================
   // Commands - Hooks
   // ============================================================================
@@ -559,7 +559,7 @@ export default {
   'Press Escape, Ctrl+C, or Ctrl+D to cancel':
     'Escape, Ctrl+C oder Ctrl+D zum Abbrechen',
   'Press Space, Enter, or Escape to dismiss':
-    'Leertaste, Enter oder Escape zum Schließen',
+    'Space, Enter oder Escape zum Schließen',
   'No hook selected': 'Kein Hook ausgewählt',
   // Hooks - List Step
   'No hook events found.': 'Keine Hook-Ereignisse gefunden.',
@@ -891,7 +891,7 @@ export default {
   No: 'Nein',
   'No (esc)': 'Nein (Esc)',
   // MCP Management Dialog (translations for MCP UI components)
-  'Manage MCP servers': 'MCP-Server verwalten',
+  'Manage MCP servers': 'MCP servers verwalten',
   'Server Detail': 'Serverdetails',
   Tools: 'Werkzeuge',
   'Tool Detail': 'Werkzeugdetails',
@@ -941,7 +941,7 @@ export default {
   server: 'Server',
   servers: 'Server',
   'Add MCP servers to your settings to get started.':
-    'Fügen Sie MCP-Server zu Ihren Einstellungen hinzu, um zu beginnen.',
+    'Fügen Sie MCP servers zu Ihren Einstellungen hinzu, um zu beginnen.',
   'Run qwen --debug to see error logs':
     'Führen Sie qwen --debug aus, um Fehlerprotokolle anzuzeigen',
 
@@ -998,10 +998,10 @@ export default {
   'Yes, and manually approve edits': 'Ja, und Änderungen manuell genehmigen',
   'No, keep planning (esc)': 'Nein, weiter planen (Esc)',
   'URLs to fetch:': 'Abzurufende URLs:',
-  'MCP Server: {{server}}': 'MCP-Server: {{server}}',
+  'MCP Server: {{server}}': 'MCP Server: {{server}}',
   'Tool: {{tool}}': 'Werkzeug: {{tool}}',
   'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
-    'Ausführung des MCP-Werkzeugs "{{tool}}" von Server "{{server}}" erlauben?',
+    'Ausführung von MCP tool "{{tool}}" von MCP server "{{server}}" erlauben?',
   // ============================================================================
   // Dialogs - Shell Confirmation
   // ============================================================================
@@ -1026,7 +1026,7 @@ export default {
   '🎯 Overall Goal:': '🎯 Gesamtziel:',
   'Select Authentication Method': 'Authentifizierungsmethode auswählen',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'Sie müssen eine Authentifizierungsmethode wählen, um fortzufahren. Drücken Sie erneut Strg+C zum Beenden.',
+    'Sie müssen eine Authentifizierungsmethode wählen, um fortzufahren. Drücken Sie erneut Ctrl+C zum Beenden.',
   'Terms of Services and Privacy Notice':
     'Nutzungsbedingungen und Datenschutzhinweis',
   'Qwen OAuth': 'Qwen OAuth',
@@ -1041,7 +1041,7 @@ export default {
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Kostenpflichtig \u00B7 Bis zu 6.000 Anfragen/5 Std. \u00B7 Alle Alibaba Cloud Coding Plan Modelle',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
-  'Bring your own API key': 'Eigenen API-Schlüssel verwenden',
+  'Bring your own API key': 'Eigenen API Key verwenden',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Browserbasierte Authentifizierung mit externen Anbietern (z. B. OpenRouter, ModelScope)',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
@@ -1062,15 +1062,15 @@ export default {
   'Authentication timed out. Please try again.':
     'Authentifizierung abgelaufen. Bitte versuchen Sie es erneut.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
-    'Warten auf Authentifizierung... (ESC oder STRG+C zum Abbrechen drücken)',
+    'Warten auf Authentifizierung... (ESC oder CTRL+C zum Abbrechen drücken)',
   'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
-    'API-Schlüssel für OpenAI-kompatible Authentifizierung fehlt. Setzen Sie settings.security.auth.apiKey oder die Umgebungsvariable {{envKeyHint}}.',
+    'API Key für OpenAI-kompatible Authentifizierung fehlt. Setzen Sie settings.security.auth.apiKey oder die Umgebungsvariable {{envKeyHint}}.',
   '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
     'Umgebungsvariable {{envKeyHint}} wurde nicht gefunden. Bitte legen Sie sie in Ihrer .env-Datei oder den Systemumgebungsvariablen fest.',
   '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
     'Umgebungsvariable {{envKeyHint}} wurde nicht gefunden (oder setzen Sie settings.security.auth.apiKey). Bitte legen Sie sie in Ihrer .env-Datei oder den Systemumgebungsvariablen fest.',
   'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
-    'API-Schlüssel für OpenAI-kompatible Authentifizierung fehlt. Setzen Sie die Umgebungsvariable {{envKeyHint}}.',
+    'API Key für OpenAI-kompatible Authentifizierung fehlt. Setzen Sie die Umgebungsvariable {{envKeyHint}}.',
   'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
     'Anthropic-Anbieter fehlt erforderliche baseUrl in modelProviders[].baseUrl.',
   'ANTHROPIC_BASE_URL environment variable not found.':
@@ -1087,7 +1087,7 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': 'Modell auswählen',
-  'API Key': 'API-Schlüssel',
+  'API Key': 'API Key',
   '(default)': '(Standard)',
   '(not set)': '(nicht gesetzt)',
   Modality: 'Modalität',
@@ -1105,7 +1105,7 @@ export default {
   // Dialogs - Permissions
   // ============================================================================
   'Manage folder trust settings': 'Ordnervertrauenseinstellungen verwalten',
-  'Manage permission rules': 'Berechtigungsregeln verwalten',
+  'Manage permission rules': 'permission rules verwalten',
   Allow: 'Erlauben',
   Ask: 'Fragen',
   Deny: 'Verweigern',
@@ -1129,19 +1129,19 @@ export default {
   'User settings': 'Benutzereinstellungen',
   'Saved in at ~/.qwen/settings.json': 'Gespeichert in ~/.qwen/settings.json',
   'Add a new rule…': 'Neue Regel hinzufügen…',
-  'Add {{type}} permission rule': '{{type}}-Berechtigungsregel hinzufügen',
+  'Add {{type}} permission rule': '{{type}} permission rule hinzufügen',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
-    'Berechtigungsregeln sind ein Toolname, optional gefolgt von einem Bezeichner in Klammern.',
+    'permission rules sind ein Toolname, optional gefolgt von einem Bezeichner in Klammern.',
   'e.g.,': 'z.B.',
   or: 'oder',
-  'Enter permission rule…': 'Berechtigungsregel eingeben…',
+  'Enter permission rule…': 'permission rule eingeben…',
   'Enter to submit · Esc to cancel': 'Enter zum Absenden · Esc zum Abbrechen',
   'Where should this rule be saved?': 'Wo soll diese Regel gespeichert werden?',
   'Enter to confirm · Esc to cancel':
     'Enter zum Bestätigen · Esc zum Abbrechen',
   'Delete {{type}} rule?': '{{type}}-Regel löschen?',
   'Are you sure you want to delete this permission rule?':
-    'Sind Sie sicher, dass Sie diese Berechtigungsregel löschen möchten?',
+    'Sind Sie sicher, dass Sie diese permission rule löschen möchten?',
   'Permissions:': 'Berechtigungen:',
   '(←/→ or tab to cycle)': '(←/→ oder Tab zum Wechseln)',
   'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
@@ -1176,16 +1176,16 @@ export default {
   'Using:': 'Verwendet:',
   '{{count}} open file': '{{count}} geöffnete Datei',
   '{{count}} open files': '{{count}} geöffnete Dateien',
-  '(ctrl+g to view)': '(Strg+G zum Anzeigen)',
+  '(ctrl+g to view)': '(Ctrl+G zum Anzeigen)',
   '{{count}} {{name}} file': '{{count}} {{name}}-Datei',
   '{{count}} {{name}} files': '{{count}} {{name}}-Dateien',
-  '{{count}} MCP server': '{{count}} MCP-Server',
-  '{{count}} MCP servers': '{{count}} MCP-Server',
+  '{{count}} MCP server': '{{count}} MCP server',
+  '{{count}} MCP servers': '{{count}} MCP servers',
   '{{count}} Blocked': '{{count}} blockiert',
-  '(ctrl+t to view)': '(Strg+T zum Anzeigen)',
-  '(ctrl+t to toggle)': '(Strg+T zum Umschalten)',
-  'Press Ctrl+C again to exit.': 'Drücken Sie erneut Strg+C zum Beenden.',
-  'Press Ctrl+D again to exit.': 'Drücken Sie erneut Strg+D zum Beenden.',
+  '(ctrl+t to view)': '(Ctrl+T zum Anzeigen)',
+  '(ctrl+t to toggle)': '(Ctrl+T zum Umschalten)',
+  'Press Ctrl+C again to exit.': 'Drücken Sie erneut Ctrl+C zum Beenden.',
+  'Press Ctrl+D again to exit.': 'Drücken Sie erneut Ctrl+D zum Beenden.',
   'Press Esc again to clear.': 'Drücken Sie erneut Esc zum Löschen.',
   'Press ↑ to edit queued messages':
     'Drücken Sie ↑, um Nachrichten in der Warteschlange zu bearbeiten',
@@ -1193,12 +1193,12 @@ export default {
   // ============================================================================
   // MCP Status
   // ============================================================================
-  'No MCP servers configured.': 'Keine MCP-Server konfiguriert.',
+  'No MCP servers configured.': 'Keine MCP servers konfiguriert.',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP-Server werden gestartet ({{count}} werden initialisiert)...',
+    '⏳ MCP servers werden gestartet ({{count}} werden initialisiert)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Hinweis: Der erste Start kann länger dauern. Werkzeugverfügbarkeit wird automatisch aktualisiert.',
-  'Configured MCP servers:': 'Konfigurierte MCP-Server:',
+  'Configured MCP servers:': 'Konfigurierte MCP servers:',
   Ready: 'Bereit',
   'Starting... (first startup may take longer)':
     'Wird gestartet... (erster Start kann länger dauern)',
@@ -1221,7 +1221,7 @@ export default {
   Use: 'Verwenden',
   'to show server and tool descriptions':
     'um Server- und Werkzeugbeschreibungen anzuzeigen',
-  'to show tool parameter schemas': 'um Werkzeug-Parameter-Schemas anzuzeigen',
+  'to show tool parameter schemas': 'um tool parameter schemas anzuzeigen',
   'to hide descriptions': 'um Beschreibungen auszublenden',
   'to authenticate with OAuth-enabled servers':
     'um sich bei OAuth-fähigen Servern zu authentifizieren',
@@ -1229,7 +1229,7 @@ export default {
   'to toggle tool descriptions on/off':
     'um Werkzeugbeschreibungen ein-/auszuschalten',
   "Starting OAuth authentication for MCP server '{{name}}'...":
-    "OAuth-Authentifizierung für MCP-Server '{{name}}' wird gestartet...",
+    "OAuth-Authentifizierung für MCP server '{{name}}' wird gestartet...",
   // ============================================================================
   // Startup Tips
   // ============================================================================
@@ -1513,7 +1513,7 @@ export default {
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Strg+O drücken, um den Kompaktmodus umzuschalten — Tool-Ausgabe und Denkprozess ausblenden.',
+    'Ctrl+O drücken, um den Kompaktmodus umzuschalten — Tool-Ausgabe und Denkprozess ausblenden.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Fügen Sie eine QWEN.md-Datei hinzu, um Qwen Code dauerhaften Projektkontext zu geben.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1529,16 +1529,16 @@ export default {
   // Custom API Key Configuration
   // ============================================================================
   'You can configure your API key and models in settings.json':
-    'Sie können Ihren API-Schlüssel und Modelle in settings.json konfigurieren',
+    'Sie können Ihren API Key und Modelle in settings.json konfigurieren',
   'Refer to the documentation for setup instructions':
     'Einrichtungsanweisungen finden Sie in der Dokumentation',
 
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'API key cannot be empty.': 'API-Schlüssel darf nicht leer sein.',
+  'API key cannot be empty.': 'API Key darf nicht leer sein.',
   'You can get your Coding Plan API key here':
-    'Sie können Ihren Coding-Plan-API-Schlüssel hier erhalten',
+    'Sie können Ihren Coding Plan API Key hier erhalten',
   'Failed to update Coding Plan configuration: {{message}}':
     'Fehler beim Aktualisieren der Coding Plan-Konfiguration: {{message}}',
 
@@ -1550,7 +1550,7 @@ export default {
   'Select Region for Coding Plan': 'Region für Coding Plan auswählen',
   'Choose based on where your account is registered':
     'Wählen Sie basierend auf dem Registrierungsort Ihres Kontos',
-  'Enter Coding Plan API Key': 'Coding-Plan-API-Schlüssel eingeben',
+  'Enter Coding Plan API Key': 'Coding Plan API Key eingeben',
 
   // ============================================================================
   // Coding Plan International Updates
@@ -1579,7 +1579,7 @@ export default {
   'Usage by category': 'Verwendung nach Kategorie',
   'System prompt': 'System-Prompt',
   'Built-in tools': 'Integrierte Tools',
-  'MCP tools': 'MCP-Tools',
+  'MCP tools': 'MCP tools',
   'Memory files': 'Speicherdateien',
   Skills: 'Fähigkeiten',
   Messages: 'Nachrichten',
@@ -1591,7 +1591,7 @@ export default {
   '{{region}} configuration updated successfully.':
     '{{region}}-Konfiguration erfolgreich aktualisiert.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
-    'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert.',
+    'Erfolgreich mit {{region}} authentifiziert. API Key und Modellkonfigurationen wurden in settings.json gespeichert.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Tipp: Verwenden Sie /model, um zwischen verfügbaren Coding Plan-Modellen zu wechseln.',
   'Type something...': 'Etwas eingeben...',
@@ -1610,7 +1610,7 @@ export default {
     'Mit Alibaba Cloud Coding Plan authentifizieren',
   'Region for Coding Plan (china/global)':
     'Region für Coding Plan (china/global)',
-  'API key for Coding Plan': 'API-Schlüssel für Coding Plan',
+  'API key for Coding Plan': 'API Key für Coding Plan',
   'Show current authentication status':
     'Aktuellen Authentifizierungsstatus anzeigen',
   'Authentication completed successfully.':
@@ -1632,7 +1632,7 @@ export default {
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Region für Coding Plan auswählen:',
   'Enter your Coding Plan API key: ':
-    'Geben Sie Ihren Coding Plan API-Schlüssel ein: ',
+    'Geben Sie Ihren Coding Plan API Key ein: ',
   'Select authentication method:': 'Authentifizierungsmethode auswählen:',
   '\n=== Authentication Status ===\n': '\n=== Authentifizierungsstatus ===\n',
   '⚠️  No authentication method configured.\n':
@@ -1657,11 +1657,11 @@ export default {
   '  Region: {{region}}': '  Region: {{region}}',
   '  Current Model: {{model}}': '  Aktuelles Modell: {{model}}',
   '  Config Version: {{version}}': '  Konfigurationsversion: {{version}}',
-  '  Status: API key configured\n': '  Status: API-Schlüssel konfiguriert\n',
+  '  Status: API key configured\n': '  Status: API Key konfiguriert\n',
   '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
     '⚠️  Authentifizierungsmethode: Alibaba Cloud Coding Plan (Unvollständig)',
   '  Issue: API key not found in environment or settings\n':
-    '  Problem: API-Schlüssel nicht in Umgebung oder Einstellungen gefunden\n',
+    '  Problem: API Key nicht in Umgebung oder Einstellungen gefunden\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
     '  Führen Sie `qwen auth coding-plan` aus, um neu zu konfigurieren.\n',
   '✓ Authentication Method: {{type}}': '✓ Authentifizierungsmethode: {{type}}',
@@ -1672,12 +1672,12 @@ export default {
   'Raw mode not available. Please run in an interactive terminal.':
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
-    '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
+    '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Ctrl+C zum Beenden)\n',
   'to toggle compact mode': 'Kompaktmodus umschalten',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Strg+O umschalten).',
+    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Ctrl+O umschalten).',
   'Press Ctrl+O to show full tool output':
-    'Strg+O für vollständige Tool-Ausgabe drücken',
+    'Ctrl+O für vollständige Tool-Ausgabe drücken',
   'Switch to plan mode or exit plan mode':
     'In den Plan-Modus wechseln oder den Plan-Modus verlassen',
   'Exited plan mode. Previous approval mode restored.':
@@ -1728,7 +1728,7 @@ export default {
   'Extension "{{name}}" updated successfully.':
     'Erweiterung "{{name}}" erfolgreich aktualisiert.',
   'Name:': 'Name:',
-  'MCP Servers:': 'MCP-Server:',
+  'MCP Servers:': 'MCP Servers:',
   'Settings:': 'Einstellungen:',
   'View Details': 'Details anzeigen',
   'Update failed:': 'Aktualisierung fehlgeschlagen:',
@@ -1853,7 +1853,13 @@ export default {
     'Keine fehlgeschlagene Anfrage zum Wiederholen.',
   'to retry last request': 'um die letzte Anfrage erneut zu versuchen',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
-    'Ungültiger API-Schlüssel. Coding-Plan-API-Schlüssel beginnen mit "sk-sp-". Bitte prüfen.',
+    'Ungültiger API Key. Coding Plan API Keys beginnen mit "sk-sp-". Bitte prüfen.',
+  'Lock release warning': 'Warnung zur Sperrfreigabe',
+  'Metadata write warning': 'Warnung beim Schreiben der Metadaten',
+  "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
+    'Weitere Dream-Läufe können als gesperrt übersprungen werden, bis der nächste Stale-Sweep der Sitzung die Datei bereinigt.',
+  "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
+    'Das Scheduler-Gate hat den Zeitstempel dieses Dream-Laufs nicht gesehen; der nächste Dream-Zyklus kann früher als üblich erneut starten.',
   // === Same-as-English optimization ===
   'Agents:': 'Agenten:',
   Prompt: 'Eingabe',

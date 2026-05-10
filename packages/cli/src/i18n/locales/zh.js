@@ -25,8 +25,8 @@ export default {
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',
-  '(shift + tab to cycle)': '(shift + tab 切换)',
-  '(tab to cycle)': '(按 tab 切换)',
+  '(shift + tab to cycle)': '(Shift + Tab 切换)',
+  '(tab to cycle)': '(按 Tab 切换)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     '通过 {{symbol}} 执行 shell 命令（例如，{{example1}}）或使用自然语言（例如，{{example2}}）',
   '!': '!',
@@ -34,7 +34,7 @@ export default {
   'Commands:': '命令：',
   'shell command': 'shell 命令',
   'Model Context Protocol command (from external servers)':
-    '模型上下文协议命令（来自外部服务器）',
+    'Model Context Protocol 命令（来自外部服务器）',
   'Keyboard Shortcuts:': '键盘快捷键：',
   'Toggle this help display': '切换此帮助显示',
   'Toggle shell mode': '切换命令行模式',
@@ -67,7 +67,7 @@ export default {
   'Send message': '发送消息',
   'Initializing...': '正在初始化...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
-    '正在连接到 MCP 服务器... ({{connected}}/{{total}})',
+    '正在连接到 MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': '输入您的消息或 @ 文件路径',
   '? for shortcuts': '按 ? 查看快捷键',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
@@ -95,7 +95,7 @@ export default {
   'Fast Model': '快速模型',
   Sandbox: '沙箱',
   'Session ID': '会话 ID',
-  'Base URL': '基础 URL',
+  'Base URL': 'Base URL',
   Proxy: '代理',
   'Memory Usage': '内存使用',
   'IDE Client': 'IDE 客户端',
@@ -245,7 +245,7 @@ export default {
   'Read-only Tools': '只读工具',
   'Read & Edit Tools': '读取和编辑工具',
   'Read & Edit & Execution Tools': '读取、编辑和执行工具',
-  'All tools selected, including MCP tools': '已选择所有工具，包括 MCP 工具',
+  'All tools selected, including MCP tools': '已选择所有工具，包括 MCP tools',
   'Selected tools:': '已选择的工具:',
   'Read-only tools:': '只读工具:',
   'Edit tools:': '编辑工具:',
@@ -305,7 +305,7 @@ export default {
   'Extension "{{name}}" updated successfully.': '扩展 "{{name}}" 更新成功。',
   // Extension dialog - missing keys
   'Name:': '名称：',
-  'MCP Servers:': 'MCP 服务器：',
+  'MCP Servers:': 'MCP Servers：',
   'Settings:': '设置：',
   active: '已启用',
   'View Details': '查看详情',
@@ -382,7 +382,7 @@ export default {
   'Tool Output Truncation Threshold': '工具输出截断阈值',
   'Tool Output Truncation Lines': '工具输出截断行数',
   'Folder Trust': '文件夹信任',
-  'Tool Schema Compliance': '工具 Schema 兼容性',
+  'Tool Schema Compliance': 'Tool Schema 兼容性',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   'Auto (detect terminal theme)': '自动（检测终端主题）',
@@ -431,7 +431,7 @@ export default {
   '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
     '**扩展可能会引入意外行为。请确保您已调查过扩展源并信任作者。**',
   'This extension will run the following MCP servers:':
-    '此扩展将运行以下 MCP 服务器：',
+    '此扩展将运行以下 MCP servers：',
   local: '本地',
   remote: '远程',
   'This extension will add the following commands: {{commands}}.':
@@ -501,7 +501,7 @@ export default {
   'Context files:': '上下文文件：',
   'Skills:': '技能：',
   'Agents:': '智能体：',
-  'MCP servers:': 'MCP 服务器：',
+  'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '链接扩展安装失败。',
   'Extension "{{name}}" linked successfully and enabled.':
     '扩展 "{{name}}" 链接成功并已启用。',
@@ -535,7 +535,7 @@ export default {
   'Plugin selection cancelled.': '插件选择已取消。',
   'Select a plugin from "{{name}}"': '从 "{{name}}" 中选择插件',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
-    '使用 ↑↓ 或 j/k 导航，回车选择，Esc 取消',
+    '使用 ↑↓ 或 j/k 导航，Enter 选择，Escape 取消',
   '{{count}} more above': '上方还有 {{count}} 项',
   '{{count}} more below': '下方还有 {{count}} 项',
   'manage IDE integration': '管理 IDE 集成',
@@ -586,7 +586,7 @@ export default {
   'Press Escape to close': '按 Escape 关闭',
   'Press Escape, Ctrl+C, or Ctrl+D to cancel':
     '按 Escape、Ctrl+C 或 Ctrl+D 取消',
-  'Press Space, Enter, or Escape to dismiss': '按空格、回车或 Escape 关闭',
+  'Press Space, Enter, or Escape to dismiss': '按 Space、Enter 或 Escape 关闭',
   'No hook selected': '未选择 Hook',
   // Hooks - List Step
   'No hook events found.': '未找到 Hook 事件。',
@@ -802,7 +802,7 @@ export default {
   // ============================================================================
   // MCP Management Dialog
   // ============================================================================
-  'Manage MCP servers': '管理 MCP 服务器',
+  'Manage MCP servers': '管理 MCP servers',
   'Server Detail': '服务器详情',
   Tools: '工具',
   'Tool Detail': '工具详情',
@@ -845,7 +845,7 @@ export default {
   server: '个服务器',
   servers: '个服务器',
   'Add MCP servers to your settings to get started.':
-    '请在设置中添加 MCP 服务器以开始使用。',
+    '请在设置中添加 MCP servers 以开始使用。',
   'Run qwen --debug to see error logs': '运行 qwen --debug 查看错误日志',
 
   // MCP OAuth Authentication
@@ -999,10 +999,10 @@ export default {
   'Yes, and manually approve edits': '是，并手动批准编辑',
   'No, keep planning (esc)': '否，继续规划 (esc)',
   'URLs to fetch:': '要获取的 URL：',
-  'MCP Server: {{server}}': 'MCP 服务器：{{server}}',
+  'MCP Server: {{server}}': 'MCP Server：{{server}}',
   'Tool: {{tool}}': '工具：{{tool}}',
   'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
-    '允许执行来自服务器 "{{server}}" 的 MCP 工具 "{{tool}}"？',
+    '允许执行来自 MCP server "{{server}}" 的 MCP tool "{{tool}}"？',
   // ============================================================================
   // Dialogs - Shell Confirmation
   // ============================================================================
@@ -1045,18 +1045,18 @@ export default {
     '适合个人开发场景 \u00B7 按模型调用次数计费 \u00B7 每 5 小时/每周限额',
   Subscribe: '订阅计划',
   'Paid subscription plans from Alibaba Cloud ModelStudio':
-    '阿里云百炼付费订阅计划',
+    'Alibaba Cloud ModelStudio 付费订阅计划',
   'Select Subscription Plan': '选择订阅计划',
   'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
   'Alibaba Cloud Token Plan': '阿里云百炼 Token Plan',
   'Pay-as-you-go tokens \u00B7 Configure ModelStudio standard API key':
-    '按 Token 付费 \u00B7 配置百炼标准 API Key',
+    '按 Token 付费 \u00B7 配置 ModelStudio 标准 API Key',
   'For individuals \u00B7 Pay-as-you-go tokens \u00B7 Dedicated Token Plan endpoint':
     '适合个人 \u00B7 按 Token 付费 \u00B7 使用独立 Token Plan Endpoint',
   'For teams/companies \u00B7 Credits deducted by token usage \u00B7 Dedicated API key and base URL':
     '适合一人公司/团队/企业 \u00B7 按 Token 消耗抵扣 Credits \u00B7 专属 API Key 和 Base URL',
   'Token Plan documentation': 'Token Plan 参考文档',
-  'Bring your own API key': '使用自己的 API 密钥',
+  'Bring your own API key': '使用自己的 API Key',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     '基于浏览器的第三方提供商认证（例如 OpenRouter、ModelScope）',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
@@ -1075,13 +1075,13 @@ export default {
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     '正在等待认证...（按 ESC 或 CTRL+C 取消）',
   'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
-    '缺少 OpenAI 兼容认证的 API 密钥。请设置 settings.security.auth.apiKey 或设置 {{envKeyHint}} 环境变量。',
+    '缺少 OpenAI 兼容认证的 API Key。请设置 settings.security.auth.apiKey 或设置 {{envKeyHint}} 环境变量。',
   '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
     '未找到 {{envKeyHint}} 环境变量。请在 .env 文件或系统环境变量中进行设置。',
   '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
     '未找到 {{envKeyHint}} 环境变量（或设置 settings.security.auth.apiKey）。请在 .env 文件或系统环境变量中进行设置。',
   'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
-    '缺少 OpenAI 兼容认证的 API 密钥。请设置 {{envKeyHint}} 环境变量。',
+    '缺少 OpenAI 兼容认证的 API Key。请设置 {{envKeyHint}} 环境变量。',
   'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
     'Anthropic 提供商缺少必需的 baseUrl，请在 modelProviders[].baseUrl 中配置。',
   'ANTHROPIC_BASE_URL environment variable not found.':
@@ -1096,7 +1096,7 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': '选择模型',
-  'API Key': 'API 密钥',
+  'API Key': 'API Key',
   '(default)': '(默认)',
   '(not set)': '(未设置)',
   Modality: '模态',
@@ -1114,7 +1114,7 @@ export default {
   // Dialogs - Permissions
   // ============================================================================
   'Manage folder trust settings': '管理文件夹信任设置',
-  'Manage permission rules': '管理权限规则',
+  'Manage permission rules': '管理 permission rules',
   Allow: '允许',
   Ask: '询问',
   Deny: '拒绝',
@@ -1138,22 +1138,22 @@ export default {
   'User settings': '用户设置',
   'Saved in at ~/.qwen/settings.json': '保存在 ~/.qwen/settings.json',
   'Add a new rule…': '添加新规则…',
-  'Add {{type}} permission rule': '添加{{type}}权限规则',
+  'Add {{type}} permission rule': '添加 {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
-    '权限规则是一个工具名称，可选地后跟括号中的限定符。',
+    'permission rules 是工具名称，可选地后跟括号中的限定符。',
   'e.g.,': '例如',
   or: '或',
-  'Enter permission rule…': '输入权限规则…',
-  'Enter to submit · Esc to cancel': '回车提交 · Esc 取消',
+  'Enter permission rule…': '输入 permission rule…',
+  'Enter to submit · Esc to cancel': 'Enter 提交 · Esc 取消',
   'Where should this rule be saved?': '此规则应保存在哪里？',
-  'Enter to confirm · Esc to cancel': '回车确认 · Esc 取消',
+  'Enter to confirm · Esc to cancel': 'Enter 确认 · Esc 取消',
   'Delete {{type}} rule?': '删除{{type}}规则？',
   'Are you sure you want to delete this permission rule?':
-    '确定要删除此权限规则吗？',
+    '确定要删除此 permission rule 吗？',
   'Permissions:': '权限：',
-  '(←/→ or tab to cycle)': '（←/→ 或 tab 切换）',
+  '(←/→ or tab to cycle)': '（←/→ 或 Tab 切换）',
   'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
-    '按 ↑↓ 导航 · 回车选择 · 输入搜索 · Esc 取消',
+    '按 ↑↓ 导航 · Enter 选择 · 输入搜索 · Esc 取消',
   'Search…': '搜索…',
   // Workspace directory management
   'Add directory…': '添加目录…',
@@ -1165,7 +1165,7 @@ export default {
   'Enter the path to the directory:': '输入目录路径：',
   'Enter directory path…': '输入目录路径…',
   'Tab to complete · Enter to add · Esc to cancel':
-    'Tab 补全 · 回车添加 · Esc 取消',
+    'Tab 补全 · Enter 添加 · Esc 取消',
   'Remove directory?': '删除目录？',
   'Are you sure you want to remove this directory from the workspace?':
     '确定要将此目录从工作区中移除吗？',
@@ -1185,8 +1185,8 @@ export default {
   '(ctrl+g to view)': '（按 ctrl+g 查看）',
   '{{count}} {{name}} file': '{{count}} 个 {{name}} 文件',
   '{{count}} {{name}} files': '{{count}} 个 {{name}} 文件',
-  '{{count}} MCP server': '{{count}} 个 MCP 服务器',
-  '{{count}} MCP servers': '{{count}} 个 MCP 服务器',
+  '{{count}} MCP server': '{{count}} 个 MCP server',
+  '{{count}} MCP servers': '{{count}} 个 MCP servers',
   '{{count}} Blocked': '{{count}} 个已阻止',
   '(ctrl+t to view)': '（按 ctrl+t 查看）',
   '(ctrl+t to toggle)': '（按 ctrl+t 切换）',
@@ -1198,12 +1198,12 @@ export default {
   // ============================================================================
   // MCP Status
   // ============================================================================
-  'No MCP servers configured.': '未配置 MCP 服务器',
+  'No MCP servers configured.': '未配置 MCP servers',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP 服务器正在启动（{{count}} 个正在初始化）...',
+    '⏳ MCP servers 正在启动（{{count}} 个正在初始化）...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     '注意：首次启动可能需要更长时间。工具可用性将自动更新',
-  'Configured MCP servers:': '已配置的 MCP 服务器：',
+  'Configured MCP servers:': '已配置的 MCP servers：',
   Ready: '就绪',
   'Starting... (first startup may take longer)':
     '正在启动...（首次启动可能需要更长时间）',
@@ -1225,14 +1225,14 @@ export default {
   '💡 Tips:': '💡 提示：',
   Use: '使用',
   'to show server and tool descriptions': '显示服务器和工具描述',
-  'to show tool parameter schemas': '显示工具参数架构',
+  'to show tool parameter schemas': '显示 tool parameter schemas',
   'to hide descriptions': '隐藏描述',
   'to authenticate with OAuth-enabled servers':
     '使用支持 OAuth 的服务器进行认证',
   Press: '按',
   'to toggle tool descriptions on/off': '切换工具描述开关',
   "Starting OAuth authentication for MCP server '{{name}}'...":
-    "正在为 MCP 服务器 '{{name}}' 启动 OAuth 认证...",
+    "正在为 MCP server '{{name}}' 启动 OAuth 认证...",
   // ============================================================================
   // Startup Tips
   // ============================================================================
@@ -1490,7 +1490,7 @@ export default {
   'Usage by category': '分类用量',
   'System prompt': '系统提示',
   'Built-in tools': '内置工具',
-  'MCP tools': 'MCP 工具',
+  'MCP tools': 'MCP tools',
   'Memory files': '记忆文件',
   Skills: '技能',
   Messages: '消息',
@@ -1524,7 +1524,7 @@ export default {
   'Authenticate using Alibaba Cloud Coding Plan':
     '使用阿里云百炼 Coding Plan 进行认证',
   'Region for Coding Plan (china/global)': 'Coding Plan 区域 (china/global)',
-  'API key for Coding Plan': 'Coding Plan 的 API 密钥',
+  'API key for Coding Plan': 'Coding Plan 的 API Key',
   'Show current authentication status': '显示当前认证状态',
   'Authentication completed successfully.': '认证完成。',
   'Starting Qwen OAuth authentication...': '正在启动 Qwen OAuth 认证...',
@@ -1540,7 +1540,7 @@ export default {
   Global: '全球',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': '选择 Coding Plan 区域：',
-  'Enter your Coding Plan API key: ': '请输入您的 Coding Plan API 密钥：',
+  'Enter your Coding Plan API key: ': '请输入您的 Coding Plan API Key：',
   'Select authentication method:': '选择认证方式：',
   '\n=== Authentication Status ===\n': '\n=== 认证状态 ===\n',
   '⚠️  No authentication method configured.\n': '⚠️  未配置认证方式。\n',
@@ -1563,11 +1563,11 @@ export default {
   '  Region: {{region}}': '  区域：{{region}}',
   '  Current Model: {{model}}': '  当前模型：{{model}}',
   '  Config Version: {{version}}': '  配置版本：{{version}}',
-  '  Status: API key configured\n': '  状态：API 密钥已配置\n',
+  '  Status: API key configured\n': '  状态：API Key 已配置\n',
   '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
     '⚠️  认证方式：阿里云百炼 Coding Plan（不完整）',
   '  Issue: API key not found in environment or settings\n':
-    '  问题：在环境变量或设置中未找到 API 密钥\n',
+    '  问题：在环境变量或设置中未找到 API Key\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
     '  运行 `qwen auth coding-plan` 重新配置。\n',
   '✓ Authentication Method: {{type}}': '✓ 认证方式：{{type}}',
@@ -1668,6 +1668,48 @@ export default {
     '动态斜杠命令描述的 AI 翻译现已启用。',
   'AI translation for dynamic slash command descriptions is now disabled.':
     '动态斜杠命令描述的 AI 翻译现已禁用。',
+  'Background tasks': '后台任务',
+  'No tasks currently running': '当前没有正在运行的任务',
+  'No entry to show.': '没有可显示的条目。',
+  Running: '运行中',
+  Paused: '已暂停',
+  Completed: '已完成',
+  Failed: '失败',
+  Stopped: '已停止',
+  Shell: 'Shell',
+  Monitor: '监控',
+  Command: '命令',
+  Dream: '记忆整理',
+  '[dream] memory consolidation': '[记忆整理] 记忆整理',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[记忆整理] 记忆整理（正在审阅 {{count}} 个会话）',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[记忆整理] 记忆整理（正在审阅 {{count}} 个会话）',
+  '{{count}} session': '{{count}} 个会话',
+  '{{count}} sessions': '{{count}} 个会话',
+  '{{count}} topic': '{{count}} 个主题',
+  '{{count}} topics': '{{count}} 个主题',
+  '{{count}} tokens': '{{count}} tokens',
+  '{{count}} tool call': '{{count}} 个工具调用',
+  '{{count}} tool calls': '{{count}} 个工具调用',
+  '{{count}} event': '{{count}} 个事件',
+  '{{count}} events': '{{count}} 个事件',
+  '{{count}} dropped': '丢弃 {{count}} 行',
+  'pid {{pid}}': 'pid {{pid}}',
+  'exit {{exitCode}}': '退出码 {{exitCode}}',
+  'Sessions reviewing': '正在审阅的会话',
+  Progress: '进度',
+  'Resume blocked': '恢复受阻',
+  'Working dir': '工作目录',
+  'Output file': '输出文件',
+  'Topics touched ({{count}})': '触及的主题（{{count}}）',
+  '{{count}} more': '{{count}} 个',
+  'Lock release warning': '锁释放警告',
+  'Metadata write warning': '元数据写入警告',
+  "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
+    '后续记忆整理可能会因锁定而跳过，直到下一次会话过期清理清除此文件。',
+  "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
+    '调度门控未看到本次记忆整理的时间戳；下一轮记忆整理可能会比平时更早重新触发。',
 
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型注册表中）',

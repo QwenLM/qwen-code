@@ -43,7 +43,7 @@ export default {
   'Send message': 'メッセージを送信',
   'Initializing...': '初期化中...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
-    'MCPサーバーに接続中... ({{connected}}/{{total}})',
+    'MCP servers に接続中... ({{connected}}/{{total}})',
   'Type your message or @path/to/file':
     'メッセージを入力、@パス/ファイルでファイルを添付(D&D対応)',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
@@ -62,7 +62,7 @@ export default {
   'Fast Model': '高速モデル',
   Sandbox: 'サンドボックス',
   'Session ID': 'セッションID',
-  'Base URL': 'ベースURL',
+  'Base URL': 'Base URL',
   'Memory Usage': 'メモリ使用量',
   'IDE Client': 'IDEクライアント',
 
@@ -224,7 +224,7 @@ export default {
   'e.g., Expert code reviewer that reviews code based on best practices...':
     '例: ベストプラクティスに基づいてコードをレビューするエキスパートレビュアー...',
   'All tools selected, including MCP tools':
-    'MCPツールを含むすべてのツールを選択',
+    'MCP tools を含むすべてのツールを選択',
   'Read-only tools:': '読み取り専用ツール:',
   'Edit tools:': '編集ツール:',
   'Execution tools:': '実行ツール:',
@@ -285,7 +285,7 @@ export default {
   'Use Builtin Ripgrep': '組み込み Ripgrep を使用',
   'Tool Output Truncation Threshold': 'ツール出力切り詰めのしきい値',
   'Tool Output Truncation Lines': 'ツール出力の切り詰め行数',
-  'Tool Schema Compliance': 'ツールスキーマ準拠',
+  'Tool Schema Compliance': 'Tool Schema 準拠',
   'Auto (detect from system)': '自動(システムから検出)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
   Auto: '自動',
@@ -453,7 +453,7 @@ export default {
     'stderr をユーザーのみに表示し、ツール呼び出しを続ける',
   'block processing, erase original prompt, and show stderr to user only':
     '処理をブロックし、元のプロンプトを消去し、stderr をユーザーのみに表示',
-  'stdout shown to Qwen': 'stdout をモデルに表示',
+  'stdout shown to Qwen': 'stdout を Qwen に表示',
   'show stderr to user only (blocking errors ignored)':
     'stderr をユーザーのみに表示（ブロッキングエラーは無視）',
   'command completes successfully': 'コマンドが正常に完了',
@@ -555,7 +555,7 @@ export default {
     '一致するマネージド自動メモリエントリなし: {{query}}',
   'Consolidate managed auto-memory topic files.':
     'マネージド自動メモリトピックファイルを統合する。',
-  'No MCP servers configured.': 'MCPサーバーが設定されていません',
+  'No MCP servers configured.': 'MCP servers が設定されていません',
   'Could not retrieve tool registry.': 'ツールレジストリを取得できませんでした',
   "Successfully authenticated and refreshed tools for '{{name}}'.":
     "'{{name}}' の認証とツール更新に成功しました",
@@ -566,7 +566,7 @@ export default {
   'Authentication complete. Returning to server details...':
     '認証完了。サーバー詳細に戻ります...',
   'Authentication successful.': '認証成功。',
-  'Configured MCP servers:': '設定済みMCPサーバー:',
+  'Configured MCP servers:': '設定済み MCP servers:',
   Ready: '準備完了',
   Disconnected: '切断',
   '{{count}} tool': '{{count}} ツール',
@@ -650,7 +650,7 @@ export default {
   No: 'いいえ',
   'No (esc)': 'いいえ (Esc)',
   // MCP Management - Core translations
-  'Manage MCP servers': 'MCPサーバーを管理',
+  'Manage MCP servers': 'MCP servers を管理',
   'Server Detail': 'サーバー詳細',
   Tools: 'ツール',
   'Tool Detail': 'ツール詳細',
@@ -700,7 +700,7 @@ export default {
   server: 'サーバー',
   servers: 'サーバー',
   'Add MCP servers to your settings to get started.':
-    '設定にMCPサーバーを追加して開始してください。',
+    '設定に MCP servers を追加して開始してください。',
   'Run qwen --debug to see error logs':
     'qwen --debug を実行してエラーログを確認してください',
 
@@ -755,10 +755,10 @@ export default {
   'Yes, and manually approve edits': 'はい、編集を手動承認',
   'No, keep planning (esc)': 'いいえ、計画を続ける (Esc)',
   'URLs to fetch:': '取得するURL:',
-  'MCP Server: {{server}}': 'MCPサーバー: {{server}}',
+  'MCP Server: {{server}}': 'MCP Server: {{server}}',
   'Tool: {{tool}}': 'ツール: {{tool}}',
   'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
-    'サーバー "{{server}}" からの MCPツール "{{tool}}" の実行を許可しますか?',
+    'MCP server "{{server}}" からの MCP tool "{{tool}}" の実行を許可しますか?',
   // Dialogs - Shell Confirmation
   'Shell Command Execution': 'シェルコマンド実行',
   'A custom command wants to run the following shell commands:':
@@ -795,7 +795,7 @@ export default {
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     '有料 \u00B7 5時間最大6,000リクエスト \u00B7 すべての Alibaba Cloud Coding Plan モデル',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
-  'Bring your own API key': '自分のAPIキーを使用',
+  'Bring your own API key': '自分の API Key を使用',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'サードパーティプロバイダーによるブラウザベースの認証（例：OpenRouter、ModelScope）',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
@@ -836,7 +836,7 @@ export default {
   unknown: '不明',
   // Dialogs - Permissions
   'Manage folder trust settings': 'フォルダ信頼設定を管理',
-  'Manage permission rules': '権限ルールを管理',
+  'Manage permission rules': 'permission rules を管理',
   Allow: '許可',
   Ask: '確認',
   Deny: '拒否',
@@ -860,18 +860,18 @@ export default {
   'User settings': 'ユーザー設定',
   'Saved in at ~/.qwen/settings.json': '~/.qwen/settings.json に保存',
   'Add a new rule…': '新しいルールを追加…',
-  'Add {{type}} permission rule': '{{type}}権限ルールを追加',
+  'Add {{type}} permission rule': '{{type}} permission rule を追加',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
-    '権限ルールはツール名で、オプションで括弧内に指定子を付けます。',
+    'permission rules はツール名で、オプションで括弧内に指定子を付けます。',
   'e.g.,': '例：',
   or: 'または',
-  'Enter permission rule…': '権限ルールを入力…',
+  'Enter permission rule…': 'permission rule を入力…',
   'Enter to submit · Esc to cancel': 'Enter で送信 · Esc でキャンセル',
   'Where should this rule be saved?': 'このルールをどこに保存しますか？',
   'Enter to confirm · Esc to cancel': 'Enter で確認 · Esc でキャンセル',
   'Delete {{type}} rule?': '{{type}}ルールを削除しますか？',
   'Are you sure you want to delete this permission rule?':
-    'この権限ルールを削除してもよろしいですか？',
+    'この permission rule を削除してもよろしいですか？',
   'Permissions:': '権限：',
   '(←/→ or tab to cycle)': '（←/→ または Tab で切替）',
   'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
@@ -906,8 +906,8 @@ export default {
   '(ctrl+g to view)': '(Ctrl+G で表示)',
   '{{count}} {{name}} file': '{{count}} {{name}} ファイル',
   '{{count}} {{name}} files': '{{count}} {{name}} ファイル',
-  '{{count}} MCP server': '{{count}} MCPサーバー',
-  '{{count}} MCP servers': '{{count}} MCPサーバー',
+  '{{count}} MCP server': '{{count}} MCP server',
+  '{{count}} MCP servers': '{{count}} MCP servers',
   '{{count}} Blocked': '{{count}} ブロック',
   '(ctrl+t to view)': '(Ctrl+T で表示)',
   '(ctrl+t to toggle)': '(Ctrl+T で切り替え)',
@@ -917,7 +917,7 @@ export default {
   'Press ↑ to edit queued messages': '↑ を押してキュー内のメッセージを編集',
   // MCP Status
   '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCPサーバーを起動中({{count}} 初期化中)...',
+    '⏳ MCP servers を起動中({{count}} 初期化中)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     '注: 初回起動には時間がかかる場合があります。ツールの利用可能状況は自動的に更新されます',
   'Starting... (first startup may take longer)':
@@ -938,13 +938,13 @@ export default {
   '💡 Tips:': '💡 ヒント:',
   Use: '使用',
   'to show server and tool descriptions': 'サーバーとツールの説明を表示',
-  'to show tool parameter schemas': 'ツールパラメータスキーマを表示',
+  'to show tool parameter schemas': 'tool parameter schemas を表示',
   'to hide descriptions': '説明を非表示',
   'to authenticate with OAuth-enabled servers': 'OAuth対応サーバーで認証',
   Press: '押す',
   'to toggle tool descriptions on/off': 'ツール説明の表示/非表示を切り替え',
   "Starting OAuth authentication for MCP server '{{name}}'...":
-    "MCPサーバー '{{name}}' のOAuth認証を開始中...",
+    "MCP server '{{name}}' の OAuth 認証を開始中...",
   // Startup Tips
   'Tips:': 'ヒント：',
   'Use /compress when the conversation gets long to summarize history and free up context.':
@@ -1080,16 +1080,16 @@ export default {
   // Custom API Key Configuration
   // ============================================================================
   'You can configure your API key and models in settings.json':
-    'settings.json で API キーとモデルを設定できます',
+    'settings.json で API Key とモデルを設定できます',
   'Refer to the documentation for setup instructions':
     'セットアップ手順はドキュメントを参照してください',
 
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'API key cannot be empty.': 'APIキーは空にできません。',
+  'API key cannot be empty.': 'API Key は空にできません。',
   'You can get your Coding Plan API key here':
-    'Coding Plan APIキーはこちらで取得できます',
+    'Coding Plan API Key はこちらで取得できます',
   'Failed to update Coding Plan configuration: {{message}}':
     'Coding Plan の設定更新に失敗しました: {{message}}',
 
@@ -1101,7 +1101,7 @@ export default {
   'Select Region for Coding Plan': 'Coding Planのリージョンを選択',
   'Choose based on where your account is registered':
     'アカウントの登録先に応じて選択してください',
-  'Enter Coding Plan API Key': 'Coding Plan APIキーを入力',
+  'Enter Coding Plan API Key': 'Coding Plan API Key を入力',
 
   // ============================================================================
   // Coding Plan International Updates
@@ -1129,7 +1129,7 @@ export default {
   'Usage by category': 'カテゴリ別の使用量',
   'System prompt': 'システムプロンプト',
   'Built-in tools': '組み込みツール',
-  'MCP tools': 'MCPツール',
+  'MCP tools': 'MCP tools',
   'Memory files': 'メモリファイル',
   Skills: 'スキル',
   Messages: 'メッセージ',
@@ -1141,7 +1141,7 @@ export default {
   '{{region}} configuration updated successfully.':
     '{{region}} の設定が正常に更新されました。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
-    '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました。',
+    '{{region}} での認証に成功しました。API Key とモデル設定が settings.json に保存されました。',
   'Tip: Use /model to switch between available Coding Plan models.':
     'ヒント: /model で利用可能な Coding Plan モデルを切り替えられます。',
   'Type something...': '何か入力...',
@@ -1160,7 +1160,7 @@ export default {
     'Alibaba Cloud Coding Plan で認証する',
   'Region for Coding Plan (china/global)':
     'Coding Plan のリージョン (china/global)',
-  'API key for Coding Plan': 'Coding Plan の API キー',
+  'API key for Coding Plan': 'Coding Plan の API Key',
   'Show current authentication status': '現在の認証ステータスを表示',
   'Authentication completed successfully.': '認証が正常に完了しました。',
   'Starting Qwen OAuth authentication...': 'Qwen OAuth 認証を開始しています...',
@@ -1179,7 +1179,7 @@ export default {
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Coding Plan のリージョンを選択:',
   'Enter your Coding Plan API key: ':
-    'Coding Plan の API キーを入力してください: ',
+    'Coding Plan の API Key を入力してください: ',
   'Select authentication method:': '認証方法を選択:',
   '\n=== Authentication Status ===\n': '\n=== 認証ステータス ===\n',
   '⚠️  No authentication method configured.\n':
@@ -1203,11 +1203,11 @@ export default {
   '  Region: {{region}}': '  リージョン: {{region}}',
   '  Current Model: {{model}}': '  現在のモデル: {{model}}',
   '  Config Version: {{version}}': '  設定バージョン: {{version}}',
-  '  Status: API key configured\n': '  ステータス: APIキー設定済み\n',
+  '  Status: API key configured\n': '  ステータス: API Key 設定済み\n',
   '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
     '⚠️  認証方法: Alibaba Cloud Coding Plan（不完全）',
   '  Issue: API key not found in environment or settings\n':
-    '  問題: 環境変数または設定にAPIキーが見つかりません\n',
+    '  問題: 環境変数または設定に API Key が見つかりません\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
     '  `qwen auth coding-plan` を実行して再設定してください。\n',
   '✓ Authentication Method: {{type}}': '✓ 認証方法: {{type}}',
@@ -1315,7 +1315,7 @@ export default {
   'Extension "{{name}}" updated successfully.':
     '拡張機能 "{{name}}" を更新しました。',
   'Name:': '名前:',
-  'MCP Servers:': 'MCP サーバー:',
+  'MCP Servers:': 'MCP Servers:',
   'Settings:': '設定:',
   'View Details': '詳細を表示',
   'Update failed:': '更新に失敗しました:',
@@ -1445,7 +1445,7 @@ export default {
   '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
     '**拡張機能は予期しない動作を引き起こす可能性があります。ソースを確認し、作者を信頼できることを確認してください。**',
   'This extension will run the following MCP servers:':
-    'この拡張機能は次の MCP サーバーを実行します:',
+    'この拡張機能は次の MCP servers を実行します:',
   local: 'ローカル',
   remote: 'リモート',
   'This extension will add the following commands: {{commands}}.':
@@ -1514,7 +1514,7 @@ export default {
   'Context files:': 'コンテキストファイル:',
   'Skills:': 'スキル:',
   'Agents:': 'エージェント:',
-  'MCP servers:': 'MCP サーバー:',
+  'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'リンク拡張機能のインストールに失敗しました。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1559,19 +1559,19 @@ export default {
   'Cannot write to terminal — copy the URL above manually.':
     'ターミナルに書き込めないため、上の URL を手動でコピーしてください。',
   'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
-    'OpenAI 互換認証用の API キーがありません。`settings.security.auth.apiKey` を設定するか、環境変数 {{envKeyHint}} を設定してください。',
+    'OpenAI 互換認証用の API Key がありません。`settings.security.auth.apiKey` を設定するか、環境変数 {{envKeyHint}} を設定してください。',
   '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
     '環境変数 {{envKeyHint}} が見つかりません。.env ファイルまたは環境変数に設定してください。',
   '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
     '環境変数 {{envKeyHint}} が見つかりません (または settings.security.auth.apiKey を設定してください)。.env ファイルまたは環境変数に設定してください。',
   'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
-    'OpenAI 互換認証用の API キーがありません。環境変数 {{envKeyHint}} を設定してください。',
+    'OpenAI 互換認証用の API Key がありません。環境変数 {{envKeyHint}} を設定してください。',
   'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
     'Anthropic プロバイダーで必須の `modelProviders[].baseUrl` が設定されていません。',
   'ANTHROPIC_BASE_URL environment variable not found.':
     '環境変数 ANTHROPIC_BASE_URL が見つかりません。',
   'Invalid auth method selected.': '無効な認証方式が選択されました。',
-  'API Key': 'API キー',
+  'API Key': 'API Key',
   '(default)': '(デフォルト)',
   '(not set)': '(未設定)',
   'Command Format Migration': 'コマンド形式の移行',
@@ -1625,7 +1625,13 @@ export default {
   'No failed request to retry.': '再試行できる失敗したリクエストはありません。',
   'to retry last request': '最後のリクエストを再試行',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
-    '無効な API キーです。Coding Plan の API キーは "sk-sp-" で始まります。確認してください。',
+    '無効な API Key です。Coding Plan の API Key は "sk-sp-" で始まります。確認してください。',
+  'Lock release warning': 'ロック解除の警告',
+  'Metadata write warning': 'メタデータ書き込みの警告',
+  "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
+    '次回のセッション期限切れクリーンアップでファイルが削除されるまで、以降の dream はロック中としてスキップされる可能性があります。',
+  "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
+    'スケジューラーゲートがこの dream のタイムスタンプを認識しませんでした。次の dream サイクルは通常より早く再実行される可能性があります。',
   // === Same-as-English optimization ===
   ' (not in model registry)': '（モデルレジストリにありません）',
   'Attribution: commit': 'コミットの帰属表示',

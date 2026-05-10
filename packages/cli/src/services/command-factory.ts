@@ -124,6 +124,7 @@ export function createSlashCommandFromDefinition(
     sourceLabel: extensionName
       ? `${t('Extension:')} ${extensionName}`
       : t('Custom'),
+    sourceDetail: extensionName ? 'extension' : 'custom',
     modelInvocable: definition.disableModelInvocation
       ? false
       : !extensionName || !!(definition.description || definition.whenToUse),

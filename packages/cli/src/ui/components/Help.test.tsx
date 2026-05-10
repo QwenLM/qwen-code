@@ -40,7 +40,8 @@ const mockCommands: readonly SlashCommand[] = [
     description: 'A custom command',
     kind: CommandKind.FILE,
     source: 'skill-dir-command',
-    sourceLabel: 'Project',
+    sourceLabel: 'Custom',
+    sourceDetail: 'custom',
   },
   {
     name: 'plugin-cmd',
@@ -177,7 +178,7 @@ describe('Help Component', () => {
     expect(output).toContain('[all]');
     expect(output).toContain('[model]');
     expect(output).toContain('/custom');
-    expect(output).toContain('[Project]');
+    expect(output).toContain('[Custom]');
     expect(output).toContain('/plugin-cmd');
     expect(output).toContain('[Plugin]');
     expect(output).toContain('/mcp-prompt');

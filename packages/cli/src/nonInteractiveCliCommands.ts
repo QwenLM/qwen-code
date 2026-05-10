@@ -382,6 +382,7 @@ export const getAvailableCommands = async (
   config: Config,
   abortSignal: AbortSignal,
   mode: ExecutionMode = 'acp',
+  settings?: LoadedSettings,
 ): Promise<SlashCommand[]> => {
   try {
     const loaders = [
@@ -405,7 +406,7 @@ export const getAvailableCommands = async (
         config,
         commandService.getCommands(),
         abortSignal,
-        false,
+        settings?.merged?.general?.dynamicCommandTranslation === true,
       ),
     );
     return localizedCommandService.getCommandsForMode(mode) as SlashCommand[];

@@ -13,12 +13,17 @@ import {
   type SupportedLanguage,
   SUPPORTED_LANGUAGES,
   getLanguageNameFromLocale,
+  getLanguageNameForTranslationTarget,
   resolveSupportedLanguage,
 } from './languages.js';
 export { MUST_TRANSLATE_KEYS } from './mustTranslateKeys.js';
 
 export type { SupportedLanguage };
-export { SUPPORTED_LANGUAGES, getLanguageNameFromLocale };
+export {
+  SUPPORTED_LANGUAGES,
+  getLanguageNameFromLocale,
+  getLanguageNameForTranslationTarget,
+};
 
 // State
 let currentLanguage: SupportedLanguage = 'en';
@@ -33,6 +38,18 @@ const loadingPromises: Record<string, Promise<TranslationDict>> = {};
 type TranslationLoadResult =
   | { translations: TranslationDict; error?: undefined }
   | { translations?: undefined; error: Error };
+
+function getTranslationModuleExport(module: Record<string, unknown>): unknown {
+  return Object.prototype.hasOwnProperty.call(module, 'default')
+    ? module['default']
+    : module;
+}
+
+function isTranslationDict(value: unknown): value is TranslationDict {
+  return (
+    value !== null && typeof value === 'object' && Object.keys(value).length > 0
+  );
+}
 // Path helpers
 const getBuiltinLocalesDir = (): string => {
   const __filename = fileURLToPath(import.meta.url);
@@ -88,12 +105,8 @@ async function tryImportTranslations(
 ): Promise<TranslationLoadResult> {
   try {
     const module = await import(moduleSpecifier);
-    const result = module.default || module;
-    if (
-      result &&
-      typeof result === 'object' &&
-      Object.keys(result).length > 0
-    ) {
+    const result = getTranslationModuleExport(module);
+    if (isTranslationDict(result)) {
       return { translations: result };
     }
 
@@ -112,12 +125,8 @@ async function tryImportBundledTranslations(
 ): Promise<TranslationLoadResult> {
   try {
     const module = await import(`./locales/${lang}.js`);
-    const result = module.default || module;
-    if (
-      result &&
-      typeof result === 'object' &&
-      Object.keys(result).length > 0
-    ) {
+    const result = getTranslationModuleExport(module);
+    if (isTranslationDict(result)) {
       return { translations: result };
     }
 
