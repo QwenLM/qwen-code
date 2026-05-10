@@ -49,13 +49,17 @@ function normalizeGitLsOutputLine(p: string): string {
   return s;
 }
 
+function repoRelativePathsCaseFold(): boolean {
+  return process.platform === 'win32' || process.platform === 'darwin';
+}
+
 function equalsRepoRelativeCaseAware(a: string, b: string): boolean {
   const x = a.replace(/\/+$/, '');
   const y = b.replace(/\/+$/, '');
   if (x === y) {
     return true;
   }
-  if (process.platform === 'win32') {
+  if (repoRelativePathsCaseFold()) {
     return x.toLowerCase() === y.toLowerCase();
   }
   return false;
@@ -70,7 +74,7 @@ function sliceAfterGitPathspecPrefix(nf: string, rg: string): string | null {
     }
     return rest;
   }
-  if (process.platform === 'win32') {
+  if (repoRelativePathsCaseFold()) {
     const lp = `${rg.toLowerCase()}/`;
     const ln = nf.toLowerCase();
     if (ln.startsWith(lp)) {
@@ -996,7 +1000,9 @@ async function crawlWithGitLsFiles(
   const dirFilter = options.ignore.getDirectoryFilter();
   const fileFilter = options.ignore.getFileFilter();
 
-  const trackedArgs = ['--literal-pathspecs', 'ls-files', '-z', '--cached'];
+  // Avoid `-z` with `-t`: record shape for `ls-files -t` + `-z` is not stable across Git
+  // versions; newline-delimited output is fine here (index paths cannot contain newlines).
+  const trackedArgs = ['--literal-pathspecs', 'ls-files', '--cached'];
   trackedArgs.push('-t');
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     trackedArgs.push(relativeToGitRoot);
@@ -1012,8 +1018,8 @@ async function crawlWithGitLsFiles(
     if (line.length === 0) {
       return null;
     }
-    // `git ls-files -t` emits "<status><space><path>".
-    // Preserve the path portion verbatim; tracked filenames may begin/end with spaces.
+    // `git ls-files -t` emits "<status><one separator char><path>" (space or tab).
+    // Do not trim further — the path may start with spaces.
     if (line.length >= 3 && /\s/.test(line[1]) && /[A-Za-z]/.test(line[0])) {
       return { status: line[0].toUpperCase(), filePath: line.slice(2) };
     }
@@ -1075,7 +1081,6 @@ async function crawlWithGitLsFiles(
       collectLines: false,
       onLine: processTrackedFile,
       yieldEveryLines: YIELD_INTERVAL,
-      recordDelimiter: '\0',
     },
   );
   if (!trackedResult.success) {
@@ -1271,7 +1276,10 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
     return [];
   }
 
-  return results.map((p) => path.posix.join(relativeToCrawlDir, p));
+  const cwdRelative = results
+    .filter((p) => p.length > 0 && p !== '.')
+    .map((p) => path.posix.join(relativeToCrawlDir, p));
+  return buildResultsFromFileSet(new Set(cwdRelative));
 }
 
 export async function crawl(options: CrawlOptions): Promise<string[]> {

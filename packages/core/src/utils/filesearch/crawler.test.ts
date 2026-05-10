@@ -1263,7 +1263,12 @@ describe('crawler', () => {
       const callsAfterFirst = gitCalls.length;
       expect(gitCalls.filter((a) => a.includes('--cached'))).toHaveLength(1);
       expect(
-        gitCalls.some((a) => a.includes('-z') && a.includes('ls-files')),
+        gitCalls.some(
+          (a) =>
+            a.includes('-z') &&
+            a.includes('ls-files') &&
+            (a.includes('--others') || a.includes('--deleted')),
+        ),
       ).toBe(true);
 
       await crawl(options);
