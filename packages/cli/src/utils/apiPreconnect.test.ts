@@ -256,14 +256,18 @@ describe('apiPreconnect', () => {
     it('should handle fetch errors gracefully', async () => {
       mockFetch.mockRejectedValue(new Error('Network error'));
       // Should not throw
-      expect(() => preconnectApi('qwen-oauth')).not.toThrow();
+      expect(() =>
+        preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' }),
+      ).not.toThrow();
     });
 
     it('should handle synchronous dispatcher errors gracefully', () => {
       mockGetOrCreateSharedDispatcher.mockImplementation(() => {
         throw new Error('Failed to create dispatcher');
       });
-      expect(() => preconnectApi('qwen-oauth')).not.toThrow();
+      expect(() =>
+        preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' }),
+      ).not.toThrow();
     });
 
     it('should skip when QWEN_CODE_DISABLE_PRECONNECT is set', () => {
