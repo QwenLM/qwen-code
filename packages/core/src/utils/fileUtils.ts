@@ -756,6 +756,14 @@ export async function detectFileType(filePath: string): Promise<FileType> {
     // declares a text mime, the bytes are text even if the first
     // 4 KB look binary on a raw read.
     if (isTextMime(lookedUpMimeType)) {
+      // Log the classification path so future #3964-class
+      // troubleshooting can tell mime-trust apart from extension
+      // override and the content-sample fallback below — without
+      // having to re-derive which fast-path fired by reading the
+      // code. Cheap at debug level; off by default.
+      debugLogger.debug(
+        `detectFileType: ${filePath} → text (mime-trust: ${lookedUpMimeType})`,
+      );
       return 'text';
     }
   }
@@ -773,6 +781,9 @@ export async function detectFileType(filePath: string): Promise<FileType> {
   // extension is unambiguously text. Issue #3964 reproduced exactly
   // this on `.c` / `.cpp` / `.h` files.
   if (KNOWN_TEXT_EXTENSIONS.has(ext)) {
+    debugLogger.debug(
+      `detectFileType: ${filePath} → text (extension-override, mime ${lookedUpMimeType ?? 'null'})`,
+    );
     return 'text';
   }
   // Basename-only allowlist for extensionless build / config / lockfiles
@@ -780,6 +791,9 @@ export async function detectFileType(filePath: string): Promise<FileType> {
   // that the extension check above misses. See KNOWN_TEXT_BASENAMES
   // for the full list.
   if (KNOWN_TEXT_BASENAMES.has(path.basename(filePath))) {
+    debugLogger.debug(
+      `detectFileType: ${filePath} → text (basename-override, mime ${lookedUpMimeType ?? 'null'})`,
+    );
     return 'text';
   }
 
