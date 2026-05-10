@@ -526,7 +526,8 @@ export class ChatRecordingService {
    *
    * Without this, a long agentic turn that streams >64KB of tool
    * output could push the only `custom_title` record past the 64KB
-   * tail window, forcing the picker into a full-file fallback.
+   * tail window, forcing the picker into a head-window fallback (or
+   * returning undefined if the title is beyond both windows).
    */
   private bytesSinceTitleAnchor = 0;
 
@@ -764,8 +765,8 @@ export class ChatRecordingService {
   /**
    * Append a fresh `custom_title` record to EOF using the in-memory
    * cached title. Mirrors {@link finalize}'s record shape — invoked
-   * mid-session (every {@link TITLE_REANCHOR_BYTES} of other writes)
-   * so the picker's tail-window scan never has to fall back to
+   * mid-session (every 32KB of other writes) so the picker's
+   * tail-window scan never has to fall back to
    * scanning the middle of the file.
    */
   private reanchorTitle(): void {

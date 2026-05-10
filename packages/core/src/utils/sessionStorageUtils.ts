@@ -252,9 +252,9 @@ export function extractLastJsonStringField(
  * Two bounded windows, never a full-file scan:
  *   1. Scan the last LITE_READ_BUF_SIZE bytes of the file. This is the
  *      common path because `ChatRecordingService` re-anchors metadata
- *      records to EOF every {@link TITLE_REANCHOR_BYTES} (≤ tail-window
- *      size) and on every lifecycle event (turn end, session switch,
- *      shutdown, resume).
+ *      records to EOF every 32KB (the title re-anchor threshold, below
+ *      the tail-window size) and on every lifecycle event (turn end,
+ *      session switch, shutdown, resume).
  *   2. If the tail has no match, scan the FIRST LITE_READ_BUF_SIZE bytes
  *      of the file. The metadata record set on a brand-new session lands
  *      near offset 0 before any user/assistant turns push it forward, so

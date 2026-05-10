@@ -593,6 +593,40 @@ describe('sessionStorageUtils', () => {
       ).toEqual({ customTitle: 'X', titleSource: 'auto' });
     });
 
+    it('returns all-undefined when the pair is buried beyond both head and tail windows', () => {
+      // Anti-test mirroring the single-field variant: the multi-field
+      // reader intentionally scans only the head and tail windows. A
+      // matching record stranded in the middle of a >2× window file must
+      // not be found, and every requested field should keep the empty
+      // result shape.
+      const padTo = (label: string, byteCount: number) => {
+        const filler =
+          '{"type":"user","message":"' +
+          'x'.repeat(Math.max(0, byteCount - 30)) +
+          '"}';
+        return label + '\n' + filler + '\n';
+      };
+      const buryWindow = LITE_READ_BUF_SIZE + 16 * 1024;
+      const buriedPair =
+        '{"subtype":"custom_title","customTitle":"buried","titleSource":"auto"}';
+      const p = writeFile(
+        'buried-pair.jsonl',
+        padTo('{"type":"user"}', buryWindow) +
+          buriedPair +
+          '\n' +
+          padTo('{"type":"user"}', buryWindow),
+      );
+
+      expect(
+        readLastJsonStringFieldsSync(
+          p,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+        ),
+      ).toEqual({ customTitle: undefined, titleSource: undefined });
+    });
+
     it('does not let a truncated trailing partial record win', () => {
       const p = writeFile(
         'truncated.jsonl',

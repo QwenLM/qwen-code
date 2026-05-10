@@ -482,9 +482,8 @@ export class SessionService {
     // Pre-allocate the tail-read buffer once and pass it to every
     // per-file metadata read. Without pooling, each session in the
     // page allocs+GCs a fresh 64KB Buffer; for a typical page of 20
-    // that's ~1.3MB churn per /resume open. Phase-2 (full-file
-    // fallback) inside the helper still allocs per chunk because
-    // chunk lengths vary, but Phase-2 is rarely entered.
+    // that's ~1.3MB churn per /resume open. The helper reuses this
+    // same scratch buffer for its bounded tail and head-window reads.
     const tailBuffer = Buffer.alloc(LITE_READ_BUF_SIZE);
 
     for (const file of files) {
