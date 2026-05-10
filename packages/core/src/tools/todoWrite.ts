@@ -423,6 +423,11 @@ export class TodoWriteTool extends BaseDeclarativeTool<
       todoWriteToolDescription,
       Kind.Think,
       todoWriteToolSchemaData.parametersJsonSchema as Record<string, unknown>,
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — todo management is infrequent
+      false, // alwaysLoad
+      'todo task list progress tracking',
     );
   }
 

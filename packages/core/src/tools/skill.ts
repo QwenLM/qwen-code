@@ -78,6 +78,9 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       initialSchema,
       false, // isOutputMarkdown
       false, // canUpdateOutput
+      true, // shouldDefer — skill invocation is infrequent
+      false, // alwaysLoad
+      'skill slash command invoke execute',
     );
 
     const skillManager = config.getSkillManager();
