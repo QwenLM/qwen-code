@@ -33,7 +33,7 @@ function toPosixPath(p: string): string {
   return p.split(path.sep).join(path.posix.sep);
 }
 
-function normalizeGitLsRepoPath(p: string): string {
+function normalizeGitRefPath(p: string): string {
   let s = toPosixPath(p);
   while (s.startsWith('./')) {
     s = s.slice(2);
@@ -41,12 +41,22 @@ function normalizeGitLsRepoPath(p: string): string {
   return s.replace(/\/+$/, '');
 }
 
+function normalizeGitLsOutputLine(p: string): string {
+  let s = toPosixPath(p);
+  while (s.startsWith('./')) {
+    s = s.slice(2);
+  }
+  return s;
+}
+
 function equalsRepoRelativeCaseAware(a: string, b: string): boolean {
-  if (a === b) {
+  const x = a.replace(/\/+$/, '');
+  const y = b.replace(/\/+$/, '');
+  if (x === y) {
     return true;
   }
   if (process.platform === 'win32') {
-    return a.toLowerCase() === b.toLowerCase();
+    return x.toLowerCase() === y.toLowerCase();
   }
   return false;
 }
@@ -54,12 +64,21 @@ function equalsRepoRelativeCaseAware(a: string, b: string): boolean {
 function sliceAfterGitPathspecPrefix(nf: string, rg: string): string | null {
   const prefix = `${rg}/`;
   if (nf.startsWith(prefix)) {
-    return nf.slice(prefix.length);
+    const rest = nf.slice(prefix.length);
+    if (rest === '') {
+      return null;
+    }
+    return rest;
   }
   if (process.platform === 'win32') {
     const lp = `${rg.toLowerCase()}/`;
-    if (nf.toLowerCase().startsWith(lp)) {
-      return nf.slice(lp.length);
+    const ln = nf.toLowerCase();
+    if (ln.startsWith(lp)) {
+      const rest = nf.slice(lp.length);
+      if (rest === '') {
+        return null;
+      }
+      return rest;
     }
   }
   return null;
@@ -892,9 +911,9 @@ function posixPathUnderGitRoot(
   relativeToGitRoot: string,
   relativeToCrawlDir: string,
 ): string {
-  const rg = normalizeGitLsRepoPath(relativeToGitRoot);
-  const rc = normalizeGitLsRepoPath(relativeToCrawlDir);
-  const nf = normalizeGitLsRepoPath(normalizedFile);
+  const rg = normalizeGitRefPath(relativeToGitRoot);
+  const rc = normalizeGitRefPath(relativeToCrawlDir);
+  const nf = normalizeGitLsOutputLine(normalizedFile);
 
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     const rest = sliceAfterGitPathspecPrefix(nf, rg);
@@ -902,11 +921,13 @@ function posixPathUnderGitRoot(
       return path.posix.join(rc, rest);
     }
     if (equalsRepoRelativeCaseAware(nf, rg)) {
-      return `${nf}/`;
+      const base = nf.replace(/\/+$/, '');
+      return `${base}/`;
     }
-    return path.posix.join(rc, nf);
+    const nfFile = nf.replace(/\/+$/, '');
+    return path.posix.join(rc, nfFile);
   }
-  return path.posix.join(rc, nf);
+  return path.posix.join(rc, nf.replace(/\/+$/, ''));
 }
 
 async function crawlWithGitLsFiles(
