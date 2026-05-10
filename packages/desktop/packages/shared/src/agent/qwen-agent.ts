@@ -3229,10 +3229,18 @@ export class QwenAgent extends BaseAgent {
 
     const messages: Message[] = [];
     const parentToolUseIdsBySubagent = new Map<string, string>();
+    const parentToolMessages = new Map<string, Message>();
     let fallbackParentToolUseId: string | undefined;
     let idCounter = 0;
 
     const nextId = () => `qwen-${sessionId}-transcript-${++idCounter}`;
+    const completeOpenParentTools = () => {
+      for (const parent of parentToolMessages.values()) {
+        if (parent.toolStatus !== 'executing') continue;
+        parent.toolStatus = 'completed';
+        parent.toolResult = parent.toolResult ?? 'Completed';
+      }
+    };
 
     for (const line of fileContent.split(/\r?\n/)) {
       if (!line.trim()) continue;
@@ -3248,6 +3256,7 @@ export class QwenAgent extends BaseAgent {
       const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now();
 
       if (record.type === 'user') {
+        completeOpenParentTools();
         const content = this.extractQwenRecordText(record);
         if (!content) continue;
         messages.push({
@@ -3292,7 +3301,7 @@ export class QwenAgent extends BaseAgent {
             asString(functionCall.id) ||
             `qwen-transcript-tool-${++idCounter}`;
           const rawInput = toRecord(functionCall.args);
-          messages.push({
+          const toolMessage: Message = {
             id: nextId(),
             role: 'tool',
             content: `Running ${toolName}...`,
@@ -3303,10 +3312,12 @@ export class QwenAgent extends BaseAgent {
             toolStatus: 'executing',
             toolIntent: asString(rawInput.description),
             toolDisplayName: displayNameForTool(toolName),
-          });
+          };
+          messages.push(toolMessage);
 
           if (isParentTaskTool(toolName)) {
             fallbackParentToolUseId = toolUseId;
+            parentToolMessages.set(toolUseId, toolMessage);
             const subagentType = asString(rawInput.subagent_type);
             if (subagentType) {
               parentToolUseIdsBySubagent.set(subagentType, toolUseId);
@@ -3324,6 +3335,10 @@ export class QwenAgent extends BaseAgent {
         fallbackParentToolUseId,
       });
       if (telemetryMessage) messages.push(telemetryMessage);
+    }
+
+    if (!(this._isProcessing && sessionId === this.qwenSessionId)) {
+      completeOpenParentTools();
     }
 
     return messages;

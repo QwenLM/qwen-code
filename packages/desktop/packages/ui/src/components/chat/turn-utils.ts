@@ -392,7 +392,12 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
         // Find the last intermediate text activity (reverse to get most recent)
         const lastTextActivity = [...currentTurn.activities]
           .reverse()
-          .find(a => a.type === 'intermediate' && a.content)
+          .find(a =>
+            a.type === 'intermediate' &&
+            a.intermediateKind !== 'thought' &&
+            !a.parentId &&
+            a.content
+          )
 
         if (lastTextActivity?.content) {
           currentTurn.response = {

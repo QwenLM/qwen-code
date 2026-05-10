@@ -11,11 +11,13 @@
 import { describe, it, expect } from 'bun:test'
 import {
   groupActivitiesByParent,
+  groupMessagesByTurn,
   computeLastChildSet,
   isActivityGroup,
   type ActivityGroup,
 } from '../turn-utils'
 import type { ActivityItem } from '../TurnCard'
+import type { Message } from '@craft-agent/core'
 
 // ============================================================================
 // Test Helpers
@@ -117,6 +119,51 @@ function createTodoWriteActivity(
 // ============================================================================
 // groupActivitiesByParent Tests
 // ============================================================================
+
+describe('groupMessagesByTurn', () => {
+  it('does not promote thought-only intermediate text to a final response', () => {
+    const messages: Message[] = [
+      {
+        id: 'user-1',
+        role: 'user',
+        content: '继续',
+        timestamp: 1,
+      },
+      {
+        id: 'thought-1',
+        role: 'assistant',
+        content: 'The user wants me to use a sub-agent.',
+        timestamp: 2,
+        isIntermediate: true,
+        intermediateKind: 'thought',
+      },
+      {
+        id: 'agent-1',
+        role: 'tool',
+        content: 'Running agent...',
+        timestamp: 3,
+        toolName: 'agent',
+        toolUseId: 'call-agent-1',
+        toolStatus: 'completed',
+        toolResult: 'Completed',
+      },
+      {
+        id: 'user-2',
+        role: 'user',
+        content: '继续',
+        timestamp: 4,
+      },
+    ]
+
+    const turns = groupMessagesByTurn(messages)
+    const assistantTurn = turns.find(turn => turn.type === 'assistant')
+
+    expect(assistantTurn?.type).toBe('assistant')
+    if (assistantTurn?.type === 'assistant') {
+      expect(assistantTurn.response).toBeUndefined()
+    }
+  })
+})
 
 describe('groupActivitiesByParent', () => {
   describe('empty and flat cases', () => {

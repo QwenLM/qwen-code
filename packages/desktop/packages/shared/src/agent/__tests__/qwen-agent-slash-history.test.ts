@@ -1030,7 +1030,8 @@ describe('QwenAgent slash command history', () => {
     expect(parent).toMatchObject({
       role: 'tool',
       toolName: 'agent',
-      toolStatus: 'executing',
+      toolStatus: 'completed',
+      toolResult: 'Completed',
       toolInput: { subagent_type: 'Explore' },
     });
     expect(child).toMatchObject({
