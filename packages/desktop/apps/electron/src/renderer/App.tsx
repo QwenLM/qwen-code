@@ -738,6 +738,24 @@ export default function App() {
     return connections.find(c => c.isDefault)?.slug ?? connections[0]?.slug
   }, [])
 
+  const handleOptimisticDefaultModelChange = useCallback((model: string, connectionSlug?: string) => {
+    setLlmConnections(previousConnections => {
+      const targetSlug = connectionSlug ?? resolveDefaultConnectionSlug(previousConnections)
+      if (!targetSlug) return previousConnections
+
+      let changed = false
+      const nextConnections = previousConnections.map(connection => {
+        if (connection.slug !== targetSlug) return connection
+        if (connection.defaultModel === model) return connection
+
+        changed = true
+        return { ...connection, defaultModel: model }
+      })
+
+      return changed ? nextConnections : previousConnections
+    })
+  }, [resolveDefaultConnectionSlug])
+
   // Refresh LLM connections from config (called on workspace change and after connection updates)
   const refreshLlmConnections = useCallback(async () => {
     const connections = await window.electronAPI.listLlmConnectionsWithStatus()
@@ -2076,6 +2094,7 @@ export default function App() {
     llmConnections,
     workspaceDefaultLlmConnection,
     refreshLlmConnections,
+    onOptimisticDefaultModelChange: handleOptimisticDefaultModelChange,
     pendingPermissions,
     pendingCredentials,
     getDraft,
@@ -2122,6 +2141,7 @@ export default function App() {
     llmConnections,
     workspaceDefaultLlmConnection,
     refreshLlmConnections,
+    handleOptimisticDefaultModelChange,
     pendingPermissions,
     pendingCredentials,
     getDraft,

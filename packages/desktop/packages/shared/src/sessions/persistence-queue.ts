@@ -11,6 +11,11 @@ interface PendingWrite {
   timer: ReturnType<typeof setTimeout>
 }
 
+type StoredSessionWithHeaderOptions = StoredSession & {
+  omitMessageDerivedHeaderFields?: boolean
+  omitTranscriptDerivedHeaderFields?: boolean
+}
+
 interface HeaderMetadataSignature {
   name?: string
   labels?: string[]
@@ -95,6 +100,7 @@ class SessionPersistenceQueue {
 
     try {
       const { data } = entry
+      const headerOptionsSource = data as StoredSessionWithHeaderOptions
       ensureSessionsDir(data.workspaceRootPath)
       ensureSessionDir(data.workspaceRootPath, sessionId)
 
@@ -111,7 +117,12 @@ class SessionPersistenceQueue {
 
       // Create JSONL content: header + messages (one per line)
       // Filter out intermediate messages - they're transient streaming status updates
-      const localHeader = createSessionHeader(storageSession)
+      const localHeader = createSessionHeader(storageSession, {
+        omitMessageDerivedFields:
+          headerOptionsSource.omitMessageDerivedHeaderFields,
+        omitTranscriptDerivedFields:
+          headerOptionsSource.omitTranscriptDerivedHeaderFields,
+      })
       const localSig = getHeaderMetadataSignature(localHeader)
       const diskHeader = readSessionHeader(filePath)
       const previousSig = this.lastWrittenHeaderSignature.get(sessionId)

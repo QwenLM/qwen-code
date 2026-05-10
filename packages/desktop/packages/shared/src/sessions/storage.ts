@@ -380,7 +380,10 @@ export function listSessions(workspaceRootPath: string): SessionMetadata[] {
   span.setMetadata('count', sessions.length);
 
   // Sort by lastUsedAt descending (most recent first)
-  const sorted = sessions.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+  const sorted = sessions.sort(
+    (a, b) => (b.lastUsedAt ?? b.lastMessageAt ?? b.createdAt ?? 0) -
+      (a.lastUsedAt ?? a.lastMessageAt ?? a.createdAt ?? 0)
+  );
   span.end();
   return sorted;
 }
@@ -479,8 +482,8 @@ export async function getOrCreateLatestSession(workspaceRootPath: string): Promi
       sdkSessionId: latest.sdkSessionId,
       workspaceRootPath: latest.workspaceRootPath,
       name: latest.name,
-      createdAt: latest.createdAt,
-      lastUsedAt: latest.lastUsedAt,
+      createdAt: latest.createdAt ?? Date.now(),
+      lastUsedAt: latest.lastUsedAt ?? latest.lastMessageAt ?? Date.now(),
     };
   }
   return createSession(workspaceRootPath);
@@ -776,7 +779,7 @@ export function deleteOldArchivedSessions(workspaceRootPath: string, retentionDa
 
   for (const session of archivedSessions) {
     // Use archivedAt if available, otherwise fall back to lastUsedAt
-    const archiveTime = session.archivedAt ?? session.lastUsedAt;
+    const archiveTime = session.archivedAt ?? session.lastUsedAt ?? session.lastMessageAt ?? session.createdAt ?? 0;
     if (archiveTime < cutoffTime) {
       if (deleteSession(workspaceRootPath, session.id)) {
         deletedCount++;

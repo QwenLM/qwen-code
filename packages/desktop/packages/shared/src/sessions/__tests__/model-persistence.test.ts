@@ -81,4 +81,32 @@ describe('session model persistence', () => {
     const loaded = readSessionJsonl(sessionFile)
     expect(loaded?.model).toBeUndefined()
   })
+
+  it('can omit provider-derived JSONL header fields for provider-native history', () => {
+    const workspaceRoot = makeWorkspaceRoot()
+    const session = {
+      ...makeStoredSession(workspaceRoot),
+      omitMessageDerivedHeaderFields: true,
+      omitTranscriptDerivedHeaderFields: true,
+    } as StoredSession & {
+      omitMessageDerivedHeaderFields: true
+      omitTranscriptDerivedHeaderFields: true
+    }
+    const sessionDir = join(workspaceRoot, 'sessions', session.id)
+    mkdirSync(sessionDir, { recursive: true })
+
+    const sessionFile = join(sessionDir, 'session.jsonl')
+    writeSessionJsonl(sessionFile, session)
+
+    const header = JSON.parse(readFileSync(sessionFile, 'utf-8').split('\n')[0]!)
+    expect(header.createdAt).toBeUndefined()
+    expect(header.lastUsedAt).toBeUndefined()
+    expect(header.lastMessageAt).toBeUndefined()
+    expect(header.llmConnection).toBeUndefined()
+    expect(header.connectionLocked).toBeUndefined()
+    expect(header.messageCount).toBeUndefined()
+    expect(header.preview).toBeUndefined()
+    expect(header.lastMessageRole).toBeUndefined()
+    expect(header.lastFinalMessageId).toBeUndefined()
+  })
 })

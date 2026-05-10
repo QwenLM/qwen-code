@@ -147,13 +147,22 @@ describe('Qwen native history loading', () => {
       doRefreshExternalSessionsForWorkspace: (workspace: Workspace) => Promise<void>
     }).doRefreshExternalSessionsForWorkspace(workspace)
 
-    const imported = loadSession(workspaceRoot, sessionId)
+    const imported = loadSession(workspaceRoot, sessionId) as
+      | (ReturnType<typeof loadSession> & {
+          messageCount?: number
+        })
+      | null
     expect(listCalls).toBe(1)
     expect(imported?.workspaceRootPath).toBe(workspaceRoot)
     expect(imported?.sdkCwd).toBe(projectRoot)
     expect(imported?.workingDirectory).toBe(projectRoot)
     expect(imported?.permissionMode).toBe('allow-all')
-    expect(imported?.llmConnection).toBe('qwen-code')
+    expect(imported?.llmConnection).toBeUndefined()
+    expect(imported?.connectionLocked).toBeUndefined()
+    expect(imported?.createdAt).toBeUndefined()
+    expect(imported?.lastUsedAt).toBeUndefined()
+    expect(imported?.lastMessageAt).toBeUndefined()
+    expect(imported?.messageCount).toBeUndefined()
   })
 
   it('removes provider-native mirrors once a Craft session owns the same SDK session ID', async () => {
@@ -679,7 +688,24 @@ describe('Qwen native history loading', () => {
       ['user', '/insight'],
       ['assistant', output],
     ])
-    expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(0)
+    const persisted = loadSession(workspaceRoot, sessionId) as
+      | (ReturnType<typeof loadSession> & {
+          messageCount?: number
+          preview?: string
+          lastMessageRole?: string
+          lastFinalMessageId?: string
+        })
+      | null
+    expect(persisted?.messages).toHaveLength(0)
+    expect(persisted?.createdAt).toBeUndefined()
+    expect(persisted?.lastUsedAt).toBeUndefined()
+    expect(persisted?.lastMessageAt).toBeUndefined()
+    expect(persisted?.llmConnection).toBeUndefined()
+    expect(persisted?.connectionLocked).toBeUndefined()
+    expect(persisted?.messageCount).toBeUndefined()
+    expect(persisted?.preview).toBeUndefined()
+    expect(persisted?.lastMessageRole).toBeUndefined()
+    expect(persisted?.lastFinalMessageId).toBeUndefined()
   })
 
   it('backfills an already-loaded empty local session from provider-native history', async () => {

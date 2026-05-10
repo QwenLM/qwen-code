@@ -68,6 +68,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     activeWorkspaceId,
     llmConnections,
     workspaceDefaultLlmConnection,
+    onOptimisticDefaultModelChange,
     onSendMessage,
     onOpenFile,
     onOpenUrl,
@@ -326,10 +327,24 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
 
   // Session model change handler - persists per-session model and connection
   const handleModelChange = React.useCallback((model: string, connection?: string) => {
+    const nextConnection = connection ?? resolveEffectiveConnectionSlug(
+      session?.llmConnection,
+      workspaceDefaultLlmConnection,
+      llmConnections
+    )
+    onOptimisticDefaultModelChange(model, nextConnection)
+
     if (activeWorkspaceId) {
-      window.electronAPI.setSessionModel(sessionId, activeWorkspaceId, model, connection)
+      window.electronAPI.setSessionModel(sessionId, activeWorkspaceId, model, nextConnection)
     }
-  }, [sessionId, activeWorkspaceId])
+  }, [
+    activeWorkspaceId,
+    llmConnections,
+    onOptimisticDefaultModelChange,
+    session?.llmConnection,
+    sessionId,
+    workspaceDefaultLlmConnection,
+  ])
 
   // Session connection change handler - can only change before first message
   const handleConnectionChange = React.useCallback(async (connectionSlug: string) => {

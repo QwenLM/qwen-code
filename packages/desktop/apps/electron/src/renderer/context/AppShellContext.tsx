@@ -47,6 +47,8 @@ export interface AppShellContextType {
   workspaceDefaultLlmConnection?: string
   /** Refresh LLM connections from config */
   refreshLlmConnections: () => Promise<void>
+  /** Optimistically update a connection's default model before backend refresh completes */
+  onOptimisticDefaultModelChange: (model: string, connectionSlug?: string) => void
   pendingPermissions: Map<string, PermissionRequest[]>
   pendingCredentials: Map<string, CredentialRequest[]>
   /** Get draft input text for a session - reads from ref without triggering re-renders */

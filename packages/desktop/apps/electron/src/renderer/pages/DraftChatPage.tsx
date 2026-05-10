@@ -23,6 +23,7 @@ export default function DraftChatPage() {
     workspaces,
     llmConnections,
     workspaceDefaultLlmConnection,
+    onOptimisticDefaultModelChange,
     onCreateSession,
     onSendMessage,
     onOpenFile,
@@ -303,11 +304,22 @@ export default function DraftChatPage() {
           onOpenUrl={onOpenUrl}
           currentModel={currentModel}
           onModelChange={(nextModel, connection) => {
+            const nextConnection = connection ?? llmConnection ?? resolveEffectiveConnectionSlug(
+              llmConnection,
+              workspaceDefaultLlmConnection,
+              llmConnections
+            )
+
             setModel(nextModel)
-            if (connection) setLlmConnection(connection)
+            if (nextConnection) {
+              setLlmConnection(nextConnection)
+              onOptimisticDefaultModelChange(nextModel, nextConnection)
+            } else {
+              onOptimisticDefaultModelChange(nextModel)
+            }
             if (activeWorkspaceId) {
               window.electronAPI
-                .setSessionModel(NEW_SESSION_DRAFT_ID, activeWorkspaceId, nextModel, connection)
+                .setSessionModel(NEW_SESSION_DRAFT_ID, activeWorkspaceId, nextModel, nextConnection)
                 .catch((error) => {
                   console.error('[DraftChatPage] Failed to persist draft model selection:', error)
                 })

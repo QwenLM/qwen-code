@@ -22,6 +22,16 @@ import { pickSessionFields } from './utils.ts';
 
 const SESSION_PATH_TOKEN = '{{SESSION_PATH}}';
 
+type HeaderWriteOptions = {
+  omitMessageDerivedFields?: boolean;
+  omitTranscriptDerivedFields?: boolean;
+};
+
+type StoredSessionWithHeaderOptions = StoredSession & {
+  omitMessageDerivedHeaderFields?: boolean;
+  omitTranscriptDerivedHeaderFields?: boolean;
+};
+
 /**
  * Replace absolute session directory paths with a portable token.
  * Applied after JSON.stringify so paths embedded anywhere in message content
@@ -153,7 +163,13 @@ export function readSessionJsonl(sessionFile: string): StoredSession | null {
  * Lines 2+: Messages (one per line)
  */
 export function writeSessionJsonl(sessionFile: string, session: StoredSession): void {
-  const header = createSessionHeader(session);
+  const headerOptionsSource = session as StoredSessionWithHeaderOptions;
+  const header = createSessionHeader(session, {
+    omitMessageDerivedFields:
+      headerOptionsSource.omitMessageDerivedHeaderFields,
+    omitTranscriptDerivedFields:
+      headerOptionsSource.omitTranscriptDerivedHeaderFields,
+  });
   const sessionDir = dirname(sessionFile);
 
   const lines = [
@@ -173,20 +189,34 @@ export function writeSessionJsonl(sessionFile: string, session: StoredSession): 
  * Pre-computes messageCount, preview, and lastMessageRole for fast list loading.
  * Uses pickSessionFields() to ensure all persistent fields are included.
  */
-export function createSessionHeader(session: StoredSession): SessionHeader {
-  return {
+export function createSessionHeader(
+  session: StoredSession,
+  options: HeaderWriteOptions = {},
+): SessionHeader {
+  const header: SessionHeader = {
     ...pickSessionFields(session),
     // Path conversion for portability
     workspaceRootPath: toPortablePath(session.workspaceRootPath),
-    // Override lastUsedAt with current timestamp (save time, not original)
-    lastUsedAt: Date.now(),
-    // Pre-computed fields
-    messageCount: session.messages.length,
-    lastMessageRole: extractLastMessageRole(session.messages),
-    preview: extractPreview(session.messages),
     tokenUsage: session.tokenUsage,
-    lastFinalMessageId: extractLastFinalMessageId(session.messages),
   } as SessionHeader;
+
+  if (options.omitTranscriptDerivedFields) {
+    delete header.createdAt;
+    delete header.lastUsedAt;
+    delete header.lastMessageAt;
+  } else {
+    // Override lastUsedAt with current timestamp (save time, not original)
+    header.lastUsedAt = Date.now();
+  }
+
+  if (!options.omitMessageDerivedFields) {
+    header.messageCount = session.messages.length;
+    header.lastMessageRole = extractLastMessageRole(session.messages);
+    header.preview = extractPreview(session.messages);
+    header.lastFinalMessageId = extractLastFinalMessageId(session.messages);
+  }
+
+  return header;
 }
 
 /**

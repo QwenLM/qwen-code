@@ -31,7 +31,9 @@ function attachRuntimeModelState<T extends LlmConnection>(connection: T): T {
   } catch {
     runtimeState = undefined
   }
-  if (!runtimeState?.models.length) return connection
+  if (!runtimeState || (runtimeState.models.length === 0 && !runtimeState.serverDefault)) {
+    return connection
+  }
   return {
     ...connection,
     models: runtimeState.models,

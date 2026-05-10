@@ -35,7 +35,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   // Config
   'enabledSourceSlugs', 'permissionMode', 'previousPermissionMode', 'workingDirectory',
   // Connection/runtime
-  'llmConnection', 'connectionLocked', 'thinkingLevel',
+  'thinkingLevel',
   // Sharing
   'sharedUrl', 'sharedId',
   // Plan execution
@@ -104,8 +104,8 @@ export interface SessionConfig {
   workspaceRootPath: string;
   /** Optional user-defined name */
   name?: string;
-  createdAt: number;
-  lastUsedAt: number;
+  createdAt?: number;
+  lastUsedAt?: number;
   /** Timestamp of last meaningful message (user or final assistant). Used for date grouping in session list.
    *  Separate from lastUsedAt which tracks any session access (auto-save, open to read, etc.). */
   lastMessageAt?: number;
@@ -139,9 +139,9 @@ export interface SessionConfig {
   sharedId?: string;
   /** Runtime-only model override for this session. Provider-managed ACP sessions do not persist this field. */
   model?: string;
-  /** LLM connection slug for this session (locked after first message) */
+  /** Runtime-only LLM connection slug for this session */
   llmConnection?: string;
-  /** Whether the connection is locked (cannot be changed after first agent creation) */
+  /** Runtime-only connection lock state */
   connectionLocked?: boolean;
   /** Thinking level for this session ('off', 'think', 'max') */
   thinkingLevel?: ThinkingLevel;
@@ -218,8 +218,8 @@ export interface SessionHeader {
   workspaceRootPath: string;
   /** Optional user-defined name */
   name?: string;
-  createdAt: number;
-  lastUsedAt: number;
+  createdAt?: number;
+  lastUsedAt?: number;
   /** Timestamp of last meaningful message — persisted separately from lastUsedAt for stable date grouping across restarts. */
   lastMessageAt?: number;
   /** Whether this session is flagged */
@@ -252,9 +252,9 @@ export interface SessionHeader {
   sharedId?: string;
   /** Legacy/runtime-only model override. New JSONL headers do not persist this field. */
   model?: string;
-  /** LLM connection slug for this session (locked after first message) */
+  /** Runtime-only LLM connection slug for this session */
   llmConnection?: string;
-  /** Whether the connection is locked (cannot be changed after first agent creation) */
+  /** Runtime-only connection lock state */
   connectionLocked?: boolean;
   /** Thinking level for this session ('off', 'think', 'max') */
   thinkingLevel?: ThinkingLevel;
@@ -286,8 +286,8 @@ export interface SessionHeader {
   /** Metadata for sessions created by automations */
   triggeredBy?: { automationName?: string; event?: string; timestamp?: number };
   // Pre-computed fields for fast list loading
-  /** Number of messages in session */
-  messageCount: number;
+  /** Number of messages in session, when known without loading the full transcript */
+  messageCount?: number;
   /** Role/type of the last message (for badge display without loading messages) */
   lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error';
   /** Preview of first user message (first 150 chars) */
@@ -305,11 +305,11 @@ export interface SessionMetadata {
   id: string;
   workspaceRootPath: string;
   name?: string;
-  createdAt: number;
-  lastUsedAt: number;
+  createdAt?: number;
+  lastUsedAt?: number;
   /** Timestamp of last meaningful message — used for date grouping. Falls back to lastUsedAt for pre-fix sessions. */
   lastMessageAt?: number;
-  messageCount: number;
+  messageCount?: number;
   /** Preview of first user message */
   preview?: string;
   sdkSessionId?: string;
@@ -337,9 +337,9 @@ export interface SessionMetadata {
   lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error';
   /** Legacy/runtime-only model override. New session metadata does not persist this field. */
   model?: string;
-  /** LLM connection slug for this session (locked after first message) */
+  /** Runtime-only LLM connection slug for this session */
   llmConnection?: string;
-  /** Whether the connection is locked (cannot be changed after first agent creation) */
+  /** Runtime-only connection lock state */
   connectionLocked?: boolean;
   /** Thinking level for this session ('off', 'think', 'max') */
   thinkingLevel?: ThinkingLevel;

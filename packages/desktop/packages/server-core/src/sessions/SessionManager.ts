@@ -830,7 +830,7 @@ export function createManagedSession(
     agent: null,
     messages: [],
     isProcessing: false,
-    lastMessageAt: (s.lastMessageAt ?? s.lastUsedAt ?? Date.now()) as number,
+    lastMessageAt: (s.lastMessageAt ?? s.lastUsedAt ?? s.createdAt ?? 0) as number,
     streamingText: '',
     processingGeneration: 0,
     isFlagged: (s.isFlagged ?? false) as boolean,
@@ -1411,7 +1411,7 @@ export class SessionManager implements ISessionManager {
     this.eventSink(RPC_CHANNELS.llmConnections.CHANGED, { to: 'all' })
   }
 
-  private updateQwenConnectionModels(slug: string, models: ModelDefinition[], _currentModelId?: string): void {
+  private updateQwenConnectionModels(slug: string, models: ModelDefinition[], currentModelId?: string): void {
     const connection = getLlmConnection(slug)
     if (!connection || connection.providerType !== 'qwen' || models.length === 0) return
 
@@ -1420,13 +1420,29 @@ export class SessionManager implements ISessionManager {
       const previous = getModelRefreshService().getRuntimeModelState(slug)
       changed = getModelRefreshService().setRuntimeModelState(slug, {
         models,
-        serverDefault: previous?.serverDefault,
+        serverDefault: currentModelId ?? previous?.serverDefault,
       })
     } catch (error) {
       sessionLog.warn(`Qwen runtime model cache unavailable: ${error instanceof Error ? error.message : String(error)}`)
       return
     }
     if (changed) this.broadcastLlmConnectionsChanged()
+  }
+
+  private updateQwenConnectionDefault(slug: string, model: string): void {
+    const connection = getLlmConnection(slug)
+    if (!connection || connection.providerType !== 'qwen') return
+
+    try {
+      const previous = getModelRefreshService().getRuntimeModelState(slug)
+      const changed = getModelRefreshService().setRuntimeModelState(slug, {
+        models: previous?.models ?? [],
+        serverDefault: model,
+      })
+      if (changed) this.broadcastLlmConnectionsChanged()
+    } catch (error) {
+      sessionLog.warn(`Qwen runtime default model update failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   private broadcastSkillsChanged(workspaceId: string, skills: import('@craft-agent/shared/skills').LoadedSkill[]): void {
@@ -1782,10 +1798,9 @@ export class SessionManager implements ISessionManager {
   private resolveExternalSessionConnectionSlug(managed: ManagedSession): string | undefined {
     if (managed.llmConnection) return managed.llmConnection
 
-    // Provider-native Qwen sessions are synced with local id === sdkSessionId.
-    // Older/partially migrated local headers may be missing llmConnection, so keep
-    // those sessions loadable through the built-in Qwen Code connection.
-    if (managed.sdkSessionId && managed.id === managed.sdkSessionId) {
+    // Qwen-only sessions no longer persist llmConnection in desktop JSONL.
+    // Any session with a provider SDK id resumes through the built-in Qwen backend.
+    if (managed.sdkSessionId) {
       return QWEN_CODE_CONNECTION_SLUG
     }
 
@@ -2015,6 +2030,11 @@ export class SessionManager implements ISessionManager {
     managed.messageCount = messages.length
     managed.preview = this.extractMessagePreview(messages)
 
+    const firstMessage = messages[0]
+    if (firstMessage && this.isQwenCanonicalMessageSession(managed)) {
+      managed.createdAt = firstMessage.timestamp
+    }
+
     const lastMessage = messages[messages.length - 1]
     if (lastMessage) {
       managed.lastMessageAt = lastMessage.timestamp
@@ -2104,13 +2124,17 @@ export class SessionManager implements ISessionManager {
       lastUsedAt: Math.max(timestamp, lastInspectedMessage?.timestamp ?? timestamp),
       lastMessageAt: lastInspectedMessage?.timestamp ?? timestamp,
       permissionMode: defaultPermissionMode,
-      llmConnection: connectionSlug,
-      connectionLocked: true,
       ...(model ? { model } : {}),
       thinkingLevel: defaultThinkingLevel,
       messages: shouldPersistInspectedMessages ? inspectedMessages?.map(messageToStored) ?? [] : [],
+      ...(connectionSlug === QWEN_CODE_CONNECTION_SLUG
+        ? {
+            omitMessageDerivedHeaderFields: true,
+            omitTranscriptDerivedHeaderFields: true,
+          }
+        : {}),
       tokenUsage: { ...DEFAULT_TOKEN_USAGE },
-    }
+    } as StoredSession
 
     await saveStoredSession(storedSession)
 
@@ -2152,7 +2176,7 @@ export class SessionManager implements ISessionManager {
   ): Promise<void> {
     for (const managed of Array.from(this.sessions.values())) {
       if (managed.workspace.id !== workspace.id) continue
-      if (managed.llmConnection !== connectionSlug) continue
+      if (this.resolveExternalSessionConnectionSlug(managed) !== connectionSlug) continue
       if (!managed.sdkSessionId || managed.id !== managed.sdkSessionId) continue
       if (seenSdkSessionIds.has(managed.sdkSessionId)) continue
       if (managed.isProcessing) continue
@@ -2177,7 +2201,6 @@ export class SessionManager implements ISessionManager {
         : managed.messages.filter(m =>
             m.role !== 'status'
           )
-
       // If messages haven't been loaded yet (e.g., branched session not yet opened),
       // skip persistence to avoid overwriting JSONL messages with empty array
       if (!managed.messagesLoaded && !usesQwenCanonicalMessages) {
@@ -2190,6 +2213,12 @@ export class SessionManager implements ISessionManager {
         createdAt: managed.createdAt ?? Date.now(),
         lastUsedAt: Date.now(),
         messages: persistableMessages.map(messageToStored),
+        ...(usesQwenCanonicalMessages
+          ? {
+              omitMessageDerivedHeaderFields: true,
+              omitTranscriptDerivedHeaderFields: true,
+            }
+          : {}),
         tokenUsage: managed.tokenUsage ?? DEFAULT_TOKEN_USAGE,
       } as StoredSession
 
@@ -5165,16 +5194,19 @@ export class SessionManager implements ISessionManager {
     const persistedModel = model === null ? undefined : (resolveModel(model) || undefined)
 
     managed.model = persistedModel
+    if (sessionConn?.providerType === 'qwen' && persistedModel) {
+      this.updateQwenConnectionDefault(sessionConn.slug, persistedModel)
+    }
     // Also update connection if provided and not already locked
     if (connection && !managed.connectionLocked) {
       managed.llmConnection = connection
     }
-    // Persist to disk (include connection if it was updated)
-    const updates: { model?: string; llmConnection?: string } = { model: persistedModel }
-    if (connection && !managed.connectionLocked) {
-      updates.llmConnection = connection
-    }
+    // Persist to disk. Connection selection is runtime-only in the Qwen-only app.
+    const updates: { model?: string } = { model: persistedModel }
     await updateSessionMetadata(managed.workspace.rootPath, sessionId, updates)
+    // Notify renderer immediately. Provider refreshes below may involve ACP I/O and
+    // should not block the visible model selection from updating.
+    this.sendEvent({ type: 'session_model_changed', sessionId, model: persistedModel ?? null }, managed.workspace.id)
     // Update agent model if it already exists (takes effect on next query)
     if (managed.agent) {
       // Fallback chain: session model > workspace default > connection default
@@ -5183,15 +5215,20 @@ export class SessionManager implements ISessionManager {
       if (effectiveModel) {
         managed.agent.setModel(effectiveModel)
         if (sessionConn?.providerType === 'qwen') {
-          await managed.agent.refreshAvailableCommands?.()
-          await this.refreshQwenConnectionDefault(sessionConn.slug, 'session model update')
+          const agent = managed.agent
+          void (async () => {
+            try {
+              await agent.refreshAvailableCommands?.()
+              await this.refreshQwenConnectionDefault(sessionConn.slug, 'session model update')
+            } catch (error) {
+              sessionLog.warn(`Qwen model follow-up refresh failed for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+            }
+          })()
         }
       }
     } else {
       sessionLog.info(`[updateSessionModel] No agent yet, model will apply on next agent creation`)
     }
-    // Notify renderer of the model change
-    this.sendEvent({ type: 'session_model_changed', sessionId, model: persistedModel ?? null }, managed.workspace.id)
     sessionLog.info(`Session ${sessionId} model updated to: ${persistedModel ?? '(global config)'}`)
   }
 
