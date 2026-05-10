@@ -69,8 +69,14 @@ export interface UseSessionSearchInputOptions {
    * fires synchronously when a non-empty → empty query transition
    * occurs (Esc, Ctrl+U/L, or the last Backspace), detected via a
    * ref-backed setter. The parent typically maps this to
-   * `setViewMode('list')`. The query is already empty by the time
-   * this fires, so the parent doesn't need to touch it.
+   * `setViewMode('list')`.
+   *
+   * **Timing note**: `onExitToList` fires from within the state
+   * updater, *before* React re-renders. At callback invocation time
+   * `searchQueryRef.current` is already the new (empty) value, but
+   * the `searchQuery` state variable still holds the old value. Parents
+   * should rely on their own state for the current query, not on the
+   * `searchQuery` return value.
    */
   onExitToList: () => void;
 }
@@ -83,6 +89,13 @@ export interface UseSessionSearchInputResult {
    * (typing in list mode seeds the query) without going through
    * `handleSearchKey`. Functional updaters are supported and
    * recommended whenever the new value depends on the previous one.
+   *
+   * **Side effect**: when called with a value that transitions the
+   * query from non-empty to empty, synchronously calls
+   * `onExitToList()` via a ref-backed check *before* React re-renders.
+   * The `searchQuery` state still holds the old value inside the
+   * callback; parents should rely on their own state for the current
+   * query value.
    */
   setSearchQuery: React.Dispatch<React.SetStateAction<string>>;
   /**
@@ -103,6 +116,8 @@ export function useSessionSearchInput(
   const { onExitToList } = options;
   const [searchQuery, rawSetSearchQuery] = useState('');
   const searchQueryRef = useRef('');
+  const onExitToListRef = useRef(onExitToList);
+  onExitToListRef.current = onExitToList;
 
   /**
    * Ref-backed setter that detects the non-empty → empty transition
@@ -113,6 +128,10 @@ export function useSessionSearchInput(
    * one-frame delay on Windows where the component rendered in
    * search mode with an empty query before the effect fired,
    * causing the "Press / to search" hint to be absent.
+   *
+   * `onExitToList` is read from a ref so that `handleSearchKey`
+   * (which depends on `setSearchQuery`) does not need to be
+   * recreated when the parent passes a new callback reference.
    */
   const setSearchQuery = useCallback(
     (nextValue: React.SetStateAction<string>) => {
@@ -126,10 +145,10 @@ export function useSessionSearchInput(
       rawSetSearchQuery(next);
 
       if (prev !== '' && next === '') {
-        onExitToList();
+        onExitToListRef.current();
       }
     },
-    [onExitToList],
+    [],
   );
 
   const handleSearchKey = useCallback(

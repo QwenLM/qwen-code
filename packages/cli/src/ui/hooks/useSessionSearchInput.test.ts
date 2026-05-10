@@ -86,6 +86,49 @@ describe('isPrintableSearchChar', () => {
   });
 });
 
+describe('isDeletionKey', () => {
+  it('recognises DEL byte (0x7F) as a deletion key', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'a', sequence: 'a' }));
+    });
+    expect(result.current.searchQuery).toBe('a');
+    // Raw DEL byte with no name — the Windows Backspace path
+    act(() => {
+      result.current.handleSearchKey(k({ name: '', sequence: '\x7f' }));
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).toHaveBeenCalledTimes(1);
+  });
+
+  it('recognises BS byte (0x08) as a deletion key', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'x', sequence: 'x' }));
+    });
+    expect(result.current.searchQuery).toBe('x');
+    // Raw BS byte with no name — alternate Windows Backspace path
+    act(() => {
+      result.current.handleSearchKey(k({ name: '', sequence: '\b' }));
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat DEL/BS byte as a printable char', () => {
+    expect(isPrintableSearchChar(k({ name: '', sequence: '\x7f' }))).toBe(
+      false,
+    );
+    expect(isPrintableSearchChar(k({ name: '', sequence: '\b' }))).toBe(false);
+  });
+});
+
 describe('useSessionSearchInput', () => {
   // Each keystroke gets its own act() — terminal events arrive in
   // separate render cycles, and the ref-backed setter fires
@@ -290,6 +333,35 @@ describe('useSessionSearchInput', () => {
       result.current.setSearchQuery((q) => `${q}-more`);
     });
     expect(result.current.searchQuery).toBe('seed-more');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('fires onExitToList when setSearchQuery direct-empty is called on a non-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.setSearchQuery('seed');
+    });
+    expect(result.current.searchQuery).toBe('seed');
+    expect(onExitToList).not.toHaveBeenCalled();
+    act(() => {
+      result.current.setSearchQuery('');
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire onExitToList when setSearchQuery direct-empty is called on an already-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.setSearchQuery('');
+    });
+    expect(result.current.searchQuery).toBe('');
     expect(onExitToList).not.toHaveBeenCalled();
   });
 
