@@ -988,6 +988,8 @@ describe('crawler', () => {
     });
 
     it('should fall back to fdir when not in a git repo and ripgrep unavailable', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
       __setCommandRunnerForTests(async (command) => {
         if (command === 'git' || command === 'rg') {
           return { success: false, lines: [] };
@@ -1018,6 +1020,13 @@ describe('crawler', () => {
       expect(results).toEqual(
         expect.arrayContaining(['.', 'lib/', 'index.js', 'lib/util.js']),
       );
+      const degradationWarns = warnSpy.mock.calls.filter(
+        (c) =>
+          typeof c[0] === 'string' &&
+          (c[0] as string).startsWith('[crawler] falling back to'),
+      );
+      expect(degradationWarns).toHaveLength(0);
+      warnSpy.mockRestore();
     });
 
     it('should respect maxDepth on git ls-files path', async () => {
@@ -1253,6 +1262,9 @@ describe('crawler', () => {
       await crawl(options);
       const callsAfterFirst = gitCalls.length;
       expect(gitCalls.filter((a) => a.includes('--cached'))).toHaveLength(1);
+      expect(
+        gitCalls.some((a) => a.includes('-z') && a.includes('ls-files')),
+      ).toBe(true);
 
       await crawl(options);
 
@@ -1310,6 +1322,60 @@ describe('crawler', () => {
       expect(degradationCalls).toContain(
         '[crawler] falling back to ripgrep (git ls-files unavailable)',
       );
+      warnSpy.mockRestore();
+    });
+
+    it('should warn on fdir fallback only after git repo listing failed and rg failed', async () => {
+      tmpDir = await createTmpDir({ 'only-fdir.js': '' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command === 'git') {
+          if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+            return { success: true, lines: [tmpDir] };
+          }
+          if (args.includes('ls-files') && args.includes('--others')) {
+            return { success: true, lines: [] };
+          }
+          if (args.includes('ls-files') && args.includes('--deleted')) {
+            return { success: true, lines: [] };
+          }
+          if (args.includes('ls-files') && args.includes('--cached')) {
+            return { success: false, lines: [] };
+          }
+        }
+        if (command === 'rg') {
+          return { success: false, lines: [] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('only-fdir.js');
+      const degradationCalls = warnSpy.mock.calls
+        .map((c) => c[0])
+        .filter(
+          (m): m is string =>
+            typeof m === 'string' && m.startsWith('[crawler] falling back to'),
+        );
+      expect(degradationCalls).toEqual([
+        '[crawler] falling back to ripgrep (git ls-files unavailable)',
+        '[crawler] falling back to fdir (ripgrep unavailable)',
+      ]);
       warnSpy.mockRestore();
     });
   });

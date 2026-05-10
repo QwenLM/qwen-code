@@ -371,6 +371,8 @@ interface RunCommandOptions {
   onLine?: (line: string) => boolean;
   silentOnFailure?: boolean;
   yieldEveryLines?: number;
+  /** Use NUL records (e.g. `git ls-files -z`) instead of newline-terminated lines. */
+  recordDelimiter?: '\n' | '\0';
 }
 
 function runCommand(
@@ -490,6 +492,22 @@ function runCommand(
 
     const processChunk = (chunk: string): void => {
       streamBuffer += chunk;
+      const delim = options?.recordDelimiter ?? '\n';
+
+      if (delim === '\0') {
+        while (true) {
+          const idx = streamBuffer.indexOf('\0');
+          if (idx === -1) {
+            break;
+          }
+          const record = streamBuffer.slice(0, idx);
+          streamBuffer = streamBuffer.slice(idx + 1);
+          if (!processLine(record)) {
+            break;
+          }
+        }
+        return;
+      }
 
       while (true) {
         const newlineIndex = streamBuffer.indexOf('\n');
@@ -800,7 +818,7 @@ async function listUntrackedFiles(
 ): Promise<string[] | null> {
   // Global `--literal-pathspecs` (before `ls-files`) matches Git CLI expectations on Windows;
   // pathspec characters are then treated literally for optional trailing paths.
-  const untrackedArgs = ['--literal-pathspecs', 'ls-files', '--others'];
+  const untrackedArgs = ['--literal-pathspecs', 'ls-files', '-z', '--others'];
   if (useGitignore) {
     untrackedArgs.push('--exclude-standard');
   }
@@ -813,7 +831,7 @@ async function listUntrackedFiles(
     withSafeGitConfig(untrackedArgs),
     gitRoot,
     10_000,
-    { silentOnFailure: true },
+    { silentOnFailure: true, recordDelimiter: '\0' },
   );
   if (!untrackedResult.success) {
     return null;
@@ -826,7 +844,7 @@ async function listDeletedTrackedFiles(
   gitRoot: string,
   relativeToGitRoot: string,
 ): Promise<string[] | null> {
-  const deletedArgs = ['--literal-pathspecs', 'ls-files', '--deleted'];
+  const deletedArgs = ['--literal-pathspecs', 'ls-files', '-z', '--deleted'];
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     deletedArgs.push(relativeToGitRoot);
   }
@@ -836,7 +854,7 @@ async function listDeletedTrackedFiles(
     withSafeGitConfig(deletedArgs),
     gitRoot,
     10_000,
-    { silentOnFailure: true },
+    { silentOnFailure: true, recordDelimiter: '\0' },
   );
   if (!deletedResult.success) {
     return null;
@@ -936,7 +954,12 @@ async function crawlWithGitLsFiles(
   cwd: string,
   options: CrawlOptions,
   workingTreePrefetch?: GitWorkingTreePrefetch,
-): Promise<{ success: boolean; files: string[] }> {
+): Promise<{
+  success: boolean;
+  files: string[];
+  /** Set when `findGitRoot` succeeded but listing commands did not complete successfully. */
+  gitRepoListingFailed?: boolean;
+}> {
   let gitRoot: string | null;
   let untrackedFiles: string[] | null;
   let deletedFiles: string[] | null;
@@ -948,7 +971,7 @@ async function crawlWithGitLsFiles(
   } else {
     gitRoot = await findGitRoot(crawlDirectory);
     if (!gitRoot) {
-      return { success: false, files: [] };
+      return { success: false, files: [], gitRepoListingFailed: false };
     }
 
     const relativeToGitRootForLists = getPosixRelative(gitRoot, crawlDirectory);
@@ -965,7 +988,7 @@ async function crawlWithGitLsFiles(
   }
 
   if (!gitRoot) {
-    return { success: false, files: [] };
+    return { success: false, files: [], gitRepoListingFailed: false };
   }
 
   const relativeToCrawlDir = getPosixRelative(cwd, crawlDirectory);
@@ -973,7 +996,7 @@ async function crawlWithGitLsFiles(
   const dirFilter = options.ignore.getDirectoryFilter();
   const fileFilter = options.ignore.getFileFilter();
 
-  const trackedArgs = ['--literal-pathspecs', 'ls-files', '--cached'];
+  const trackedArgs = ['--literal-pathspecs', 'ls-files', '-z', '--cached'];
   trackedArgs.push('-t');
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     trackedArgs.push(relativeToGitRoot);
@@ -1052,10 +1075,11 @@ async function crawlWithGitLsFiles(
       collectLines: false,
       onLine: processTrackedFile,
       yieldEveryLines: YIELD_INTERVAL,
+      recordDelimiter: '\0',
     },
   );
   if (!trackedResult.success) {
-    return { success: false, files: [] };
+    return { success: false, files: [], gitRepoListingFailed: true };
   }
 
   // Test doubles may return `lines` without streaming `onLine`; drain any leftovers.
@@ -1308,8 +1332,12 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     return results;
   }
 
-  // eslint-disable-next-line no-console -- operator-visible crawl strategy degradation
-  console.warn('[crawler] falling back to ripgrep (git ls-files unavailable)');
+  if (gitResult.gitRepoListingFailed) {
+    // eslint-disable-next-line no-console -- operator-visible crawl strategy degradation
+    console.warn(
+      '[crawler] falling back to ripgrep (git ls-files unavailable)',
+    );
+  }
 
   const rgResult = await crawlWithRipgrep(
     stateKey,
@@ -1327,8 +1355,10 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     return results;
   }
 
-  // eslint-disable-next-line no-console -- operator-visible crawl strategy degradation
-  console.warn('[crawler] falling back to fdir (ripgrep unavailable)');
+  if (gitResult.gitRepoListingFailed) {
+    // eslint-disable-next-line no-console -- operator-visible crawl strategy degradation
+    console.warn('[crawler] falling back to fdir (ripgrep unavailable)');
+  }
 
   const fdirResults = await crawlWithFdir(options);
   const limitedResults = applyMaxFilesLimit(fdirResults, options.maxFiles);
