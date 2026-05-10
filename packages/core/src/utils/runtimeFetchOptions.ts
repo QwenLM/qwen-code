@@ -201,10 +201,17 @@ function buildFetchOptionsWithDispatcher(
     // Log dispatcher creation failure - requests will fallback to direct connection
     // bypassing the configured proxy. This is important for environments requiring
     // proxy for security controls (TLS inspection, traffic logging).
-    debugLogger.warn(
-      'Failed to create proxy dispatcher, falling back to direct connection:',
-      error,
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    // Redact credentials from proxy URL to prevent credential leakage
+    const redactedMessage = errorMessage.replace(
+      /\/\/[^@]*@/g,
+      '//<redacted>@',
     );
+    const logMessage = `Failed to create proxy dispatcher, falling back to direct connection: ${redactedMessage}`;
+    debugLogger.warn(logMessage);
+    // Also log to stderr for visibility in production environments
+    // eslint-disable-next-line no-console
+    console.error(`[RUNTIME_FETCH] ${logMessage}`);
     return sdkType === 'openai' ? undefined : {};
   }
 }

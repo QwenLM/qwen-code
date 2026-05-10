@@ -5,13 +5,19 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import {
-  buildRuntimeFetchOptions,
-  getOrCreateSharedDispatcher,
-  resetDispatcherCache,
-} from './runtimeFetchOptions.js';
 
-type UndiciOptions = Record<string, unknown>;
+// Hoist mockWarn so it's available to both the vi.mock and test cases
+const { mockWarn } = vi.hoisted(() => ({ mockWarn: vi.fn() }));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    debug: vi.fn(),
+    warn: mockWarn,
+    error: vi.fn(),
+    info: vi.fn(),
+  }),
+  mockWarn,
+}));
 
 vi.mock('undici', () => {
   class MockAgent {
@@ -40,18 +46,18 @@ vi.mock('undici', () => {
   };
 });
 
-vi.mock('./debugLogger.js', () => ({
-  createDebugLogger: () => ({
-    debug: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-  }),
-}));
+import {
+  buildRuntimeFetchOptions,
+  getOrCreateSharedDispatcher,
+  resetDispatcherCache,
+} from './runtimeFetchOptions.js';
+
+type UndiciOptions = Record<string, unknown>;
 
 describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {
     resetDispatcherCache();
+    mockWarn.mockClear();
   });
   it('returns undefined for OpenAI when no proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai');
@@ -99,6 +105,11 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     const result = buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
     // Should fallback to undefined (no dispatcher) on error
     expect(result).toBeUndefined();
+    // Should log the failure for visibility
+    expect(mockWarn).toHaveBeenCalledOnce();
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to create proxy dispatcher'),
+    );
   });
 
   it('returns empty object for Anthropic when dispatcher creation fails', () => {
@@ -108,6 +119,11 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     );
     // Should fallback to empty object on error
     expect(result).toEqual({});
+    // Should log the failure for visibility
+    expect(mockWarn).toHaveBeenCalledOnce();
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to create proxy dispatcher'),
+    );
   });
 });
 
