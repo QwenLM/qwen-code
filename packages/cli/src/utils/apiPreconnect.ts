@@ -19,6 +19,7 @@ import {
   createDebugLogger,
   detectRuntime,
   getOrCreateSharedDispatcher,
+  redactProxyCredentials,
 } from '@qwen-code/qwen-code-core';
 
 import { getAllProviderBaseUrls } from '../auth/allProviders.js';
@@ -208,11 +209,13 @@ export function preconnectApi(
         debugLogger.debug('Preconnect completed');
       })
       .catch((error) => {
-        debugLogger.debug(`Preconnect failed (ignored): ${error}`);
+        const redactedError = redactProxyCredentials(String(error));
+        debugLogger.debug(`Preconnect failed (ignored): ${redactedError}`);
       });
   } catch (error) {
     // Preconnect failure doesn't affect main flow
-    debugLogger.debug(`Preconnect failed (ignored): ${error}`);
+    const redactedError = redactProxyCredentials(String(error));
+    debugLogger.debug(`Preconnect failed (ignored): ${redactedError}`);
   }
 }
 

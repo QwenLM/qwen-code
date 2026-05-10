@@ -28,6 +28,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => mockDebugLogger,
   detectRuntime: () => 'node',
   getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,
+  redactProxyCredentials: (msg: string) =>
+    msg.replace(/\/\/[^/\s]*@/g, '//<redacted>@'),
 }));
 
 describe('apiPreconnect', () => {
@@ -55,7 +57,7 @@ describe('apiPreconnect', () => {
   describe('shouldSkipPreconnect', () => {
     it('should skip when NODE_EXTRA_CA_CERTS is set', () => {
       process.env['NODE_EXTRA_CA_CERTS'] = '/path/to/ca.pem';
-      preconnectApi('qwen-oauth');
+      preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' });
       expect(mockFetch).not.toHaveBeenCalled();
     });
   });
@@ -281,13 +283,13 @@ describe('apiPreconnect', () => {
 
     it('should skip when QWEN_CODE_DISABLE_PRECONNECT is set', () => {
       process.env['QWEN_CODE_DISABLE_PRECONNECT'] = '1';
-      preconnectApi('qwen-oauth');
+      preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' });
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
     it('should skip in sandbox mode', () => {
       process.env['SANDBOX'] = '1';
-      preconnectApi('qwen-oauth');
+      preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' });
       expect(mockFetch).not.toHaveBeenCalled();
     });
   });

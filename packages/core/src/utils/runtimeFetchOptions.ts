@@ -143,12 +143,6 @@ export function buildRuntimeFetchOptions(
 const dispatcherCache = new Map<string | undefined, Dispatcher>();
 
 /**
- * Set of proxy URLs that have failed dispatcher creation.
- * Prevents duplicate error logging for the same broken proxy config.
- */
-const rejectedProxyCache = new Set<string>();
-
-/**
  * Fallback return value when no custom dispatcher is used.
  * OpenAI SDK accepts `undefined` for fetchOptions to use runtime built-in fetch;
  * Anthropic SDK requires an empty object `{}`.
@@ -190,19 +184,37 @@ export function getOrCreateSharedDispatcher(proxyUrl?: string): Dispatcher {
 }
 
 /**
- * Reset the rejected proxy cache (for testing only)
- * @internal
- */
-export function resetRejectedProxyCache(): void {
-  rejectedProxyCache.clear();
-}
-
-/**
  * Reset the dispatcher cache (for testing only)
  * @internal
  */
 export function resetDispatcherCache(): void {
   dispatcherCache.clear();
+}
+
+/**
+ * Extract hostname (with port) from a proxy URL for deduplication.
+ *
+ * This function extracts just the host part from a proxy URL, removing any
+ * credentials. This allows different credentials for the same host to be
+ * logged separately when dispatcher creation fails, enabling administrators
+ * to diagnose credential issues.
+ *
+ * Examples:
+ * - `http://user:pass@proxy.example.com:8080` → `proxy.example.com:8080`
+ * - `https://proxy.example.com:8080` → `proxy.example.com:8080`
+ *
+ * @param proxyUrl - Proxy URL that may contain credentials
+ * @returns Hostname with port (credentials removed)
+ */
+export function extractHostnameFromProxyUrl(proxyUrl: string): string {
+  try {
+    const url = new URL(proxyUrl);
+    return url.port ? `${url.hostname}:${url.port}` : url.hostname;
+  } catch {
+    // Fallback: if URL parsing fails, use regex to extract host after '@'
+    const match = proxyUrl.match(/@([^:/]+)(:\d+)?/);
+    return match ? match[1] + (match[2] ?? '') : proxyUrl;
+  }
 }
 
 /**
@@ -249,21 +261,19 @@ function buildFetchOptionsWithDispatcher(
     // Log dispatcher creation failure - requests will fallback to direct connection
     // bypassing the configured proxy. This is important for environments requiring
     // proxy for security controls (TLS inspection, traffic logging).
-    // Use redacted proxyUrl as cache key to avoid storing plaintext credentials in memory.
-    const cacheKey = redactProxyCredentials(proxyUrl);
-    if (!rejectedProxyCache.has(cacheKey)) {
-      rejectedProxyCache.add(cacheKey);
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      const redactedMessage = redactProxyCredentials(errorMessage);
-      const logMessage = `Failed to create proxy dispatcher, falling back to direct connection: ${redactedMessage}`;
-      debugLogger.warn(logMessage);
-      // Dual logging: debugLogger writes to ~/.qwen/debug/ (for local debugging),
-      // console.error writes to stderr (captured by container orchestrators and log aggregators).
-      // This ensures visibility in production even when debug sessions are inactive.
-      // eslint-disable-next-line no-console
-      console.error(`[RUNTIME_FETCH] ${logMessage}`);
-    }
+    // Log only the hostname (without credentials) to avoid credential leakage,
+    // and do not deduplicate so that administrators can see each credential change
+    // attempt's failure when debugging proxy issues.
+    const hostname = extractHostnameFromProxyUrl(proxyUrl);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const redactedMessage = redactProxyCredentials(errorMessage);
+    const logMessage = `Failed to create proxy dispatcher for ${hostname}, falling back to direct connection: ${redactedMessage}`;
+    debugLogger.warn(logMessage);
+    // Dual logging: debugLogger writes to ~/.qwen/debug/ (for local debugging),
+    // console.error writes to stderr (captured by container orchestrators and log aggregators).
+    // This ensures visibility in production even when debug sessions are inactive.
+    // eslint-disable-next-line no-console
+    console.error(`[RUNTIME_FETCH] ${logMessage}`);
     return NO_DISPATCHER_FALLBACK[sdkType];
   }
 }

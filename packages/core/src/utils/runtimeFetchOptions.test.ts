@@ -55,7 +55,6 @@ import {
   getOrCreateSharedDispatcher,
   redactProxyCredentials,
   resetDispatcherCache,
-  resetRejectedProxyCache,
 } from './runtimeFetchOptions.js';
 
 type UndiciOptions = Record<string, unknown>;
@@ -63,7 +62,6 @@ type UndiciOptions = Record<string, unknown>;
 describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {
     resetDispatcherCache();
-    resetRejectedProxyCache();
     mockWarn.mockClear();
     mockConsoleError.mockClear();
     vi.spyOn(console, 'error').mockImplementation(mockConsoleError);
@@ -169,32 +167,31 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     );
   });
 
-  it('logs only once for repeated failures with the same proxy URL', () => {
-    // Simulate multiple requests failing with the same broken proxy config
+  it('logs hostname (without credentials) in failure message', () => {
+    buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('invalid-proxy'),
+    );
+    expect(mockWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('secret'),
+    );
+  });
+
+  it('logs each failure separately (no deduplication)', () => {
+    // Deduplication was removed to allow administrators to see each credential
+    // change attempt's failure when debugging proxy issues
     buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
     buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
     buildRuntimeFetchOptions('anthropic', 'http://invalid-proxy');
-    // Should only log once due to rejectedProxyCache dedup
-    expect(mockWarn).toHaveBeenCalledOnce();
-    expect(mockConsoleError).toHaveBeenCalledOnce();
-  });
-
-  it('logs again for a different failing proxy URL', () => {
-    // http://invalid-proxy triggers dispatcher creation failure
-    // http://user:secret@proxy.local succeeds in mock (ProxyAgent accepts credentials)
-    // so we test dedup via the same invalid proxy URL
-    buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
-    buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
-    // Should log only once due to rejectedProxyCache dedup
-    expect(mockWarn).toHaveBeenCalledOnce();
-    expect(mockConsoleError).toHaveBeenCalledOnce();
+    // Should log each failure (no dedup)
+    expect(mockWarn).toHaveBeenCalledTimes(3);
+    expect(mockConsoleError).toHaveBeenCalledTimes(3);
   });
 });
 
 describe('getOrCreateSharedDispatcher', () => {
   beforeEach(() => {
     resetDispatcherCache();
-    resetRejectedProxyCache();
     mockWarn.mockClear();
     mockConsoleError.mockClear();
   });
