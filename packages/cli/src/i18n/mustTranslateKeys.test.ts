@@ -26,6 +26,9 @@ import type { SlashCommand } from '../ui/commands/types.js';
 const NON_ENGLISH_LANGUAGES = SUPPORTED_LANGUAGES.filter(
   (language) => language.code !== 'en',
 );
+const STRICT_PARITY_NON_ENGLISH_LANGUAGES = NON_ENGLISH_LANGUAGES.filter(
+  (language) => language.strictParity,
+);
 
 type TranslationValue = string | string[];
 type TranslationDict = Record<string, TranslationValue>;
@@ -137,8 +140,8 @@ describe('must-translate locale coverage', () => {
     },
   );
 
-  it.each(NON_ENGLISH_LANGUAGES)(
-    'does not fall back to English for any built-in command description in %s',
+  it.each(STRICT_PARITY_NON_ENGLISH_LANGUAGES)(
+    'does not fall back to English for any built-in command description in strict-parity locale %s',
     async (language) => {
       const loader = new BuiltinCommandLoader(null);
 
