@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { AgentBackend } from '@craft-agent/shared/agent/backend'
@@ -154,8 +154,9 @@ describe('Qwen native history loading', () => {
       | null
     expect(listCalls).toBe(1)
     expect(imported?.workspaceRootPath).toBe(workspaceRoot)
-    expect(imported?.sdkCwd).toBe(projectRoot)
-    expect(imported?.workingDirectory).toBe(projectRoot)
+    expect(imported?.sdkCwd).toBeUndefined()
+    expect(imported?.workingDirectory).toBeUndefined()
+    expect(imported?.name).toBeUndefined()
     expect(imported?.permissionMode).toBe('allow-all')
     expect(imported?.llmConnection).toBeUndefined()
     expect(imported?.connectionLocked).toBeUndefined()
@@ -163,6 +164,34 @@ describe('Qwen native history loading', () => {
     expect(imported?.lastUsedAt).toBeUndefined()
     expect(imported?.lastMessageAt).toBeUndefined()
     expect(imported?.messageCount).toBeUndefined()
+    expect(imported?.tokenUsage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      contextTokens: 0,
+      costUsd: 0,
+    })
+
+    const header = JSON.parse(
+      readFileSync(join(workspaceRoot, 'sessions', sessionId, 'session.jsonl'), 'utf8').split('\n')[0],
+    ) as Record<string, unknown>
+    expect(header).not.toHaveProperty('sdkCwd')
+    expect(header).not.toHaveProperty('workingDirectory')
+    expect(header).not.toHaveProperty('name')
+    expect(header).not.toHaveProperty('tokenUsage')
+
+    const [listed] = manager.getSessions(workspace.id) as Array<{
+      sdkCwd?: string
+      workingDirectory?: string
+      name?: string
+      createdAt?: number
+      lastMessageAt?: number
+    }>
+    expect(listed?.sdkCwd).toBe(projectRoot)
+    expect(listed?.workingDirectory).toBe(projectRoot)
+    expect(listed?.name).toBe('qwen native conversation')
+    expect(listed?.createdAt).toBe(timestamp)
+    expect(listed?.lastMessageAt).toBe(timestamp)
   })
 
   it('removes provider-native mirrors once a Craft session owns the same SDK session ID', async () => {
@@ -697,6 +726,9 @@ describe('Qwen native history loading', () => {
         })
       | null
     expect(persisted?.messages).toHaveLength(0)
+    expect(persisted?.sdkCwd).toBeUndefined()
+    expect(persisted?.workingDirectory).toBeUndefined()
+    expect(persisted?.name).toBeUndefined()
     expect(persisted?.createdAt).toBeUndefined()
     expect(persisted?.lastUsedAt).toBeUndefined()
     expect(persisted?.lastMessageAt).toBeUndefined()
@@ -706,6 +738,11 @@ describe('Qwen native history loading', () => {
     expect(persisted?.preview).toBeUndefined()
     expect(persisted?.lastMessageRole).toBeUndefined()
     expect(persisted?.lastFinalMessageId).toBeUndefined()
+
+    const header = JSON.parse(
+      readFileSync(join(workspaceRoot, 'sessions', sessionId, 'session.jsonl'), 'utf8').split('\n')[0],
+    ) as Record<string, unknown>
+    expect(header).not.toHaveProperty('tokenUsage')
   })
 
   it('backfills an already-loaded empty local session from provider-native history', async () => {

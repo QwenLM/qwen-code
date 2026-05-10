@@ -25,11 +25,21 @@ const SESSION_PATH_TOKEN = '{{SESSION_PATH}}';
 type HeaderWriteOptions = {
   omitMessageDerivedFields?: boolean;
   omitTranscriptDerivedFields?: boolean;
+  omitTokenUsage?: boolean;
 };
 
 type StoredSessionWithHeaderOptions = StoredSession & {
   omitMessageDerivedHeaderFields?: boolean;
   omitTranscriptDerivedHeaderFields?: boolean;
+  omitHeaderTokenUsage?: boolean;
+};
+
+const EMPTY_TOKEN_USAGE: SessionTokenUsage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  totalTokens: 0,
+  contextTokens: 0,
+  costUsd: 0,
 };
 
 /**
@@ -146,7 +156,7 @@ export function readSessionJsonl(sessionFile: string): StoredSession | null {
       sdkCwd,
       // Runtime fields
       messages,
-      tokenUsage: header.tokenUsage,
+      tokenUsage: header.tokenUsage ?? { ...EMPTY_TOKEN_USAGE },
     } as StoredSession;
   } catch (error) {
     debug('[jsonl] Failed to read session:', sessionFile, error);
@@ -169,6 +179,8 @@ export function writeSessionJsonl(sessionFile: string, session: StoredSession): 
       headerOptionsSource.omitMessageDerivedHeaderFields,
     omitTranscriptDerivedFields:
       headerOptionsSource.omitTranscriptDerivedHeaderFields,
+    omitTokenUsage:
+      headerOptionsSource.omitHeaderTokenUsage,
   });
   const sessionDir = dirname(sessionFile);
 
@@ -197,7 +209,7 @@ export function createSessionHeader(
     ...pickSessionFields(session),
     // Path conversion for portability
     workspaceRootPath: toPortablePath(session.workspaceRootPath),
-    tokenUsage: session.tokenUsage,
+    ...(!options.omitTokenUsage ? { tokenUsage: session.tokenUsage } : {}),
   } as SessionHeader;
 
   if (options.omitTranscriptDerivedFields) {

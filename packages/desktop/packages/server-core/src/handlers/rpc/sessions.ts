@@ -145,13 +145,13 @@ export function registerSessionsHandlers(
     const workspaceId =
       ctx.workspaceId ??
       deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!);
+    try {
+      await sessionManager.refreshExternalSessions?.(workspaceId ?? undefined);
+    } catch (error) {
+      log.warn('GET_SESSIONS external refresh failed:', error);
+    }
     const sessions = sessionManager.getSessions(workspaceId ?? undefined);
     end();
-    void sessionManager
-      .refreshExternalSessions?.(workspaceId ?? undefined)
-      .catch((error) => {
-        log.warn('GET_SESSIONS background external refresh failed:', error);
-      });
     return sessions;
   });
 

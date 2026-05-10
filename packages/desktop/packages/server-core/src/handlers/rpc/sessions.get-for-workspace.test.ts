@@ -92,28 +92,33 @@ function createTestHarness(options?: {
 }
 
 describe('registerSessionsHandlers GET', () => {
-  it('returns current workspace sessions before background external refresh completes', async () => {
+  it('refreshes external provider sessions before returning current workspace sessions', async () => {
     const refresh = deferred();
     const { get, ctx, calls } = createTestHarness({
       refreshExternalSessions: () => refresh.promise,
     });
 
-    const result = await get(ctx);
+    const resultPromise = get(ctx);
+    await Promise.resolve();
+    expect(calls).toEqual([
+      'waitForInit',
+      'refreshExternalSessions:current-workspace',
+    ]);
+
+    refresh.resolve();
+    const result = await resultPromise;
 
     expect(result).toEqual([
       { id: 's1', workspaceId: 'current-workspace', messages: [] },
     ]);
     expect(calls).toEqual([
       'waitForInit',
-      'getSessions:current-workspace',
       'refreshExternalSessions:current-workspace',
+      'getSessions:current-workspace',
     ]);
-
-    refresh.resolve();
-    await refresh.promise;
   });
 
-  it('does not fail the session list request when background external refresh fails', async () => {
+  it('does not fail the session list request when external refresh fails', async () => {
     const { get, ctx } = createTestHarness({
       refreshExternalSessions: async () => {
         throw new Error('provider is slow');

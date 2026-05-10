@@ -305,7 +305,29 @@ export async function getOrCreateSessionById(
  * Writes in JSONL format: line 1 = header, lines 2+ = messages
  */
 export async function saveSession(session: StoredSession): Promise<void> {
-  sessionPersistenceQueue.enqueue(session);
+  const existingHeader = readSessionHeader(getSessionFilePath(session.workspaceRootPath, session.id));
+  const preserveProviderNativeMinimalHeader = !!existingHeader?.sdkSessionId
+    && existingHeader.tokenUsage === undefined
+    && existingHeader.createdAt === undefined
+    && existingHeader.lastUsedAt === undefined
+    && existingHeader.lastMessageAt === undefined;
+
+  const sessionToPersist = preserveProviderNativeMinimalHeader
+    ? ({
+        ...session,
+        name: undefined,
+        createdAt: undefined,
+        lastUsedAt: undefined,
+        lastMessageAt: undefined,
+        workingDirectory: undefined,
+        sdkCwd: undefined,
+        omitMessageDerivedHeaderFields: true,
+        omitTranscriptDerivedHeaderFields: true,
+        omitHeaderTokenUsage: true,
+      } as StoredSession)
+    : session;
+
+  sessionPersistenceQueue.enqueue(sessionToPersist);
   await sessionPersistenceQueue.flush(session.id);
 }
 

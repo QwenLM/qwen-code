@@ -893,6 +893,29 @@ const DEFAULT_TOKEN_USAGE = {
   contextTokens: 0, costUsd: 0,
 }
 
+type StoredSessionWithHeaderOptions = StoredSession & {
+  omitMessageDerivedHeaderFields?: boolean
+  omitTranscriptDerivedHeaderFields?: boolean
+  omitHeaderTokenUsage?: boolean
+}
+
+function stripQwenCanonicalStoredFields<T extends Partial<StoredSession>>(session: T): T {
+  const stripped = { ...session }
+  delete stripped.name
+  delete stripped.createdAt
+  delete stripped.lastUsedAt
+  delete stripped.lastMessageAt
+  delete stripped.workingDirectory
+  delete stripped.sdkCwd
+  return stripped
+}
+
+function parseOptionalTimestamp(value?: string | null): number | undefined {
+  if (!value) return undefined
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
 /**
  * Convert a ManagedSession to a renderer-side Session object.
  * Uses pickSessionFields() for persistent fields so new fields propagate automatically.
@@ -2094,6 +2117,9 @@ export class SessionManager implements ISessionManager {
       managed.workingDirectory = info.cwd
       managed.sdkCwd = info.cwd
       managed.name = title
+      managed.createdAt = parseOptionalTimestamp(info.startTime) ?? managed.createdAt
+      if (info.preview !== undefined) managed.preview = info.preview ?? undefined
+      if (typeof info.messageCount === 'number') managed.messageCount = info.messageCount
       managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, timestamp)
       managed.lastMessageAt = Math.max(managed.lastMessageAt ?? 0, timestamp)
       if (!managed.llmConnection) managed.llmConnection = connectionSlug
@@ -2113,28 +2139,33 @@ export class SessionManager implements ISessionManager {
     const inspectedMessages = inspectedResult?.messages
     const lastInspectedMessage = inspectedMessages?.[inspectedMessages.length - 1]
     const shouldPersistInspectedMessages = connectionSlug !== QWEN_CODE_CONNECTION_SLUG
-    const storedSession: StoredSession = {
+    const createdAt = parseOptionalTimestamp(info.startTime) ?? timestamp
+    const inMemoryLastMessageAt = lastInspectedMessage?.timestamp ?? timestamp
+    const storedSessionBase: StoredSession = {
       id: info.sessionId,
       workspaceRootPath: workspace.rootPath,
       sdkSessionId: info.sessionId,
       sdkCwd: info.cwd,
       workingDirectory: info.cwd,
       name: title,
-      createdAt: timestamp,
-      lastUsedAt: Math.max(timestamp, lastInspectedMessage?.timestamp ?? timestamp),
-      lastMessageAt: lastInspectedMessage?.timestamp ?? timestamp,
+      createdAt,
+      lastUsedAt: Math.max(timestamp, inMemoryLastMessageAt),
+      lastMessageAt: inMemoryLastMessageAt,
       permissionMode: defaultPermissionMode,
       ...(model ? { model } : {}),
       thinkingLevel: defaultThinkingLevel,
       messages: shouldPersistInspectedMessages ? inspectedMessages?.map(messageToStored) ?? [] : [],
-      ...(connectionSlug === QWEN_CODE_CONNECTION_SLUG
-        ? {
-            omitMessageDerivedHeaderFields: true,
-            omitTranscriptDerivedHeaderFields: true,
-          }
-        : {}),
       tokenUsage: { ...DEFAULT_TOKEN_USAGE },
     } as StoredSession
+
+    const storedSession = (connectionSlug === QWEN_CODE_CONNECTION_SLUG
+      ? {
+          ...stripQwenCanonicalStoredFields(storedSessionBase),
+          omitMessageDerivedHeaderFields: true,
+          omitTranscriptDerivedHeaderFields: true,
+          omitHeaderTokenUsage: true,
+        }
+      : storedSessionBase) as StoredSessionWithHeaderOptions
 
     await saveStoredSession(storedSession)
 
@@ -2143,6 +2174,14 @@ export class SessionManager implements ISessionManager {
       messages: inspectedMessages ?? [],
       messagesLoaded: !!inspectedMessages,
       tokenUsage: { ...storedSession.tokenUsage },
+      sdkCwd: info.cwd,
+      workingDirectory: info.cwd,
+      name: title,
+      createdAt,
+      lastUsedAt: Math.max(timestamp, inMemoryLastMessageAt),
+      lastMessageAt: inMemoryLastMessageAt,
+      preview: info.preview ?? undefined,
+      ...(typeof info.messageCount === 'number' ? { messageCount: info.messageCount } : {}),
     })
     if (inspectedResult?.availableCommands?.length || inspectedResult?.availableSkills?.length) {
       imported.availableCommands = inspectedResult.availableCommands ?? []
@@ -2207,20 +2246,22 @@ export class SessionManager implements ISessionManager {
         return
       }
 
-      const storedSession: StoredSession = {
+      const storedSessionBase: StoredSession = {
         ...pickSessionFields(managed),
         workspaceRootPath: managed.workspace.rootPath,
         createdAt: managed.createdAt ?? Date.now(),
         lastUsedAt: Date.now(),
         messages: persistableMessages.map(messageToStored),
-        ...(usesQwenCanonicalMessages
-          ? {
-              omitMessageDerivedHeaderFields: true,
-              omitTranscriptDerivedHeaderFields: true,
-            }
-          : {}),
         tokenUsage: managed.tokenUsage ?? DEFAULT_TOKEN_USAGE,
       } as StoredSession
+      const storedSession = (usesQwenCanonicalMessages
+        ? {
+            ...stripQwenCanonicalStoredFields(storedSessionBase),
+            omitMessageDerivedHeaderFields: true,
+            omitTranscriptDerivedHeaderFields: true,
+            omitHeaderTokenUsage: true,
+          }
+        : storedSessionBase) as StoredSessionWithHeaderOptions
 
       // Queue for async persistence with debouncing
       sessionPersistenceQueue.enqueue(storedSession)
@@ -2232,6 +2273,36 @@ export class SessionManager implements ISessionManager {
   // Flush a specific session immediately (call on session close/switch)
   async flushSession(sessionId: string): Promise<void> {
     await sessionPersistenceQueue.flush(sessionId)
+  }
+
+  private async persistSessionMetadataUpdate(
+    managed: ManagedSession,
+    updates: Partial<Pick<SessionConfig,
+      | 'isFlagged'
+      | 'name'
+      | 'sessionStatus'
+      | 'labels'
+      | 'lastReadMessageId'
+      | 'hasUnread'
+      | 'enabledSourceSlugs'
+      | 'workingDirectory'
+      | 'sdkCwd'
+      | 'permissionMode'
+      | 'sharedUrl'
+      | 'sharedId'
+      | 'model'
+      | 'llmConnection'
+      | 'isArchived'
+      | 'archivedAt'
+    >>,
+  ): Promise<void> {
+    if (this.isQwenCanonicalMessageSession(managed)) {
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+      return
+    }
+
+    await updateSessionMetadata(managed.workspace.rootPath, managed.id, updates)
   }
 
   // Flush all pending sessions (call on app quit)
@@ -4645,8 +4716,7 @@ export class SessionManager implements ISessionManager {
       // Store shared info in session
       managed.sharedUrl = data.url
       managed.sharedId = data.id
-      const workspaceRootPath = managed.workspace.rootPath
-      await updateSessionMetadata(workspaceRootPath, sessionId, {
+      await this.persistSessionMetadataUpdate(managed, {
         sharedUrl: data.url,
         sharedId: data.id,
       })
@@ -4748,8 +4818,7 @@ export class SessionManager implements ISessionManager {
       // Clear shared info
       delete managed.sharedUrl
       delete managed.sharedId
-      const workspaceRootPath = managed.workspace.rootPath
-      await updateSessionMetadata(workspaceRootPath, sessionId, {
+      await this.persistSessionMetadataUpdate(managed, {
         sharedUrl: undefined,
         sharedId: undefined,
       })
@@ -4934,8 +5003,7 @@ export class SessionManager implements ISessionManager {
 
     // Persist changes
     if (needsPersist) {
-      const workspaceRootPath = managed.workspace.rootPath
-      await updateSessionMetadata(workspaceRootPath, sessionId, updates)
+      await this.persistSessionMetadataUpdate(managed, updates)
       this.emitUnreadSummaryChanged()
     }
   }
@@ -4950,8 +5018,7 @@ export class SessionManager implements ISessionManager {
       managed.hasUnread = true
       managed.lastReadMessageId = undefined
       // Persist to disk
-      const workspaceRootPath = managed.workspace.rootPath
-      await updateSessionMetadata(workspaceRootPath, sessionId, { hasUnread: true, lastReadMessageId: undefined })
+      await this.persistSessionMetadataUpdate(managed, { hasUnread: true, lastReadMessageId: undefined })
       this.emitUnreadSummaryChanged()
     }
   }
@@ -4969,7 +5036,7 @@ export class SessionManager implements ISessionManager {
       if (!managed.hasUnread) continue
       managed.hasUnread = false
       updates.push(
-        updateSessionMetadata(managed.workspace.rootPath, managed.id, { hasUnread: false })
+        this.persistSessionMetadataUpdate(managed, { hasUnread: false })
       )
     }
     if (updates.length > 0) {
@@ -5203,7 +5270,7 @@ export class SessionManager implements ISessionManager {
     }
     // Persist to disk. Connection selection is runtime-only in the Qwen-only app.
     const updates: { model?: string } = { model: persistedModel }
-    await updateSessionMetadata(managed.workspace.rootPath, sessionId, updates)
+    await this.persistSessionMetadataUpdate(managed, updates)
     // Notify renderer immediately. Provider refreshes below may involve ACP I/O and
     // should not block the visible model selection from updating.
     this.sendEvent({ type: 'session_model_changed', sessionId, model: persistedModel ?? null }, managed.workspace.id)
@@ -6565,7 +6632,7 @@ export class SessionManager implements ISessionManager {
         // User is not watching - mark as unread for NEW badge
         if (!managed.hasUnread) {
           managed.hasUnread = true
-          await updateSessionMetadata(managed.workspace.rootPath, sessionId, { hasUnread: true })
+          await this.persistSessionMetadataUpdate(managed, { hasUnread: true })
           this.emitUnreadSummaryChanged()
         }
       }

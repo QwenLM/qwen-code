@@ -14,6 +14,7 @@ interface PendingWrite {
 type StoredSessionWithHeaderOptions = StoredSession & {
   omitMessageDerivedHeaderFields?: boolean
   omitTranscriptDerivedHeaderFields?: boolean
+  omitHeaderTokenUsage?: boolean
 }
 
 interface HeaderMetadataSignature {
@@ -122,6 +123,8 @@ class SessionPersistenceQueue {
           headerOptionsSource.omitMessageDerivedHeaderFields,
         omitTranscriptDerivedFields:
           headerOptionsSource.omitTranscriptDerivedHeaderFields,
+        omitTokenUsage:
+          headerOptionsSource.omitHeaderTokenUsage,
       })
       const localSig = getHeaderMetadataSignature(localHeader)
       const diskHeader = readSessionHeader(filePath)

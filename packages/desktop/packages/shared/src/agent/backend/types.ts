@@ -311,6 +311,11 @@ export interface BackendSessionInfo {
   cwd: string;
   title?: string | null;
   updatedAt?: string | null;
+  startTime?: string | null;
+  preview?: string | null;
+  messageCount?: number | null;
+  gitBranch?: string | null;
+  titleSource?: 'manual' | 'auto' | null;
 }
 
 export interface BackendSessionListOptions {

@@ -515,6 +515,13 @@ class QwenAgent implements Agent {
       sessionId: item.sessionId,
       title: item.customTitle || item.prompt || '(session)',
       updatedAt: new Date(item.mtime).toISOString(),
+      _meta: {
+        startTime: item.startTime,
+        preview: item.prompt,
+        messageCount: item.messageCount,
+        ...(item.gitBranch ? { gitBranch: item.gitBranch } : {}),
+        ...(item.titleSource ? { titleSource: item.titleSource } : {}),
+      },
     }));
 
     return {

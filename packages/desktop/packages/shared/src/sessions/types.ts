@@ -293,7 +293,7 @@ export interface SessionHeader {
   /** Preview of first user message (first 150 chars) */
   preview?: string;
   /** Token usage statistics */
-  tokenUsage: SessionTokenUsage;
+  tokenUsage?: SessionTokenUsage;
   /** ID of the last final (non-intermediate) assistant message - for unread detection without loading messages */
   lastFinalMessageId?: string;
 }

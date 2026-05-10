@@ -1734,6 +1734,22 @@ export class QwenAgent extends BaseAgent {
         cwd: session.cwd,
         title: session.title,
         updatedAt: session.updatedAt,
+        startTime: typeof session._meta?.['startTime'] === 'string'
+          ? session._meta['startTime']
+          : undefined,
+        preview: typeof session._meta?.['preview'] === 'string'
+          ? session._meta['preview']
+          : undefined,
+        messageCount: typeof session._meta?.['messageCount'] === 'number'
+          ? session._meta['messageCount']
+          : undefined,
+        gitBranch: typeof session._meta?.['gitBranch'] === 'string'
+          ? session._meta['gitBranch']
+          : undefined,
+        titleSource: session._meta?.['titleSource'] === 'manual' ||
+          session._meta?.['titleSource'] === 'auto'
+          ? session._meta['titleSource']
+          : undefined,
       })),
     };
   }
