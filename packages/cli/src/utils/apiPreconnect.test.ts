@@ -7,10 +7,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { preconnectApi, resetPreconnectState } from './apiPreconnect.js';
 
-// Mock fetch
-const mockFetch = vi.fn().mockResolvedValue(undefined);
-global.fetch = mockFetch;
-
 // Mock the shared dispatcher functions from core
 const { mockGetOrCreateSharedDispatcher, mockDebugLogger } = vi.hoisted(() => {
   const dispatcher = { fake: 'dispatcher' };
@@ -20,6 +16,9 @@ const { mockGetOrCreateSharedDispatcher, mockDebugLogger } = vi.hoisted(() => {
     mockDebugLogger,
   };
 });
+
+// Mock fetch
+const mockFetch = vi.fn().mockResolvedValue(undefined);
 vi.mock('@qwen-code/qwen-code-core', () => ({
   AuthType: {
     USE_OPENAI: 'openai',
@@ -35,7 +34,6 @@ describe('apiPreconnect', () => {
   beforeEach(() => {
     resetPreconnectState();
     mockFetch.mockClear();
-    mockFetch.mockResolvedValue(undefined);
     mockGetOrCreateSharedDispatcher.mockClear();
     delete process.env['HTTPS_PROXY'];
     delete process.env['https_proxy'];
@@ -44,9 +42,11 @@ describe('apiPreconnect', () => {
     delete process.env['QWEN_CODE_DISABLE_PRECONNECT'];
     delete process.env['NODE_EXTRA_CA_CERTS'];
     delete process.env['SANDBOX'];
+    vi.stubGlobal('fetch', mockFetch);
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -202,17 +202,10 @@ describe('apiPreconnect', () => {
       );
     });
 
-    it('should pass undefined proxy to shared dispatcher by default', () => {
+    it('should pass configured proxy to shared dispatcher', () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://proxy.example.com:8080',
       });
-      expect(mockGetOrCreateSharedDispatcher).toHaveBeenCalledWith(
-        'http://proxy.example.com:8080',
-      );
-    });
-
-    it('should pass configured proxy to shared dispatcher', () => {
-      preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' });
       expect(mockGetOrCreateSharedDispatcher).toHaveBeenCalledWith(
         'http://proxy.example.com:8080',
       );

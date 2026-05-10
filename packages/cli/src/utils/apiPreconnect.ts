@@ -168,8 +168,12 @@ export function preconnectApi(
 
   // Skip dispatcher creation when no proxy configured - SDK uses built-in fetch
   // with its own connection pool, so warming undici dispatcher provides no benefit.
+  // This mirrors the logic in buildFetchOptionsWithDispatcher() which also skips
+  // custom dispatcher creation when no proxy is set, ensuring consistent behavior.
   if (!options.proxy) {
     debugLogger.debug('Skipping preconnect dispatcher: no proxy configured');
+    // Set preconnectFired = true because no-proxy state is permanent for the process
+    // lifetime (unlike the transient unknown-authType case below which allows retry).
     preconnectFired = true;
     return;
   }
@@ -181,6 +185,8 @@ export function preconnectApi(
     return;
   }
 
+  // Mark as fired before async operation — prevents duplicate fires.
+  // If the request fails, we don't retry (fire-and-forget semantics).
   preconnectFired = true;
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 

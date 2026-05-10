@@ -187,9 +187,8 @@ function buildFetchOptionsWithDispatcher(
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   // When no proxy is configured, skip the custom dispatcher and let the SDK
   // use the runtime's built-in fetch. This avoids version-mismatch issues
-  // between the project's bundled undici and the Node.js built-in undici
-  // (e.g., Node v26 ships undici v8 while the project bundles v6, causing
-  // "InvalidArgumentError: invalid onError method" on dispatch).
+  // between the project's bundled undici and the Node.js built-in undici.
+  // Re-verify compatibility if the bundled undici version changes.
   if (!proxyUrl) {
     return sdkType === 'openai' ? undefined : {};
   }
@@ -209,7 +208,9 @@ function buildFetchOptionsWithDispatcher(
     );
     const logMessage = `Failed to create proxy dispatcher, falling back to direct connection: ${redactedMessage}`;
     debugLogger.warn(logMessage);
-    // Also log to stderr for visibility in production environments
+    // Dual logging: debugLogger writes to ~/.qwen/debug/ (for local debugging),
+    // console.error writes to stderr (captured by container orchestrators and log aggregators).
+    // This ensures visibility in production even when debug sessions are inactive.
     // eslint-disable-next-line no-console
     console.error(`[RUNTIME_FETCH] ${logMessage}`);
     return sdkType === 'openai' ? undefined : {};
