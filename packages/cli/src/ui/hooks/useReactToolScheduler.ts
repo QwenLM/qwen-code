@@ -141,13 +141,21 @@ export function useReactToolScheduler(
 
           // For non-executing statuses, explicitly clear liveOutput so
           // it doesn't leak across an executing → completed transition.
-          // `pid` / `promoteAbortController` are not on `coreTc` for
-          // non-executing statuses (`...coreTc` doesn't include them),
-          // so no extra clearing needed.
+          // `pid` / `promoteAbortController` are also explicitly set to
+          // `undefined` here as defense-in-depth: today they're not on
+          // `coreTc` for non-executing statuses so `...coreTc` doesn't
+          // carry them, but if a future core change adds either field
+          // to a non-executing status type the explicit clearing
+          // prevents stale executing-state leakage into the React tree
+          // (which would surface as a stuck PID display or a Ctrl+B
+          // handler that incorrectly matches a no-longer-executing
+          // tool call).
           return {
             ...coreTc,
             responseSubmittedToGemini,
             liveOutput: undefined,
+            pid: undefined,
+            promoteAbortController: undefined,
           };
         }),
       );

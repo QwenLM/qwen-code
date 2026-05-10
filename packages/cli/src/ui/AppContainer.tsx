@@ -58,6 +58,7 @@ import {
   type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import {
@@ -2311,6 +2312,13 @@ export const AppContainer = (props: AppContainerProps) => {
         const executingShell = pendingToolCallsRef.current.find(
           (tc) =>
             tc.status === 'executing' &&
+            // Defense-in-depth: also gate on the tool name. Today only
+            // the shell tool's invocation wires `promoteAbortController`,
+            // but a future copy-paste / type-confusion that adds the
+            // property to a non-shell tool would otherwise let Ctrl+B
+            // mistakenly fire `abort({kind:'background'})` on a tool
+            // whose service has no promote-handoff handler.
+            tc.request.name === ToolNames.SHELL &&
             tc.promoteAbortController !== undefined,
         ) as TrackedExecutingToolCall | undefined;
         if (executingShell?.promoteAbortController) {
