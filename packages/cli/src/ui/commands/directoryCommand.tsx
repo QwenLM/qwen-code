@@ -372,7 +372,7 @@ export const directoryCommand: SlashCommand = {
         }
 
         if (
-          workspaceContext.isInitialDirectory(expandedDir) ??
+          workspaceContext.isInitialDirectory(expandedDir) ||
           workspaceContext.getInitialDirectories().includes(expandedDir)
         ) {
           addItem(
@@ -388,8 +388,52 @@ export const directoryCommand: SlashCommand = {
           return;
         }
 
+        // Persist removal to settings first.  If this fails we can roll
+        // back the in-memory removal so the two stay in sync.
+        const targetDir = canonicalDirectory;
+        let found = false;
+
+        try {
+          for (const scope of [
+            SettingScope.Workspace,
+            SettingScope.User,
+          ] as const) {
+            const scopeDirs =
+              settings.forScope(scope).originalSettings.context
+                ?.includeDirectories ?? [];
+            const includeDirectories = scopeDirs.filter((d: string) => {
+              try {
+                const resolved = fs.realpathSync(expandHomeDir(d));
+                return resolved !== targetDir;
+              } catch {
+                return expandHomeDir(d) !== targetDir && d !== targetDir;
+              }
+            });
+            if (includeDirectories.length < scopeDirs.length) {
+              found = true;
+              settings.setValue(
+                scope,
+                'context.includeDirectories',
+                includeDirectories,
+              );
+            }
+          }
+        } catch (error) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Error updating settings: {{error}}', {
+                error: (error as Error).message,
+              }),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // Now remove from memory — persisted settings are already updated.
         const removed = workspaceContext.removeDirectory(expandedDir);
-        if (!removed) {
+        if (!removed && !found) {
           addItem(
             {
               type: MessageType.ERROR,
@@ -402,70 +446,16 @@ export const directoryCommand: SlashCommand = {
           return;
         }
 
-        try {
-          // Find the scope(s) that contain this directory entry so we
-          // update the correct persisted setting.  The merged workspace
-          // context is built from all scopes via MergeStrategy.CONCAT, so a
-          // directory added at user scope would reappear on restart if we
-          // only clear the workspace-scoped list.
-          //
-          // Persisted entries may use ~, $HOME, or symlink spellings, so
-          // we resolve each raw entry via expandHomeDir + realpath before
-          // comparing against the canonical directory.
-          const targetDir = canonicalDirectory;
-          let found = false;
-
-          for (const scope of [
-            SettingScope.Workspace,
-            SettingScope.User,
-          ] as const) {
-            const scopeDirs =
-              settings.forScope(scope).originalSettings.context
-                ?.includeDirectories ?? [];
-            const matchingIndex = scopeDirs.findIndex((d: string) => {
-              try {
-                const resolved = fs.realpathSync(expandHomeDir(d));
-                return resolved === targetDir;
-              } catch {
-                return d === targetDir;
-              }
-            });
-            if (matchingIndex !== -1) {
-              found = true;
-              const includeDirectories = scopeDirs.filter(
-                (_: string, i: number) => i !== matchingIndex,
-              );
-              settings.setValue(
-                scope,
-                'context.includeDirectories',
-                includeDirectories,
-              );
-            }
-          }
-
-          if (!found) {
-            addItem(
-              {
-                type: MessageType.WARNING,
-                text: t(
-                  'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.',
-                ),
-              },
-              Date.now(),
-            );
-          }
-        } catch (error) {
+        if (!found) {
           addItem(
             {
-              type: MessageType.ERROR,
+              type: MessageType.WARNING,
               text: t(
-                'Directory removed from workspace but error updating settings: {{error}}',
-                { error: (error as Error).message },
+                'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.',
               ),
             },
             Date.now(),
           );
-          return;
         }
 
         // Refresh hierarchical memory to drop QWEN.md content and
@@ -473,21 +463,17 @@ export const directoryCommand: SlashCommand = {
         // mirroring what the add path already does.
         if (config.shouldLoadMemoryFromIncludeDirectories()) {
           try {
-            const {
-              memoryContent,
-              fileCount,
-              conditionalRules,
-              projectRoot,
-            } = await loadServerHierarchicalMemory(
-              config.getWorkingDir(),
-              config.getWorkspaceContext().getDirectories(),
-              config.getFileService(),
-              config.getExtensionContextFilePaths(),
-              config.getFolderTrust(),
-              context.services.settings.merged.context?.importFormat ||
-                'tree',
-              config.getContextRuleExcludes(),
-            );
+            const { memoryContent, fileCount, conditionalRules, projectRoot } =
+              await loadServerHierarchicalMemory(
+                config.getWorkingDir(),
+                config.getWorkspaceContext().getDirectories(),
+                config.getFileService(),
+                config.getExtensionContextFilePaths(),
+                config.getFolderTrust(),
+                context.services.settings.merged.context?.importFormat ||
+                  'tree',
+                config.getContextRuleExcludes(),
+              );
             config.setUserMemory(memoryContent);
             config.setGeminiMdFileCount(fileCount);
             config.setConditionalRulesRegistry(

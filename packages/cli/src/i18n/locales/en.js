@@ -1310,6 +1310,8 @@ export default {
   'Path is not a directory.': 'Path is not a directory.',
   'This directory is already in the workspace.':
     'This directory is already in the workspace.',
+  'Already covered by existing directory: {{dir}}':
+    'Already covered by existing directory: {{dir}}',
 
   // ============================================================================
   // /directory remove command

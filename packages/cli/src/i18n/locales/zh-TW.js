@@ -1108,6 +1108,8 @@ export default {
   'Path is not a directory.': '路徑不是目錄。',
   'This directory is already in the workspace.': '此目錄已在工作區中。',
 
+  'Already covered by existing directory: {{dir}}': '已被現有目錄覆蓋：{{dir}}',
+
   // ============================================================================
   // /directory remove command
   // ============================================================================

@@ -18,6 +18,7 @@ describe('directoryCommand', () => {
   let mockConfig: Config;
   let mockWorkspaceContext: WorkspaceContext;
   let mockWorkspaceDirectories: string[];
+  let mockSettings: Record<string, unknown>;
   const addCommand = directoryCommand.subCommands?.find(
     (c) => c.name === 'add',
   );
@@ -65,26 +66,22 @@ describe('directoryCommand', () => {
       setGeminiMdFileCount: vi.fn(),
     } as unknown as Config;
 
-    const createMockSettings = () => ({
+    mockSettings = {
       merged: {},
       workspace: {
         settings: {},
         originalSettings: {},
-      } as SettingsFile,
+      },
       user: {
         settings: {},
         originalSettings: {},
-      } as SettingsFile,
+      },
       setValue: vi.fn(),
-      forScope: vi.fn(function (scope: string) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const self = this as any;
-        if (scope === 'user') return self.user;
-        return self.workspace;
-      }),
+    };
+    mockSettings.forScope = vi.fn((scope: string) => {
+      if (scope === 'user') return mockSettings.user;
+      return mockSettings.workspace;
     });
-
-    const mockSettings = createMockSettings();
 
     mockContext = {
       services: {
@@ -392,38 +389,30 @@ describe('directoryCommand', () => {
         getWorkspaceContext: () => mockWorkspaceContext,
       } as unknown as Config;
 
-      mockContext = {
-        ...mockContext,
-        services: {
-          ...mockContext.services,
-          config: mockConfig,
-          settings: {
-            ...mockContext.services.settings,
-            workspace: {
-              settings: {},
-              originalSettings: {
-                context: {
-                  includeDirectories: [
-                    path.normalize('/home/user/project1'),
-                    removableDir,
-                  ],
-                },
-              },
-            },
+      // Set up workspace settings with the directories that include the
+      // removable one, so the persist path can find and remove it.
+      mockSettings.workspace = {
+        settings: {},
+        originalSettings: {
+          context: {
+            includeDirectories: [
+              path.normalize('/home/user/project1'),
+              removableDir,
+            ],
           },
         },
-      } as unknown as CommandContext;
+      };
 
       if (!removeCommand?.action) throw new Error('No action');
       await removeCommand.action(mockContext, removableDir);
 
-      expect(mockWorkspaceContext.removeDirectory).toHaveBeenCalledWith(
-        removableDir,
-      );
       expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
         SettingScope.Workspace,
         'context.includeDirectories',
         [path.normalize('/home/user/project1')],
+      );
+      expect(mockWorkspaceContext.removeDirectory).toHaveBeenCalledWith(
+        removableDir,
       );
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -434,7 +423,7 @@ describe('directoryCommand', () => {
       );
     });
 
-    it('should show error when settings update fails after removal', async () => {
+    it('should show error when settings update fails and not remove from memory', async () => {
       const removableDir = path.normalize('/home/user/project2');
       mockWorkspaceContext = {
         ...mockWorkspaceContext,
@@ -451,33 +440,42 @@ describe('directoryCommand', () => {
       } as unknown as Config;
 
       const settingsError = new Error('write failed');
+      const newSettings: Record<string, unknown> = {
+        ...mockSettings,
+        workspace: {
+          settings: {},
+          originalSettings: {
+            context: { includeDirectories: [removableDir] },
+          },
+        },
+        setValue: vi.fn().mockImplementation(() => {
+          throw settingsError;
+        }),
+      };
+      newSettings.forScope = vi.fn((scope: string) => {
+        if (scope === 'user') return newSettings.user;
+        return newSettings.workspace;
+      });
+
       mockContext = {
         ...mockContext,
         services: {
           ...mockContext.services,
           config: mockConfig,
-          settings: {
-            ...mockContext.services.settings,
-            workspace: {
-              settings: {},
-              originalSettings: {
-                context: { includeDirectories: [removableDir] },
-              },
-            },
-            setValue: vi.fn().mockImplementation(() => {
-              throw settingsError;
-            }),
-          },
+          settings: newSettings,
         },
       } as unknown as CommandContext;
 
       if (!removeCommand?.action) throw new Error('No action');
       await removeCommand.action(mockContext, removableDir);
 
+      // Settings update failed — directory should NOT have been removed
+      // from memory since persist happened first.
+      expect(mockWorkspaceContext.removeDirectory).not.toHaveBeenCalled();
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: MessageType.ERROR,
-          text: `Directory removed from workspace but error updating settings: ${settingsError.message}`,
+          text: `Error updating settings: ${settingsError.message}`,
         }),
         expect.any(Number),
       );
