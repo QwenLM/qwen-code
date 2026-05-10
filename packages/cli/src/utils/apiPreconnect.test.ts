@@ -251,6 +251,17 @@ describe('apiPreconnect', () => {
       );
     });
 
+    it('should permanently skip preconnect when no proxy is set', () => {
+      // First call: no proxy → sets preconnectFired = true
+      preconnectApi('qwen-oauth');
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      // Second call: with proxy → still skipped because preconnectFired is true
+      preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' });
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(mockGetOrCreateSharedDispatcher).not.toHaveBeenCalled();
+    });
+
     it('should handle fetch errors gracefully', async () => {
       mockFetch.mockRejectedValue(new Error('Network error'));
       // Should not throw

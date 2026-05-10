@@ -149,6 +149,16 @@ const dispatcherCache = new Map<string | undefined, Dispatcher>();
 const rejectedProxyCache = new Set<string>();
 
 /**
+ * Fallback return value when no custom dispatcher is used.
+ * OpenAI SDK accepts `undefined` for fetchOptions to use runtime built-in fetch;
+ * Anthropic SDK requires an empty object `{}`.
+ */
+const NO_DISPATCHER_FALLBACK = {
+  openai: undefined,
+  anthropic: {},
+} as const;
+
+/**
  * Get or create a shared undici dispatcher for the given proxy configuration.
  * The dispatcher is cached so that preconnect and subsequent SDK requests
  * share the same connection pool, enabling TCP+TLS connection reuse.
@@ -227,7 +237,7 @@ function buildFetchOptionsWithDispatcher(
   // between the project's bundled undici and the Node.js built-in undici.
   // Re-verify compatibility if the bundled undici version changes.
   if (!proxyUrl) {
-    return sdkType === 'openai' ? undefined : {};
+    return NO_DISPATCHER_FALLBACK[sdkType];
   }
 
   // Note: Without a custom dispatcher, Node.js built-in fetch uses its default
@@ -254,6 +264,6 @@ function buildFetchOptionsWithDispatcher(
       // eslint-disable-next-line no-console
       console.error(`[RUNTIME_FETCH] ${logMessage}`);
     }
-    return sdkType === 'openai' ? undefined : {};
+    return NO_DISPATCHER_FALLBACK[sdkType];
   }
 }
