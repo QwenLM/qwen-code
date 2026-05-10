@@ -88,13 +88,27 @@ function truncateStderrSnippet(stderr: string): string {
   return `${t.slice(0, STDERR_LOG_MAX_CHARS)}…`;
 }
 
+function redactArgsForLog(args: string[]): string {
+  return args
+    .map((t) => {
+      if (/^[A-Za-z]:[\\/]/.test(t) || (t.startsWith('/') && t.length > 1)) {
+        return '<abs-path>';
+      }
+      if (t.includes(path.sep) && t.length > 32) {
+        return '<path>';
+      }
+      return t;
+    })
+    .join(' ');
+}
+
 function logCommandProblem(
   kind: string,
   command: string,
   args: string[],
   detail: { code?: number | null; stderr?: string },
 ): void {
-  const parts = [`[crawler] ${kind}:`, command, args.join(' ')];
+  const parts = [`[crawler] ${kind}:`, command, redactArgsForLog(args)];
   if (detail.code !== undefined && detail.code !== null) {
     parts.push(`exit=${String(detail.code)}`);
   }
@@ -115,10 +129,14 @@ function withSafeGitConfig(args: string[]): string[] {
   ];
 }
 
+function canonicalStatePath(p: string): string {
+  return toPosixPath(path.resolve(p));
+}
+
 function getStateKey(options: CrawlOptions): string {
   return [
-    normalizePath(options.crawlDirectory),
-    normalizePath(options.cwd),
+    canonicalStatePath(options.crawlDirectory),
+    canonicalStatePath(options.cwd),
     options.ignore.getFingerprint(),
     options.useGitignore === false ? 'no-gitignore' : 'gitignore',
     options.maxDepth === undefined ? 'undefined' : String(options.maxDepth),
@@ -159,7 +177,7 @@ function evictChangeStateIfNeeded(): void {
 }
 
 function resolveGitDir(crawlDirectory: string): string | null {
-  const cacheKey = normalizePath(path.resolve(crawlDirectory));
+  const cacheKey = canonicalStatePath(crawlDirectory);
   const cached = pathCacheGet(resolveGitDirCache, cacheKey);
   if (cached !== undefined) {
     return cached;
@@ -187,15 +205,29 @@ function resolveGitDir(crawlDirectory: string): string | null {
         }
 
         const resolvedGitDir = match[1].trim();
-        const resolved = path.isAbsolute(resolvedGitDir)
-          ? resolvedGitDir
+        let resolvedAbs = path.isAbsolute(resolvedGitDir)
+          ? path.resolve(resolvedGitDir)
           : path.resolve(current, resolvedGitDir);
-        pathCacheSet(resolveGitDirCache, cacheKey, resolved);
-        return resolved;
+
+        try {
+          resolvedAbs = fs.realpathSync(resolvedAbs);
+          try {
+            fs.statSync(path.join(resolvedAbs, 'HEAD'));
+          } catch {
+            fs.statSync(path.join(resolvedAbs, 'index'));
+          }
+        } catch {
+          pathCacheSet(resolveGitDirCache, cacheKey, null);
+          return null;
+        }
+
+        pathCacheSet(resolveGitDirCache, cacheKey, resolvedAbs);
+        return resolvedAbs;
       }
     } catch (error) {
       const errno = error as NodeJS.ErrnoException;
       if (errno.code !== 'ENOENT') {
+        pathCacheSet(resolveGitDirCache, cacheKey, null);
         return null;
       }
     }
@@ -287,6 +319,7 @@ interface RunCommandOptions {
   collectLines?: boolean;
   onLine?: (line: string) => boolean;
   silentOnFailure?: boolean;
+  yieldEveryLines?: number;
 }
 
 function runCommand(
@@ -309,6 +342,7 @@ function runCommand(
     let timedOut = false;
     let killedByLimit = false;
     let streamBuffer = '';
+    let streamedLineCount = 0;
 
     const finalize = (success: boolean, resultLines: string[]): void => {
       if (settled) {
@@ -327,9 +361,11 @@ function runCommand(
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err) {
-      logCommandProblem('command spawn threw', command, args, {
-        stderr: err instanceof Error ? err.message : String(err),
-      });
+      if (!options?.silentOnFailure) {
+        logCommandProblem('command spawn threw', command, args, {
+          stderr: err instanceof Error ? err.message : String(err),
+        });
+      }
       finalize(false, []);
       return;
     }
@@ -363,20 +399,39 @@ function runCommand(
         return true;
       }
 
-      if (collectLines) {
-        lines.push(normalized);
-      }
-
       if (options?.onLine && !options.onLine(normalized)) {
         killedByLimit = true;
         stopProcess();
         return false;
       }
 
+      if (collectLines) {
+        lines.push(normalized);
+      }
+
       if (maxLines !== undefined && lines.length >= maxLines) {
         killedByLimit = true;
         stopProcess();
         return false;
+      }
+
+      streamedLineCount++;
+      const yieldEvery = options?.yieldEveryLines;
+      if (
+        yieldEvery !== undefined &&
+        yieldEvery > 0 &&
+        streamedLineCount % yieldEvery === 0 &&
+        child.stdout &&
+        typeof child.stdout.pause === 'function'
+      ) {
+        child.stdout.pause();
+        setImmediate(() => {
+          try {
+            child.stdout?.resume();
+          } catch {
+            // Stream may already be closed.
+          }
+        });
       }
 
       return true;
@@ -424,9 +479,11 @@ function runCommand(
       if (timeout) {
         clearTimeout(timeout);
       }
-      logCommandProblem('command spawn failed', command, args, {
-        stderr: `${String(err.code ?? '')} ${String(err)}`.trim(),
-      });
+      if (!options?.silentOnFailure) {
+        logCommandProblem('command spawn failed', command, args, {
+          stderr: `${String(err.code ?? '')} ${String(err)}`.trim(),
+        });
+      }
       finalize(false, []);
     });
 
@@ -564,60 +621,26 @@ function stripCrawlDirectoryPrefix(
 }
 
 /** Depth limits apply here; git/rg streaming may still count maxFiles against paths later dropped by depth. */
-function applyMaxDepthLimit(
-  results: string[],
-  maxDepth?: number,
-  relativeToCrawlDir?: string,
-): string[] {
-  if (maxDepth === undefined) {
-    return results;
-  }
-
-  return results.filter((entry) => {
-    if (entry === '.') {
-      return true;
-    }
-
-    const crawlRootRelativeEntry = relativeToCrawlDir
-      ? stripCrawlDirectoryPrefix(entry, relativeToCrawlDir)
-      : entry;
-
-    return getEntryDepth(crawlRootRelativeEntry) <= maxDepth;
-  });
-}
-
-function isUnderIgnoredDirectory(
-  filePath: string,
-  dirFilter: (dirPath: string) => boolean,
-): boolean {
-  const parts = filePath.split('/');
-  let current = '';
-
-  for (let i = 0; i < parts.length - 1; i++) {
-    current = current ? `${current}/${parts[i]}` : parts[i];
-    if (dirFilter(`${current}/`)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 function applyFilters(
   results: string[],
   options: CrawlOptions,
   relativeToCrawlDir?: string,
   prevalidatedFiles?: Set<string>,
 ): string[] {
-  const depthFiltered = applyMaxDepthLimit(
-    results,
-    options.maxDepth,
-    relativeToCrawlDir,
-  );
+  const maxDepth = options.maxDepth;
   const dirFilter = options.ignore.getDirectoryFilter();
   const fileFilter = options.ignore.getFileFilter();
 
-  return depthFiltered.filter((p) => {
+  return results.filter((p) => {
+    if (maxDepth !== undefined && p !== '.') {
+      const crawlRootRelativeEntry = relativeToCrawlDir
+        ? stripCrawlDirectoryPrefix(p, relativeToCrawlDir)
+        : p;
+      if (getEntryDepth(crawlRootRelativeEntry) > maxDepth) {
+        return false;
+      }
+    }
+
     if (p === '.') return true;
 
     if (p.endsWith('/')) {
@@ -641,6 +664,23 @@ function applyFilters(
 
     return !fileFilter(p);
   });
+}
+
+function isUnderIgnoredDirectory(
+  filePath: string,
+  dirFilter: (dirPath: string) => boolean,
+): boolean {
+  const parts = filePath.split('/');
+  let current = '';
+
+  for (let i = 0; i < parts.length - 1; i++) {
+    current = current ? `${current}/${parts[i]}` : parts[i];
+    if (dirFilter(`${current}/`)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 const YIELD_INTERVAL = 1000;
@@ -722,6 +762,7 @@ async function listUntrackedFiles(
     withSafeGitConfig(untrackedArgs),
     gitRoot,
     10_000,
+    { silentOnFailure: true },
   );
   if (!untrackedResult.success) {
     return null;
@@ -744,6 +785,7 @@ async function listDeletedTrackedFiles(
     withSafeGitConfig(deletedArgs),
     gitRoot,
     10_000,
+    { silentOnFailure: true },
   );
   if (!deletedResult.success) {
     return null;
@@ -769,6 +811,14 @@ async function scanWorkingTreeForChange(
   crawlDirectory: string,
   useGitignore: boolean,
 ): Promise<WorkingTreeChangeScan> {
+  if (
+    state.gitRootMtimeMs === null &&
+    state.untrackedFingerprint === null &&
+    state.deletedFingerprint === null
+  ) {
+    return { changed: false };
+  }
+
   const gitRoot = await findGitRoot(crawlDirectory);
 
   if (
@@ -805,13 +855,27 @@ async function scanWorkingTreeForChange(
   };
 }
 
+function posixPathUnderGitRoot(
+  normalizedFile: string,
+  relativeToGitRoot: string,
+  relativeToCrawlDir: string,
+): string {
+  if (relativeToGitRoot && relativeToGitRoot !== '.') {
+    return path.posix.join(
+      relativeToCrawlDir,
+      normalizedFile.slice(relativeToGitRoot.length + 1),
+    );
+  }
+  return path.posix.join(relativeToCrawlDir, normalizedFile);
+}
+
 async function crawlWithGitLsFiles(
   stateKey: string,
   crawlDirectory: string,
   cwd: string,
   options: CrawlOptions,
   workingTreePrefetch?: GitWorkingTreePrefetch,
-): Promise<{ success: boolean; files: string[]; isGitRepo: boolean }> {
+): Promise<{ success: boolean; files: string[] }> {
   let gitRoot: string | null;
   let untrackedFiles: string[] | null;
   let deletedFiles: string[] | null;
@@ -823,7 +887,7 @@ async function crawlWithGitLsFiles(
   } else {
     gitRoot = await findGitRoot(crawlDirectory);
     if (!gitRoot) {
-      return { success: false, files: [], isGitRepo: false };
+      return { success: false, files: [] };
     }
 
     const relativeToGitRootForLists = getPosixRelative(gitRoot, crawlDirectory);
@@ -840,7 +904,7 @@ async function crawlWithGitLsFiles(
   }
 
   if (!gitRoot) {
-    return { success: false, files: [], isGitRepo: false };
+    return { success: false, files: [] };
   }
 
   const relativeToCrawlDir = getPosixRelative(cwd, crawlDirectory);
@@ -854,11 +918,7 @@ async function crawlWithGitLsFiles(
     trackedArgs.push(relativeToGitRoot);
   }
 
-  if (untrackedFiles === null || deletedFiles === null) {
-    return { success: false, files: [], isGitRepo: true };
-  }
-
-  const deletedSet = new Set(deletedFiles);
+  const deletedSet = new Set(deletedFiles ?? []);
 
   const fileSet = new Set<string>();
   let budgetedFileCount = 0;
@@ -901,13 +961,11 @@ async function crawlWithGitLsFiles(
       return true;
     }
 
-    const fullPath =
-      relativeToGitRoot && relativeToGitRoot !== '.'
-        ? path.posix.join(
-            relativeToCrawlDir,
-            normalizedFile.slice(relativeToGitRoot.length + 1),
-          )
-        : path.posix.join(relativeToCrawlDir, normalizedFile);
+    const fullPath = posixPathUnderGitRoot(
+      normalizedFile,
+      relativeToGitRoot,
+      relativeToCrawlDir,
+    );
 
     if (!shouldIncludeFile(fullPath, dirFilter, fileFilter)) {
       return true;
@@ -932,10 +990,11 @@ async function crawlWithGitLsFiles(
     {
       collectLines: false,
       onLine: processTrackedFile,
+      yieldEveryLines: YIELD_INTERVAL,
     },
   );
   if (!trackedResult.success) {
-    return { success: false, files: [], isGitRepo: true };
+    return { success: false, files: [] };
   }
 
   // Test doubles may return `lines` without streaming `onLine`; drain any leftovers.
@@ -954,13 +1013,11 @@ async function crawlWithGitLsFiles(
       }
 
       await maybeYield(count++);
-      const fullPath =
-        relativeToGitRoot && relativeToGitRoot !== '.'
-          ? path.posix.join(
-              relativeToCrawlDir,
-              normalizedFile.slice(relativeToGitRoot.length + 1),
-            )
-          : path.posix.join(relativeToCrawlDir, normalizedFile);
+      const fullPath = posixPathUnderGitRoot(
+        normalizedFile,
+        relativeToGitRoot,
+        relativeToCrawlDir,
+      );
 
       if (!shouldIncludeFile(fullPath, dirFilter, fileFilter)) {
         continue;
@@ -994,12 +1051,12 @@ async function crawlWithGitLsFiles(
     stateKey,
     crawlDirectory,
     limitedResults,
-    untrackedFiles,
-    deletedFiles,
+    untrackedFiles === null ? undefined : untrackedFiles,
+    deletedFiles === null ? undefined : deletedFiles,
   );
   recordRebuild(stateKey);
 
-  return { success: true, files: limitedResults, isGitRepo: true };
+  return { success: true, files: limitedResults };
 }
 
 function buildResultsFromFileSet(files: Set<string>): string[] {
@@ -1137,7 +1194,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
 
   const cacheKey = options.cache
     ? cache.getCacheKey(
-        options.crawlDirectory,
+        canonicalStatePath(options.crawlDirectory),
         options.ignore.getFingerprint(),
         options.maxDepth,
         options.maxFiles,
@@ -1190,6 +1247,9 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     return results;
   }
 
+  // eslint-disable-next-line no-console -- operator-visible crawl strategy degradation
+  console.warn('[crawler] falling back to ripgrep (git ls-files unavailable)');
+
   const rgResult = await crawlWithRipgrep(
     stateKey,
     options.crawlDirectory,
@@ -1205,6 +1265,9 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
 
     return results;
   }
+
+  // eslint-disable-next-line no-console -- operator-visible crawl strategy degradation
+  console.warn('[crawler] falling back to fdir (ripgrep unavailable)');
 
   const fdirResults = await crawlWithFdir(options);
   const limitedResults = applyMaxFilesLimit(fdirResults, options.maxFiles);

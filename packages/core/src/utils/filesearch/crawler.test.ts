@@ -424,8 +424,12 @@ describe('crawler', () => {
       expect(crawlSpy).toHaveBeenCalledTimes(2);
       // fdir should not have been called a second time.
       // We can't spy on it directly, but we can check the cache was hit.
+      const canonicalDir = path
+        .resolve(options.crawlDirectory)
+        .split(path.sep)
+        .join('/');
       const cacheKey = cache.getCacheKey(
-        options.crawlDirectory,
+        canonicalDir,
         options.ignore.getFingerprint(),
         undefined,
       );
@@ -561,6 +565,7 @@ describe('crawler', () => {
 
       const first = await crawl(options);
       expect(first.length).toBeGreaterThan(0);
+      expect(first).toContain('tracked.js');
 
       const second = await crawl(options);
       expect(second).toEqual(first);
@@ -587,7 +592,9 @@ describe('crawler', () => {
 
       const writeSpy = vi.spyOn(cache, 'write');
 
-      await crawl(options);
+      const first = await crawl(options);
+      expect(first).toContain('only.js');
+
       await crawl(options);
 
       expect(writeSpy).toHaveBeenCalledTimes(1);
@@ -1202,6 +1209,108 @@ describe('crawler', () => {
 
       expect(rgArgsSeen).toHaveLength(1);
       expect(rgArgsSeen[0]).not.toContain('--no-ignore');
+    });
+
+    it('should not run git ls-files --cached on second crawl when throttled and working tree unchanged', async () => {
+      tmpDir = await createTmpDir({ 'tracked.js': '' });
+
+      const gitCalls: string[][] = [];
+
+      __setCommandRunnerForTests(async (command, args) => {
+        gitCalls.push(args);
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+        if (args.includes('ls-files') && args.includes('--others')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--deleted')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--cached')) {
+          return { success: true, lines: ['tracked.js'] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      await crawl(options);
+      const callsAfterFirst = gitCalls.length;
+      expect(gitCalls.filter((a) => a.includes('--cached'))).toHaveLength(1);
+
+      await crawl(options);
+
+      const newCalls = gitCalls.slice(callsAfterFirst);
+      expect(newCalls.some((a) => a.includes('--cached'))).toBe(false);
+    });
+
+    it('should fall back to ripgrep when git ls-files --cached fails inside a git repo', async () => {
+      tmpDir = await createTmpDir({ 'via-rg.js': '' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command === 'git') {
+          if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+            return { success: true, lines: [tmpDir] };
+          }
+          if (args.includes('ls-files') && args.includes('--others')) {
+            return { success: true, lines: [] };
+          }
+          if (args.includes('ls-files') && args.includes('--deleted')) {
+            return { success: true, lines: [] };
+          }
+          if (args.includes('ls-files') && args.includes('--cached')) {
+            return { success: false, lines: [] };
+          }
+        }
+        if (command === 'rg') {
+          return { success: true, lines: ['via-rg.js'] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('via-rg.js');
+      const degradationCalls = warnSpy.mock.calls
+        .map((c) => c[0])
+        .filter(
+          (m): m is string =>
+            typeof m === 'string' && m.startsWith('[crawler] falling back to'),
+        );
+      expect(degradationCalls).toContain(
+        '[crawler] falling back to ripgrep (git ls-files unavailable)',
+      );
+      warnSpy.mockRestore();
     });
   });
 
