@@ -332,23 +332,40 @@ export class DynamicCommandLocalizationService {
     const cloneCommands = (
       commandList: readonly SlashCommand[],
       prefix = '',
-    ): SlashCommand[] =>
-      commandList.map((command) => {
+    ): { commands: SlashCommand[]; changed: boolean } => {
+      let changed = false;
+      const localizedCommands = commandList.map((command) => {
         const commandPath = getCommandPath(command, prefix);
         const localizedDescription = localizedDescriptions.get(commandPath);
-        const cloned: SlashCommand = {
-          ...command,
-          description: localizedDescription ?? command.description,
-        };
+        const subCommandsResult = command.subCommands
+          ? cloneCommands(command.subCommands, commandPath)
+          : undefined;
 
-        if (command.subCommands) {
-          cloned.subCommands = cloneCommands(command.subCommands, commandPath);
+        const descriptionChanged =
+          localizedDescription !== undefined &&
+          localizedDescription !== command.description;
+        if (!descriptionChanged && !subCommandsResult?.changed) {
+          return command;
         }
 
+        changed = true;
+        const cloned: SlashCommand = { ...command };
+        if (descriptionChanged) {
+          cloned.description = localizedDescription;
+        }
+        if (subCommandsResult?.changed) {
+          cloned.subCommands = subCommandsResult.commands;
+        }
         return cloned;
       });
 
-    return cloneCommands(commands);
+      return { commands: localizedCommands, changed };
+    };
+
+    const localizedCommands = cloneCommands(commands);
+    return localizedCommands.changed
+      ? localizedCommands.commands
+      : (commands as SlashCommand[]);
   }
 
   private async translateMissingDescriptions(

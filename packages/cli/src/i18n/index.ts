@@ -16,6 +16,11 @@ import {
   getLanguageNameForTranslationTarget,
   resolveSupportedLanguage,
 } from './languages.js';
+import {
+  getTranslationModuleExport,
+  isTranslationDict,
+  type TranslationDict,
+} from './translationDict.js';
 export { MUST_TRANSLATE_KEYS } from './mustTranslateKeys.js';
 
 export type { SupportedLanguage };
@@ -29,9 +34,6 @@ export {
 let currentLanguage: SupportedLanguage = 'en';
 let translations: Record<string, string | string[]> = {};
 
-// Cache
-type TranslationValue = string | string[];
-type TranslationDict = Record<string, TranslationValue>;
 const translationCache: Record<string, TranslationDict> = {};
 const loadingPromises: Record<string, Promise<TranslationDict>> = {};
 
@@ -39,17 +41,6 @@ type TranslationLoadResult =
   | { translations: TranslationDict; error?: undefined }
   | { translations?: undefined; error: Error };
 
-function getTranslationModuleExport(module: Record<string, unknown>): unknown {
-  return Object.prototype.hasOwnProperty.call(module, 'default')
-    ? module['default']
-    : module;
-}
-
-function isTranslationDict(value: unknown): value is TranslationDict {
-  return (
-    value !== null && typeof value === 'object' && Object.keys(value).length > 0
-  );
-}
 // Path helpers
 const getBuiltinLocalesDir = (): string => {
   const __filename = fileURLToPath(import.meta.url);

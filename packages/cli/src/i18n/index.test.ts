@@ -71,6 +71,28 @@ describe('bundled locale fallback', () => {
 
     await fs.rm(tempDir, { recursive: true, force: true });
   }, 20000);
+
+  it('falls back to bundled translations when a user locale default export is an array', async () => {
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-i18n-array-locale-'),
+    );
+    const localesDir = path.join(tempDir, 'locales');
+    await fs.mkdir(localesDir, { recursive: true });
+    await fs.writeFile(
+      path.join(localesDir, 'zh.js'),
+      "export default ['show version info'];\n",
+      'utf-8',
+    );
+
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempDir);
+
+    const { setLanguageAsync, t } = await import('./index.js');
+    await setLanguageAsync('zh');
+
+    expect(t('show version info')).toBe('显示版本信息');
+
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }, 20000);
 });
 
 describe('public i18n exports', () => {

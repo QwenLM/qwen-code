@@ -16,9 +16,11 @@ import {
   SUPPORTED_LANGUAGES,
 } from '../packages/cli/src/i18n/index.js';
 import type { LanguageDefinition } from '../packages/cli/src/i18n/languages.js';
-
-type TranslationValue = string | string[];
-type TranslationDict = Record<string, TranslationValue>;
+import {
+  getTranslationModuleExport,
+  isTranslationDict,
+  type TranslationDict,
+} from '../packages/cli/src/i18n/translationDict.js';
 
 export interface LocaleStats {
   code: string;
@@ -61,16 +63,6 @@ export interface PrintCheckI18nOptions {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WRITE_UNUSED_KEYS_FLAG = '--write-unused-locale-keys';
 const WRITE_UNUSED_KEYS_ENV = 'QWEN_CHECK_I18N_WRITE_UNUSED_KEYS';
-
-function getTranslationModuleExport(module: Record<string, unknown>): unknown {
-  return Object.prototype.hasOwnProperty.call(module, 'default')
-    ? module['default']
-    : module;
-}
-
-function isTranslationDict(value: unknown): value is TranslationDict {
-  return value !== null && typeof value === 'object';
-}
 
 export function shouldWriteUnusedKeysJson(): boolean {
   return (

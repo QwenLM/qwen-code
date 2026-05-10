@@ -6,17 +6,24 @@
 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LanguageDefinition } from '../../packages/cli/src/i18n/languages.js';
-import type { CheckI18nOptions } from '../check-i18n.js';
+import {
+  checkI18n,
+  printCheckI18nResult,
+  shouldWriteUnusedKeysJson,
+  type CheckI18nOptions,
+} from '../check-i18n.js';
 
 vi.unmock('fs');
 vi.unmock('node:fs');
-
-const { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } =
-  await vi.importActual('node:fs');
-const { checkI18n, printCheckI18nResult, shouldWriteUnusedKeysJson } =
-  await import('../check-i18n.ts');
 
 type TestLanguage = Pick<LanguageDefinition, 'code' | 'id' | 'strictParity'>;
 type TestLanguageInput =
@@ -208,7 +215,7 @@ describe('checkI18n', () => {
       Optional: 'Optional',
       Required: 'Required',
     });
-    writeLocale(localesDir, 'fr', {});
+    writeLocale(localesDir, 'fr', { ExtraLoose: 'Supplémentaire' });
     writeSource(sourceDir, "t('Optional');\nt('Required');\n");
 
     const result = await checkI18n({
@@ -336,25 +343,25 @@ describe('checkI18n', () => {
 
   it('detects the unused-keys JSON flag from argv or env', () => {
     const originalArgv = process.argv;
-    const originalEnv = process.env.QWEN_CHECK_I18N_WRITE_UNUSED_KEYS;
+    const originalEnv = process.env['QWEN_CHECK_I18N_WRITE_UNUSED_KEYS'];
 
     try {
       process.argv = ['node', 'check-i18n.ts'];
-      delete process.env.QWEN_CHECK_I18N_WRITE_UNUSED_KEYS;
+      delete process.env['QWEN_CHECK_I18N_WRITE_UNUSED_KEYS'];
       expect(shouldWriteUnusedKeysJson()).toBe(false);
 
       process.argv = ['node', 'check-i18n.ts', '--write-unused-locale-keys'];
       expect(shouldWriteUnusedKeysJson()).toBe(true);
 
       process.argv = ['node', 'check-i18n.ts'];
-      process.env.QWEN_CHECK_I18N_WRITE_UNUSED_KEYS = '1';
+      process.env['QWEN_CHECK_I18N_WRITE_UNUSED_KEYS'] = '1';
       expect(shouldWriteUnusedKeysJson()).toBe(true);
     } finally {
       process.argv = originalArgv;
       if (originalEnv === undefined) {
-        delete process.env.QWEN_CHECK_I18N_WRITE_UNUSED_KEYS;
+        delete process.env['QWEN_CHECK_I18N_WRITE_UNUSED_KEYS'];
       } else {
-        process.env.QWEN_CHECK_I18N_WRITE_UNUSED_KEYS = originalEnv;
+        process.env['QWEN_CHECK_I18N_WRITE_UNUSED_KEYS'] = originalEnv;
       }
     }
   });
