@@ -6,8 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Hoist mockWarn so it's available to both the vi.mock and test cases
-const { mockWarn } = vi.hoisted(() => ({ mockWarn: vi.fn() }));
+// Hoist mockWarn and mockConsoleError so they're available to both the vi.mock and test cases
+const { mockWarn, mockConsoleError } = vi.hoisted(() => ({
+  mockWarn: vi.fn(),
+  mockConsoleError: vi.fn(),
+}));
 
 vi.mock('./debugLogger.js', () => ({
   createDebugLogger: () => ({
@@ -18,6 +21,9 @@ vi.mock('./debugLogger.js', () => ({
   }),
   mockWarn,
 }));
+
+// Spy on console.error
+vi.spyOn(console, 'error').mockImplementation(mockConsoleError);
 
 vi.mock('undici', () => {
   class MockAgent {
@@ -33,9 +39,12 @@ vi.mock('undici', () => {
     constructor(options: UndiciOptions) {
       this.options = options;
       this.uri = (options as { uri?: string }).uri || '';
-      // Simulate failure for invalid proxy URLs
-      if (this.uri === 'http://invalid-proxy') {
-        throw new Error('Invalid proxy URL');
+      // Simulate failure for invalid proxy URLs or URLs with credentials
+      if (
+        this.uri === 'http://invalid-proxy' ||
+        this.uri === 'http://user:secret@proxy.local'
+      ) {
+        throw new Error('Invalid proxy URL: http://user:secret@proxy.local');
       }
     }
   }
@@ -58,6 +67,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {
     resetDispatcherCache();
     mockWarn.mockClear();
+    mockConsoleError.mockClear();
   });
   it('returns undefined for OpenAI when no proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai');
@@ -110,6 +120,11 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(mockWarn).toHaveBeenCalledWith(
       expect.stringContaining('Failed to create proxy dispatcher'),
     );
+    // Should also log to console.error for production visibility
+    expect(mockConsoleError).toHaveBeenCalledOnce();
+    expect(mockConsoleError).toHaveBeenCalledWith(
+      expect.stringContaining('[RUNTIME_FETCH]'),
+    );
   });
 
   it('returns empty object for Anthropic when dispatcher creation fails', () => {
@@ -123,6 +138,32 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(mockWarn).toHaveBeenCalledOnce();
     expect(mockWarn).toHaveBeenCalledWith(
       expect.stringContaining('Failed to create proxy dispatcher'),
+    );
+    // Should also log to console.error for production visibility
+    expect(mockConsoleError).toHaveBeenCalledOnce();
+    expect(mockConsoleError).toHaveBeenCalledWith(
+      expect.stringContaining('[RUNTIME_FETCH]'),
+    );
+  });
+
+  it('redacts credentials from proxy URL in error message', () => {
+    const result = buildRuntimeFetchOptions(
+      'openai',
+      'http://user:secret@proxy.local',
+    );
+    expect(result).toBeUndefined();
+    // Should redact credentials in the log message
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('<redacted>'),
+    );
+    expect(mockWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining('secret'),
+    );
+    expect(mockConsoleError).toHaveBeenCalledWith(
+      expect.stringContaining('<redacted>'),
+    );
+    expect(mockConsoleError).not.toHaveBeenCalledWith(
+      expect.stringContaining('secret'),
     );
   });
 });
