@@ -38,7 +38,11 @@ import {
   useRenderMode,
   type RenderMode,
 } from './contexts/RenderModeContext.js';
-import { type HistoryItem, ToolCallStatus } from './types.js';
+import {
+  type HistoryItem,
+  type HistoryItemWithoutId,
+  ToolCallStatus,
+} from './types.js';
 import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
 
@@ -728,7 +732,10 @@ describe('AppContainer State Management', () => {
     // signature change surfaces as a clear test failure rather than silently
     // grabbing the wrong callback.
     const ON_CANCEL_SUBMIT_ARG_INDEX = 14;
-    let capturedOnCancelSubmit: (() => void) | null = null;
+    type CapturedCancelSubmit = (info?: {
+      pendingItem: HistoryItemWithoutId | null;
+    }) => void;
+    let capturedOnCancelSubmit: CapturedCancelSubmit | null = null;
 
     const installCancelCapture = (
       streamReturnValue: Record<string, unknown>,
@@ -737,7 +744,7 @@ describe('AppContainer State Management', () => {
       mockedUseGeminiStream.mockImplementation((...args: unknown[]) => {
         const candidate = args[ON_CANCEL_SUBMIT_ARG_INDEX];
         if (typeof candidate === 'function') {
-          capturedOnCancelSubmit = candidate as () => void;
+          capturedOnCancelSubmit = candidate as CapturedCancelSubmit;
         }
         return streamReturnValue;
       });

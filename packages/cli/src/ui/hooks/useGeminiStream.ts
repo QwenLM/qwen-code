@@ -16,6 +16,7 @@ import type {
   Config,
   EditorType,
   GeminiClient,
+  Logger,
   RetryInfo,
   ServerGeminiChatCompressedEvent,
   ServerGeminiContentEvent as ContentEvent,
@@ -25,7 +26,8 @@ import type {
   ToolCallRequestInfo,
   GeminiErrorEventValue,
   StopFailureErrorType,
-
+} from '@qwen-code/qwen-code-core';
+import {
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -49,7 +51,7 @@ import type {
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   generateToolUseSummary,
-  type Logger} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
   HistoryItem,
