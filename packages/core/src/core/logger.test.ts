@@ -699,6 +699,66 @@ describe('Logger', () => {
       expect(logger['logs']).toEqual([]);
       expect(logger['sessionId']).toBeUndefined();
       expect(logger['messageId']).toBe(0);
+      expect(logger['lastLoggedUserEntry']).toBeNull();
+    });
+  });
+
+  describe('removeLastUserMessage', () => {
+    it('removes the most recently persisted USER entry from disk and cache', async () => {
+      await logger.logMessage(MessageSenderType.USER, 'kept');
+      vi.advanceTimersByTime(1000);
+      await logger.logMessage(MessageSenderType.USER, 'cancelled');
+
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(true);
+
+      const onDisk = await readLogFile();
+      expect(onDisk.map((e) => e.message)).toEqual(['kept']);
+      const inMemory = await logger.getPreviousUserMessages();
+      expect(inMemory).toEqual(['kept']);
+      expect(logger['lastLoggedUserEntry']).toBeNull();
+      // messageId rolled back so the next write reuses the freed slot.
+      expect(logger['messageId']).toBe(1);
+    });
+
+    it('is a no-op (returns false) when there is nothing to undo', async () => {
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(false);
+    });
+
+    it('is one-shot — a second call without a new logMessage is a no-op', async () => {
+      await logger.logMessage(MessageSenderType.USER, 'one');
+      expect(await logger.removeLastUserMessage()).toBe(true);
+      expect(await logger.removeLastUserMessage()).toBe(false);
+      expect(await readLogFile()).toEqual([]);
+    });
+
+    it('only undoes USER entries (model_switch is left intact)', async () => {
+      await logger.logMessage(MessageSenderType.USER, 'real prompt');
+      vi.advanceTimersByTime(1000);
+      await logger.logMessage(MessageSenderType.MODEL_SWITCH, 'qwen→qwen-max');
+
+      // The model-switch write does NOT update lastLoggedUserEntry, so undo
+      // still targets the earlier USER row.
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(true);
+      const onDisk = await readLogFile();
+      expect(onDisk.map((e) => e.message)).toEqual(['qwen→qwen-max']);
+    });
+
+    it('returns false when the tracked entry is no longer on disk', async () => {
+      await logger.logMessage(MessageSenderType.USER, 'one');
+      // External rotation — wipe the file, then ask the logger to undo.
+      await fs.writeFile(testLogFilePath, '[]', 'utf-8');
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(false);
+      expect(logger['lastLoggedUserEntry']).toBeNull();
+    });
+
+    it('returns false when the logger is uninitialized', async () => {
+      const fresh = new Logger(testSessionId, new Storage(process.cwd()));
+      // No initialize() call.
+      expect(await fresh.removeLastUserMessage()).toBe(false);
     });
   });
 });

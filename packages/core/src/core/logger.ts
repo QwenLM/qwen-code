@@ -75,6 +75,7 @@ export class Logger {
   private messageId = 0; // Instance-specific counter for the next messageId
   private initialized = false;
   private logs: LogEntry[] = []; // In-memory cache, ideally reflects the last known state of the file
+  private lastLoggedUserEntry: LogEntry | null = null; // Tracks the most recently persisted USER entry for cancel-undo (mirrors claude-code's lastAddedEntry).
   private debugLogger: DebugLogger;
 
   constructor(
@@ -277,9 +278,88 @@ export class Logger {
         // If an entry was actually written (not a duplicate skip),
         // then this instance can increment its idea of the next messageId for this session.
         this.messageId = writtenEntry.messageId + 1;
+        if (writtenEntry.type === MessageSenderType.USER) {
+          this.lastLoggedUserEntry = writtenEntry;
+        }
       }
     } catch (_error) {
       // Error already logged by _updateLogFile or _readLogFile
+    }
+  }
+
+  /**
+   * Undo the most recent {@link logMessage} call for a USER entry — used by
+   * the auto-restore-on-cancel flow when the user hits ESC right after submit
+   * and the model produced nothing meaningful. Without this, the cancelled
+   * prompt would still surface in cross-session ↑-history via
+   * {@link getPreviousUserMessages}.
+   *
+   * Mirrors claude-code's `removeLastFromHistory` (history.ts): one-shot,
+   * clears the tracked entry so a second call is a no-op. Identifies the
+   * entry by sessionId+messageId+timestamp+message so a stray race that
+   * appended a different entry between log and undo will not silently
+   * remove the wrong row.
+   *
+   * @returns true when an entry was removed; false otherwise.
+   */
+  async removeLastUserMessage(): Promise<boolean> {
+    if (!this.initialized || !this.logFilePath) {
+      return false;
+    }
+    const target = this.lastLoggedUserEntry;
+    if (!target) return false;
+    this.lastLoggedUserEntry = null;
+
+    let currentLogsOnDisk: LogEntry[];
+    try {
+      currentLogsOnDisk = await this._readLogFile();
+    } catch (error) {
+      this.debugLogger.debug(
+        'Failed to read log file while undoing last user entry:',
+        error,
+      );
+      return false;
+    }
+
+    const idx = currentLogsOnDisk.findIndex(
+      (e) =>
+        e.sessionId === target.sessionId &&
+        e.messageId === target.messageId &&
+        e.timestamp === target.timestamp &&
+        e.message === target.message &&
+        e.type === target.type,
+    );
+    if (idx === -1) {
+      // Entry already gone (concurrent rotation/clear). Sync the in-memory
+      // cache with disk so callers don't see a stale row.
+      this.logs = currentLogsOnDisk;
+      return false;
+    }
+
+    currentLogsOnDisk.splice(idx, 1);
+
+    try {
+      await fs.writeFile(
+        this.logFilePath,
+        JSON.stringify(currentLogsOnDisk, null, 2),
+        'utf-8',
+      );
+      this.logs = currentLogsOnDisk;
+      // Roll back this instance's nextMessageId so a subsequent log doesn't
+      // skip the freed slot (matters for tests that assert sequential ids).
+      if (
+        target.sessionId === this.sessionId &&
+        this.messageId === target.messageId + 1
+      ) {
+        this.messageId = target.messageId;
+      }
+      return true;
+    } catch (error) {
+      this.debugLogger.debug(
+        'Failed to write log file while undoing last user entry:',
+        error,
+      );
+      return false;
     }
   }
 
@@ -456,6 +536,7 @@ export class Logger {
     this.initialized = false;
     this.logFilePath = undefined;
     this.logs = [];
+    this.lastLoggedUserEntry = null;
     this.sessionId = undefined;
     this.messageId = 0;
   }

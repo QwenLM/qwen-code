@@ -198,6 +198,7 @@ describe('AppContainer State Management', () => {
       updateItem: vi.fn(),
       clearItems: vi.fn(),
       loadHistory: vi.fn(),
+      truncateToItem: vi.fn(),
     });
     mockedUseThemeCommand.mockReturnValue({
       isThemeDialogOpen: false,
@@ -316,6 +317,7 @@ describe('AppContainer State Management', () => {
     });
     mockedUseLogger.mockReturnValue({
       getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+      removeLastUserMessage: vi.fn().mockResolvedValue(false),
     });
     mockedUseLoadingIndicator.mockReturnValue({
       elapsedTime: '0.0s',
@@ -864,14 +866,339 @@ describe('AppContainer State Management', () => {
       expect(mockClearQueue).not.toHaveBeenCalled();
     });
 
-    it('drops the queue when cancelling during tool execution', async () => {
+    it('auto-restores the just-submitted prompt when cancelling before any meaningful output', async () => {
+      // claude-code parity: ESC immediately after submit (model produced
+      // nothing) rewinds the user item + trailing INFO and pulls the prompt
+      // text back into the input box. Up-arrow history is implicitly cleaned
+      // because qwen-code's userMessages list is derived from the same
+      // historyManager.history.
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'what time is it?' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      // User item (id=1) is the truncation target — slice removes it AND
+      // the trailing INFO in the same render pass.
+      expect(mockTruncateToItem).toHaveBeenCalledWith(1);
+      expect(mockSetText).toHaveBeenCalledWith('what time is it?');
+      // Cross-session ↑-history (disk-backed) is also cleaned.
+      expect(mockRemoveLastUserMessage).toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when the model produced meaningful content', async () => {
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'what time is it?' },
+          { id: 2, type: 'gemini_content', text: '12:00pm' },
+          { id: 3, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when the user typed text after submitting (preserves the draft)', async () => {
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: 'follow-up I am typing',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'what time is it?' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when the user queued a follow-up (drains queue but keeps prompt)', async () => {
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'what time is it?' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: ['queued thought'],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('queued thought'),
+        popAllMessages: vi.fn().mockReturnValue('queued thought'),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue('queued thought'),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      // Queue drained to buffer, but prompt NOT undone.
+      expect(mockSetText).toHaveBeenCalledWith('queued thought');
+      expect(mockSetText).not.toHaveBeenCalledWith('what time is it?');
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when a tool_group is pending (covers tool-execution cancel)', async () => {
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'edit foo.ts' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [
+          {
+            type: 'tool_group',
+            tools: [
+              {
+                callId: 'call-1',
+                name: 'replace',
+                description: 'edit foo.ts',
+                status: ToolCallStatus.Executing,
+                resultDisplay: undefined,
+                confirmationDetails: undefined,
+                renderOutputAsMarkdown: false,
+              },
+            ],
+          },
+        ],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('preserves the queue into the buffer when cancelling during tool execution', async () => {
       // Simulates: user asks for a shell tool (e.g. sleep 30), queues
       // `/model` and `hi` while the tool is running, then hits Ctrl+C.
-      // The cancel must clear BOTH the buffer and the queue so that
-      // `hi` does not auto-fire once the tool settles and the app
-      // returns to idle.
+      // The cancel must drain the queue back into the buffer (so the user
+      // can edit or delete it) instead of silently dropping it. This still
+      // resolves issue #3204 (no auto-fire after tool settles) because the
+      // queue ends up empty — but without losing the user's queued work.
+      // Mirrors claude-code's popAllEditable behaviour.
       const mockSetText = vi.fn();
       const mockClearQueue = vi.fn();
+      const mockPopAllMessages = vi.fn().mockReturnValue('/model\n\nhi');
       mockedUseTextBuffer.mockReturnValue({
         text: '',
         setText: mockSetText,
@@ -905,7 +1232,7 @@ describe('AppContainer State Management', () => {
         addMessage: vi.fn(),
         clearQueue: mockClearQueue,
         getQueuedMessagesText: vi.fn().mockReturnValue('/model\n\nhi'),
-        popAllMessages: vi.fn().mockReturnValue('/model'),
+        popAllMessages: mockPopAllMessages,
         drainQueue: vi.fn().mockReturnValue([]),
         popNextSegment: vi.fn().mockReturnValue('/model'),
       });
@@ -924,10 +1251,12 @@ describe('AppContainer State Management', () => {
 
       triggerCancel();
 
-      // Buffer cleared and queue dropped — same "abort and redirect"
-      // contract as the non-tool cancel path.
-      expect(mockSetText).toHaveBeenCalledWith('');
-      expect(mockClearQueue).toHaveBeenCalled();
+      // Queue moved into buffer for editing; popAllMessages drains the
+      // queue internally so clearQueue is not called separately.
+      expect(mockPopAllMessages).toHaveBeenCalled();
+      expect(mockSetText).toHaveBeenCalledWith('/model\n\nhi');
+      expect(mockSetText).not.toHaveBeenCalledWith('');
+      expect(mockClearQueue).not.toHaveBeenCalled();
     });
 
     it('preserves an in-progress draft when restoring queued messages on cancel', async () => {

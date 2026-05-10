@@ -165,6 +165,11 @@ import {
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
 import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
+import {
+  findLastUserItemIndex,
+  isSyntheticHistoryItem,
+  itemsAfterAreOnlySynthetic,
+} from './utils/historyUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -1014,7 +1019,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     messageQueue,
     addMessage,
-    clearQueue,
     popAllMessages,
     drainQueue,
     popNextSegment,
@@ -1356,23 +1360,65 @@ export const AppContainer = (props: AppContainerProps) => {
       ...pendingSlashCommandHistoryItems,
       ...pendingGeminiHistoryItems,
     ];
-    if (isToolExecuting(pendingHistoryItems)) {
-      // Tool-cancel: drop both buffer and queue so nothing auto-fires later.
-      buffer.setText('');
-      clearQueue();
-      return;
-    }
+    const draftWasEmpty = buffer.text.length === 0;
 
-    // Restore queued input joined into the buffer for editing.
+    // Always drain the queue back into the buffer (claude-code parity:
+    // popAllEditable preserves queued text on every cancel path, including
+    // tool-execution cancels — never silently drop the user's queued work).
     const popped = popAllMessages();
     if (popped) {
       const currentText = buffer.text;
       buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
     }
+
+    // Auto-restore-on-cancel: if the user hit ESC immediately after submit
+    // (nothing meaningful was produced), pull the just-submitted prompt back
+    // into the input box and rewind the transcript so it doesn't show a
+    // stranded "user prompt + Request cancelled." pair. Mirrors claude-code
+    // (REPL.tsx auto-restore branch).
+    //
+    // Guards (all required):
+    //   - Buffer was empty before the queue drain (don't clobber typed-during-
+    //     loading text).
+    //   - Queue was empty (popped === null): if the user queued more input,
+    //     they've moved on — don't undo their previous prompt.
+    //   - No pending stream item carries meaningful content. `tool_group` is
+    //     non-synthetic regardless of status (executing/canceled/done), so
+    //     this also covers the tool-execution cancel case.
+    //   - Items committed AFTER the last user prompt are all synthetic
+    //     (info/error/warning/cancel notice).
+    //
+    // truncateToItem is functional setState — it observes the latest queued
+    // history, including any INFO/pending item just appended by
+    // cancelOngoingRequest, and slices them all off together with the user
+    // item. No flicker because React batches with the same render pass.
+    if (
+      !draftWasEmpty ||
+      popped !== null ||
+      pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))
+    ) {
+      return;
+    }
+
+    const history = historyRef.current;
+    const lastUserIdx = findLastUserItemIndex(history);
+    if (lastUserIdx === -1) return;
+    if (!itemsAfterAreOnlySynthetic(history, lastUserIdx)) return;
+
+    const lastUserItem = history[lastUserIdx];
+    if (lastUserItem.type !== 'user') return;
+    historyManager.truncateToItem(lastUserItem.id);
+    buffer.setText(lastUserItem.text);
+    // Also undo the cross-session ↑-history disk entry written by
+    // useGeminiStream's `logger.logMessage` — otherwise getPreviousUserMessages
+    // would resurrect the cancelled prompt next session. Fire-and-forget;
+    // the UI restore must not block on disk I/O.
+    void logger?.removeLastUserMessage();
   }, [
     buffer,
     popAllMessages,
-    clearQueue,
+    historyManager,
+    logger,
     pendingSlashCommandHistoryItems,
     pendingGeminiHistoryItems,
   ]);
