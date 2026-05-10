@@ -33,6 +33,38 @@ function toPosixPath(p: string): string {
   return p.split(path.sep).join(path.posix.sep);
 }
 
+function normalizeGitLsRepoPath(p: string): string {
+  let s = toPosixPath(p);
+  while (s.startsWith('./')) {
+    s = s.slice(2);
+  }
+  return s.replace(/\/+$/, '');
+}
+
+function equalsRepoRelativeCaseAware(a: string, b: string): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (process.platform === 'win32') {
+    return a.toLowerCase() === b.toLowerCase();
+  }
+  return false;
+}
+
+function sliceAfterGitPathspecPrefix(nf: string, rg: string): string | null {
+  const prefix = `${rg}/`;
+  if (nf.startsWith(prefix)) {
+    return nf.slice(prefix.length);
+  }
+  if (process.platform === 'win32') {
+    const lp = `${rg.toLowerCase()}/`;
+    if (nf.toLowerCase().startsWith(lp)) {
+      return nf.slice(lp.length);
+    }
+  }
+  return null;
+}
+
 const THROTTLE_MS = 5_000;
 const PATH_CACHE_TTL_MS = 30_000;
 const MAX_PATH_CACHE_ENTRIES = 200;
@@ -860,31 +892,21 @@ function posixPathUnderGitRoot(
   relativeToGitRoot: string,
   relativeToCrawlDir: string,
 ): string {
-  const stripTrailingSlashes = (s: string): string => s.replace(/\/+$/, '');
+  const rg = normalizeGitLsRepoPath(relativeToGitRoot);
+  const rc = normalizeGitLsRepoPath(relativeToCrawlDir);
+  const nf = normalizeGitLsRepoPath(normalizedFile);
 
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
-    const rg = stripTrailingSlashes(relativeToGitRoot);
-    const prefix = `${rg}/`;
-
-    if (normalizedFile.startsWith(prefix)) {
-      return path.posix.join(
-        stripTrailingSlashes(relativeToCrawlDir),
-        normalizedFile.slice(prefix.length),
-      );
+    const rest = sliceAfterGitPathspecPrefix(nf, rg);
+    if (rest !== null) {
+      return path.posix.join(rc, rest);
     }
-
-    const nf = stripTrailingSlashes(normalizedFile);
-    if (nf === rg) {
-      const rc = stripTrailingSlashes(relativeToCrawlDir);
-      return `${rc}/`;
+    if (equalsRepoRelativeCaseAware(nf, rg)) {
+      return `${nf}/`;
     }
-
-    return path.posix.join(stripTrailingSlashes(relativeToCrawlDir), nf);
+    return path.posix.join(rc, nf);
   }
-  return path.posix.join(
-    stripTrailingSlashes(relativeToCrawlDir),
-    stripTrailingSlashes(normalizedFile),
-  );
+  return path.posix.join(rc, nf);
 }
 
 async function crawlWithGitLsFiles(
