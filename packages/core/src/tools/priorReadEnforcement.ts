@@ -302,12 +302,22 @@ export async function checkPriorRead(
   const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
   const verbDisplay =
     verb === 'editing' ? 'editing this file' : 'overwriting this file';
+  // Tool-specific guidance on partial reads. Edit can use a partial
+  // read (the model only needs to have seen `old_string`-bearing
+  // bytes; the rest of the file passes through untouched). WriteFile
+  // OVERWRITES — the model is replacing the entire file, so a
+  // partial read leaves any unseen bytes as collateral damage. The
+  // mtime/size drift check still catches the worst case (#2499
+  // hallucinated-bytes risk), but recommending a partial read here
+  // would actively encourage the foot-gun.
+  const partialReadGuidance =
+    verb === 'editing'
+      ? `(a partial read with offset / limit is fine — you only need to have seen the bytes you intend to ${verbBare})`
+      : `(read the full file — overwriting replaces every byte, so any unseen bytes would be discarded)`;
   const raw =
     `File ${filePath} has not been read in this session. ` +
     `Use the ${ToolNames.READ_FILE} tool first to load the current ` +
-    `content (a partial read with offset / limit is fine — you only ` +
-    `need to have seen the bytes you intend to ${verbBare}) before ` +
-    `${verb} it.`;
+    `content ${partialReadGuidance} before ${verb} it.`;
   return {
     ok: false,
     type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
