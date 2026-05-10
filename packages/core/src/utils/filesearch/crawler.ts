@@ -1097,7 +1097,7 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
       .withRelativePaths()
       .withDirs()
       .withPathSeparator('/')
-      .exclude((_, dirPath) => {
+      .exclude((_excludedName: string, dirPath: string) => {
         const relativePath = toFdirExcludeRelativePath(
           options.crawlDirectory,
           dirPath,
@@ -1107,7 +1107,7 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
         }
         return dirFilter(`${relativePath}/`);
       })
-      .filter((filePath, isDirectory) => {
+      .filter((filePath: string, isDirectory: boolean) => {
         if (isDirectory) return true;
         const cwdRelative = path.posix.join(relativeToCrawlDir, filePath);
         if (!isValidIgnorePath(cwdRelative)) {

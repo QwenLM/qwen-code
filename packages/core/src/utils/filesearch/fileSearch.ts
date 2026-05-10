@@ -241,7 +241,7 @@ class DirectoryFileSearch implements FileSearch {
       if (finalResults.length >= (options.maxResults ?? Infinity)) {
         break;
       }
-      if (candidate === '.') {
+      if (candidate === '.' || candidate.endsWith('/')) {
         continue;
       }
       if (!fileFilter(candidate)) {
