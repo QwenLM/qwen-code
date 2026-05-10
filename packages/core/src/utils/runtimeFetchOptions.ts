@@ -202,9 +202,13 @@ function buildFetchOptionsWithDispatcher(
     // bypassing the configured proxy. This is important for environments requiring
     // proxy for security controls (TLS inspection, traffic logging).
     const errorMessage = error instanceof Error ? error.message : String(error);
-    // Redact credentials from proxy URL to prevent credential leakage
+    // Redact credentials from proxy URL to prevent credential leakage.
+    // Use [^/]* rather than [^@]* because the URL userinfo component
+    // never contains '/', but passwords CAN contain '@'. Using [^@]*
+    // would stop at the first '@' and leak partial credentials when
+    // the password includes '@' (e.g. http://user:p@ssword@proxy).
     const redactedMessage = errorMessage.replace(
-      /\/\/[^@]*@/g,
+      /\/\/[^/]*@/g,
       '//<redacted>@',
     );
     const logMessage = `Failed to create proxy dispatcher, falling back to direct connection: ${redactedMessage}`;

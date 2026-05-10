@@ -33,8 +33,12 @@ vi.mock('undici', () => {
     constructor(options: UndiciOptions) {
       this.options = options;
       this.uri = (options as { uri?: string }).uri || '';
-      // Simulate failure for invalid proxy URLs
-      if (this.uri === 'http://invalid-proxy') {
+      // Simulate failure for invalid proxy URLs and URLs with
+      // credentials (to exercise the credential redaction path).
+      if (
+        this.uri === 'http://invalid-proxy' ||
+        this.uri === 'http://user:p@ssword@proxy.example.com:8080'
+      ) {
         throw new Error('Invalid proxy URL');
       }
     }
@@ -106,6 +110,19 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     // Should fallback to undefined (no dispatcher) on error
     expect(result).toBeUndefined();
     // Should log the failure for visibility
+    expect(mockWarn).toHaveBeenCalledOnce();
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to create proxy dispatcher'),
+    );
+  });
+
+  it('redacts credentials when proxy password contains @ sign', () => {
+    // Verify the redaction regex [^/]* handles @ in passwords
+    // (URL userinfo never contains '/', but passwords CAN contain '@').
+    buildRuntimeFetchOptions(
+      'openai',
+      'http://user:p@ssword@proxy.example.com:8080',
+    );
     expect(mockWarn).toHaveBeenCalledOnce();
     expect(mockWarn).toHaveBeenCalledWith(
       expect.stringContaining('Failed to create proxy dispatcher'),
