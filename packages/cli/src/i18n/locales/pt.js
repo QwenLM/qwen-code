@@ -811,6 +811,11 @@ export default {
     'Resumo do projeto salvo em {{filePathForDisplay}}.',
   'Saving project summary...': 'Salvando resumo do projeto...',
   'Generating project summary...': 'Gerando resumo do projeto...',
+  'Processing summary...': 'Processando resumo...',
+  'Project summary generated and saved successfully!':
+    'Resumo do projeto gerado e salvo com sucesso!',
+  'Saved to: {{filePath}}': 'Salvo em: {{filePath}}',
+  'Stopped because': 'Parado porque',
   'Failed to generate summary - no text content received from LLM response':
     'Falha ao gerar resumo - nenhum conteúdo de texto recebido da resposta do LLM',
 

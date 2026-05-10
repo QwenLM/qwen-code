@@ -584,6 +584,11 @@ export default {
     'プロジェクトサマリーを {{filePathForDisplay}} に保存しました',
   'Saving project summary...': 'プロジェクトサマリーを保存中...',
   'Generating project summary...': 'プロジェクトサマリーを生成中...',
+  'Processing summary...': 'サマリーを処理中...',
+  'Project summary generated and saved successfully!':
+    'プロジェクトサマリーを生成して保存しました！',
+  'Saved to: {{filePath}}': '保存先: {{filePath}}',
+  'Stopped because': '停止理由',
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model

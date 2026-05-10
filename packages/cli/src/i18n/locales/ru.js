@@ -820,6 +820,11 @@ export default {
     'Сводка проекта сохранена в {{filePathForDisplay}}',
   'Saving project summary...': 'Сохранение сводки проекта...',
   'Generating project summary...': 'Генерация сводки проекта...',
+  'Processing summary...': 'Обработка сводки...',
+  'Project summary generated and saved successfully!':
+    'Сводка проекта успешно создана и сохранена!',
+  'Saved to: {{filePath}}': 'Сохранено в: {{filePath}}',
+  'Stopped because': 'Остановлено, потому что',
   'Failed to generate summary - no text content received from LLM response':
     'Не удалось сгенерировать сводку - не получен текстовый контент из ответа LLM',
 

@@ -804,6 +804,11 @@ export default {
     'Projektzusammenfassung gespeichert unter {{filePathForDisplay}}.',
   'Saving project summary...': 'Projektzusammenfassung wird gespeichert...',
   'Generating project summary...': 'Projektzusammenfassung wird generiert...',
+  'Processing summary...': 'Projektzusammenfassung wird verarbeitet...',
+  'Project summary generated and saved successfully!':
+    'Projektzusammenfassung wurde erfolgreich erstellt und gespeichert!',
+  'Saved to: {{filePath}}': 'Gespeichert unter: {{filePath}}',
+  'Stopped because': 'Angehalten, weil',
   'Failed to generate summary - no text content received from LLM response':
     'Fehler beim Generieren der Zusammenfassung - kein Textinhalt von LLM-Antwort erhalten',
 

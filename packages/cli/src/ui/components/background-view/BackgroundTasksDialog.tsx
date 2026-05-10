@@ -792,7 +792,7 @@ const MonitorDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={errorColor}>
-              {errorIsFailure ? t('Error') : 'Stopped because'}
+              {errorIsFailure ? t('Error') : t('Stopped because')}
             </Text>
           </Box>
           <Box>

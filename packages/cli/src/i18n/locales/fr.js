@@ -315,6 +315,7 @@ export default {
   'Updating...': 'Mise à jour...',
   Unknown: 'Inconnu',
   Error: 'Erreur',
+  'Stopped because': 'Arrêté parce que',
   'Version:': 'Version :',
   'Status:': 'Statut :',
   'Are you sure you want to uninstall extension "{{name}}"?':
@@ -935,6 +936,10 @@ export default {
     'Résumé du projet enregistré dans {{filePathForDisplay}}.',
   'Saving project summary...': 'Enregistrement du résumé du projet...',
   'Generating project summary...': 'Génération du résumé du projet...',
+  'Processing summary...': 'Traitement du résumé...',
+  'Project summary generated and saved successfully!':
+    'Le résumé du projet a été généré et enregistré avec succès !',
+  'Saved to: {{filePath}}': 'Enregistré dans : {{filePath}}',
   'Failed to generate summary - no text content received from LLM response':
     'Échec de la génération du résumé - aucun contenu texte reçu de la réponse LLM',
 

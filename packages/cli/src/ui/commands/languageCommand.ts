@@ -682,7 +682,7 @@ export const languageCommand: SlashCommand = {
                 'non_interactive',
                 'acp',
               ] as const,
-              action: async (_context, args) => {
+              action: async (context, args) => {
                 if (args.trim()) {
                   return {
                     type: 'message',
@@ -694,6 +694,7 @@ export const languageCommand: SlashCommand = {
                 }
 
                 await clearDynamicCommandTranslations();
+                void context.ui.reloadCommands();
 
                 return {
                   type: 'message',

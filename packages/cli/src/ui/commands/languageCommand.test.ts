@@ -640,6 +640,7 @@ describe('languageCommand', () => {
       expect(
         dynamicCommandLocalizationService.clearCacheForLanguage,
       ).toHaveBeenCalledWith('en');
+      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',

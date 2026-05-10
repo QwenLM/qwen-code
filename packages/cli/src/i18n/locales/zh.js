@@ -296,6 +296,7 @@ export default {
   'Updating...': '更新中...',
   Unknown: '未知',
   Error: '错误',
+  'Stopped because': '停止原因',
   'Version:': '版本：',
   'Status:': '状态：',
   'Are you sure you want to uninstall extension "{{name}}"?':
@@ -906,6 +907,10 @@ export default {
     '项目摘要已保存到 {{filePathForDisplay}}',
   'Saving project summary...': '正在保存项目摘要...',
   'Generating project summary...': '正在生成项目摘要...',
+  'Processing summary...': '正在处理摘要...',
+  'Project summary generated and saved successfully!':
+    '项目摘要已生成并成功保存！',
+  'Saved to: {{filePath}}': '保存至：{{filePath}}',
   'Failed to generate summary - no text content received from LLM response':
     '生成摘要失败 - 未从 LLM 响应中接收到文本内容',
 

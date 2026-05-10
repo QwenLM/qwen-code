@@ -311,6 +311,7 @@ export default {
   'Updating...': 'Actualitzant...',
   Unknown: 'Desconegut',
   Error: 'Error',
+  'Stopped because': 'Aturat perquè',
   'Version:': 'Versió:',
   'Status:': 'Estat:',
   'Are you sure you want to uninstall extension "{{name}}"?':
@@ -944,6 +945,10 @@ export default {
     'Resum del projecte desat a {{filePathForDisplay}}.',
   'Saving project summary...': 'Desant el resum del projecte...',
   'Generating project summary...': 'Generant el resum del projecte...',
+  'Processing summary...': 'Processant el resum...',
+  'Project summary generated and saved successfully!':
+    "El resum del projecte s'ha generat i desat correctament!",
+  'Saved to: {{filePath}}': 'Desat a: {{filePath}}',
   'Failed to generate summary - no text content received from LLM response':
     "Error en generar el resum - no s'ha rebut contingut de text de la resposta del model",
 

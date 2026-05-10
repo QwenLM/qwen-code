@@ -28,12 +28,14 @@ export const SummaryMessage: React.FC<SummaryDisplayProps> = ({ summary }) => {
         case 'saving':
           return t('Saving project summary...');
         default:
-          return 'Processing summary...';
+          return t('Processing summary...');
       }
     }
-    const baseMessage = 'Project summary generated and saved successfully!';
+    const baseMessage = t('Project summary generated and saved successfully!');
     if (summary.filePath) {
-      return `${baseMessage} Saved to: ${summary.filePath}`;
+      return `${baseMessage} ${t('Saved to: {{filePath}}', {
+        filePath: summary.filePath,
+      })}`;
     }
     return baseMessage;
   };
