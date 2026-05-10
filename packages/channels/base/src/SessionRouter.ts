@@ -8,6 +8,8 @@ interface PersistedEntry {
   cwd: string;
 }
 
+const LOAD_SESSION_TIMEOUT_MS = 30_000;
+
 export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
@@ -208,10 +210,15 @@ export class SessionRouter {
       }
 
       try {
-        const sessionId = await this.bridge.loadSession(
-          entry.sessionId,
-          entry.cwd,
-        );
+        const sessionId = await Promise.race([
+          this.bridge.loadSession(entry.sessionId, entry.cwd),
+          new Promise<string>((_, reject) =>
+            setTimeout(
+              () => reject(new Error('loadSession timed out')),
+              LOAD_SESSION_TIMEOUT_MS,
+            ),
+          ),
+        ]);
         this.toSession.set(key, sessionId);
         this.toTarget.set(sessionId, entry.target);
         this.toCwd.set(sessionId, entry.cwd);
