@@ -26,8 +26,18 @@ import {
 } from '../../utils/schemaConverter.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
+// `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
+// to extend prompt caching across sessions (rather than the default
+// per-session ephemeral scope). The Anthropic SDK types we depend on still
+// model `cache_control` as `{ type: 'ephemeral' }` only, so we widen the
+// shape here for the fields where we actually attach it (tool params and
+// the system text block).
+type AnthropicCacheControl = { type: 'ephemeral'; scope?: 'global' };
 type AnthropicToolParam = Anthropic.Tool & {
-  cache_control?: { type: 'ephemeral'; scope?: 'global' };
+  cache_control?: AnthropicCacheControl;
+};
+type AnthropicTextBlockParam = Anthropic.TextBlockParam & {
+  cache_control?: AnthropicCacheControl;
 };
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
@@ -88,7 +98,7 @@ export class AnthropicContentConverter {
     request: GenerateContentParameters,
     options: ConvertGeminiRequestToAnthropicOptions = {},
   ): {
-    system?: Anthropic.TextBlockParam[] | string;
+    system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
     const messages: AnthropicMessageParam[] = [];
@@ -173,12 +183,16 @@ export class AnthropicContentConverter {
       }
     }
 
-    // Add cache_control to the last tool for prompt caching (if enabled)
+    // Add cache_control to the last tool for prompt caching (if enabled).
+    // Use `scope: 'global'` so identical tool prefixes are cached across
+    // sessions — tools tend to be the largest, slowest-changing prefix
+    // (often 5K+ tokens), so cross-session reuse is where most of the
+    // hit-rate improvement under `prompt-caching-scope-2026-01-05` shows up.
     if (this.enableCacheControl && tools.length > 0) {
       const lastToolIndex = tools.length - 1;
       tools[lastToolIndex] = {
         ...tools[lastToolIndex],
-        cache_control: { type: 'ephemeral' },
+        cache_control: { type: 'ephemeral', scope: 'global' },
       };
     }
 
@@ -580,10 +594,12 @@ export class AnthropicContentConverter {
   /**
    * Build system content blocks with cache_control.
    * Anthropic prompt caching requires cache_control on system content.
+   * Uses `scope: 'global'` so the system prefix participates in
+   * cross-session caching under the `prompt-caching-scope-2026-01-05` beta.
    */
   private buildSystemWithCacheControl(
     systemText: string,
-  ): Anthropic.TextBlockParam[] | string {
+  ): AnthropicTextBlockParam[] | string {
     if (!systemText) {
       return systemText;
     }
@@ -592,9 +608,7 @@ export class AnthropicContentConverter {
       {
         type: 'text',
         text: systemText,
-        cache_control: { type: 'ephemeral', scope: 'global' } as {
-          type: 'ephemeral';
-        },
+        cache_control: { type: 'ephemeral', scope: 'global' },
       },
     ];
   }

@@ -1112,7 +1112,7 @@ describe('AnthropicContentConverter', () => {
           properties: { location: { type: 'string' } },
           required: ['location'],
         },
-        cache_control: { type: 'ephemeral' },
+        cache_control: { type: 'ephemeral', scope: 'global' },
       });
 
       expect(vi.mocked(convertSchema)).toHaveBeenCalledTimes(1);
@@ -1156,7 +1156,7 @@ describe('AnthropicContentConverter', () => {
         name: 'no_params',
         description: 'no params',
         input_schema: { type: 'object', properties: {} },
-        cache_control: { type: 'ephemeral' },
+        cache_control: { type: 'ephemeral', scope: 'global' },
       });
     });
 

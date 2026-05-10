@@ -82,6 +82,29 @@ function isDeepSeekAnthropicProvider(
   return model.includes('deepseek');
 }
 
+/**
+ * Whether the resolved baseURL is Anthropic's native API (or the SDK default
+ * when no baseURL is set). Used to gate IdeaLab-style proxy workarounds —
+ * `Authorization: Bearer` auth and the `claude-cli` User-Agent — so that
+ * users hitting `api.anthropic.com` directly keep the SDK-default
+ * `x-api-key` auth and a truthful `QwenCode` User-Agent (avoids identity
+ * misattribution in Anthropic-side logs/quotas).
+ */
+function isAnthropicNativeBaseUrl(
+  contentGeneratorConfig: ContentGeneratorConfig,
+): boolean {
+  const baseUrl = contentGeneratorConfig.baseUrl;
+  if (!baseUrl) return true;
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return (
+      hostname === 'api.anthropic.com' || hostname.endsWith('.anthropic.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
 type StreamingBlockState = {
   type: string;
   id?: string;
@@ -119,11 +142,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
     );
 
     // IdeaLab-style Anthropic proxies expect `Authorization: Bearer <token>`
-    // instead of the SDK-default `x-api-key` header.  Use the SDK's
-    // `authToken` parameter which sends `Authorization: Bearer` natively,
-    // avoiding the conflict where both headers coexist.
+    // instead of the SDK-default `x-api-key` header. Use the SDK's
+    // `authToken` parameter (sends `Authorization: Bearer` natively) only
+    // when targeting a non-Anthropic-native baseURL — direct
+    // `api.anthropic.com` users keep the SDK-default `apiKey` (`x-api-key`)
+    // path so they don't break against the Anthropic API itself.
+    const useBearerAuth = !isAnthropicNativeBaseUrl(contentGeneratorConfig);
     this.client = new Anthropic({
-      authToken: contentGeneratorConfig.apiKey,
+      ...(useBearerAuth
+        ? { authToken: contentGeneratorConfig.apiKey }
+        : { apiKey: contentGeneratorConfig.apiKey }),
       baseURL,
       timeout: contentGeneratorConfig.timeout || DEFAULT_TIMEOUT,
       maxRetries: contentGeneratorConfig.maxRetries,
@@ -220,15 +248,26 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // would cause two physical headers on the wire (one mixed-case, one
     // lowercase) when the per-request override fires.
     const version = this.cliConfig.getCliVersion() || 'unknown';
-    // Use claude-cli User-Agent to satisfy IdeaLab-style proxy Team rules
-    // that restrict usage by client identity.
-    const userAgent = `claude-cli/${version} (external, cli)`;
+    // For non-Anthropic-native baseURLs (IdeaLab-style proxies), present as
+    // `claude-cli` + `x-app: cli` to satisfy proxy Team rules that restrict
+    // usage by client identity. For api.anthropic.com itself we keep the
+    // truthful QwenCode User-Agent so usage isn't misattributed to Claude
+    // CLI in Anthropic's logs/quotas, and we don't ship the proxy-specific
+    // `x-app` header.
+    const useProxyIdentity = !isAnthropicNativeBaseUrl(
+      this.contentGeneratorConfig,
+    );
+    const userAgent = useProxyIdentity
+      ? `claude-cli/${version} (external, cli)`
+      : `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { customHeaders } = this.contentGeneratorConfig;
 
     const headers: Record<string, string> = {
       'User-Agent': userAgent,
-      'x-app': 'cli',
     };
+    if (useProxyIdentity) {
+      headers['x-app'] = 'cli';
+    }
     if (customHeaders) {
       for (const [key, value] of Object.entries(customHeaders)) {
         if (key.toLowerCase() === 'anthropic-beta') continue;
@@ -266,9 +305,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
       betas.push('effort-2025-11-24');
     }
 
-    // Enable global prompt cache scope so that identical system/tool
-    // prefixes are cached across sessions, greatly improving cache hit rates.
-    betas.push('prompt-caching-scope-2026-01-05');
+    // Enable global prompt cache scope so identical system/tool prefixes
+    // are cached across sessions, greatly improving cross-session cache hit
+    // rates. Only ship the beta flag when cache_control is actually being
+    // attached to the body (the converter wires `cache_control` based on
+    // the same `enableCacheControl` flag) — otherwise the flag is dead
+    // weight and risks 4xx responses from anthropic-compatible backends
+    // that don't recognize it. Keeping this conditional also preserves the
+    // `betas.length === 0` early-return below for the all-disabled case.
+    if (this.contentGeneratorConfig.enableCacheControl !== false) {
+      betas.push('prompt-caching-scope-2026-01-05');
+    }
 
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
@@ -455,15 +502,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   /**
    * Check if the current model supports adaptive thinking (type: 'adaptive').
-   * Claude 4.6+ models require adaptive thinking; older models use budget-based.
+   * Claude 4.6+ models require adaptive thinking; older models use the
+   * budget-based config. Uses numeric major/minor comparison rather than a
+   * single-digit character class so that future families (haiku, opus-4-10,
+   * opus-5-1, …) are recognized instead of silently falling back to the
+   * budget path and tripping HTTP 400 with `budget_tokens` they don't
+   * accept.
    */
   private modelSupportsAdaptiveThinking(): boolean {
     const model = (this.contentGeneratorConfig.model || '').toLowerCase();
-    // Claude 4.6+ models (opus-4-6, sonnet-4-6, opus-4-7, etc.) use adaptive
-    if (/claude-(?:opus|sonnet)-4-[6-9]/.test(model)) {
-      return true;
-    }
-    return false;
+    const match = model.match(/claude-(?:opus|sonnet|haiku)-(\d+)-(\d+)/);
+    if (!match) return false;
+    const major = Number.parseInt(match[1], 10);
+    const minor = Number.parseInt(match[2], 10);
+    return major > 4 || (major === 4 && minor >= 6);
   }
 
   private buildThinkingConfig(
@@ -483,13 +535,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return undefined;
     }
 
-    // Models that support adaptive thinking use { type: 'adaptive' } without
-    // a budget_tokens field.  The server controls the thinking budget via
-    // output_config.effort instead.
-    if (this.modelSupportsAdaptiveThinking()) {
-      return { type: 'adaptive' };
-    }
-
     // Explicit budget_tokens is an escape hatch from the effort ladder:
     // honor exactly what the user asked for. This deliberately does NOT
     // re-clamp the value to track the (possibly clamped) effort label —
@@ -501,11 +546,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // just an integer the server accepts within its context window, so
     // an explicit override stays explicit. The default ladder below is
     // what stays consistent with the clamped effort.
+    //
+    // Checked before the adaptive-thinking branch so an explicit budget
+    // isn't silently dropped on Claude 4.6+ models — adaptive omits
+    // `budget_tokens` entirely, which would discard the user override.
     if (reasoning?.budget_tokens !== undefined) {
       return {
         type: 'enabled',
         budget_tokens: reasoning.budget_tokens,
       };
+    }
+
+    // Models that support adaptive thinking use { type: 'adaptive' } without
+    // a budget_tokens field. The server controls the thinking budget via
+    // output_config.effort instead.
+    if (this.modelSupportsAdaptiveThinking()) {
+      return { type: 'adaptive' };
     }
 
     // When using interleaved thinking with tools, this budget token limit is the entire context window(200k tokens).

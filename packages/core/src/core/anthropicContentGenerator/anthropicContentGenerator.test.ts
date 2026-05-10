@@ -104,7 +104,12 @@ describe('AnthropicContentGenerator', () => {
     vi.restoreAllMocks();
   });
 
-  it('passes a QwenCode User-Agent header to the Anthropic SDK', async () => {
+  it('uses claude-cli identity (User-Agent + x-app + Bearer auth) for non-Anthropic baseURLs', async () => {
+    // Non-Anthropic-native baseURL → IdeaLab-style proxy path:
+    //  - User-Agent presents as `claude-cli/<version> (external, cli)`
+    //  - `x-app: cli` is sent
+    //  - SDK is constructed with `authToken` (sends `Authorization: Bearer`)
+    //    rather than `apiKey` (`x-api-key`), avoiding dual-header conflicts.
     const { AnthropicContentGenerator } = await importGenerator();
     void new AnthropicContentGenerator(
       {
@@ -123,6 +128,58 @@ describe('AnthropicContentGenerator', () => {
       {}) as Record<string, string>;
     expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
     expect(headers['User-Agent']).toContain('(external, cli)');
+    expect(headers['x-app']).toBe('cli');
+    expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
+    expect(anthropicState.constructorOptions?.['apiKey']).toBeUndefined();
+  });
+
+  it('uses QwenCode identity + apiKey auth when baseURL is api.anthropic.com', async () => {
+    // Anthropic-native baseURL: keep the SDK-default `x-api-key` auth and
+    // a truthful `QwenCode` User-Agent (no `x-app` header) so usage isn't
+    // misattributed to Claude CLI in Anthropic's logs/quotas.
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
+    expect(headers['User-Agent']).not.toContain('claude-cli');
+    expect(headers['x-app']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
+    expect(anthropicState.constructorOptions?.['authToken']).toBeUndefined();
+  });
+
+  it('treats unset baseURL as Anthropic-native (SDK default targets api.anthropic.com)', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
+    expect(headers['x-app']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
+    expect(anthropicState.constructorOptions?.['authToken']).toBeUndefined();
   });
 
   it('merges customHeaders into defaultHeaders (does not replace defaults)', async () => {
@@ -219,6 +276,38 @@ describe('AnthropicContentGenerator', () => {
     it('sends only prompt-caching-scope when reasoning is disabled (no thinking, no effort)', async () => {
       const headers = await callOnce({ ...baseConfig, reasoning: false });
       expect(headers['anthropic-beta']).toBe('prompt-caching-scope-2026-01-05');
+    });
+
+    it('drops the prompt-caching-scope beta when enableCacheControl is false', async () => {
+      // The cache-scope beta is dead weight (and risks 4xx on backends that
+      // don't recognize it) when the converter isn't actually attaching
+      // `cache_control` to the request body. With both cache and reasoning
+      // disabled, the betas list is empty and no header should be sent.
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: false,
+        enableCacheControl: false,
+      } as ContentGeneratorConfig);
+      expect(headers['anthropic-beta']).toBeUndefined();
+    });
+
+    it('drops only the cache-scope beta when enableCacheControl is false but reasoning is on', async () => {
+      // With reasoning enabled, `interleaved-thinking` (and `effort` when
+      // applicable) still ride the per-request header — only the cache-scope
+      // flag is gated off, since there's no cache_control on the body to
+      // pair it with.
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: { effort: 'medium' },
+        enableCacheControl: false,
+      } as ContentGeneratorConfig);
+      expect(headers['anthropic-beta']).toContain(
+        'interleaved-thinking-2025-05-14',
+      );
+      expect(headers['anthropic-beta']).toContain('effort-2025-11-24');
+      expect(headers['anthropic-beta']).not.toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
     });
 
     it('merges user-supplied customHeaders[anthropic-beta] with computed flags (no overwrite)', async () => {
@@ -658,6 +747,96 @@ describe('AnthropicContentGenerator', () => {
           thinking: { type: 'enabled', budget_tokens: 128_000 },
         }),
       );
+    });
+
+    describe('adaptive thinking (Claude 4.6+ models)', () => {
+      // Claude 4.6+ models reject the budget_tokens-shaped thinking config and
+      // require `{ type: 'adaptive' }`. The detection uses numeric major/minor
+      // comparison so future families/versions are recognized instead of
+      // silently falling back to the budget path.
+      async function thinkingFor(
+        model: string,
+        reasoningOverride?: ContentGeneratorConfig['reasoning'],
+      ): Promise<unknown> {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model,
+          content: [{ type: 'text', text: 'hi' }],
+        });
+        const generator = new AnthropicContentGenerator(
+          {
+            model,
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+            reasoning: reasoningOverride ?? { effort: 'medium' },
+          },
+          mockConfig,
+        );
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+        const [req] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        return (req as { thinking?: unknown }).thinking;
+      }
+
+      it('selects adaptive for claude-opus-4-6 / sonnet-4-6 / opus-4-7', async () => {
+        expect(await thinkingFor('claude-opus-4-6')).toEqual({
+          type: 'adaptive',
+        });
+        expect(await thinkingFor('claude-sonnet-4-6')).toEqual({
+          type: 'adaptive',
+        });
+        expect(await thinkingFor('claude-opus-4-7')).toEqual({
+          type: 'adaptive',
+        });
+      });
+
+      it('selects adaptive for claude-haiku-4-6 (haiku family is in scope)', async () => {
+        // Single-digit character-class regex would have missed haiku entirely.
+        expect(await thinkingFor('claude-haiku-4-6')).toEqual({
+          type: 'adaptive',
+        });
+      });
+
+      it('selects adaptive for two-digit minors like claude-opus-4-10', async () => {
+        // Single-digit `[6-9]` would have skipped this and produced an
+        // invalid `{ type: 'enabled', budget_tokens: ... }` body.
+        expect(await thinkingFor('claude-opus-4-10')).toEqual({
+          type: 'adaptive',
+        });
+      });
+
+      it('selects adaptive for a future major like claude-opus-5-1', async () => {
+        expect(await thinkingFor('claude-opus-5-1')).toEqual({
+          type: 'adaptive',
+        });
+      });
+
+      it('keeps the budget_tokens config for older 4.x models (e.g. claude-opus-4-5)', async () => {
+        expect(await thinkingFor('claude-opus-4-5')).toEqual({
+          type: 'enabled',
+          budget_tokens: 32_000,
+        });
+      });
+
+      it('honors explicit reasoning.budget_tokens before falling back to adaptive', async () => {
+        // Explicit budget_tokens is a user escape hatch — adaptive thinking
+        // would otherwise silently drop the user-supplied value because the
+        // adaptive shape carries no budget field. The explicit branch must
+        // run first.
+        expect(
+          await thinkingFor('claude-opus-4-7', {
+            effort: 'medium',
+            budget_tokens: 42_000,
+          }),
+        ).toEqual({ type: 'enabled', budget_tokens: 42_000 });
+      });
     });
 
     it('omits thinking when request.config.thinkingConfig.includeThoughts is false', async () => {
