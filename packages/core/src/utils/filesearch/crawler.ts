@@ -861,10 +861,19 @@ function posixPathUnderGitRoot(
   relativeToCrawlDir: string,
 ): string {
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
-    return path.posix.join(
-      relativeToCrawlDir,
-      normalizedFile.slice(relativeToGitRoot.length + 1),
-    );
+    const prefix = `${relativeToGitRoot}/`;
+    if (normalizedFile.startsWith(prefix)) {
+      return path.posix.join(
+        relativeToCrawlDir,
+        normalizedFile.slice(prefix.length),
+      );
+    }
+    if (normalizedFile === relativeToGitRoot) {
+      return relativeToCrawlDir.endsWith('/')
+        ? relativeToCrawlDir
+        : `${relativeToCrawlDir}/`;
+    }
+    return path.posix.join(relativeToCrawlDir, normalizedFile);
   }
   return path.posix.join(relativeToCrawlDir, normalizedFile);
 }
