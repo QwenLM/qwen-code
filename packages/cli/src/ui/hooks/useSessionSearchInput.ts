@@ -66,11 +66,11 @@ export function isPrintableSearchChar(key: Key): boolean {
 export interface UseSessionSearchInputOptions {
   /**
    * Called when the search frame should yield back to list mode —
-   * fires after a non-empty → empty query transition (Esc, Ctrl+U/L,
-   * or the last Backspace), via a `useEffect` so the side effect
-   * lives outside the React state updater. The parent typically
-   * maps this to `setViewMode('list')`. The query is already empty
-   * by the time this fires, so the parent doesn't need to touch it.
+   * fires synchronously when a non-empty → empty query transition
+   * occurs (Esc, Ctrl+U/L, or the last Backspace), detected via a
+   * ref-backed setter. The parent typically maps this to
+   * `setViewMode('list')`. The query is already empty by the time
+   * this fires, so the parent doesn't need to touch it.
    */
   onExitToList: () => void;
 }

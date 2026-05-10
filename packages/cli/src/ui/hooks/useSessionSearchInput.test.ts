@@ -88,11 +88,11 @@ describe('isPrintableSearchChar', () => {
 
 describe('useSessionSearchInput', () => {
   // Each keystroke gets its own act() — terminal events arrive in
-  // separate render cycles, and the empty-query effect runs after
-  // each commit. Batching multiple keys into one act() collapses the
-  // intermediate states the effect needs to observe (so a never-saw-
-  // 'a' state can never satisfy the prev-non-empty → empty
-  // transition).
+  // separate render cycles, and the ref-backed setter fires
+  // onExitToList synchronously within the state updater when it
+  // detects a non-empty → empty transition. Batching multiple keys
+  // into one act() collapses the intermediate states the setter
+  // needs to observe.
 
   it('starts with an empty query', () => {
     const { result } = renderHook(() =>
@@ -102,7 +102,7 @@ describe('useSessionSearchInput', () => {
   });
 
   it('does not fire onExitToList on initial mount with the default empty query', () => {
-    // Pin the prev-ref guard: the effect must distinguish "started
+    // Pin the prev-ref guard: the setter must distinguish "started
     // empty" from "transitioned to empty". Without the guard, every
     // mount with a default-empty query would falsely call the parent
     // out of search mode before search ever started.
@@ -275,17 +275,75 @@ describe('useSessionSearchInput', () => {
     // arrives in list mode — covered here as a smoke test that the
     // setter (functional and direct) round-trips through the hook
     // independently of handleSearchKey.
+    const onExitToList = vi.fn();
     const { result } = renderHook(() =>
-      useSessionSearchInput({ onExitToList: vi.fn() }),
+      useSessionSearchInput({ onExitToList }),
     );
     act(() => {
       result.current.setSearchQuery('seed');
     });
     expect(result.current.searchQuery).toBe('seed');
+    // Seeding the query (empty → non-empty) must NOT trigger exit.
+    expect(onExitToList).not.toHaveBeenCalled();
 
     act(() => {
       result.current.setSearchQuery((q) => `${q}-more`);
     });
     expect(result.current.searchQuery).toBe('seed-more');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not fire onExitToList when Backspace is pressed on an already-empty query', () => {
+    // The prev !== '' guard must prevent a false exit when the user
+    // presses Backspace (or Delete) while the query is already empty.
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'backspace', sequence: '' }));
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not fire onExitToList when Esc is pressed on an already-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'escape', sequence: '' }));
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not fire onExitToList when Ctrl+U is pressed on an already-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(
+        k({ name: 'u', sequence: '', ctrl: true }),
+      );
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not fire onExitToList when Ctrl+L is pressed on an already-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(
+        k({ name: 'l', sequence: '', ctrl: true }),
+      );
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
   });
 });
