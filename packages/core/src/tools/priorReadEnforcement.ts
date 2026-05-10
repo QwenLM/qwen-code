@@ -91,10 +91,18 @@ export type PriorReadVerb = 'editing' | 'overwriting';
  * impossible precondition on files larger than the limit, producing
  * the deadlock issue #3945 reported. The contract now matches Claude
  * Code's `readFileState`: any prior read clears enforcement for both
- * tools, the mtime/size drift check is the safety net, and
- * `fileReadCacheDisabled: true` is the escape hatch for users who
- * want stricter behaviour. See the docstring on {@link checkPriorRead}
- * for the full rationale and the residual #2499 risk it accepts.
+ * tools, the mtime/size drift check is the safety net.
+ *
+ * There is no built-in "stricter than this" mode. `fileReadCacheDisabled:
+ * true` is the OPPOSITE — it bypasses the cache (and thus prior-read
+ * enforcement) entirely, ceding the safety net to whatever
+ * application-level overwrite-protection the operator wires up
+ * (lockfiles, content hashing, atomic temp-file rename, etc.). Users
+ * who want STRICTER built-in enforcement than the residual #2499 risk
+ * accepts have no flag here today; file a feature request.
+ *
+ * See the docstring on {@link checkPriorRead} for the full rationale
+ * and the residual #2499 risk it accepts.
  */
 export interface CheckPriorReadOptions {
   expectExisting?: boolean;
@@ -123,8 +131,10 @@ export interface CheckPriorReadOptions {
  * seen current bytes" from "the model has seen older bytes", and it
  * fires identically for both tools. Issue #2499 (model hallucinates
  * unread bytes on overwrite) is the residual risk this stance
- * accepts, mitigated by the drift check; users who need stricter
- * behaviour can set `fileReadCacheDisabled: true`.
+ * accepts, mitigated by the drift check. There is no built-in
+ * stricter mode — `fileReadCacheDisabled: true` is an OPT-OUT (it
+ * bypasses enforcement entirely so application-level locking can
+ * take over), not an opt-in to anything stricter.
  *
  * Stat policy: `ENOENT` means the path disappeared between the
  * caller's `fileExists` check and now — a disappearance race that is

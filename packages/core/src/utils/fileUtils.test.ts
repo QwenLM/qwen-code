@@ -911,6 +911,36 @@ describe('fileUtils', () => {
       }
     });
 
+    it('returns text for extensionless build/config basenames (Dockerfile, Makefile, go.mod, …)', async () => {
+      // Build / config / lockfile conventions carry no extension (or
+      // only an ambiguous one like .mod). `path.extname` returns `''`,
+      // so the extension allowlist misses them, and an encrypted-volume
+      // read whose 4 KB sample looks binary would misclassify these as
+      // binary even though the basename is unambiguously text.
+      const looksBinary = Buffer.alloc(64);
+      for (let i = 0; i < looksBinary.length; i++) {
+        looksBinary[i] = i % 4 === 0 ? 0 : 0xff;
+      }
+      for (const basename of [
+        'Dockerfile',
+        'Makefile',
+        'Jenkinsfile',
+        'go.mod',
+        'package-lock.json',
+        '.gitignore',
+        'LICENSE',
+      ]) {
+        mockMimeGetType.mockReturnValueOnce(null);
+        const filePath = path.join(tempRootDir, basename);
+        actualNodeFs.writeFileSync(filePath, looksBinary);
+        try {
+          expect(await detectFileType(filePath)).toBe('text');
+        } finally {
+          actualNodeFs.unlinkSync(filePath);
+        }
+      }
+    });
+
     it('still classifies files in BINARY_EXTENSIONS as binary even with text-looking content', async () => {
       // The extension overrides win-list must not weaken the
       // existing binary-extension pre-empt. A `.png` whose first

@@ -629,6 +629,57 @@ const KNOWN_TEXT_EXTENSIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Basename-only fallback for files whose name carries no extension
+ * but is unambiguously text (build / config / lockfile conventions).
+ * `path.extname('Dockerfile')` / `path.extname('Makefile')` /
+ * `path.extname('go.mod')` return `''` (or just `'.mod'` for go.mod —
+ * not enough to disambiguate from binary `.mod` payloads), so the
+ * extension-only `KNOWN_TEXT_EXTENSIONS` check above misses them and
+ * an encrypted-volume read whose 4 KB sample looks binary would
+ * misclassify these as binary.
+ */
+const KNOWN_TEXT_BASENAMES: ReadonlySet<string> = new Set([
+  'Dockerfile',
+  'Containerfile',
+  'Makefile',
+  'GNUmakefile',
+  'Jenkinsfile',
+  'Vagrantfile',
+  'Rakefile',
+  'Gemfile',
+  'Procfile',
+  'BUILD',
+  'WORKSPACE',
+  'CMakeLists.txt', // also caught by .txt but pin explicitly
+  'go.mod',
+  'go.sum',
+  'go.work',
+  'Cargo.lock',
+  'Pipfile',
+  'Pipfile.lock',
+  'poetry.lock',
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'requirements.txt',
+  '.gitignore',
+  '.gitattributes',
+  '.dockerignore',
+  '.npmignore',
+  '.editorconfig',
+  '.env',
+  '.bashrc',
+  '.zshrc',
+  '.profile',
+  'LICENSE',
+  'COPYING',
+  'AUTHORS',
+  'CHANGELOG',
+  'README',
+  'NOTICE',
+]);
+
+/**
  * Decide whether a mime registry entry is a text payload that the
  * Edit / WriteFile tools can safely mutate as text. Used by {@link
  * detectFileType} to avoid running `isBinaryFile` content sampling
@@ -722,6 +773,13 @@ export async function detectFileType(filePath: string): Promise<FileType> {
   // extension is unambiguously text. Issue #3964 reproduced exactly
   // this on `.c` / `.cpp` / `.h` files.
   if (KNOWN_TEXT_EXTENSIONS.has(ext)) {
+    return 'text';
+  }
+  // Basename-only allowlist for extensionless build / config / lockfiles
+  // (Dockerfile, Makefile, Jenkinsfile, go.mod, package-lock.json, ...)
+  // that the extension check above misses. See KNOWN_TEXT_BASENAMES
+  // for the full list.
+  if (KNOWN_TEXT_BASENAMES.has(path.basename(filePath))) {
     return 'text';
   }
 

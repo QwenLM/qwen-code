@@ -233,13 +233,16 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     //    payload" error.
     //
     //  - `full` — whether the model has seen every byte of the
-    //    current file. This gates both the file_unchanged fast-path
-    //    and WriteFile's full-read requirement. A "full" Read at the
-    //    request level (no offset / limit / pages) only counts as
-    //    full at the cache level if the produced content was not
-    //    truncated, otherwise the model only saw the head and a
-    //    follow-up `file_unchanged` placeholder would falsely imply
-    //    "you've already seen everything".
+    //    current file. This now gates ONLY the file_unchanged
+    //    fast-path; PR #4002 removed WriteFile's `requireFullRead`
+    //    (the truncate-tool-output limit made "fully read" an
+    //    impossible precondition on files past the limit, deadlocking
+    //    issue #3945). A "full" Read at the request level (no
+    //    offset / limit / pages) only counts as full at the cache
+    //    level if the produced content was not truncated, otherwise
+    //    the model only saw the head and a follow-up `file_unchanged`
+    //    placeholder would falsely imply "you've already seen
+    //    everything".
     //
     // The stat we record is the one taken inside `processSingleFileContent`
     // and surfaced via `result.stats`. The internal stat happens
