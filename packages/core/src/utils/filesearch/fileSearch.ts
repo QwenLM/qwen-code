@@ -223,8 +223,12 @@ class DirectoryFileSearch implements FileSearch {
     pattern = pattern || '*';
 
     const dir = pattern.endsWith('/') ? pattern : path.dirname(pattern);
+    const crawlDirectory = path.join(this.options.projectRoot, dir);
+    const listingProjectRoot =
+      path.resolve(crawlDirectory) === path.resolve(this.options.projectRoot);
+
     const results = await crawl({
-      crawlDirectory: path.join(this.options.projectRoot, dir),
+      crawlDirectory,
       cwd: this.options.projectRoot,
       maxDepth: 0,
       ignore: this.ignore,
@@ -241,7 +245,10 @@ class DirectoryFileSearch implements FileSearch {
       if (finalResults.length >= (options.maxResults ?? Infinity)) {
         break;
       }
-      if (candidate === '.' || candidate.endsWith('/')) {
+      if (candidate === '.') {
+        continue;
+      }
+      if (candidate.endsWith('/') && !listingProjectRoot) {
         continue;
       }
       if (!fileFilter(candidate)) {

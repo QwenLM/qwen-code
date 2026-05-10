@@ -860,22 +860,31 @@ function posixPathUnderGitRoot(
   relativeToGitRoot: string,
   relativeToCrawlDir: string,
 ): string {
+  const stripTrailingSlashes = (s: string): string => s.replace(/\/+$/, '');
+
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
-    const prefix = `${relativeToGitRoot}/`;
+    const rg = stripTrailingSlashes(relativeToGitRoot);
+    const prefix = `${rg}/`;
+
     if (normalizedFile.startsWith(prefix)) {
       return path.posix.join(
-        relativeToCrawlDir,
+        stripTrailingSlashes(relativeToCrawlDir),
         normalizedFile.slice(prefix.length),
       );
     }
-    if (normalizedFile === relativeToGitRoot) {
-      return relativeToCrawlDir.endsWith('/')
-        ? relativeToCrawlDir
-        : `${relativeToCrawlDir}/`;
+
+    const nf = stripTrailingSlashes(normalizedFile);
+    if (nf === rg) {
+      const rc = stripTrailingSlashes(relativeToCrawlDir);
+      return `${rc}/`;
     }
-    return path.posix.join(relativeToCrawlDir, normalizedFile);
+
+    return path.posix.join(stripTrailingSlashes(relativeToCrawlDir), nf);
   }
-  return path.posix.join(relativeToCrawlDir, normalizedFile);
+  return path.posix.join(
+    stripTrailingSlashes(relativeToCrawlDir),
+    stripTrailingSlashes(normalizedFile),
+  );
 }
 
 async function crawlWithGitLsFiles(
