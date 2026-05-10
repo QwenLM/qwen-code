@@ -74,9 +74,10 @@ export interface FileReadEntry {
    * impossible precondition on files larger than the limit (issue
    * #3945 deadlock). The current contract aligns with Claude Code's
    * `readFileState`: any prior read clears enforcement, the
-   * mtime/size drift check is the safety net, and
-   * `fileReadCacheDisabled: true` is the escape hatch for users who
-   * want stricter behaviour.
+   * mtime/size drift check is the safety net. `fileReadCacheDisabled:
+   * true` is an OPT-OUT (it bypasses the cache and thus enforcement
+   * entirely so application-level locking can take over) — it is NOT
+   * an opt-in to stricter behaviour.
    */
   lastReadWasFull: boolean;
   /**

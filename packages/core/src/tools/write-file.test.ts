@@ -970,6 +970,16 @@ describe('WriteFileTool', () => {
       // read is enough to clear enforcement; the mtime/size drift
       // check remains the gate that distinguishes "model saw current
       // bytes" from "model saw older bytes".
+      //
+      // Coverage split: this test seeds the cache directly (mockConfig
+      // here lacks the `getFileService` / `getTruncateToolOutputLines`
+      // / `getTruncateToolOutputThreshold` / `getContentGeneratorConfig`
+      // wiring ReadFileTool needs). The matching ReadFile-side coverage
+      // that *produces* `{ full: false, cacheable: true }` for a
+      // truncated full read lives in read-file.test.ts under "records
+      // truncated full reads with lastReadCacheable=true (issue #3964)".
+      // A future cache-entry schema change must update both halves to
+      // keep the deadlock-free guarantee end-to-end.
       const filePath = path.join(rootDir, 'enforce-truncated-full.txt');
       fs.writeFileSync(filePath, 'unchanged', 'utf-8');
       const stats = fs.statSync(filePath);

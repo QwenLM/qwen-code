@@ -143,10 +143,13 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       // output limit makes "fully read" an impossible precondition
       // on large files (issue #3945 deadlock). WriteFile and Edit
       // now share the same contract — any prior read clears
-      // enforcement, mtime/size drift is the safety net,
-      // `fileReadCacheDisabled: true` is the escape hatch. See
-      // the docstring on `checkPriorRead` for the full rationale
-      // and the residual #2499 risk this stance accepts.
+      // enforcement and mtime/size drift is the safety net. The
+      // `fileReadCacheDisabled: true` config check above goes the
+      // OTHER way (skipping `checkPriorRead` entirely so application-
+      // level locking can take over), it is not an opt-in to
+      // stricter behaviour. See the docstring on `checkPriorRead`
+      // for the full rationale and the residual #2499 risk this
+      // stance accepts.
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         this.params.file_path,
