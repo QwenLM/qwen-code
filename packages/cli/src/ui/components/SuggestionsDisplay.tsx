@@ -7,7 +7,11 @@
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { PrepareLabel, MAX_WIDTH } from './PrepareLabel.js';
-import { CommandKind } from '../commands/types.js';
+import type {
+  CommandKind,
+  CommandSource,
+  ExecutionMode,
+} from '../commands/types.js';
 import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
 export interface Suggestion {
@@ -15,7 +19,15 @@ export interface Suggestion {
   value: string;
   description?: string;
   matchedIndex?: number;
+  /** @deprecated Use source/sourceBadge instead. */
   commandKind?: CommandKind;
+  source?: CommandSource;
+  sourceLabel?: string;
+  sourceBadge?: string;
+  argumentHint?: string;
+  matchedAlias?: string;
+  supportedModes?: ExecutionMode[];
+  modelInvocable?: boolean;
 }
 interface SuggestionsDisplayProps {
   suggestions: Suggestion[];
@@ -62,7 +74,7 @@ export function SuggestionsDisplay({
   const visibleSuggestions = suggestions.slice(startIndex, endIndex);
 
   const getFullLabel = (s: Suggestion) =>
-    s.label + (s.commandKind === CommandKind.MCP_PROMPT ? ' [MCP]' : '');
+    [s.label, s.argumentHint, s.sourceBadge].filter(Boolean).join(' ');
 
   const maxLabelLength = Math.max(
     ...suggestions.map((s) => getFullLabel(s).length),
@@ -105,8 +117,14 @@ export function SuggestionsDisplay({
             >
               <Box>
                 {labelElement}
-                {suggestion.commandKind === CommandKind.MCP_PROMPT && (
-                  <Text color={textColor}> [MCP]</Text>
+                {suggestion.argumentHint && (
+                  <Text color={theme.text.secondary}>
+                    {' '}
+                    {suggestion.argumentHint}
+                  </Text>
+                )}
+                {suggestion.sourceBadge && (
+                  <Text color={textColor}> {suggestion.sourceBadge}</Text>
                 )}
               </Box>
             </Box>

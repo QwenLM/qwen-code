@@ -30,6 +30,7 @@ import {
   createMinimalSettings,
   getSettingsWarnings,
   loadSettings,
+  preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import {
   initializeApp,
@@ -360,6 +361,10 @@ export async function main() {
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
+
+  // Run before yargs parses subcommands — handlers like `channel status`/`stop`
+  // call `process.exit` before `loadSettings()` would otherwise bootstrap.
+  preResolveHomeEnvOverrides();
 
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');

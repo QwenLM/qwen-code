@@ -313,6 +313,7 @@
     "@qwen-code/webui": "*",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "cors": "^2.8.5",
+    "dotenv": "^17.1.0",
     "express": "^5.1.0",
     "markdown-it": "^14.1.0",
     "react": "^19.2.4",

@@ -235,6 +235,7 @@ export const languageCommand: SlashCommand = {
   get description() {
     return t('View or change the language setting');
   },
+  argumentHint: 'ui|output <language>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
 

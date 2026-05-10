@@ -7,7 +7,9 @@
 import { describe, it, expect } from 'vitest';
 import { AgentCore } from './agent-core.js';
 import {
+  getCurrentAgentId,
   getRuntimeContentGenerator,
+  runWithAgentContext,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
@@ -175,6 +177,34 @@ describe('AgentCore.runInAgentFrames', () => {
 
     expect(observedView).toBe(parentView);
     expect(observedName).toBe('inherit-agent');
+  });
+
+  it('restores the logical agent id for deferred-approval continuations', async () => {
+    const core = makeCore('approval-agent');
+
+    let respondClosure: (() => Promise<void>) | undefined;
+    let inheritedAgentId: string | null = null;
+    let observedAgentId: string | null = null;
+    const onConfirm = async () => {
+      observedAgentId = getCurrentAgentId();
+    };
+
+    await runWithAgentContext('agent-123', async () => {
+      inheritedAgentId = getCurrentAgentId();
+      respondClosure = () =>
+        core.runInAgentFrames(
+          onConfirm,
+          undefined,
+          inheritedAgentId ?? undefined,
+        );
+    });
+
+    expect(getCurrentAgentId()).toBeNull();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await respondClosure!();
+
+    expect(observedAgentId).toBe('agent-123');
   });
 
   it("prefers the agent's own view over inheritedView when both are present", async () => {
