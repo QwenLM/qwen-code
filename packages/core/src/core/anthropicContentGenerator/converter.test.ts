@@ -37,7 +37,7 @@ describe('AnthropicContentConverter', () => {
         {
           type: 'text',
           text: 'sys',
-          cache_control: { type: 'ephemeral' },
+          cache_control: { type: 'ephemeral', scope: 'global' },
         },
       ]);
     });
@@ -58,7 +58,7 @@ describe('AnthropicContentConverter', () => {
         {
           type: 'text',
           text: 'a\nb',
-          cache_control: { type: 'ephemeral' },
+          cache_control: { type: 'ephemeral', scope: 'global' },
         },
       ]);
     });

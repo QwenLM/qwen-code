@@ -121,10 +121,8 @@ describe('AnthropicContentGenerator', () => {
 
     const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
       {}) as Record<string, string>;
-    expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
-    expect(headers['User-Agent']).toContain(
-      `(${process.platform}; ${process.arch})`,
-    );
+    expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
+    expect(headers['User-Agent']).toContain('(external, cli)');
   });
 
   it('merges customHeaders into defaultHeaders (does not replace defaults)', async () => {
@@ -150,7 +148,7 @@ describe('AnthropicContentGenerator', () => {
       {}) as Record<string, string>;
     // Beta headers moved out of defaultHeaders — see PR #3788 review feedback.
     // Only User-Agent and customHeaders remain at construction time.
-    expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
+    expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
     expect(headers['X-Custom']).toBe('1');
     expect(headers['anthropic-beta']).toBeUndefined();
   });
@@ -210,12 +208,17 @@ describe('AnthropicContentGenerator', () => {
         ...baseConfig,
         // No reasoning config: thinking defaults to enabled, no effort.
       });
-      expect(headers['anthropic-beta']).toBe('interleaved-thinking-2025-05-14');
+      expect(headers['anthropic-beta']).toContain(
+        'interleaved-thinking-2025-05-14',
+      );
+      expect(headers['anthropic-beta']).toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
     });
 
-    it('omits beta header when reasoning is disabled (no thinking, no effort)', async () => {
+    it('sends only prompt-caching-scope when reasoning is disabled (no thinking, no effort)', async () => {
       const headers = await callOnce({ ...baseConfig, reasoning: false });
-      expect(headers['anthropic-beta']).toBeUndefined();
+      expect(headers['anthropic-beta']).toBe('prompt-caching-scope-2026-01-05');
     });
 
     it('merges user-supplied customHeaders[anthropic-beta] with computed flags (no overwrite)', async () => {
@@ -243,7 +246,10 @@ describe('AnthropicContentGenerator', () => {
         reasoning: false,
         customHeaders: { 'anthropic-beta': 'experimental-x' },
       });
-      expect(headers['anthropic-beta']).toBe('experimental-x');
+      expect(headers['anthropic-beta']).toContain('experimental-x');
+      expect(headers['anthropic-beta']).toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
     });
 
     it('does not leak customHeaders[anthropic-beta] (any casing) into defaultHeaders', async () => {
@@ -315,15 +321,15 @@ describe('AnthropicContentGenerator', () => {
       expect(occurrences).toHaveLength(1);
     });
 
-    it('omits beta header when per-request thinkingConfig.includeThoughts=false', async () => {
+    it('sends only prompt-caching-scope when per-request thinkingConfig.includeThoughts=false', async () => {
       // Even though the global reasoning config sets effort, the per-request
       // opt-out drops both `thinking` and `output_config` from the body — and
-      // the beta header must follow.
+      // the thinking/effort beta flags must not be present.
       const headers = await callOnce(
         { ...baseConfig, reasoning: { effort: 'medium' } },
         { thinkingConfig: { includeThoughts: false } },
       );
-      expect(headers['anthropic-beta']).toBeUndefined();
+      expect(headers['anthropic-beta']).toBe('prompt-caching-scope-2026-01-05');
     });
 
     it('keeps customHeaders + User-Agent in defaultHeaders while sending computed anthropic-beta per-request', async () => {
@@ -355,7 +361,7 @@ describe('AnthropicContentGenerator', () => {
       const defaultHeaders = (anthropicState.constructorOptions?.[
         'defaultHeaders'
       ] || {}) as Record<string, string>;
-      expect(defaultHeaders['User-Agent']).toContain('QwenCode/1.2.3');
+      expect(defaultHeaders['User-Agent']).toContain('claude-cli/1.2.3');
       expect(defaultHeaders['X-Custom']).toBe('v1');
       expect(defaultHeaders['anthropic-beta']).toBeUndefined();
 
