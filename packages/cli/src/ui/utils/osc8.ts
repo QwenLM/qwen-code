@@ -217,13 +217,15 @@ export function supportsHyperlinks(
         );
       case 'ghostty':
         return true;
-      case 'WarpTerminal':
-        // Warp has supported OSC 8 since its public launch.
-        return true;
       case 'mintty':
         // mintty ≥ 3.3 supports OSC 8; older installs are extremely rare
         // and still degrade safely (terminal just prints the visible bytes).
         return true;
+      // Warp (TERM_PROGRAM=WarpTerminal) does NOT yet support OSC 8 — its
+      // rendering engine ignores the envelope and prints visible garbage,
+      // so we deliberately fall through to the legacy `label (url)` path.
+      // Re-enable when Warp ships OSC 8 support.
+      //
       // Hyper exposes OSC 8 in recent versions but plugin chains have a
       // history of breaking escape passthrough — gate on FORCE_HYPERLINK
       // so users who know their setup works can opt in explicitly.

@@ -370,11 +370,15 @@ describe('osc8 helpers', () => {
       expect(supportsHyperlinks()).toBe(true);
     });
 
-    it('Warp Terminal is enabled via TERM_PROGRAM=WarpTerminal', () => {
+    it('Warp Terminal is intentionally NOT auto-detected (no OSC 8 support yet)', () => {
+      // Warp's current rendering engine doesn't honor OSC 8 — it prints the
+      // envelope as visible garbage. Falls through to the final return false
+      // until Warp ships support. Users on a Warp build that does support
+      // OSC 8 can opt in via FORCE_HYPERLINK=1.
       setTTY(true);
       process.env['TERM_PROGRAM'] = 'WarpTerminal';
-      // Warp's TERM_PROGRAM_VERSION is set but not consulted — Warp has
-      // supported OSC 8 since launch.
+      expect(supportsHyperlinks()).toBe(false);
+      process.env['FORCE_HYPERLINK'] = '1';
       expect(supportsHyperlinks()).toBe(true);
     });
 
