@@ -108,7 +108,10 @@ function parseArgs(argv) {
     baseline: '',
     cliEntry: CLI_ENTRY,
     interactive: false,
-    interactiveTimeoutMs: 30000,
+    // 60s default so flaky-mcp (10s discovery timeout + 35s finalize cap +
+    // headroom) and three-mixed-mcp (slow server ~7s + finalize delay) both
+    // fit. Override with --interactive-timeout for tighter measurement.
+    interactiveTimeoutMs: 60000,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];

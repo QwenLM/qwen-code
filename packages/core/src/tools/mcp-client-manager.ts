@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '../config/config.js';
+import type { Config, MCPServerConfig } from '../config/config.js';
 import { isSdkMcpServerConfig } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
 import {
@@ -290,6 +290,53 @@ export class McpClientManager {
   }
 
   /**
+   * Caps how long a single MCP server's discover handshake is allowed to
+   * take during startup. Local stdio servers default to 30s; remote
+   * HTTP/SSE servers default to 5s (mirrors Claude Code's
+   * `CLAUDE_AI_MCP_TIMEOUT_MS`). Per-server override via
+   * `mcpServers.<name>.discoveryTimeoutMs` in settings.
+   *
+   * Tool-call timeout (`MCP_DEFAULT_TIMEOUT_MSEC`, 10 min) is intentionally
+   * unaffected: a long-running tool invocation is not a startup pathology.
+   */
+  private runWithDiscoveryTimeout<T>(
+    serverName: string,
+    serverConfig: MCPServerConfig | undefined,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const timeoutMs = this.discoveryTimeoutFor(serverConfig);
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          new Error(
+            `MCP server '${serverName}' discovery timed out after ${timeoutMs}ms`,
+          ),
+        );
+      }, timeoutMs);
+      fn().then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    });
+  }
+
+  private discoveryTimeoutFor(serverConfig?: MCPServerConfig): number {
+    if (serverConfig?.discoveryTimeoutMs !== undefined) {
+      return serverConfig.discoveryTimeoutMs;
+    }
+    // Remote transports (HTTP/SSE) carry network risk and get a shorter
+    // default; stdio servers we trust the user already runs locally.
+    const isRemote = !!(serverConfig?.httpUrl || serverConfig?.url);
+    return isRemote ? 5_000 : 30_000;
+  }
+
+  /**
    * Disconnects a specific MCP server.
    * @param serverName The name of the server to disconnect.
    */
@@ -474,6 +521,14 @@ export class McpClientManager {
     );
 
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
+    recordStartupEvent('mcp_discovery_start', {
+      serverCount: Object.keys(servers).length,
+      incremental: true,
+    });
+    // Mirrors the legacy `discoverAllMcpTools` path: fire the IN_PROGRESS
+    // notification so subscribers (e.g. UI MCP-status pill) know discovery
+    // started even when no servers need updates this pass.
+    this.eventEmitter?.emit('mcp-client-update', this.clients);
 
     // Find servers that are new or have changed configuration
     const serversToUpdate: string[] = [];
@@ -502,11 +557,37 @@ export class McpClientManager {
       }
     }
 
-    // Update only the servers that need it
+    // PR-A: emit the same per-server / first-tool / settled events the
+    // legacy `discoverAllMcpTools` path emits, so the profiler captures
+    // identical metrics whether MCP discovery ran inline or in the
+    // background. `firstToolEventFired` is the global guard for the
+    // "first server that successfully completed discover" semantic
+    // (matches the simplified semantic adopted in PR0+1).
+    let firstToolEventFired = false;
+
     const discoveryPromises = serversToUpdate.map(async (name) => {
+      const serverConfig = servers[name];
       try {
-        await this.discoverMcpToolsForServer(name, cliConfig);
+        // Race the per-server discover against a discovery-only timeout.
+        // Tool-call timeout (MCP_DEFAULT_TIMEOUT_MSEC) is intentionally
+        // left alone — we want long-running MCP tool calls to still work.
+        await this.runWithDiscoveryTimeout(name, serverConfig, () =>
+          this.discoverMcpToolsForServer(name, cliConfig),
+        );
+        if (!firstToolEventFired) {
+          firstToolEventFired = true;
+          recordStartupEvent('mcp_first_tool_registered', {
+            serverName: name,
+          });
+        }
+        recordStartupEvent(`mcp_server_ready:${name}`, {
+          outcome: 'ready',
+        });
       } catch (error) {
+        recordStartupEvent(`mcp_server_ready:${name}`, {
+          outcome: 'failed',
+          reason: getErrorMessage(error),
+        });
         debugLogger.error(
           `Error during incremental discovery for server '${name}': ${getErrorMessage(error)}`,
         );
@@ -521,6 +602,19 @@ export class McpClientManager {
     }
 
     this.discoveryState = MCPDiscoveryState.COMPLETED;
+    recordStartupEvent('mcp_all_servers_settled', {
+      serverCount: Object.keys(servers).length,
+      incremental: true,
+    });
+    // Fire one final `mcp-client-update` AFTER flipping discoveryState to
+    // COMPLETED. This is what lets the cli's AppContainer batch-flush /
+    // finalize effect observe the terminal state — the per-server updates
+    // above all happen WHILE the state is still IN_PROGRESS, so without
+    // this trailing emit the subscriber would only see COMPLETED if
+    // another `mcp-client-update` happens to fire later (e.g. a health
+    // check disconnect). Critical for the deferred startup-profile
+    // finalize path introduced by PR-A.
+    this.eventEmitter?.emit('mcp-client-update', this.clients);
   }
 
   /**

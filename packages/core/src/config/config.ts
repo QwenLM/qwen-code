@@ -358,6 +358,15 @@ export class MCPServerConfig {
     readonly targetServiceAccount?: string,
     // SDK MCP server type - 'sdk' indicates server runs in SDK process
     readonly type?: 'sdk',
+    /**
+     * PR-A: per-server cap on the discovery handshake (connect + tools/list
+     * + prompts/list + resources/list). Defaults: 30s for stdio, 5s for
+     * remote HTTP/SSE. Tool-call timeout (`timeout` above) is unaffected —
+     * a long-running tool invocation is not a startup pathology. Appended
+     * at the end of the parameter list to avoid shifting positional
+     * arguments at the many `new MCPServerConfig(...)` call sites.
+     */
+    readonly discoveryTimeoutMs?: number,
   ) {}
 }
 
@@ -1204,12 +1213,23 @@ export class Config {
     await this.refreshHierarchicalMemory();
     this.debugLogger.debug('Hierarchical memory loaded');
 
+    // PR-A: Progressive MCP availability.
+    // By default we skip MCP discovery in the synchronous tool-registry
+    // construction path and kick it off in the background after the registry
+    // exists. The user can opt back into the legacy synchronous behavior by
+    // setting QWEN_CODE_LEGACY_MCP_BLOCKING=1 — kept for at least 1 release
+    // as a rollback escape hatch.
+    const legacyBlockingMcp =
+      process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
+    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
-      this.getBareMode() ? { skipDiscovery: true } : undefined,
+      skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
     );
     recordStartupEvent('tool_registry_created', {
       toolCount: this.toolRegistry.getAllToolNames().length,
+      mcpInline: !skipInlineMcpDiscovery,
     });
     this.debugLogger.info(
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
@@ -1225,8 +1245,53 @@ export class Config {
     // Use strict mode so a broken built-in tool surfaces immediately at startup.
     await this.toolRegistry.warmAll({ strict: true });
 
+    // Fire-and-forget MCP discovery. This is the user-visible win of PR-A:
+    // the cli reaches `input_enabled` without waiting for MCP servers, and
+    // each server's tools land in the registry as they become ready. The
+    // cli side (AppContainer's MCP batch-flush effect) debounces
+    // `setTools()` so the model sees the new tools within ~16ms of the
+    // last server settling.
+    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+      this.startMcpDiscoveryInBackground();
+    }
+
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
+  }
+
+  /**
+   * Kicks off MCP server discovery in the background after the synchronous
+   * portion of {@link initialize} returns. Errors are logged, never thrown:
+   * a broken MCP server must not bring down the cli, and per-server
+   * connect/discover failures are already surfaced through the
+   * `mcp-client-update` event stream the UI subscribes to.
+   *
+   * This is the user-visible win of PR-A: `Config.initialize()` resolves as
+   * soon as built-in tools are ready, so the AppContainer mount effect can
+   * record `input_enabled` independently of MCP server response time.
+   */
+  private startMcpDiscoveryInBackground(): void {
+    // Defensive: some tests inject a partially-stubbed ToolRegistry that
+    // doesn't expose `getMcpClientManager`. We don't want background MCP
+    // discovery to crash `Config.initialize()` in those paths — the cli
+    // would surface it eventually, but the test ergonomics are worse.
+    const registry = this.toolRegistry as ToolRegistry & {
+      getMcpClientManager?: () => {
+        discoverAllMcpToolsIncremental: (cfg: Config) => Promise<void>;
+      };
+    };
+    const manager = registry.getMcpClientManager?.();
+    if (!manager) {
+      this.debugLogger.debug(
+        'Skipping background MCP discovery: ToolRegistry has no MCP client manager',
+      );
+      return;
+    }
+    void manager.discoverAllMcpToolsIncremental(this).catch((err: unknown) => {
+      this.debugLogger.error(
+        `Background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
   }
 
   async refreshHierarchicalMemory(): Promise<void> {

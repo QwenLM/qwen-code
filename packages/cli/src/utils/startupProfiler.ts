@@ -259,9 +259,21 @@ function computeDerivedPhases(): DerivedPhases {
   const mcpSettled = findEventMs('mcp_all_servers_settled');
   if (mcpSettled !== undefined) out.mcp_all_settled = mcpSettled;
 
-  const toolsUpdated = findEventMs('gemini_tools_updated');
-  if (toolsUpdated !== undefined && mcpFirst !== undefined) {
-    out.gemini_tools_lag = Math.round((toolsUpdated - mcpFirst) * 100) / 100;
+  // gemini_tools_lag = how long after the first MCP server finished
+  // discover did the model actually receive an updated tool list. We must
+  // pick the FIRST `gemini_tools_updated` event whose timestamp is >=
+  // `mcp_first_tool_registered`, because earlier `setTools()` calls fire
+  // from `GeminiClient.initialize() -> startChat()` (built-in tools only)
+  // and from `SkillTool` post-construction refresh — both happen BEFORE
+  // MCP discovery starts under PR-A, so naively taking the first
+  // `gemini_tools_updated` would give a misleading negative lag.
+  if (mcpFirst !== undefined) {
+    for (const ev of events) {
+      if (ev.name === 'gemini_tools_updated' && ev.tMs >= mcpFirst) {
+        out.gemini_tools_lag = Math.round((ev.tMs - mcpFirst) * 100) / 100;
+        break;
+      }
+    }
   }
 
   return out;
