@@ -86,10 +86,12 @@ qwen serve --hostname 0.0.0.0 --port 4170
 # → boot refuses without QWEN_SERVER_TOKEN
 ```
 
-Clients then send `Authorization: Bearer $QWEN_SERVER_TOKEN` on every request.
+Clients then send `Authorization: Bearer $QWEN_SERVER_TOKEN` on every request **except `/health`**, which is intentionally exempt so liveness probes (k8s, Compose, monitoring) work without credentials. Use `/capabilities` to verify your token is correct end-to-end:
 
 ```bash
-curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" http://your-host:4170/health
+curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" http://your-host:4170/capabilities
+# → {"v":1,"mode":"http-bridge","features":[...],"modelServices":[]}
+# Wrong token → 401
 ```
 
 The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 responses are uniform across "missing header", "wrong scheme", and "wrong token" so a side-channel can't distinguish.
@@ -116,7 +118,9 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 
 ## Multi-session & remote deployment
 
-Each `qwen serve` process binds **one workspace**. To handle multiple workspaces or multiple users at scale you spawn multiple daemon instances behind an external orchestrator. That orchestrator (multi-tenancy / OIDC / Quota / Audit / k8s) is **out of scope** for the qwen-code project — see issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) "External Reference Architecture" for the design pointers.
+A single `qwen serve` process can manage sessions for any workspace path passed via `cwd` on `POST /session` — under the default `sessionScope: 'single'` it keeps one ACP session per canonicalized workspace, sharing it across every client that posts the same `cwd`. So one daemon will happily host sessions for many workspaces at once.
+
+To handle multiple **users** (each with their own quota, audit log, sandbox) or to scale beyond one process's reach (cold-start budget, FD count, RSS), you spawn multiple daemon instances behind an external orchestrator. That orchestrator (multi-tenancy / OIDC / Quota / Audit / k8s) is **out of scope** for the qwen-code project — see issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) "External Reference Architecture" for the design pointers.
 
 ## What's next
 

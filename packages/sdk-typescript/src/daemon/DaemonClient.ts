@@ -355,7 +355,11 @@ export class DaemonClient {
  * but exposed as `static` on `AbortSignal`, so cautious feature-detect plus
  * a polyfill keeps us honest if a runtime ships a stripped-down `AbortSignal`.
  */
-function abortTimeout(ms: number): AbortSignal {
+// Exported solely for direct unit testing — production callers go
+// through `fetchWithTimeout` above, but the polyfill paths only fire
+// on Node 18.0–20.2 (where `AbortSignal.any` is missing) and that
+// runtime can't easily be exercised from the public API surface.
+export function abortTimeout(ms: number): AbortSignal {
   const tFn = (
     AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal }
   ).timeout;
@@ -394,7 +398,8 @@ function abortTimeout(ms: number): AbortSignal {
  * listeners after the first fire is best-effort), but for `fetch`-style
  * single-shot use the difference is invisible.
  */
-function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
+// Exported solely for direct unit testing — see note on `abortTimeout`.
+export function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
   const anyFn = (
     AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }
   ).any;

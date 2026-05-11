@@ -679,10 +679,16 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
     });
 
+    // Switched probe endpoint from `/health` to `/capabilities` for
+    // these auth-rejection tests because per #3889 review A8dZT
+    // `/health` is now intentionally registered BEFORE the bearer
+    // middleware so liveness probes work without credentials.
+    // `/capabilities` is the cheapest endpoint that still goes through
+    // the auth chain.
     it('rejects missing Authorization header when token is set', async () => {
       const app = createServeApp({ ...baseOpts, token: 'secret' });
       const res = await request(app)
-        .get('/health')
+        .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(401);
     });
@@ -690,7 +696,7 @@ describe('createServeApp', () => {
     it('rejects wrong scheme', async () => {
       const app = createServeApp({ ...baseOpts, token: 'secret' });
       const res = await request(app)
-        .get('/health')
+        .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Basic c2VjcmV0');
       expect(res.status).toBe(401);
@@ -699,7 +705,7 @@ describe('createServeApp', () => {
     it('rejects wrong token', async () => {
       const app = createServeApp({ ...baseOpts, token: 'secret' });
       const res = await request(app)
-        .get('/health')
+        .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer wrong');
       expect(res.status).toBe(401);
@@ -708,10 +714,26 @@ describe('createServeApp', () => {
     it('accepts the right token', async () => {
       const app = createServeApp({ ...baseOpts, token: 'secret' });
       const res = await request(app)
-        .get('/health')
+        .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(res.status).toBe(200);
+    });
+
+    it('exempts /health from bearer auth so liveness probes work without credentials', async () => {
+      // Per #3889 review A8dZT — the registration order in
+      // `createServeApp` puts `/health` BEFORE `bearerAuth`, so a
+      // probe with no credentials still gets 200 even when the daemon
+      // was started with a token. CORS deny + Host allowlist still
+      // apply to `/health` (registered before /health), so this is
+      // not a way to bypass DNS rebinding or browser-origin
+      // protection.
+      const app = createServeApp({ ...baseOpts, token: 'secret' });
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ status: 'ok' });
     });
   });
 });

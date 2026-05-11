@@ -61,12 +61,20 @@ export function createServeApp(
   // amplified CPU/memory cost from any wrong-token client.
   app.use(denyBrowserOriginCors);
   app.use(hostAllowlist(opts.hostname, getPort));
-  app.use(bearerAuth(opts.token));
-  app.use(express.json({ limit: '10mb' }));
 
+  // `/health` is registered BEFORE `bearerAuth` so liveness probes work
+  // without credentials even when the daemon was started with a
+  // `--token` (k8s/Compose probes typically don't carry the daemon's
+  // bearer; round-tripping a 401 just to know the listener is up is
+  // pure waste). CORS deny + Host allowlist still apply, so a browser
+  // or a wrong-Host probe is still rejected. Documented exemption in
+  // `docs/developers/qwen-serve-protocol.md`.
   app.get('/health', (_req, res) => {
     res.status(200).json({ status: 'ok' });
   });
+
+  app.use(bearerAuth(opts.token));
+  app.use(express.json({ limit: '10mb' }));
 
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
@@ -309,7 +317,17 @@ export function createServeApp(
     // payload in user-space memory unboundedly — a slow consumer on a
     // chatty session can balloon daemon RSS. Wait for `drain` (or
     // close/error) before scheduling the next write.
-    const writeWithBackpressure = (chunk: string): Promise<void> =>
+    //
+    // Concurrency: serialize ALL writes through a per-connection chain
+    // so the heartbeat (fire-and-forget interval, see below) can't
+    // interleave with the main event-write loop. Without serialization,
+    // the heartbeat firing while the main loop is mid-`drain` await
+    // would issue a second `res.write()` that bypasses the
+    // backpressure guard — and could even interleave bytes between two
+    // SSE frames on the wire. The chain is single-flight: each call
+    // waits for the previous write to settle before scheduling its own.
+    let writeChain: Promise<void> = Promise.resolve();
+    const doWrite = (chunk: string): Promise<void> =>
       new Promise((resolve, reject) => {
         if (res.writableEnded) {
           resolve();
@@ -341,6 +359,15 @@ export function createServeApp(
         res.once('close', onClose);
         res.once('error', onError);
       });
+    const writeWithBackpressure = (chunk: string): Promise<void> => {
+      const next = writeChain.then(() => doWrite(chunk));
+      // Tail-swallow rejections on the chain itself so a single failed
+      // write doesn't poison every subsequent call. The CALLER's
+      // returned promise still rejects — chain-internal failures are
+      // someone else's problem, not blockers for queueing.
+      writeChain = next.catch(() => undefined);
+      return next;
+    };
 
     // Tell EventSource to retry after 3s on disconnect. Awaiting drain on
     // the very first write is overkill but cheap — `ok` is true the
@@ -444,6 +471,21 @@ export function createServeApp(
         (err as { status: number }).status === 400
       ) {
         res.status(400).json({ error: 'Invalid JSON in request body' });
+        return;
+      }
+      // body-parser raises a typed error with `status: 413` when a
+      // request body exceeds the `express.json({ limit: '10mb' })`
+      // ceiling. Without this branch it falls through to the 500 path
+      // and clients see a misleading "Internal server error" instead
+      // of a clear "payload too large" — which is the kind of error
+      // they can actually act on (chunk the request, raise the limit).
+      if (
+        err &&
+        typeof err === 'object' &&
+        'status' in err &&
+        (err as { status: number }).status === 413
+      ) {
+        res.status(413).json({ error: 'Request body too large (max 10 MB)' });
         return;
       }
       writeStderrLine(

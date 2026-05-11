@@ -539,39 +539,37 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
 
       // ACP `newSession` doesn't take a model id; honor the caller's
       // `modelServiceId` by issuing the unstable `setSessionModel` call
-      // immediately after the session is established. If the agent rejects
-      // the model id, surface it as a session-creation failure so the
-      // caller doesn't think they got the requested model.
+      // immediately after the session is established. Use the shared
+      // `applyModelServiceId` helper so the call:
+      //   - races against `transportClosedReject` (a wedged child
+      //     during model switch fails fast instead of consuming the
+      //     full init timeout — A09HD)
+      //   - publishes `model_switched` / `model_switch_failed` to the
+      //     bus so attached clients see the result
+      //   - serializes through `entry.modelChangeQueue` for ordering
+      //     against later attach-with-different-model calls
+      //
+      // On failure we DO NOT tear the session down. An earlier rev
+      // tore it down so the caller "didn't inherit silent drift",
+      // but that killed an already-functional session and left the
+      // caller with a 500 and no sessionId to retry against. The
+      // session is operational on the agent's default model — the
+      // `model_switch_failed` event tells subscribers exactly what
+      // happened, and the caller can retry the switch via
+      // `POST /session/:id/model` once they know the sessionId.
+      //
+      // Swallow the rejection inline so the outer try/catch (which
+      // would `channel.kill()`) doesn't fire. The publish inside
+      // `applyModelServiceId` is the visible signal; the caller
+      // gets a 200 and a sessionId regardless, and learns of the
+      // model issue via the SSE stream.
       if (modelServiceId) {
-        try {
-          const conn = entry.connection as unknown as {
-            unstable_setSessionModel(p: {
-              sessionId: string;
-              modelId: string;
-            }): Promise<unknown>;
-          };
-          await withTimeout(
-            conn.unstable_setSessionModel({
-              sessionId: entry.sessionId,
-              modelId: modelServiceId,
-            }),
-            initTimeoutMs,
-            'setSessionModel',
-          );
-        } catch (err) {
-          // The session is half-initialized — a known sessionId on a real
-          // child but pointing at the wrong model. Tear it down so the
-          // caller can retry cleanly instead of inheriting silent drift.
-          // Close the EventBus too: the agent may have published session_
-          // update frames during init that are now orphaned (no subscriber
-          // can ever reach them — the caller never received the sessionId
-          // they would need to subscribe). Without an explicit close the
-          // bus + ring buffer linger until the next GC cycle.
-          byWorkspace.delete(workspaceKey);
-          byId.delete(entry.sessionId);
-          entry.events.close();
-          throw err;
-        }
+        await applyModelServiceId(entry, modelServiceId, initTimeoutMs).catch(
+          () => {
+            // Already published `model_switch_failed`; don't take
+            // down the session.
+          },
+        );
       }
 
       return {
@@ -829,7 +827,17 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         // req.on('close')), tell the agent to wind down. ACP cancel is a
         // notification — the active prompt resolves with
         // stopReason: 'cancelled', then the next queued prompt can run.
+        //
+        // Also resolve any pending permission requests as `cancelled`.
+        // ACP spec requires `cancel` to settle outstanding
+        // `requestPermission` calls — `cancelSession()` already does
+        // this; the abort path here was missing the call. Without it,
+        // a client disconnecting while the agent is inside
+        // `requestPermission` leaves the permission promise unresolved
+        // forever (the agent is stuck waiting on a vote that no SSE
+        // subscriber will ever cast).
         const onAbort = () => {
+          cancelPendingForSession(sessionId);
           entry.connection.cancel({ sessionId }).catch(() => {
             // Cancel is fire-and-forget; the agent may already be dead.
           });
@@ -1012,6 +1020,19 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       for (const id of Array.from(entry.pendingPermissionIds)) {
         resolvePending(id, { outcome: { outcome: 'cancelled' } });
       }
+      // Publish `session_died` BEFORE closing the bus. After the eager
+      // `byId.delete` above, the channel.exited handler's
+      // `byId.get(...) !== entry` guard short-circuits, so the
+      // automatic publish at crash time wouldn't fire. SSE subscribers
+      // need this terminal frame to know the session is gone.
+      try {
+        entry.events.publish({
+          type: 'session_died',
+          data: { sessionId, reason: 'killed' },
+        });
+      } catch {
+        /* bus already closed */
+      }
       entry.events.close();
       await entry.channel.kill().catch(() => {
         // Best-effort kill — channel may already be dead.
@@ -1036,7 +1057,24 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       byWorkspace.clear();
       byId.clear();
       pendingPermissions.clear();
-      for (const e of entries) e.events.close();
+      // Publish a terminal `session_died` BEFORE closing each bus so SSE
+      // subscribers can distinguish "daemon shut down" from a transient
+      // network error and don't sit indefinitely retrying. The
+      // channel.exited handler also publishes this on a child crash,
+      // but at shutdown time the entry has already been removed from
+      // `byId` (above), so the handler's `byId.get(...) !== entry`
+      // guard would short-circuit and the event would never fire.
+      for (const e of entries) {
+        try {
+          e.events.publish({
+            type: 'session_died',
+            data: { sessionId: e.sessionId, reason: 'daemon_shutdown' },
+          });
+        } catch {
+          /* bus already closed */
+        }
+        e.events.close();
+      }
       // Wait for in-flight spawns too. The snapshot above only sees
       // sessions already in `byId`; a `doSpawn` past `channelFactory()`
       // but still inside `connection.newSession` (~1s on cold start) is
@@ -1187,19 +1225,29 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // is a `.ts` file Node can't run; users should `npm run build` before
   // `qwen serve` or set `process.execPath` to a tsx-aware shim. Stage 1
   // accepts this — the daemon is meant for built deployments.
-  // Pass an *allowlisted* environment to the child (see
-  // ALLOWED_CHILD_ENV_KEYS at module scope for the rationale + the
-  // allowlist itself). Move-out keeps the Set allocated once, not
-  // per-spawn.
-  const childEnv: NodeJS.ProcessEnv = {};
-  for (const key of ALLOWED_CHILD_ENV_KEYS) {
-    const v = process.env[key];
-    if (typeof v === 'string') childEnv[key] = v;
+  // Pass through the daemon's full environment to the child, scrubbing
+  // ONLY daemon-internal secrets (see SCRUBBED_CHILD_ENV_KEYS at module
+  // scope). An earlier version used an allowlist, but that broke the
+  // common deployment shape: users export `OPENAI_API_KEY` /
+  // `ANTHROPIC_API_KEY` / `QWEN_*` / `DASHSCOPE_API_KEY` / a custom
+  // `modelProviders[].envKey` to authenticate the agent's LLM calls,
+  // and core's model config resolves those from `process.env`. An
+  // exhaustive allowlist can't enumerate user-defined provider keys,
+  // so the agent ends up unable to authenticate.
+  //
+  // Threat-model rationale: the agent already runs as the same UID
+  // with shell-tool access — anything in `~/.bashrc`, `~/.npmrc`,
+  // `~/.aws/credentials`, etc. is reachable by prompt injection
+  // regardless of what we put in `env`. The env passthrough is not
+  // the security boundary; the user-as-trust-root is. The only thing
+  // we MUST scrub is `QWEN_SERVER_TOKEN` (daemon-only auth that
+  // would let a prompt-injected shell turn the agent into an
+  // authenticated client of its own daemon — escalation the agent
+  // doesn't otherwise have).
+  const childEnv: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of SCRUBBED_CHILD_ENV_KEYS) {
+    delete childEnv[key];
   }
-  // Defense-in-depth: the explicit allowlist is exhaustive but the
-  // delete keeps the security review trail readable — anyone grepping
-  // for `QWEN_SERVER_TOKEN` finds the scrub explicitly named.
-  delete childEnv['QWEN_SERVER_TOKEN'];
   // CodeQL `js/path-injection` flags the `cwd: workspaceCwd` flow.
   // Stage 1 trust model accepts this — see the function-level comment
   // above for the design rationale. Defense-in-depth: the cwd is
@@ -1257,54 +1305,20 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
 const KILL_HARD_DEADLINE_MS = 10_000;
 
 /**
- * Environment variables the spawned `qwen --acp` child is allowed to
- * inherit from the daemon's environment. Anything else is dropped —
- * the agent runs user-supplied prompts with shell-tool access, so
- * everything in its env is reachable by prompt injection: API keys
- * (OPENAI/ANTHROPIC/GEMINI/DASHSCOPE/...), DB passwords, AWS/GCP
- * credentials, OAuth tokens, secrets your operator forgot they
- * exported. A denylist requires perfect knowledge of every secret
- * anyone might set; an allowlist requires only that we know what
- * the agent legitimately needs.
+ * Environment variables stripped from the spawned `qwen --acp` child's
+ * environment. Everything else is passed through — see the
+ * threat-model rationale at the call site in `defaultSpawnChannelFactory`.
  *
- * What's needed: enough to launch Node + load the entry script and
- * resolve user-config files (HOME), enough to find binaries and
- * standard tools (PATH), enough to localize and identify the user
- * for any session-state lookups (LANG/LC_*, USER/LOGNAME). Anything
- * beyond this list should be passed to the agent through ACP, not
- * through the spawn env.
+ * Currently just `QWEN_SERVER_TOKEN`: the daemon's own bearer token,
+ * which the agent doesn't need (it speaks to the daemon over stdio,
+ * not HTTP). Leaving it in the child's env would let prompt injection
+ * turn the agent into an authenticated client of its own daemon — an
+ * escalation the agent doesn't otherwise have.
  *
- * Per-platform extras: NODE-specific knobs (NODE_OPTIONS, NODE_PATH)
- * and shell-driven temp dir overrides (TMPDIR/TEMP/TMP) are usually
- * benign but can carry instructions; include only the temp-dir ones
- * since the agent legitimately writes scratch files. Windows-only
- * SYSTEMROOT/USERPROFILE/APPDATA are required by Node itself on
- * Windows or the spawn fails.
- *
- * Defined at module scope so the Set is allocated once at load,
- * not rebuilt on every `defaultSpawnChannelFactory` call.
+ * Defined at module scope so the Set is allocated once at load.
  */
-const ALLOWED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
-  'HOME',
-  'PATH',
-  'USER',
-  'LOGNAME',
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'LC_COLLATE',
-  'LC_MESSAGES',
-  'TMPDIR',
-  'TEMP',
-  'TMP',
-  'NODE_PATH',
-  // Windows essentials — Node refuses to spawn without these on Win32.
-  'SYSTEMROOT',
-  'USERPROFILE',
-  'APPDATA',
-  'LOCALAPPDATA',
-  'COMSPEC',
-  'PATHEXT',
+const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
+  'QWEN_SERVER_TOKEN',
 ]);
 
 function killChild(child: ChildProcess): Promise<void> {

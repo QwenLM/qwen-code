@@ -52,6 +52,12 @@ Every Stage 1 daemon advertises 9 feature tags. Clients **must** gate UI off `fe
 
 ## Routes
 
+> **Stage 1 limitation — no `DELETE /session/:id`.** Sessions live until
+> the agent child crashes (`session_died`), the daemon process exits, or
+> a server-side `killSession` (used internally by orphan-cleanup) fires.
+> HTTP clients have no explicit "close one session" route in Stage 1.
+> An explicit `DELETE /session/:id` is on the Stage 2 polish list.
+
 ### `GET /health`
 
 Liveness probe. Returns `200 {"status":"ok"}` if the listener is up. No auth required even when a token is configured (heartbeat-friendly).
@@ -216,6 +222,7 @@ data: {"reason":"queue_overflow","droppedAfter":42}
 Reconnect semantics:
 
 - Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth 1000)
+- **Gap detection (client-side):** if `<n>` predates the oldest event still in the ring (e.g. you reconnect with `Last-Event-ID: 50` but the ring now holds 200–1199), the daemon replays from the oldest available event without raising. Compare the first replayed event's `id` against `n + 1`; any difference is the size of the lost window. Stage 2 will inject an explicit `stream_gap` synthetic frame on the daemon side; in Stage 1 detection is the client's responsibility.
 - IDs are monotonic per session, starting at 1
 - Synthetic terminal frames (`client_evicted`, `stream_error`) intentionally omit `id` so they don't burn a sequence slot for other subscribers
 
@@ -227,6 +234,19 @@ Backpressure:
 ### `POST /permission/:requestId`
 
 Cast a vote on a pending `permission_request`. **First responder wins** — once one client answers, every other client trying to answer the same id gets `404`.
+
+> **Stage 1 limitation — no permission timeout.** A `permission_request`
+> stays pending until: (a) some client votes here, (b) `POST
+/session/:id/cancel` fires, (c) the HTTP client driving the prompt
+> disconnects (mid-prompt cancel resolves outstanding permissions as
+> `cancelled`), (d) the session is killed, or (e) the daemon shuts
+> down. **In a fully-headless deployment with no SSE subscriber,
+> `requestPermission` blocks the agent indefinitely** — there's nothing
+> to time out the wait. Stage 2 will add a configurable
+> `permissionTimeoutMs`. Until then, headless callers should keep an
+> SSE subscription open or wrap their prompt loop in their own timeout
+>
+> - `POST /session/:id/cancel`.
 
 Request:
 
@@ -268,22 +288,22 @@ The connection then closes.
 
 ## Environment variables
 
-| Var                 | Purpose                                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `QWEN_SERVER_TOKEN` | Bearer token. Stripped of leading/trailing whitespace at boot.                                               |
-| `QWEN_E2E_LLM`      | Set to `1` to enable LLM-required integration tests in `integration-tests/cli/qwen-serve-streaming.test.ts`. |
+| Var                 | Purpose                                                                                                                                                             |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_SERVER_TOKEN` | Bearer token. Stripped of leading/trailing whitespace at boot.                                                                                                      |
+| `SKIP_LLM_TESTS`    | Set to `1` to **skip** LLM-required integration tests in `integration-tests/cli/qwen-serve-streaming.test.ts` (default-on for CI envs that lack provider API keys). |
 
 ## Source layout
 
-| Path                                                 | Purpose                                                  |
-| ---------------------------------------------------- | -------------------------------------------------------- |
-| `packages/cli/src/commands/serve.ts`                 | yargs command + flag schema                              |
-| `packages/cli/src/serve/runQwenServe.ts`             | listener lifecycle + signal handling                     |
-| `packages/cli/src/serve/server.ts`                   | Express routes + middleware                              |
-| `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                      |
-| `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry |
-| `packages/cli/src/serve/eventBus.ts`                 | bounded async queue + replay ring                        |
-| `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                |
-| `packages/sdk-typescript/src/daemon/sse.ts`          | EventSource frame parser                                 |
-| `integration-tests/cli/qwen-serve-routes.test.ts`    | 18 cases, no LLM                                         |
-| `integration-tests/cli/qwen-serve-streaming.test.ts` | 4 cases, real `qwen --acp` child (`QWEN_E2E_LLM=1`)      |
+| Path                                                 | Purpose                                                            |
+| ---------------------------------------------------- | ------------------------------------------------------------------ |
+| `packages/cli/src/commands/serve.ts`                 | yargs command + flag schema                                        |
+| `packages/cli/src/serve/runQwenServe.ts`             | listener lifecycle + signal handling                               |
+| `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                        |
+| `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                |
+| `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry           |
+| `packages/cli/src/serve/eventBus.ts`                 | bounded async queue + replay ring                                  |
+| `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                          |
+| `packages/sdk-typescript/src/daemon/sse.ts`          | EventSource frame parser                                           |
+| `integration-tests/cli/qwen-serve-routes.test.ts`    | 18 cases, no LLM                                                   |
+| `integration-tests/cli/qwen-serve-streaming.test.ts` | 3 cases, real `qwen --acp` child (skipped when `SKIP_LLM_TESTS=1`) |

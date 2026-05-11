@@ -8,6 +8,8 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   DaemonClient,
   DaemonHttpError,
+  abortTimeout,
+  composeAbortSignals,
 } from '../../src/daemon/DaemonClient.js';
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -480,35 +482,42 @@ describe('DaemonClient', () => {
       expect(elapsed).toBeLessThan(2000);
     });
 
-    it('aborts when the caller-supplied signal fires (composeAbortSignals path)', async () => {
-      // Verifies that `composeAbortSignals` actually forwards the
-      // caller's abort to the underlying fetch — the polyfill path
-      // is the only one Node 18.0–20.2 takes for signal composition.
-      const fetch = vi.fn(
-        (_input: RequestInfo | URL, init?: RequestInit) =>
-          new Promise<Response>((_res, rej) => {
-            init?.signal?.addEventListener('abort', () =>
-              rej(new DOMException('aborted', 'AbortError')),
-            );
-          }),
-      ) as unknown as typeof globalThis.fetch;
-      const client = new DaemonClient({
-        baseUrl: 'http://daemon',
-        fetch,
-        fetchTimeoutMs: 60_000, // long, so the caller's abort is what fires
-      });
-      const ctrl = new AbortController();
-      setTimeout(() => ctrl.abort(), 30);
-      await expect(
-        // subscribeEvents forwards opts.signal through fetchWithTimeout
-        // — pick a method whose typed surface accepts a signal.
-        (async () => {
-          const iter = client.subscribeEvents('s-1', { signal: ctrl.signal });
-          for await (const _ of iter) {
-            void _;
-          }
-        })(),
-      ).rejects.toThrow();
+    it('composeAbortSignals forwards the first abort, with or without native AbortSignal.any', async () => {
+      // Direct-unit test on the helper — `subscribeEvents` bypasses
+      // `fetchWithTimeout` entirely (it calls `_fetch` directly with
+      // the caller's signal), so testing through subscribeEvents
+      // never exercises the polyfill. Calling `composeAbortSignals`
+      // here covers it on all Node versions: native (`>=20.3`) and
+      // polyfill (`18.0`–`20.2`) take the same input shape.
+      const a = new AbortController();
+      const b = new AbortController();
+      const composed = composeAbortSignals([a.signal, b.signal]);
+      expect(composed.aborted).toBe(false);
+      a.abort(new DOMException('first', 'AbortError'));
+      // The composed signal should follow whichever input fires first.
+      // Allow a microtask for native AbortSignal.any propagation.
+      await Promise.resolve();
+      expect(composed.aborted).toBe(true);
+    });
+
+    it('composeAbortSignals fires immediately if any input is already aborted', () => {
+      const a = new AbortController();
+      a.abort();
+      const b = new AbortController();
+      const composed = composeAbortSignals([a.signal, b.signal]);
+      expect(composed.aborted).toBe(true);
+    });
+
+    it('abortTimeout fires after the configured delay', async () => {
+      const t0 = Date.now();
+      const sig = abortTimeout(40);
+      await new Promise<void>((resolve) =>
+        sig.addEventListener('abort', () => resolve(), { once: true }),
+      );
+      const elapsed = Date.now() - t0;
+      // Generous tolerance — just checking the timer fires.
+      expect(elapsed).toBeGreaterThanOrEqual(30);
+      expect(elapsed).toBeLessThan(2000);
     });
   });
 });

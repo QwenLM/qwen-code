@@ -34,7 +34,7 @@ console.log('Daemon features:', caps.features);
 
 // 2. Spawn-or-attach a session for the current workspace.
 const session = await client.createOrAttachSession({
-  cwd: process.cwd(),
+  workspaceCwd: process.cwd(),
 });
 console.log(`session=${session.sessionId} attached=${session.attached}`);
 
@@ -57,10 +57,10 @@ const subscription = (async () => {
 })();
 
 // 4. Send a prompt and wait for it to settle. (Order-of-operations
-//    note: even if `sendPrompt` fires before the SSE handshake
+//    note: even if `prompt()` fires before the SSE handshake
 //    completes, step 3's `lastEventId: 0` guarantees every event
 //    lands in the iterator.)
-const result = await client.sendPrompt(session.sessionId, {
+const result = await client.prompt(session.sessionId, {
   prompt: [{ type: 'text', text: 'Summarize src/main.ts in one sentence.' }],
 });
 console.log('stop reason:', result.stopReason);
@@ -143,11 +143,11 @@ Two clients pointed at the same daemon and `cwd` end up on the same session:
 
 ```ts
 // Client A (e.g. an IDE plugin)
-const a = await clientA.createOrAttachSession({ cwd: '/work/repo' });
+const a = await clientA.createOrAttachSession({ workspaceCwd: '/work/repo' });
 console.log(a.attached); // false — A spawned the agent
 
 // Client B (e.g. a web UI on the same machine)
-const b = await clientB.createOrAttachSession({ cwd: '/work/repo' });
+const b = await clientB.createOrAttachSession({ workspaceCwd: '/work/repo' });
 console.log(b.attached); // true — B joined A's session
 console.log(a.sessionId === b.sessionId); // true
 ```
@@ -186,7 +186,7 @@ try {
 If your user hits Esc:
 
 ```ts
-await client.cancelSession(session.sessionId);
+await client.cancel(session.sessionId);
 // In the event stream you'll see the prompt resolve with stopReason: "cancelled"
 ```
 

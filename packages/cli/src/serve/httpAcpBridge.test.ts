@@ -837,66 +837,70 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
-    it('rejects spawnOrAttach when the agent rejects the requested model', async () => {
+    it('keeps the session alive on model-switch failure and publishes model_switch_failed', async () => {
+      // Contract (per #3889 review A05Ym): when the agent rejects the
+      // requested model at create-session time, the session is still
+      // operational on the agent's default model. The caller gets a
+      // sessionId they can retry the model switch against (via
+      // POST /session/:id/model) and observe via the SSE stream.
+      // Tearing the session down would force the caller into a 500
+      // with no way to recover.
       const { bridge } = setup({
         setModelImpl: async () => {
           throw new Error('unknown model');
         },
       });
-      await expect(
-        bridge.spawnOrAttach({
-          workspaceCwd: WS_A,
-          modelServiceId: 'definitely-not-a-real-model',
-        }),
-      ).rejects.toBeTruthy();
-      // Failed spawn must NOT leave the half-initialized session in the maps.
-      // (The entry's EventBus is also closed in the same teardown — it has
-      // no externally-reachable subscriber and the bus's internal `closed`
-      // flag prevents future GC-blocking publishes from the in-flight
-      // ClientSideConnection observer chain.)
-      expect(bridge.sessionCount).toBe(0);
-      await bridge.shutdown();
-    });
-
-    it('a retry after a model-rejection failure uses a fresh EventBus', async () => {
-      // Regression for the leak path: after a setSessionModel failure we
-      // tear down the half-initialized session. A subsequent retry must
-      // create a *new* entry (not silently reuse the old one), and old
-      // events must not bleed into the new subscriber.
-      let attempt = 0;
-      const { bridge } = setup({
-        setModelImpl: async () => {
-          attempt += 1;
-          if (attempt === 1) throw new Error('first attempt rejected');
-        },
-      });
-
-      await expect(
-        bridge.spawnOrAttach({
-          workspaceCwd: WS_A,
-          modelServiceId: 'try-1',
-        }),
-      ).rejects.toBeTruthy();
-      expect(bridge.sessionCount).toBe(0);
-
       const session = await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
-        modelServiceId: 'try-2',
+        modelServiceId: 'definitely-not-a-real-model',
       });
       expect(session.attached).toBe(false);
       expect(bridge.sessionCount).toBe(1);
-
-      // Subscribe to the live session — should see no events from the
-      // failed attempt.
+      // The model_switch_failed event must be on the bus for any
+      // subscriber that subscribes with `lastEventId: 0` (replay).
       const abort = new AbortController();
       const iter = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
+        lastEventId: 0,
       });
       const it = iter[Symbol.asyncIterator]();
-      // No events have been published yet; aborting closes the queue.
+      const first = await it.next();
+      expect(first.value?.type).toBe('model_switch_failed');
+      expect(first.value?.data).toMatchObject({
+        sessionId: session.sessionId,
+        requestedModelId: 'definitely-not-a-real-model',
+      });
       abort.abort();
-      const next = await it.next();
-      expect(next.done).toBe(true);
+      await bridge.shutdown();
+    });
+
+    it('attaches to the existing session on retry after a model-switch failure', async () => {
+      // Per the same A05Ym contract: a follow-up `spawnOrAttach` for
+      // the same workspace finds the existing session (rather than
+      // re-spawning a fresh one), and a retry of the model switch
+      // through `POST /session/:id/model` is the documented recovery
+      // path. We exercise just the attach side here.
+      const { bridge } = setup({
+        setModelImpl: async () => {
+          throw new Error('first attempt rejected');
+        },
+      });
+
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        modelServiceId: 'try-1',
+      });
+      expect(first.attached).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Second attach (no modelServiceId so we don't re-trigger the
+      // failing setModel) reuses the same session.
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      expect(second.attached).toBe(true);
+      expect(second.sessionId).toBe(first.sessionId);
+      expect(bridge.sessionCount).toBe(1);
 
       await bridge.shutdown();
     });
@@ -1681,9 +1685,13 @@ describe('createHttpAcpBridge', () => {
       await new Promise((r) => setTimeout(r, 10));
       await bridge.shutdown();
 
-      // Subscriber must unwind to completion (no events ever published).
-      const events = await drain;
-      expect(events).toEqual([]);
+      // Subscriber must unwind to completion. Per #3889 review A05Ys
+      // the bus now publishes a terminal `session_died` event before
+      // closing on shutdown, so SSE subscribers can distinguish
+      // daemon shutdown from a transient network error.
+      const events = (await drain) as Array<{ type: string }>;
+      expect(events).toHaveLength(1);
+      expect(events[0]?.type).toBe('session_died');
     });
   });
 });
