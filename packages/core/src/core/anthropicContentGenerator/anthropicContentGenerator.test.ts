@@ -980,6 +980,60 @@ describe('AnthropicContentGenerator', () => {
           }),
         ).toEqual({ type: 'enabled', budget_tokens: 42_000 });
       });
+
+      it('still ships adaptive (no output_config, no effort beta) when reasoning is undefined on a 4.6+ model', async () => {
+        // Pins the existing wire shape for the corner case where a 4.6+
+        // model runs with no `reasoning` config at all: the thinking field
+        // takes the adaptive shape, but `resolveEffectiveEffort` returns
+        // undefined (no effort enum to emit), so `output_config` is
+        // omitted and the `effort-2025-11-24` beta isn't pushed.
+        // `prompt-caching-scope-2026-01-05` rides along because
+        // enableCacheControl defaults to true. If Anthropic ever requires
+        // `output_config.effort` to accompany adaptive thinking, this
+        // pinned shape will surface the regression at this test instead
+        // of at runtime as a server 400.
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-opus-4-7',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-opus-4-7',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+            // No `reasoning` key at all — different from `reasoning: false`.
+          },
+          mockConfig,
+        );
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [req, options] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect((req as { thinking?: unknown }).thinking).toEqual({
+          type: 'adaptive',
+        });
+        expect(req).toEqual(
+          expect.not.objectContaining({ output_config: expect.anything() }),
+        );
+        const headers = ((options as { headers?: Record<string, string> })
+          ?.headers || {}) as Record<string, string>;
+        expect(headers['anthropic-beta']).toContain(
+          'interleaved-thinking-2025-05-14',
+        );
+        expect(headers['anthropic-beta']).not.toContain('effort-2025-11-24');
+        expect(headers['anthropic-beta']).toContain(
+          'prompt-caching-scope-2026-01-05',
+        );
+      });
     });
 
     it('omits thinking when request.config.thinkingConfig.includeThoughts is false', async () => {

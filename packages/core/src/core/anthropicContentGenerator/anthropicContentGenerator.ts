@@ -113,8 +113,16 @@ type StreamingBlockState = {
   signature: string;
 };
 
+// Two thinking shapes — the budget-tokens shape for pre-4.6 Claude families
+// and the adaptive shape for 4.6+. Centralized so the message-params type,
+// the streaming-request override, and `buildThinkingConfig`'s return type
+// stay in lockstep when a third shape (e.g. `extended`) eventually lands.
+type AnthropicThinkingParam =
+  | { type: 'enabled'; budget_tokens: number }
+  | { type: 'adaptive' };
+
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
-  thinking?: { type: 'enabled'; budget_tokens: number } | { type: 'adaptive' };
+  thinking?: AnthropicThinkingParam;
   // Anthropic beta feature: output_config.effort (requires beta header effort-2025-11-24)
   // This is not yet represented in the official SDK types we depend on. The
   // 'max' tier is a DeepSeek extension (see contentGenerator.ts comment).
@@ -132,7 +140,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
     private contentGeneratorConfig: ContentGeneratorConfig,
     private readonly cliConfig: Config,
   ) {
-    const defaultHeaders = this.buildHeaders();
+    // One predicate drives the whole IdeaLab-style proxy compatibility
+    // bundle: `Authorization: Bearer` auth, `claude-cli` User-Agent, and
+    // `x-app: cli`. Two locally-named booleans for the same thing would
+    // obscure that coupling and tempt a future contributor to split one
+    // half of the bundle without the other.
+    const useProxyIdentity = !isAnthropicNativeBaseUrl(contentGeneratorConfig);
+    const defaultHeaders = this.buildHeaders(useProxyIdentity);
     const baseURL = contentGeneratorConfig.baseUrl;
     // Configure runtime options to ensure user-configured timeout works as expected
     // bodyTimeout is always disabled (0) to let Anthropic SDK timeout control the request
@@ -147,9 +161,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // when targeting a non-Anthropic-native baseURL — direct
     // `api.anthropic.com` users keep the SDK-default `apiKey` (`x-api-key`)
     // path so they don't break against the Anthropic API itself.
-    const useBearerAuth = !isAnthropicNativeBaseUrl(contentGeneratorConfig);
     this.client = new Anthropic({
-      ...(useBearerAuth
+      ...(useProxyIdentity
         ? { authToken: contentGeneratorConfig.apiKey }
         : { apiKey: contentGeneratorConfig.apiKey }),
       baseURL,
@@ -185,9 +198,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const anthropicRequest = await this.buildRequest(request);
     const headers = this.buildPerRequestHeaders(anthropicRequest);
     const streamingRequest: MessageCreateParamsStreaming & {
-      thinking?:
-        | { type: 'enabled'; budget_tokens: number }
-        | { type: 'adaptive' };
+      thinking?: AnthropicThinkingParam;
     } = {
       ...anthropicRequest,
       stream: true,
@@ -239,7 +250,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return false;
   }
 
-  private buildHeaders(): Record<string, string> {
+  private buildHeaders(useProxyIdentity: boolean): Record<string, string> {
     // Beta headers are computed per-request in buildPerRequestHeaders so they
     // stay in sync with what the request body actually carries — see #3788
     // review feedback. Constructor headers carry only User-Agent and any
@@ -253,10 +264,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // usage by client identity. For api.anthropic.com itself we keep the
     // truthful QwenCode User-Agent so usage isn't misattributed to Claude
     // CLI in Anthropic's logs/quotas, and we don't ship the proxy-specific
-    // `x-app` header.
-    const useProxyIdentity = !isAnthropicNativeBaseUrl(
-      this.contentGeneratorConfig,
-    );
+    // `x-app` header. Predicate is computed once at construction and shared
+    // with the auth-mode decision so the bundle stays internally consistent.
     const userAgent = useProxyIdentity
       ? `claude-cli/${version} (external, cli)`
       : `QwenCode/${version} (${process.platform}; ${process.arch})`;
@@ -307,12 +316,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     // Enable global prompt cache scope so identical system/tool prefixes
     // are cached across sessions, greatly improving cross-session cache hit
-    // rates. Only ship the beta flag when cache_control is actually being
-    // attached to the body (the converter wires `cache_control` based on
-    // the same `enableCacheControl` flag) — otherwise the flag is dead
-    // weight and risks 4xx responses from anthropic-compatible backends
-    // that don't recognize it. Keeping this conditional also preserves the
-    // `betas.length === 0` early-return below for the all-disabled case.
+    // rates. Gate on the same `enableCacheControl` flag the converter uses
+    // for body-side `cache_control`: when caching is opted out, neither the
+    // beta nor the body markers ship, so anthropic-compatible backends that
+    // don't recognize the beta don't 4xx on it. The flag-gate isn't a
+    // strict body-presence check (the converter may still skip
+    // `cache_control` on niche shapes like a request with no system text,
+    // no tools, and a last user block that isn't text) — Anthropic-native
+    // ignores unused betas, so the looser gate is intentional. Keeping
+    // this conditional also preserves the `betas.length === 0`
+    // early-return below for the all-disabled case.
     if (this.contentGeneratorConfig.enableCacheControl !== false) {
       betas.push('prompt-caching-scope-2026-01-05');
     }
@@ -520,6 +533,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * opus-5-1, …) are recognized instead of silently falling back to the
    * budget path and tripping HTTP 400 with `budget_tokens` they don't
    * accept.
+   *
+   * The regex is intentionally unanchored so reseller-prefixed model names
+   * also match (`bedrock/claude-opus-4-7`, `vertex_ai/claude-sonnet-4-6@…`,
+   * `idealab:claude-opus-4-6`, etc.) — those route to the same Anthropic
+   * models on the wire and need the same thinking shape. Do not tighten to
+   * `^claude-` without also covering those naming conventions.
    */
   private modelSupportsAdaptiveThinking(): boolean {
     const model = (this.contentGeneratorConfig.model || '').toLowerCase();
@@ -533,10 +552,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private buildThinkingConfig(
     request: GenerateContentParameters,
     effectiveEffort: 'low' | 'medium' | 'high' | 'max' | undefined,
-  ):
-    | { type: 'enabled'; budget_tokens: number }
-    | { type: 'adaptive' }
-    | undefined {
+  ): AnthropicThinkingParam | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
     }
