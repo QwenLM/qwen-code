@@ -2896,7 +2896,7 @@ export class Config {
 
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
-    options?: { skipDiscovery?: boolean },
+    options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -2930,6 +2930,37 @@ export class Config {
       }
     };
 
+    // The synthetic structured_output tool is the terminal contract for
+    // --json-schema runs. It must be registered in BOTH the bare-mode
+    // branch and the regular branch — without it the model can't finish
+    // a structured run, so omitting either branch causes
+    // `qwen [--bare] --json-schema X -p "..."` to loop until
+    // maxSessionTurns and exit via the "plain text" failure path. Hoisted
+    // out of the two branches so the dynamic-import factory shape stays
+    // in sync between them.
+    //
+    // Skipped when building a subagent-context registry. `this.jsonSchema`
+    // propagates to subagent overrides via prototype delegation
+    // (`Object.create(base)` in `createApprovalModeOverride` /
+    // `buildSubagentContextOverride`), but only `runNonInteractive`'s main
+    // and drain loops detect a successful structured_output call as
+    // terminal. A subagent that called the tool would receive the
+    // "Session will end now" llmContent, then keep running because its
+    // own loop has no termination handler — wasted tokens with no
+    // structured payload surfacing on stdout. Strip the registration in
+    // those contexts.
+    const registerStructuredOutputIfRequested = async (): Promise<void> => {
+      if (!this.jsonSchema) return;
+      if (options?.forSubAgent) return;
+      const schema = this.jsonSchema;
+      await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
+        const { SyntheticOutputTool } = await import(
+          '../tools/syntheticOutput.js'
+        );
+        return new SyntheticOutputTool(schema);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -2943,6 +2974,7 @@ export class Config {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
       });
+      await registerStructuredOutputIfRequested();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );
@@ -3060,15 +3092,9 @@ export class Config {
     // Register synthetic structured-output tool when --json-schema is set.
     // The tool's parameter schema IS the user-supplied JSON Schema, so the
     // model's arguments must match it (Ajv-validated in BaseDeclarativeTool).
-    if (this.jsonSchema) {
-      const schema = this.jsonSchema;
-      await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
-        const { SyntheticOutputTool } = await import(
-          '../tools/syntheticOutput.js'
-        );
-        return new SyntheticOutputTool(this, schema);
-      });
-    }
+    // Same helper as the bare-mode branch above to keep the registration
+    // shape and permission gating in sync between the two paths.
+    await registerStructuredOutputIfRequested();
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {
