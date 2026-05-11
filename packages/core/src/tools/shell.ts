@@ -32,6 +32,7 @@ import {
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
 import type {
   ShellExecutionConfig,
+  ShellExecutionResult,
   ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
@@ -893,6 +894,15 @@ export function parseNumstat(numstatOutput: string): Map<string, number> {
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
+/**
+ * Time we give SIGTERM to settle a promoted-then-cancelled child
+ * before escalating to SIGKILL. Mirrors `SIGKILL_TIMEOUT_MS` inside
+ * `ShellExecutionService` (which runs the same SIGTERM-then-SIGKILL
+ * pattern on the non-promote cancel path) but kept as a separate
+ * constant here so tuning one doesn't silently change the other.
+ */
+const PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS = 200;
+
 // Long-run advisory threshold: half the EFFECTIVE foreground timeout
 // (not the default), computed per-invocation by `longRunThresholdFor`.
 // Couples to whichever timeout actually governs THIS command — so a
@@ -1413,6 +1423,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
+    setPromoteAbortControllerCallback?: (ac: AbortController) => void,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
 
@@ -1430,11 +1441,26 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const effectiveTimeout =
       this.params.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_MS;
 
-    // Create combined signal with timeout for foreground execution
-    let combinedSignal = signal;
+    // Create combined signal with timeout AND promote-trigger for
+    // foreground execution. The promoteAbortController is exposed to
+    // the caller (the future Ctrl+B keybind handler in PR-3) via
+    // `setPromoteAbortControllerCallback`. When the keybind fires
+    // `promoteAbortController.abort({ kind: 'background', shellId })`,
+    // ShellExecutionService detects the discriminated reason and
+    // returns `result.promoted: true` instead of killing the child —
+    // see #3842 / #3886 for the foundation.
+    const promoteAbortController = new AbortController();
+    let combinedSignal = AbortSignal.any([
+      signal,
+      promoteAbortController.signal,
+    ]);
     if (effectiveTimeout) {
       const timeoutSignal = AbortSignal.timeout(effectiveTimeout);
-      combinedSignal = AbortSignal.any([signal, timeoutSignal]);
+      combinedSignal = AbortSignal.any([
+        signal,
+        timeoutSignal,
+        promoteAbortController.signal,
+      ]);
     }
 
     // Add co-author to git commit commands and Qwen Code attribution to
@@ -1479,81 +1505,148 @@ export class ShellToolInvocation extends BaseToolInvocation<
       : null;
 
     let cumulativeOutput: string | AnsiOutput = '';
-    let lastUpdateTime = Date.now();
+    let lastUpdateTime = Number.NEGATIVE_INFINITY;
     let isBinaryStream = false;
     let totalLines = 0;
     let totalBytes = 0;
+    let trailingFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const { result: resultPromise, pid } = await ShellExecutionService.execute(
-      commandToExecute,
-      cwd,
-      (event: ShellOutputEvent) => {
-        let shouldUpdate = false;
+    const cancelTrailingFlush = () => {
+      if (trailingFlushTimer !== null) {
+        clearTimeout(trailingFlushTimer);
+        trailingFlushTimer = null;
+      }
+    };
 
-        switch (event.type) {
-          case 'data':
-            if (isBinaryStream) break;
-            cumulativeOutput = event.chunk;
-            // Stats are only consumed by the ANSI-output branch below,
-            // so skip the per-chunk accounting for plain string chunks.
-            if (Array.isArray(event.chunk)) {
-              totalLines = event.chunk.length;
-              totalBytes = event.chunk.reduce(
-                (sum, line) =>
-                  sum +
-                  line.reduce(
-                    (ls, token) => ls + Buffer.byteLength(token.text, 'utf-8'),
-                    0,
-                  ),
-                0,
-              );
-            }
-            shouldUpdate = true;
-            break;
-          case 'binary_detected':
-            isBinaryStream = true;
-            cumulativeOutput = '[Binary output detected. Halting stream...]';
-            shouldUpdate = true;
-            break;
-          case 'binary_progress':
-            isBinaryStream = true;
-            cumulativeOutput = `[Receiving binary output... ${formatMemoryUsage(
-              event.bytesReceived,
-            )} received]`;
-            if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
-              shouldUpdate = true;
-            }
-            break;
-          default: {
-            throw new Error('An unhandled ShellOutputEvent was found.');
+    const doUpdate = () => {
+      // Any path that emits an update supersedes a pending trailing flush —
+      // cancel centrally so leading-edge text, ANSI, binary_detected, and
+      // binary_progress branches all stay consistent without each having to
+      // remember to clear the timer themselves.
+      cancelTrailingFlush();
+      lastUpdateTime = Date.now();
+      if (!updateOutput) return;
+      if (typeof cumulativeOutput === 'string') {
+        updateOutput(cumulativeOutput);
+      } else {
+        updateOutput({
+          ansiOutput: cumulativeOutput,
+          totalLines,
+          totalBytes,
+          ...(this.params.timeout != null && {
+            timeoutMs: this.params.timeout,
+          }),
+        });
+      }
+    };
+
+    // If the command is aborted (user cancel or timeout) while a trailing
+    // flush is pending, cancel the timer so we don't emit a stale frame
+    // between the abort signal firing and the result promise settling.
+    const onAbort = () => {
+      cancelTrailingFlush();
+    };
+    combinedSignal.addEventListener('abort', onAbort, { once: true });
+
+    const onShellOutputEvent = (event: ShellOutputEvent) => {
+      let shouldUpdate = false;
+
+      switch (event.type) {
+        case 'data':
+          if (isBinaryStream) break;
+          cumulativeOutput = event.chunk;
+          // Stats are only consumed by the ANSI-output branch below,
+          // so skip the per-chunk accounting for plain string chunks.
+          if (Array.isArray(event.chunk)) {
+            totalLines = event.chunk.length;
+            totalBytes = event.chunk.reduce(
+              (sum, line) =>
+                sum +
+                line.reduce(
+                  (ls, token) => ls + Buffer.byteLength(token.text, 'utf-8'),
+                  0,
+                ),
+              0,
+            );
           }
-        }
-
-        if (shouldUpdate && updateOutput) {
-          if (typeof cumulativeOutput === 'string') {
-            updateOutput(cumulativeOutput);
-          } else {
-            updateOutput({
-              ansiOutput: cumulativeOutput,
-              totalLines,
-              totalBytes,
-              // Only include timeout when user explicitly set it
-              ...(this.params.timeout != null && {
-                timeoutMs: this.params.timeout,
-              }),
-            });
+          // ANSI output is already throttled and semantically deduped by
+          // ShellExecutionService, so preserve its live responsiveness.
+          // Plain text data can arrive in bursts and does not need every
+          // chunk to force a React render; the final ToolResult still
+          // carries the complete output after command completion.
+          if (Array.isArray(event.chunk)) {
+            shouldUpdate = true;
+          } else if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
+            shouldUpdate = true;
+          } else if (trailingFlushTimer === null) {
+            // Throttled: schedule a trailing flush so the last suppressed
+            // chunk is still shown if the command goes quiet within the
+            // window. The timer's callback reads `cumulativeOutput` by
+            // closure, so subsequent suppressed chunks within the same
+            // window don't need to reschedule — the latest value will be
+            // emitted when the timer fires.
+            const remaining =
+              OUTPUT_UPDATE_INTERVAL_MS - (Date.now() - lastUpdateTime);
+            trailingFlushTimer = setTimeout(() => {
+              trailingFlushTimer = null;
+              doUpdate();
+            }, remaining);
           }
-          lastUpdateTime = Date.now();
+          break;
+        case 'binary_detected':
+          isBinaryStream = true;
+          cumulativeOutput = '[Binary output detected. Halting stream...]';
+          shouldUpdate = true;
+          break;
+        case 'binary_progress':
+          isBinaryStream = true;
+          cumulativeOutput = `[Receiving binary output... ${formatMemoryUsage(
+            event.bytesReceived,
+          )} received]`;
+          if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
+            shouldUpdate = true;
+          }
+          break;
+        default: {
+          throw new Error('An unhandled ShellOutputEvent was found.');
         }
-      },
-      combinedSignal,
-      this.config.getShouldUseNodePtyShell(),
-      shellExecutionConfig ?? {},
-    );
+      }
+
+      if (shouldUpdate) {
+        doUpdate();
+      }
+    };
+
+    let executionHandle;
+    try {
+      executionHandle = await ShellExecutionService.execute(
+        commandToExecute,
+        cwd,
+        onShellOutputEvent,
+        combinedSignal,
+        this.config.getShouldUseNodePtyShell(),
+        shellExecutionConfig ?? {},
+      );
+    } catch (err) {
+      // ShellExecutionService.execute() can throw before resolving (e.g.
+      // PTY dynamic import failure). Tear down the abort listener and any
+      // (theoretically) scheduled trailing flush so nothing fires after we
+      // re-throw to the caller.
+      cancelTrailingFlush();
+      combinedSignal.removeEventListener('abort', onAbort);
+      throw err;
+    }
+    const { result: resultPromise, pid } = executionHandle;
 
     if (pid && setPidCallback) {
       setPidCallback(pid);
     }
+    // Hand the promote controller up to the scheduler so a future UI
+    // surface (PR-3 Ctrl+B keybind) can find it and trigger promote.
+    // Done unconditionally — the caller can ignore it if they don't
+    // implement promote yet, but exposing it now means PR-3 doesn't
+    // need to revisit shell.ts.
+    setPromoteAbortControllerCallback?.(promoteAbortController);
 
     // Bracket the spawn → settle wall-clock so the result builder below
     // can decide whether to append the long-run advisory. Captured AFTER
@@ -1572,13 +1665,86 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // difference matters here.
     const executionStartTime = performance.now();
 
-    const result = await resultPromise;
+    let result;
+    try {
+      result = await resultPromise;
+    } finally {
+      // Cancel any pending trailing flush — the command has settled (or
+      // threw) and either the final ToolResult carries the complete output
+      // or the caller will surface an error. Either way the timer must not
+      // fire a stale frame after we've returned. `finally` covers both the
+      // happy path and the (theoretical) reject path so no timer leaks.
+      cancelTrailingFlush();
+      combinedSignal.removeEventListener('abort', onAbort);
+    }
+
+    // Background-promote path: the user pressed Ctrl+B (PR-3 wires the
+    // keybind to `promoteAbortController.abort({ kind: 'background' })`),
+    // ShellExecutionService skipped the kill, snapshotted the output up
+    // to that moment, and resolved with `promoted: true`. Per #3831
+    // design question 7, `result.aborted` is `false` for promoted
+    // results, so this branch is checked BEFORE the `if (result.aborted)`
+    // arm and falls through naturally to the success-shape arm if
+    // promote didn't fire.
+    //
+    // What we do here:
+    //   1. Generate a `bg_xxx` shell id + on-disk output path under the
+    //      same project temp dir `executeBackground` uses.
+    //   2. Write `result.output` (the snapshot ShellExecutionService
+    //      built right before promote) to the file as the initial
+    //      content. The agent / `/tasks` / dialog can `Read` this file.
+    //   3. Register a `BackgroundShellEntry` with the existing pid +
+    //      a FRESH `AbortController` whose abort listener kills the
+    //      still-running child (mirroring `ShellExecutionService`'s
+    //      SIGTERM → 200ms → SIGKILL cascade) and sync-marks the
+    //      entry `cancelled`. `task_stop bg_xxx` and the dialog's
+    //      `x` key route through `entry.abortController.abort()` →
+    //      kill listener → child gets SIGTERM/SIGKILL. Reusing the
+    //      already-aborted `promoteAbortController` would have made
+    //      `task_stop` a no-op (Web `AbortController.abort()` is
+    //      idempotent on already-aborted controllers per spec) — see
+    //      `handlePromotedForeground` for the full rationale.
+    //   4. Return a model-facing `ToolResult` with promote-flavored copy
+    //      pointing the agent at `/tasks` / the Background tasks dialog
+    //      / `task_stop` for follow-up.
+    //
+    // KNOWN LIMITATION (deferred to PR-2.5): post-promote, the
+    // ShellExecutionService no longer streams output to the file (PR-1
+    // detached its data listener as part of the ownership-transfer
+    // contract), and there's no path for the registry entry to settle
+    // when the underlying child exits naturally. The entry stays
+    // `'running'` until `task_stop bg_xxx` or session shutdown
+    // (`abortAll`) clears it. PR-2.5 will add post-promote stream
+    // redirect (so /tasks shows live output) and a settle hook (so
+    // natural exit transitions the entry to `completed`/`failed`).
+    if (result.promoted) {
+      const promotedToolResult = await this.handlePromotedForeground(
+        result,
+        cwd,
+        commandToExecute,
+        promoteAbortController,
+      );
+      return promotedToolResult;
+    }
 
     let llmContent = '';
     if (result.aborted) {
-      // Check if it was a timeout or user cancellation
+      // Check if it was a timeout or user cancellation. Exclude BOTH
+      // the user signal AND the promote signal — the latter matters
+      // when PR-3's Ctrl+B keybind fires `promoteAbortController.abort`
+      // but the service's race guard refused promotion (the child
+      // terminated a beat earlier). The result then lands with
+      // `aborted: true, promoted: false`; without the
+      // `promoteAbortController.signal.aborted` exclusion, the
+      // foreground path would falsely report "Command timed out" for
+      // a process that finished naturally.
       const wasTimeout =
-        effectiveTimeout && combinedSignal.aborted && !signal.aborted;
+        effectiveTimeout &&
+        combinedSignal.aborted &&
+        !signal.aborted &&
+        !promoteAbortController.signal.aborted;
+      const wasPromoteRefused =
+        promoteAbortController.signal.aborted && !signal.aborted;
 
       if (wasTimeout) {
         llmContent = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
@@ -1586,6 +1752,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
           llmContent += ` Below is the output before it timed out:\n${result.output}`;
         } else {
           llmContent += ' There was no output before it timed out.';
+        }
+      } else if (wasPromoteRefused) {
+        // The user pressed Ctrl+B (promote) but the service refused —
+        // typically the child had already terminated by the time the
+        // signal was checked. Treat as a benign race: report what
+        // actually happened (the run completed, just without the
+        // promote handoff) rather than as a cancellation or timeout.
+        llmContent =
+          'Command finished before the background-promote request could be honoured (the child had already exited).';
+        if (result.output.trim()) {
+          llmContent += ` Output:\n${result.output}`;
         }
       } else {
         llmContent = 'Command was cancelled by user before it could complete.';
@@ -1714,13 +1891,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
         returnDisplayMessage = result.output;
       } else {
         if (result.aborted) {
-          // Check if it was a timeout or user cancellation
+          // Check if it was a timeout, a refused-promote, or a real user
+          // cancellation. See the matching block above for why we also
+          // exclude `promoteAbortController.signal.aborted` from the
+          // timeout discriminator.
           const wasTimeout =
-            effectiveTimeout && combinedSignal.aborted && !signal.aborted;
+            effectiveTimeout &&
+            combinedSignal.aborted &&
+            !signal.aborted &&
+            !promoteAbortController.signal.aborted;
+          const wasPromoteRefused =
+            promoteAbortController.signal.aborted && !signal.aborted;
 
           returnDisplayMessage = wasTimeout
             ? `Command timed out after ${effectiveTimeout}ms.`
-            : 'Command cancelled by user.';
+            : wasPromoteRefused
+              ? 'Command finished before background-promote could be honoured.'
+              : 'Command cancelled by user.';
         } else if (result.signal) {
           returnDisplayMessage = `Command terminated by signal: ${result.signal}`;
         } else if (result.error) {
@@ -1838,6 +2025,234 @@ export class ShellToolInvocation extends BaseToolInvocation<
       llmContent,
       returnDisplay: returnDisplayMessage,
       ...executionError,
+    };
+  }
+
+  /**
+   * Foreground → background promote handler. Called when the foreground
+   * execute path observes `result.promoted: true` (the user pressed
+   * Ctrl+B mid-flight). Snapshots captured output to a `bg_xxx.output`
+   * file, registers a `BackgroundShellEntry` in the same registry the
+   * `is_background: true` path uses, and returns a model-facing
+   * `ToolResult` pointing at `/tasks` / the dialog / `task_stop` for
+   * follow-up.
+   *
+   * Limitations (PR-2.5 follow-up):
+   *   - The registry entry stays `'running'` until `task_stop bg_xxx`
+   *     or session-end `abortAll` clears it; natural child exit does
+   *     NOT auto-settle the entry today (no settle hook from the
+   *     service after promote — the listener was detached as part of
+   *     PR-1's ownership-transfer contract).
+   *   - The `outputPath` content is FROZEN at the promote moment; the
+   *     service no longer streams post-promote bytes to the file.
+   *     Caller-side stream redirect lands in PR-2.5.
+   */
+  private async handlePromotedForeground(
+    result: ShellExecutionResult,
+    cwd: string,
+    commandToExecute: string,
+    abortController: AbortController,
+  ): Promise<ToolResult> {
+    // Mirror executeBackground's outputPath layout so /tasks-on-disk and
+    // ReadFileTool's auto-allow rules treat foreground-promoted shells
+    // and originally-background shells identically.
+    const outputDir = path.join(
+      this.config.storage.getProjectTempDir(),
+      'background-shells',
+      this.config.getSessionId(),
+    );
+    // The service has already detached its kill path by the time we
+    // get here (PR-1's ownership-transfer contract), so any throw
+    // before we wire up the registry's kill listener leaves the still-
+    // running child as an orphan zombie that nothing can stop until
+    // the OS reaps it on session end. Wrap the mkdir + write best-
+    // effort: if either fails, log + reap the child immediately and
+    // report the failure to the caller (mirrors the safety pattern
+    // around `registry.register` further down).
+    let mkdirError: Error | undefined;
+    try {
+      fs.mkdirSync(outputDir, { recursive: true });
+    } catch (err) {
+      mkdirError = err instanceof Error ? err : new Error(String(err));
+    }
+    if (mkdirError) {
+      debugLogger.warn(
+        `promote: mkdirSync(${outputDir}) failed before registry register — killing orphan child: ${mkdirError.message}`,
+      );
+      const pid = result.pid;
+      if (pid !== undefined) {
+        if (os.platform() === 'win32') {
+          try {
+            const taskkillChild = childProcess.spawn('taskkill', [
+              '/pid',
+              String(pid),
+              '/f',
+              '/t',
+            ]);
+            taskkillChild.on('error', () => {
+              /* swallow — already in error path */
+            });
+          } catch {
+            /* swallow */
+          }
+        } else {
+          try {
+            process.kill(-pid, 'SIGTERM');
+          } catch {
+            /* swallow — pid gone or perms */
+          }
+        }
+      }
+      throw mkdirError;
+    }
+
+    const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
+    const outputPath = path.join(outputDir, `shell-${shellId}.output`);
+    // Best-effort initial snapshot write — if disk is full or
+    // permission flips, log + continue (the registry entry is still
+    // valuable on its own; the file is only the inspection surface).
+    try {
+      fs.writeFileSync(outputPath, result.output);
+    } catch (err) {
+      debugLogger.warn(
+        `promote: failed to write initial output snapshot to ${outputPath}: ${getErrorMessage(err)}`,
+      );
+    }
+
+    const startTime = Date.now();
+    const registry = this.config.getBackgroundShellRegistry();
+    // Create a FRESH AbortController for the registry entry. Using the
+    // promote AbortController directly (which is already in the
+    // `aborted` state — that's what triggered the promote) would be
+    // a real bug: `task_stop bg_xxx` calls `entry.abortController.abort()`
+    // which is a no-op on an already-aborted controller, AND
+    // `ShellExecutionService` has detached its abort listener as part
+    // of the promote handoff (PR-1's ownership-transfer contract), so
+    // there's nobody left to translate the abort into an actual signal
+    // to the still-running child. Instead, the entry gets a new
+    // controller, and we wire the abort listener directly to send
+    // SIGTERM → SIGKILL ourselves (mirroring the kill semantics
+    // `ShellExecutionService.execute()`'s abort handler uses for the
+    // non-promote path) and to mark the registry entry `cancelled`.
+    const entryAc = new AbortController();
+    const cancelChild = async () => {
+      const pid = result.pid;
+      if (pid !== undefined) {
+        if (os.platform() === 'win32') {
+          try {
+            const taskkillChild = childProcess.spawn('taskkill', [
+              '/pid',
+              String(pid),
+              '/f',
+              '/t',
+            ]);
+            // Without an 'error' listener on the spawned ChildProcess,
+            // a taskkill spawn failure (binary missing, permission
+            // denied, etc.) would emit 'error' with no listener — which
+            // crashes Node by default. Log + drop is the sane recovery:
+            // the registry entry still transitions via `registry.cancel`
+            // below; the still-running child is at worst an orphan,
+            // which Windows reaps when the CLI session ends.
+            taskkillChild.on('error', (err) => {
+              debugLogger.warn(
+                `promote: taskkill spawn failed for pid=${pid}: ${err.message}`,
+              );
+            });
+          } catch (e) {
+            // childProcess.spawn itself throwing (sync) is rare but possible
+            // (e.g. EMFILE — too many open files) — same recovery.
+            debugLogger.warn(
+              `promote: childProcess.spawn('taskkill') threw for pid=${pid}: ${getErrorMessage(e)}`,
+            );
+          }
+        } else {
+          try {
+            // Negative pid → kill the whole process group; matches the
+            // `detached: !isWindows` spawn the foreground path uses.
+            process.kill(-pid, 'SIGTERM');
+            await new Promise((res) =>
+              setTimeout(res, PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS),
+            );
+            try {
+              process.kill(-pid, 'SIGKILL');
+            } catch {
+              // Already dead before SIGKILL — happy path.
+            }
+          } catch (e) {
+            debugLogger.warn(
+              `promote: process.kill on -${pid} threw: ${getErrorMessage(e)}`,
+            );
+          }
+        }
+      }
+      // Sync-mark the registry entry `cancelled` so /tasks reflects the
+      // user intent immediately. (Recursive note: `registry.cancel`
+      // calls `entry.abortController.abort()` internally, but our
+      // entryAc is already aborted by the time we got here, so that
+      // call is a no-op + our listener was `{ once: true }` and has
+      // already detached.)
+      registry.cancel(shellId, Date.now());
+    };
+    entryAc.signal.addEventListener('abort', () => void cancelChild(), {
+      once: true,
+    });
+    const entry: BackgroundShellEntry = {
+      shellId,
+      // Use `commandToExecute` (post-co-author transform) so the registry
+      // shows what actually ran. `this.params.command` is the pre-transform
+      // form and would diverge for git-commit invocations that
+      // `addCoAuthorToGitCommit()` rewrote (#3894 review).
+      command: commandToExecute,
+      cwd,
+      pid: result.pid,
+      status: 'running',
+      startTime,
+      outputPath,
+      abortController: entryAc,
+    };
+    // Reference `abortController` so it's not unused — the parameter
+    // is kept on the signature so a future PR-2.5 that needs to
+    // double-link the original promote signal can read it without
+    // re-plumbing.
+    void abortController;
+
+    // `registry.register` is internally safe today (Map.set + emit),
+    // but if a future implementation throws, the promoted child is
+    // already detached from the service and would become an orphan
+    // zombie with no kill path. Wrap defensively: best-effort kill the
+    // child and re-throw so the scheduler surfaces the failure instead
+    // of pretending promote succeeded.
+    try {
+      registry.register(entry);
+    } catch (e) {
+      debugLogger.warn(
+        `promote: registry.register threw for ${shellId} (pid=${result.pid}) — killing orphan child: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      try {
+        entryAc.abort();
+      } catch {
+        /* swallow — we're already in an error path */
+      }
+      throw e;
+    }
+
+    const llmContent = [
+      `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
+      `Status: running. PID: ${result.pid ?? '(unknown)'}.`,
+      `Output snapshot at promote time saved to: ${outputPath}`,
+      `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`,
+      `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`,
+    ].join('\n');
+
+    debugLogger.debug(
+      `promote: registered ${shellId} (pid=${result.pid}) — outputPath=${outputPath}`,
+    );
+
+    return {
+      llmContent,
+      returnDisplay: `Promoted to background: ${shellId}`,
     };
   }
 

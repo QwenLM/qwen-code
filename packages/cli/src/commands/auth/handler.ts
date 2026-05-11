@@ -485,10 +485,13 @@ export async function handleApiKeyAuth() {
  * Handles Custom API Key - prints docs link
  */
 function handleCustomApiKeyAuth(): void {
+  writeStdoutLine('');
   writeStdoutLine(
-    t(
-      '\nYou can configure your API key and models in settings.json.\nRefer to the documentation for setup instructions:\n  https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/\n',
-    ),
+    t('You can configure your API key and models in settings.json'),
+  );
+  writeStdoutLine(t('Refer to the documentation for setup instructions'));
+  writeStdoutLine(
+    '  https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/\n',
   );
   process.exit(0);
 }
@@ -522,9 +525,10 @@ export async function showAuthStatus(): Promise<void> {
       );
       writeStdoutLine(
         t(
-          '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)\n',
+          '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)',
         ),
       );
+      writeStdoutLine('');
       writeStdoutLine(t('Or simply run:'));
       writeStdoutLine(
         t('  qwen auth                - Interactive authentication setup\n'),

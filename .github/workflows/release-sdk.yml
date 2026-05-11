@@ -399,7 +399,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
-              --title "chore(release): sdk-typescript ${RELEASE_TAG} [skip ci]" \
+              --title "chore(release): sdk-typescript ${RELEASE_TAG}" \
               --body "Automated release PR for sdk-typescript ${RELEASE_TAG}.")"
           fi
 
@@ -414,10 +414,9 @@ jobs:
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
           set -euo pipefail
-          # Keep [skip ci] on the squash commit that lands on main. The release
-          # PR title also includes it for visibility, but --subject makes the
-          # post-merge CI-skip behavior explicit instead of depending on gh's
-          # default squash subject.
+          # Keep [skip ci] only on the squash commit that lands on main. The
+          # release branch commit and PR title intentionally omit it so tag-push
+          # workflows and PR metadata stay unaffected.
           gh pr merge "${PR_URL}" \
             --squash \
             --auto \

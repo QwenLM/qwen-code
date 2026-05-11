@@ -294,21 +294,17 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
       },
     );
 
-    const createSpy = vi
-      .spyOn(AgentHeadless, 'create')
-      .mockImplementation(
-        async (..._args: unknown[]): Promise<AgentHeadless> =>
-          ({
-            execute: vi
-              .fn()
-              .mockRejectedValue(new Error('headless-execute-blew-up')),
-            getTerminateMode: vi
-              .fn()
-              .mockReturnValue(AgentTerminateMode.GOAL),
-            getFinalText: vi.fn().mockReturnValue(''),
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          }) as any,
-      );
+    const createSpy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (..._args: unknown[]): Promise<AgentHeadless> =>
+        ({
+          execute: vi
+            .fn()
+            .mockRejectedValue(new Error('headless-execute-blew-up')),
+          getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
 
     try {
       await expect(

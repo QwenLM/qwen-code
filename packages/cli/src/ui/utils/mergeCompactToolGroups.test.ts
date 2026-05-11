@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mergeCompactToolGroups } from './mergeCompactToolGroups.js';
+import {
+  compactToggleHasVisualEffect,
+  mergeCompactToolGroups,
+} from './mergeCompactToolGroups.js';
 import type {
   HistoryItem,
   HistoryItemToolGroup,
@@ -567,5 +570,47 @@ describe('mergeCompactToolGroups', () => {
     expect(merged[2].type).toBe('tool_group');
     expect(merged[3].type).toBe('tool_group');
     expect(merged[4].type).toBe('tool_group');
+  });
+});
+
+describe('compactToggleHasVisualEffect', () => {
+  it('returns false for empty history', () => {
+    expect(compactToggleHasVisualEffect([])).toBe(false);
+  });
+
+  it('returns false for plain user/info/error history (no tools, no thinking)', () => {
+    const history: HistoryItem[] = [
+      { type: 'user', id: 1, text: 'hi' },
+      { type: 'gemini', id: 2, text: 'hello' },
+      { type: 'info', id: 3, text: 'note' },
+      { type: 'error', id: 4, text: 'oops' },
+    ];
+    expect(compactToggleHasVisualEffect(history)).toBe(false);
+  });
+
+  it('returns true when any tool_group is present', () => {
+    const history: HistoryItem[] = [
+      { type: 'user', id: 1, text: 'run' },
+      createToolGroup(2, [
+        createTool('c1', 'shell', ToolCallStatus.Success),
+      ]) as HistoryItem,
+    ];
+    expect(compactToggleHasVisualEffect(history)).toBe(true);
+  });
+
+  it('returns true when any gemini_thought is present', () => {
+    const history: HistoryItem[] = [
+      { type: 'user', id: 1, text: 'q' },
+      { type: 'gemini_thought', id: 2, text: 'thinking…' },
+    ];
+    expect(compactToggleHasVisualEffect(history)).toBe(true);
+  });
+
+  it('returns true when any gemini_thought_content is present', () => {
+    const history: HistoryItem[] = [
+      { type: 'user', id: 1, text: 'q' },
+      { type: 'gemini_thought_content', id: 2, text: 'inner' },
+    ];
+    expect(compactToggleHasVisualEffect(history)).toBe(true);
   });
 });

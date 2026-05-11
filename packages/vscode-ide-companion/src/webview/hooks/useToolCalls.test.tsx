@@ -118,4 +118,41 @@ describe('useToolCalls', () => {
       },
     });
   });
+
+  it('rewinds tool calls at and after a cutoff timestamp', () => {
+    act(() => {
+      latestSnapshot?.handleToolCallUpdate({
+        type: 'tool_call',
+        toolCallId: 'before',
+        kind: 'other',
+        title: 'Before',
+        status: 'completed',
+        timestamp: 100,
+      });
+      latestSnapshot?.handleToolCallUpdate({
+        type: 'tool_call',
+        toolCallId: 'at-cutoff',
+        kind: 'other',
+        title: 'At cutoff',
+        status: 'completed',
+        timestamp: 200,
+      });
+      latestSnapshot?.handleToolCallUpdate({
+        type: 'tool_call',
+        toolCallId: 'after',
+        kind: 'other',
+        title: 'After',
+        status: 'completed',
+        timestamp: 300,
+      });
+    });
+
+    act(() => {
+      latestSnapshot?.rewindToolCallsToTimestamp(200);
+    });
+
+    expect(Array.from(latestSnapshot?.toolCalls.keys() ?? [])).toEqual([
+      'before',
+    ]);
+  });
 });
