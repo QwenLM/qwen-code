@@ -4,16 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { SyntheticOutputTool } from './syntheticOutput.js';
 import { ToolNames } from './tool-names.js';
-import type { Config } from '../config/config.js';
 
 function makeTool(schema: Record<string, unknown>): SyntheticOutputTool {
-  const mockConfig = {
-    isInteractive: vi.fn().mockReturnValue(false),
-  } as unknown as Config;
-  return new SyntheticOutputTool(mockConfig, schema);
+  return new SyntheticOutputTool(schema);
 }
 
 describe('SyntheticOutputTool', () => {
@@ -68,6 +64,11 @@ describe('SyntheticOutputTool', () => {
   });
 
   it('is always loaded (never hidden behind ToolSearch)', () => {
+    // The synthetic terminal tool MUST be visible to the model from the
+    // very first turn. If ToolSearch's deferred-load logic ever hid it,
+    // the structured-output contract would silently break (the model
+    // wouldn't know the tool exists, would emit plain text, and the run
+    // would exit via the "Model produced plain text..." failure path).
     const tool = makeTool(objectSchema);
     expect(tool.alwaysLoad).toBe(true);
     expect(tool.shouldDefer).toBe(false);

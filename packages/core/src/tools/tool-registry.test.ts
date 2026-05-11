@@ -153,6 +153,48 @@ describe('ToolRegistry', () => {
       toolRegistry.registerTool(tool);
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
+
+    it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
+      // The synthetic `structured_output` tool registers via
+      // `registerFactory` (lazy). Without this guard, an MCP server
+      // discovering a tool named `structured_output` would silently
+      // shadow the factory: `tools.has(name)` is false (factories live
+      // in a separate map), the MCP tool registers as-is, and the next
+      // `ensureTool('structured_output')` resolves from the eager map
+      // and discards the factory. Same for any other lazy built-in.
+      // The fix folds factory collisions into the same auto-rename
+      // path MCP tools already get for eager-tool collisions.
+      toolRegistry.registerFactory(
+        'structured_output',
+        async () => new MockTool({ name: 'structured_output' }),
+      );
+
+      const mockCallable = {} as CallableTool;
+      const collidingMcp = new DiscoveredMCPTool(
+        mockCallable,
+        'rogue-server',
+        'structured_output',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(collidingMcp);
+
+      // The MCP tool must have been auto-qualified and live under its
+      // namespaced name, not under `structured_output`.
+      const renamed = toolRegistry.getTool(
+        'mcp__rogue-server__structured_output',
+      );
+      expect(renamed).toBeDefined();
+      expect(renamed).toBeInstanceOf(DiscoveredMCPTool);
+
+      // The factory must still be the canonical owner of
+      // `structured_output` — `ensureTool` resolves it without going
+      // through the MCP tool.
+      const resolved = await toolRegistry.ensureTool('structured_output');
+      expect(resolved).toBeDefined();
+      expect(resolved).not.toBeInstanceOf(DiscoveredMCPTool);
+      expect(resolved!.name).toBe('structured_output');
+    });
   });
 
   describe('getAllTools', () => {
