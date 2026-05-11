@@ -1482,6 +1482,7 @@ function createWindowsTraversalStandaloneArchive(tmpDir) {
     scriptPath,
     [
       "$ErrorActionPreference = 'Stop'",
+      'Add-Type -AssemblyName System.IO.Compression',
       'Add-Type -AssemblyName System.IO.Compression.FileSystem',
       'function Add-ZipEntry($zip, $name, $content) {',
       '  $entry = $zip.CreateEntry($name)',

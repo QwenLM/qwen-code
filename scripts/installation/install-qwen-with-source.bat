@@ -730,9 +730,8 @@ exit /b %PS_STATUS%
 
 :EnsureManagedInstallDir
 set "MANAGED_DIR=%~1"
-if not exist "!MANAGED_DIR!" exit /b 0
 set "QWEN_MANAGED_DIR=!MANAGED_DIR!"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $dir = $env:QWEN_MANAGED_DIR; $manifest = Join-Path $dir 'manifest.json'; if (!(Test-Path -LiteralPath $manifest -PathType Leaf)) { exit 1 }; try { $data = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json } catch { exit 1 }; if ($data.name -ne '@qwen-code/qwen-code') { exit 1 }; if ([string]$data.target -notmatch '^win-(x64|arm64)$') { exit 1 }; if (!(Test-Path -LiteralPath (Join-Path $dir 'bin\qwen.cmd') -PathType Leaf)) { exit 1 }; if (!(Test-Path -LiteralPath (Join-Path $dir 'node\node.exe') -PathType Leaf)) { exit 1 }; exit 0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $dir = $env:QWEN_MANAGED_DIR; if (!(Test-Path -LiteralPath $dir)) { exit 0 }; if (!(Test-Path -LiteralPath $dir -PathType Container)) { exit 1 }; $manifest = Join-Path $dir 'manifest.json'; if (!(Test-Path -LiteralPath $manifest -PathType Leaf)) { exit 1 }; try { $data = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json } catch { exit 1 }; if ($data.name -ne '@qwen-code/qwen-code') { exit 1 }; if ([string]$data.target -notmatch '^win-(x64|arm64)$') { exit 1 }; if (!(Test-Path -LiteralPath (Join-Path $dir 'bin\qwen.cmd') -PathType Leaf)) { exit 1 }; if (!(Test-Path -LiteralPath (Join-Path $dir 'node\node.exe') -PathType Leaf)) { exit 1 }; exit 0"
 set "PS_STATUS=!ERRORLEVEL!"
 set "QWEN_MANAGED_DIR="
 if !PS_STATUS! EQU 0 exit /b 0
