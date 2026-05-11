@@ -612,18 +612,8 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     // model switch fails the call immediately instead of waiting the
     // full `timeoutMs`. Matches what `sendPrompt` and `setSessionModel`
     // already do — without this, a callback-attach with a broken model
-    // wedges the HTTP handler for 10s. Lazy-init the rejector so we
-    // attach exactly ONE channel.exited listener over the session
-    // lifetime (a per-call attach would leak listeners on chatty
-    // model-change paths).
-    if (!entry.transportClosedReject) {
-      entry.transportClosedReject = entry.channel.exited.then(() => {
-        throw new Error(
-          `agent channel closed during applyModelServiceId (session ${entry.sessionId})`,
-        );
-      });
-    }
-    const transportClosed = entry.transportClosedReject;
+    // wedges the HTTP handler for 10s.
+    const transportClosed = getTransportClosedReject(entry);
     const work = entry.modelChangeQueue.then(async () => {
       try {
         await Promise.race([
@@ -676,6 +666,28 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     }
   };
 
+  /**
+   * Lazy-init the per-session `transportClosedReject` promise that
+   * `sendPrompt` / `setSessionModel` / `applyModelServiceId` race their
+   * ACP calls against. ONE listener is attached to `channel.exited`
+   * over the session's lifetime (the first caller "wins" and creates
+   * the promise; subsequent callers reuse it) — a per-call attach
+   * would grow Node's listener list linearly with prompt count on
+   * chatty sessions. The rejection message names the FIRST caller,
+   * which can be misleading if a later method observes the failure;
+   * the cost-benefit favors the single-listener invariant.
+   */
+  const getTransportClosedReject = (entry: SessionEntry): Promise<never> => {
+    if (!entry.transportClosedReject) {
+      entry.transportClosedReject = entry.channel.exited.then(() => {
+        throw new Error(
+          `agent channel closed mid-request (session ${entry.sessionId})`,
+        );
+      });
+    }
+    return entry.transportClosedReject;
+  };
+
   return {
     get sessionCount() {
       return byId.size;
@@ -712,11 +724,18 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           // rejected, propagate as a spawn-style error rather than
           // silently returning an attach-with-stale-model.
           if (req.modelServiceId) {
+            // Swallow: matches the create-session catch in `doSpawn`
+            // below — a model-switch rejection on an already-running
+            // session must NOT 500 the attach (the session is fully
+            // operational on its current model; tearing it down or
+            // returning an error without the sessionId would deny
+            // the caller any way to recover). The
+            // `model_switch_failed` SSE event is the visible signal.
             await applyModelServiceId(
               existing,
               req.modelServiceId,
               initTimeoutMs,
-            );
+            ).catch(() => {});
           }
           return {
             sessionId: existing.sessionId,
@@ -735,11 +754,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           if (req.modelServiceId) {
             const liveEntry = byId.get(session.sessionId);
             if (liveEntry) {
+              // Same swallow as above — we picked up an in-flight
+              // spawn, the session is real, model-switch failure
+              // shouldn't deny us the sessionId.
               await applyModelServiceId(
                 liveEntry,
                 req.modelServiceId,
                 initTimeoutMs,
-              );
+              ).catch(() => {});
             }
           }
           return { ...session, attached: true };
@@ -803,23 +825,11 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         // flight, the SDK's pending-request promise can hang because the
         // wire never delivers a response. Make the prompt fail-fast in
         // that case so the per-session FIFO doesn't poison the next
-        // queued prompt with an unbounded await.
-        //
-        // Cache the rejection promise on the entry so we attach exactly
-        // ONE listener to `channel.exited` over the session's lifetime
-        // (lazy-init on first prompt). A naive per-call
-        // `entry.channel.exited.then(...)` would grow the listener list
-        // linearly with prompt count — a slow leak on chatty sessions.
-        if (!entry.transportClosedReject) {
-          entry.transportClosedReject = entry.channel.exited.then(() => {
-            throw new Error(
-              `agent channel closed while prompt was in flight (session ${entry.sessionId})`,
-            );
-          });
-        }
+        // queued prompt with an unbounded await. See
+        // `getTransportClosedReject` for the single-listener invariant.
         const racedPromise = Promise.race([
           promptPromise,
-          entry.transportClosedReject,
+          getTransportClosedReject(entry),
         ]);
 
         if (!signal) return racedPromise;
@@ -947,16 +957,8 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // forever. Matches `sendPrompt` (transport race) and
       // `applyModelServiceId` (timeout) — the absence of either was an
       // attack surface for "POST /session/:id/model never returns".
-      // Lazy-init the channel-exit promise the same way `sendPrompt` does
-      // so we don't accumulate one channel.exited listener per call.
-      if (!entry.transportClosedReject) {
-        entry.transportClosedReject = entry.channel.exited.then(() => {
-          throw new Error(
-            `agent channel closed while setSessionModel was in flight (session ${entry.sessionId})`,
-          );
-        });
-      }
-      const transportClosed = entry.transportClosedReject;
+      // See `getTransportClosedReject` for the single-listener invariant.
+      const transportClosed = getTransportClosedReject(entry);
       const work = entry.modelChangeQueue.then(() =>
         Promise.race([
           withTimeout(
@@ -1314,6 +1316,16 @@ const KILL_HARD_DEADLINE_MS = 10_000;
  * not HTTP). Leaving it in the child's env would let prompt injection
  * turn the agent into an authenticated client of its own daemon — an
  * escalation the agent doesn't otherwise have.
+ *
+ * **WARNING**: this denylist is correct *only because the agent
+ * already has unrestricted shell-tool access* — anything in the env
+ * is reachable via `~/.bashrc`/`~/.aws/credentials`/etc. anyway.
+ * Any future mode that **removes** shell-tool access (e.g. a
+ * sandbox-locked agent variant) MUST switch this back to an
+ * allowlist OR significantly expand the denylist to cover common
+ * provider/CI/cloud secret prefixes (`OPENAI_*`, `ANTHROPIC_*`,
+ * `AWS_*`, `GITHUB_TOKEN`, `CI_*`, `*_API_KEY`, `*_SECRET`, …).
+ * See issue #3803 §11 for the Stage 4+ remote-sandbox plan.
  *
  * Defined at module scope so the Set is allocated once at load.
  */

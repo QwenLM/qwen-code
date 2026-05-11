@@ -736,6 +736,28 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({ status: 'ok' });
     });
   });
+
+  describe('payload-too-large handling (A-UsP)', () => {
+    it('returns 413 JSON when the request body exceeds the 10 MB limit', async () => {
+      // body-parser raises `{status: 413, type: 'entity.too.large'}`
+      // when the body exceeds the configured limit. The Express
+      // error middleware special-cases this to a structured 413
+      // response instead of falling through to a misleading 500.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      // 11 MB of `x` characters > 10 MB body-parser limit
+      const oversize = 'x'.repeat(11 * 1024 * 1024);
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Content-Type', 'application/json')
+        .send(JSON.stringify({ cwd: '/work', pad: oversize }));
+      expect(res.status).toBe(413);
+      expect(res.body).toEqual({ error: 'Request body too large (max 10 MB)' });
+      // Body parser short-circuits before the route handler runs.
+      expect(bridge.calls).toHaveLength(0);
+    });
+  });
 });
 
 describe('runQwenServe', () => {

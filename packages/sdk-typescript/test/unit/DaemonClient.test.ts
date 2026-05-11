@@ -203,6 +203,31 @@ describe('DaemonClient', () => {
       });
       expect(calls[0]?.url).toBe('http://daemon/session/with%2Fslash/prompt');
     });
+
+    it('forwards a caller AbortSignal through to fetch (A-UsQ)', async () => {
+      // The bridge already supports per-prompt cancellation via the
+      // signal arg on `sendPrompt`; the SDK had the parameter wired
+      // but no test, so a regression that dropped it on the floor
+      // would silently leave callers unable to cancel.
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_res, rej) => {
+            init?.signal?.addEventListener('abort', () =>
+              rej(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 30);
+      await expect(
+        client.prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'hi' }] },
+          ctrl.signal,
+        ),
+      ).rejects.toThrow();
+    });
   });
 
   describe('cancel', () => {
@@ -417,6 +442,47 @@ describe('DaemonClient', () => {
       await expect(iter.next()).rejects.toMatchObject({
         status: 200,
       });
+    });
+
+    it('applies fetchTimeoutMs to the connect phase only — never-resolving fetch aborts (A-UsS)', async () => {
+      // The CONNECT phase (request → headers received) must respect
+      // `fetchTimeoutMs`; the SSE body itself must NOT be timed out.
+      // Verify the timer fires when headers never arrive.
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_res, rej) => {
+            init?.signal?.addEventListener('abort', () =>
+              rej(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 50,
+      });
+      const before = Date.now();
+      const iter = client.subscribeEvents('s-1');
+      await expect(iter.next()).rejects.toThrow();
+      const elapsed = Date.now() - before;
+      // Generous bound — just confirms the timer fired.
+      expect(elapsed).toBeLessThan(2000);
+    });
+
+    it('clears the connect-timeout when headers arrive promptly (A-UsS)', async () => {
+      // A fast-resolving fetch must NOT leave the timer pending,
+      // otherwise vitest would see a dangling handle that keeps the
+      // event loop alive past the test (flake on slow CI).
+      const { fetch } = recordingFetch(() => sseResponse(''));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 60_000, // long; if we don't clear it, the test would hang
+      });
+      const iter = client.subscribeEvents('s-1');
+      const first = await iter.next();
+      expect(first.done).toBe(true);
+      // We reach this line in < a second; the 60s timer was cleared.
     });
   });
 

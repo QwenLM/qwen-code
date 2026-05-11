@@ -88,7 +88,7 @@ qwen serve --hostname 0.0.0.0 --port 4170
 # → boot refuses without QWEN_SERVER_TOKEN
 ```
 
-Clients then send `Authorization: Bearer $QWEN_SERVER_TOKEN` on every request **except `/health`**, which is intentionally exempt so liveness probes (k8s, Compose, monitoring) work without credentials. Use `/capabilities` to verify your token is correct end-to-end:
+Clients then send `Authorization: Bearer $QWEN_SERVER_TOKEN` on every request. `/health` is exempted **only on loopback binds** so k8s/Compose liveness probes inside the pod (where the daemon listens on `127.0.0.1`) don't need credentials. On non-loopback binds (`--hostname 0.0.0.0` etc.) `/health` requires the token like every other route — otherwise an attacker can probe arbitrary addresses to confirm the daemon's existence. Use `/capabilities` to verify your token is correct end-to-end (it always requires auth):
 
 ```bash
 curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" http://your-host:4170/capabilities

@@ -778,6 +778,91 @@ describe('createHttpAcpBridge', () => {
 
       subAbort.abort();
     });
+
+    it('sendPrompt abort resolves pending permissions as cancelled (A-UsU)', async () => {
+      // Regression test for the bug fix where `sendPrompt`'s
+      // `onAbort` handler was missing the `cancelPendingForSession`
+      // call. Without it, an HTTP client disconnecting mid-permission
+      // would leave the agent stuck waiting on a vote that no SSE
+      // subscriber would ever cast.
+      //
+      // FakeAgent's `prompt()` here issues a permission request and
+      // then awaits a never-resolving promise, so the agent IS the
+      // thing pending on the permission. When the test aborts the
+      // sendPrompt, `cancelPendingForSession` resolves the
+      // permission, which in turn lets the agent's prompt() throw
+      // (it sees the cancelled outcome). Both sides settle.
+      let conn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const ab = new TransformStream<Uint8Array, Uint8Array>();
+        const ba = new TransformStream<Uint8Array, Uint8Array>();
+        const clientStream = ndJsonStream(ab.writable, ba.readable);
+        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const fakeAgent = new FakeAgent({
+          promptImpl: async (p): Promise<PromptResponse> => {
+            // Issue the permission request from inside prompt() so
+            // it's correlated with the in-flight prompt the bridge
+            // is awaiting.
+            await (
+              conn as unknown as {
+                requestPermission(q: unknown): Promise<unknown>;
+              }
+            ).requestPermission({
+              sessionId: p.sessionId,
+              toolCall: { toolCallId: 'tc-1', title: 'x' },
+              options: [
+                { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+              ],
+            });
+            return { stopReason: 'cancelled' };
+          },
+        });
+        conn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<void>(() => {}),
+          kill: async () => {},
+        };
+      };
+      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // Kick off sendPrompt — agent will issue a permission request
+      // that no SSE subscriber will vote on.
+      const promptAbort = new AbortController();
+      const promptResult = bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'x' }],
+          },
+          promptAbort.signal,
+        )
+        .catch(() => undefined);
+
+      // Wait until the permission has been registered.
+      for (let i = 0; i < 50 && bridge.pendingPermissionCount === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(bridge.pendingPermissionCount).toBe(1);
+
+      // Abort the prompt — the bug being regressed: the abort
+      // handler must call `cancelPendingForSession` so the pending
+      // permission resolves as cancelled (otherwise the agent's
+      // `requestPermission` blocks forever).
+      promptAbort.abort();
+
+      // Wait for the permission to resolve as cancelled. With the
+      // bug present this would hang until the test timeout.
+      for (let i = 0; i < 50 && bridge.pendingPermissionCount > 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(bridge.pendingPermissionCount).toBe(0);
+
+      await bridge.shutdown();
+      await promptResult;
+    });
   });
 
   describe('modelServiceId honored at session create', () => {
@@ -1017,13 +1102,19 @@ describe('createHttpAcpBridge', () => {
         signal: abort.signal,
       });
 
-      // Second attach with a NEW model — agent rejects.
-      await expect(
-        bridge.spawnOrAttach({
-          workspaceCwd: WS_A,
-          modelServiceId: 'rejected',
-        }),
-      ).rejects.toBeTruthy();
+      // Second attach with a NEW model — agent rejects. Per #3889
+      // review A-UsJ the attach path now SWALLOWS the model-switch
+      // failure (matches the create-session path's existing
+      // behavior): the session is fully operational on its current
+      // model, and returning an error without the sessionId would
+      // deny the caller any way to recover. The visible signal is
+      // the `model_switch_failed` SSE event (asserted below).
+      const attached = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        modelServiceId: 'rejected',
+      });
+      expect(attached.attached).toBe(true);
+      expect(attached.sessionId).toBe(session.sessionId);
 
       // Crucially: the session is still alive (we didn't tear it down
       // because it's a SHARED session). Other clients keep working.

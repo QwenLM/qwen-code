@@ -52,12 +52,24 @@ export function hostAllowlist(
     // platform with case-preserving DNS (`HOST.docker.internal`) would
     // get 403 with an exact-string compare. Lowercase both sides.
     const host = (req.headers.host || '').toLowerCase();
-    if (
-      host !== `localhost:${port}` &&
-      host !== `127.0.0.1:${port}` &&
-      host !== `[::1]:${port}` &&
-      host !== `host.docker.internal:${port}`
-    ) {
+    const allowed = new Set([
+      `localhost:${port}`,
+      `127.0.0.1:${port}`,
+      `[::1]:${port}`,
+      `host.docker.internal:${port}`,
+    ]);
+    // RFC 7230 §5.4: clients may omit the port suffix when it matches
+    // the URI scheme's default. http → 80, https → 443. The qwen
+    // serve daemon is plain HTTP, so accept the no-port forms when
+    // we're listening on port 80 (uncommon but valid for an operator
+    // who points at a privileged port for clean URLs).
+    if (port === 80) {
+      allowed.add('localhost');
+      allowed.add('127.0.0.1');
+      allowed.add('[::1]');
+      allowed.add('host.docker.internal');
+    }
+    if (!allowed.has(host)) {
       res.status(403).json({ error: 'Invalid Host header' });
       return;
     }

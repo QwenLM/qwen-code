@@ -78,6 +78,21 @@ interface InternalSub {
   evicted: boolean;
 }
 
+/**
+ * Thrown by `EventBus.subscribe()` when the per-bus subscriber cap
+ * has been reached. The SSE route catches this and surfaces a
+ * `stream_error` frame so rejected clients see a readable failure
+ * rather than a silent empty stream.
+ */
+export class SubscriberLimitExceededError extends Error {
+  readonly limit: number;
+  constructor(limit: number) {
+    super(`EventBus subscriber limit reached (${limit})`);
+    this.name = 'SubscriberLimitExceededError';
+    this.limit = limit;
+  }
+}
+
 export class EventBus {
   private nextId = 1;
   private readonly ring: BridgeEvent[] = [];
@@ -185,14 +200,13 @@ export class EventBus {
     // Per-bus subscriber cap: refuse rather than admit a subscriber
     // that would push us past the limit. An accepted-but-immediately-
     // evicted alternative would still pay the `BoundedAsyncQueue`
-    // allocation + the per-publish iteration cost. Returning an empty
-    // iterable lets the caller (the SSE route) cleanly close the
-    // response with no frames sent — under attack this is exactly
-    // the desired "drop new connections" behavior. Healthy callers
-    // won't normally hit the cap; if they do, raise `maxSubscribers`
-    // at construction.
+    // allocation + the per-publish iteration cost. Throw a typed
+    // error so the SSE route can surface a `stream_error` frame to
+    // the rejected client (rather than returning an empty iterable
+    // that closes silently — that left oncall blind to "some
+    // clients get events, some don't" under load).
     if (this.subs.size >= this.maxSubscribers) {
-      return emptyAsyncIterable<BridgeEvent>();
+      throw new SubscriberLimitExceededError(this.maxSubscribers);
     }
     const queue = new BoundedAsyncQueue<BridgeEvent>(
       opts.maxQueued ?? DEFAULT_MAX_QUEUED,

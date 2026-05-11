@@ -9,12 +9,13 @@ import express from 'express';
 import type { Application } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
+import { isLoopbackBind } from './loopbackBinds.js';
 import {
   createHttpAcpBridge,
   SessionNotFoundError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
-import type { BridgeEvent } from './eventBus.js';
+import { SubscriberLimitExceededError, type BridgeEvent } from './eventBus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
   STAGE1_FEATURES,
@@ -62,19 +63,36 @@ export function createServeApp(
   app.use(denyBrowserOriginCors);
   app.use(hostAllowlist(opts.hostname, getPort));
 
-  // `/health` is registered BEFORE `bearerAuth` so liveness probes work
-  // without credentials even when the daemon was started with a
-  // `--token` (k8s/Compose probes typically don't carry the daemon's
-  // bearer; round-tripping a 401 just to know the listener is up is
-  // pure waste). CORS deny + Host allowlist still apply, so a browser
-  // or a wrong-Host probe is still rejected. Documented exemption in
-  // `docs/developers/qwen-serve-protocol.md`.
-  app.get('/health', (_req, res) => {
-    res.status(200).json({ status: 'ok' });
-  });
+  // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
+  // the canonical liveness-probe case (k8s/Compose probes don't
+  // carry the daemon's bearer; round-tripping a 401 just to know
+  // the listener is up is waste). On non-loopback binds the
+  // exemption becomes a low-severity info leak (attacker can probe
+  // arbitrary IP:port to confirm a `qwen serve` is listening), so
+  // we register `/health` AFTER `bearerAuth` and let it 401 like
+  // every other route. Operators using the loopback default get the
+  // probe-friendly behavior; operators exposing the daemon publicly
+  // gate `/health` behind their token alongside everything else.
+  // CORS deny + Host allowlist still apply to `/health` in both
+  // cases.
+  const loopback = isLoopbackBind(opts.hostname);
+  if (loopback) {
+    app.get('/health', (_req, res) => {
+      res.status(200).json({ status: 'ok' });
+    });
+  }
 
   app.use(bearerAuth(opts.token));
   app.use(express.json({ limit: '10mb' }));
+
+  if (!loopback) {
+    // Non-loopback: register `/health` AFTER `bearerAuth` so probes
+    // must carry the token. Otherwise unauthenticated callers can
+    // ping any reachable address:port to confirm a daemon exists.
+    app.get('/health', (_req, res) => {
+      res.status(200).json({ status: 'ok' });
+    });
+  }
 
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
@@ -305,6 +323,36 @@ export function createServeApp(
       });
       iter = iterable[Symbol.asyncIterator]();
     } catch (err) {
+      // `EventBus` throws `SubscriberLimitExceededError` when the
+      // per-session subscriber cap (default 64) is reached. Surface
+      // it as an SSE-shaped `stream_error` terminal frame rather
+      // than a generic 5xx so clients see a readable failure on the
+      // stream they were already trying to consume. Also log to
+      // stderr so an operator notices when a session is being
+      // attacked or has a connection leak.
+      if (err instanceof SubscriberLimitExceededError) {
+        writeStderrLine(
+          `qwen serve: subscriber limit reached for session ${sessionId} (limit=${err.limit}); rejecting new SSE client`,
+        );
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+        res.write(
+          formatSseFrame({
+            type: 'stream_error',
+            data: {
+              error: err.message,
+              code: 'subscriber_limit_exceeded',
+              limit: err.limit,
+            },
+          }),
+        );
+        res.end();
+        return;
+      }
       sendBridgeError(res, err);
       return;
     }

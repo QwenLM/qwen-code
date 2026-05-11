@@ -60,7 +60,9 @@ Every Stage 1 daemon advertises 9 feature tags. Clients **must** gate UI off `fe
 
 ### `GET /health`
 
-Liveness probe. Returns `200 {"status":"ok"}` if the listener is up. No auth required even when a token is configured (heartbeat-friendly).
+Liveness probe. Returns `200 {"status":"ok"}` if the listener is up.
+
+**Auth:** required **only on non-loopback binds**. On loopback (`127.0.0.1`, `::1`, `[::1]`) `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the loopback exemption.
 
 ### `GET /capabilities`
 
