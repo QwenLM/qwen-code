@@ -126,6 +126,13 @@ export default {
   'Rename the current conversation. --auto lets the fast model pick a title.':
     '重命名当前对话。--auto 会让快速模型自动生成标题。',
   'Rewind conversation to a previous turn': '将对话回退到之前的某一轮',
+  'Restore code and conversation': '恢复代码和对话',
+  'Restore conversation only': '仅恢复对话',
+  'Restore code only': '仅恢复代码',
+  'Never mind': '算了',
+  'Computing file changes...': '正在计算文件变更...',
+  'Restored {{count}} file(s).': '已恢复 {{count}} 个文件。',
+  'Failed to restore files: {{error}}': '恢复文件失败：{{error}}',
   'change the theme': '更改主题',
   'Select Theme': '选择主题',
   Preview: '预览',

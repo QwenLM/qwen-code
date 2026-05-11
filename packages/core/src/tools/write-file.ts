@@ -430,6 +430,8 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       fs.mkdirSync(dirName, { recursive: true });
     }
 
+    await this.config.getFileHistoryService().trackEdit(file_path);
+
     try {
       await this.config.getFileSystemService().writeTextFile({
         path: file_path,

@@ -132,6 +132,13 @@ export default {
     'Rename the current conversation. --auto lets the fast model pick a title.',
   'Rewind conversation to a previous turn':
     'Rewind conversation to a previous turn',
+  'Restore code and conversation': 'Restore code and conversation',
+  'Restore conversation only': 'Restore conversation only',
+  'Restore code only': 'Restore code only',
+  'Never mind': 'Never mind',
+  'Computing file changes...': 'Computing file changes...',
+  'Restored {{count}} file(s).': 'Restored {{count}} file(s).',
+  'Failed to restore files: {{error}}': 'Failed to restore files: {{error}}',
   'change the theme': 'change the theme',
   'Select Theme': 'Select Theme',
   Preview: 'Preview',

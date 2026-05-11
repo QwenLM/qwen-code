@@ -37,6 +37,7 @@ import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { FileHistoryService } from '../services/fileHistoryService.js';
 import {
   type FileSystemService,
   StandardFileSystemService,
@@ -461,6 +462,7 @@ export interface ConfigParameters {
     enableFuzzySearch?: boolean;
   };
   checkpointing?: boolean;
+  fileCheckpointingEnabled?: boolean;
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
@@ -721,6 +723,8 @@ export class Config {
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private readonly checkpointing: boolean;
+  private readonly fileCheckpointingEnabled: boolean;
+  private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
   private readonly explicitIncludeDirectories: string[];
@@ -877,6 +881,8 @@ export class Config {
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
     this.checkpointing = params.checkpointing ?? false;
+    this.fileCheckpointingEnabled =
+      params.fileCheckpointingEnabled ?? !params.sdkMode;
     this.proxy = params.proxy;
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
@@ -2277,6 +2283,21 @@ export class Config {
 
   getCheckpointingEnabled(): boolean {
     return this.checkpointing;
+  }
+
+  getFileCheckpointingEnabled(): boolean {
+    return this.fileCheckpointingEnabled;
+  }
+
+  getFileHistoryService(): FileHistoryService {
+    if (!this.fileHistoryService) {
+      this.fileHistoryService = new FileHistoryService(
+        this.sessionId,
+        this.fileCheckpointingEnabled,
+        this.cwd,
+      );
+    }
+    return this.fileHistoryService;
   }
 
   getProxy(): string | undefined {

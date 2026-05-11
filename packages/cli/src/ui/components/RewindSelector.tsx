@@ -4,27 +4,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import type { HistoryItem } from '../types.js';
+import type { HistoryItem, HistoryItemUser } from '../types.js';
 import { theme } from '../semantic-colors.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { truncateText } from '../utils/sessionPickerUtils.js';
 import { isRealUserTurn } from '../utils/historyMapping.js';
 import { t } from '../../i18n/index.js';
+import type { FileHistoryService, DiffStats } from '@qwen-code/qwen-code-core';
+
+export type RestoreOption = 'both' | 'conversation' | 'code' | 'cancel';
 
 export interface RewindSelectorProps {
   history: HistoryItem[];
-  onRewind: (userItem: HistoryItem) => void;
+  onRewind: (userItem: HistoryItem, option: RestoreOption) => void;
   onCancel: () => void;
+  fileCheckpointingEnabled: boolean;
+  fileHistoryService: FileHistoryService;
 }
 
 const MAX_VISIBLE_ITEMS = 7;
 
-/**
- * Extract user-type items from UI history for the rewind pick list.
- */
 function getUserTurns(history: HistoryItem[]): HistoryItem[] {
   return history.filter(isRealUserTurn);
 }
@@ -91,26 +93,80 @@ function TurnItemView({
   );
 }
 
+interface RestoreOptionItem {
+  key: RestoreOption;
+  label: string;
+  detail?: string;
+}
+
+function getRestoreOptions(
+  diffStats: DiffStats | undefined,
+): RestoreOptionItem[] {
+  const hasChanges =
+    diffStats &&
+    diffStats.filesChanged &&
+    diffStats.filesChanged.length > 0;
+
+  const options: RestoreOptionItem[] = [];
+
+  if (hasChanges) {
+    const fileCount = diffStats!.filesChanged!.length;
+    const detail = `(+${diffStats!.insertions} -${diffStats!.deletions} in ${fileCount} file${fileCount !== 1 ? 's' : ''})`;
+    options.push({
+      key: 'both',
+      label: t('Restore code and conversation'),
+      detail,
+    });
+  }
+
+  options.push({
+    key: 'conversation',
+    label: t('Restore conversation only'),
+  });
+
+  if (hasChanges) {
+    options.push({
+      key: 'code',
+      label: t('Restore code only'),
+    });
+  }
+
+  options.push({
+    key: 'cancel',
+    label: t('Never mind'),
+  });
+
+  return options;
+}
+
 /**
- * Two-phase rewind selector:
+ * Multi-phase rewind selector:
  * 1. Pick list — choose which user turn to rewind to
- * 2. Confirm — confirm the rewind action
+ * 2. Restore options — choose what to restore (when file checkpointing enabled)
+ * 3. Confirm — Y/N confirm (when file checkpointing disabled, legacy fallback)
  */
 export function RewindSelector({
   history,
   onRewind,
   onCancel,
+  fileCheckpointingEnabled,
+  fileHistoryService,
 }: RewindSelectorProps) {
   const { columns: width, rows: height } = useTerminalSize();
   const userTurns = useMemo(() => getUserTurns(history), [history]);
 
   const [selectedIndex, setSelectedIndex] = useState(userTurns.length - 1);
+  // Legacy confirm (when file checkpointing is off)
   const [confirmItem, setConfirmItem] = useState<HistoryItem | null>(null);
+  // Restore option phase (when file checkpointing is on)
+  const [restoreItem, setRestoreItem] = useState<HistoryItem | null>(null);
+  const [restoreOptionIndex, setRestoreOptionIndex] = useState(0);
+  const [diffStats, setDiffStats] = useState<DiffStats | undefined>(undefined);
+  const [loadingDiff, setLoadingDiff] = useState(false);
 
   const boxWidth = width - 4;
   const maxVisibleItems = Math.min(MAX_VISIBLE_ITEMS, userTurns.length);
 
-  // Centered scroll offset
   const scrollOffset = useMemo(() => {
     if (userTurns.length <= maxVisibleItems) return 0;
     const halfVisible = Math.floor(maxVisibleItems / 2);
@@ -127,10 +183,48 @@ export function RewindSelector({
   const showScrollUp = scrollOffset > 0;
   const showScrollDown = scrollOffset + maxVisibleItems < userTurns.length;
 
+  const restoreOptions = useMemo(
+    () => getRestoreOptions(diffStats),
+    [diffStats],
+  );
+
+  // Load diff stats when entering restore option phase
+  useEffect(() => {
+    if (!restoreItem || !fileCheckpointingEnabled) return;
+    const promptId = (restoreItem as HistoryItemUser).promptId;
+    if (!promptId) {
+      setDiffStats(undefined);
+      setLoadingDiff(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingDiff(true);
+    fileHistoryService
+      .getDiffStats(promptId)
+      .then((stats) => {
+        if (!cancelled) {
+          setDiffStats(stats);
+          setRestoreOptionIndex(0);
+          setLoadingDiff(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDiffStats(undefined);
+          setRestoreOptionIndex(0);
+          setLoadingDiff(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [restoreItem, fileCheckpointingEnabled, fileHistoryService]);
+
+  // Legacy confirm handler
   const handleConfirmSelect = useCallback(
     (confirmed: boolean) => {
       if (confirmed && confirmItem) {
-        onRewind(confirmItem);
+        onRewind(confirmItem, 'conversation');
       } else {
         setConfirmItem(null);
       }
@@ -151,7 +245,12 @@ export function RewindSelector({
       if (name === 'return') {
         const selected = userTurns[selectedIndex];
         if (selected) {
-          setConfirmItem(selected);
+          if (fileCheckpointingEnabled) {
+            setRestoreItem(selected);
+            setRestoreOptionIndex(0);
+          } else {
+            setConfirmItem(selected);
+          }
         }
         return;
       }
@@ -166,10 +265,49 @@ export function RewindSelector({
         return;
       }
     },
-    { isActive: confirmItem === null },
+    { isActive: confirmItem === null && restoreItem === null },
   );
 
-  // Confirm key handler
+  // Restore option key handler
+  useKeypress(
+    (key) => {
+      const { name, ctrl } = key;
+
+      if (name === 'escape' || (ctrl && name === 'c')) {
+        setRestoreItem(null);
+        setDiffStats(undefined);
+        return;
+      }
+
+      if (name === 'return') {
+        const option = restoreOptions[restoreOptionIndex];
+        if (option) {
+          if (option.key === 'cancel') {
+            setRestoreItem(null);
+            setDiffStats(undefined);
+          } else {
+            onRewind(restoreItem!, option.key);
+          }
+        }
+        return;
+      }
+
+      if (name === 'up' || name === 'k') {
+        setRestoreOptionIndex((prev) => Math.max(0, prev - 1));
+        return;
+      }
+
+      if (name === 'down' || name === 'j') {
+        setRestoreOptionIndex((prev) =>
+          Math.min(restoreOptions.length - 1, prev + 1),
+        );
+        return;
+      }
+    },
+    { isActive: restoreItem !== null && !loadingDiff },
+  );
+
+  // Legacy confirm key handler
   useKeypress(
     (key) => {
       const { name, ctrl, sequence } = key;
@@ -211,7 +349,81 @@ export function RewindSelector({
     );
   }
 
-  // Confirm phase
+  // Restore option phase
+  if (restoreItem) {
+    const promptPreview = truncateText(
+      restoreItem.text || '(empty)',
+      boxWidth - 10,
+    );
+    return (
+      <Box flexDirection="column" width={boxWidth}>
+        <Box
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={theme.border.default}
+          width={boxWidth}
+        >
+          <Box paddingX={1}>
+            <Text bold color={theme.text.primary}>
+              {t('Rewind Conversation')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.border.default}>{'─'.repeat(boxWidth - 2)}</Text>
+          </Box>
+          <Box paddingX={1} flexDirection="column">
+            <Box marginBottom={1}>
+              <Text color={theme.text.primary}>{t('Rewind to: ')}</Text>
+              <Text color={theme.text.accent} bold>
+                {promptPreview}
+              </Text>
+            </Box>
+            {loadingDiff ? (
+              <Text color={theme.text.secondary}>
+                {t('Computing file changes...')}
+              </Text>
+            ) : (
+              <Box flexDirection="column">
+                {restoreOptions.map((option, idx) => {
+                  const isSelected = idx === restoreOptionIndex;
+                  const prefix = isSelected ? '› ' : '  ';
+                  return (
+                    <Box key={option.key}>
+                      <Text
+                        color={
+                          isSelected ? theme.text.accent : theme.text.primary
+                        }
+                        bold={isSelected}
+                      >
+                        {prefix}
+                        {option.label}
+                      </Text>
+                      {option.detail && (
+                        <Text color={theme.text.secondary}>
+                          {' '}
+                          {option.detail}
+                        </Text>
+                      )}
+                    </Box>
+                  );
+                })}
+              </Box>
+            )}
+          </Box>
+          <Box>
+            <Text color={theme.border.default}>{'─'.repeat(boxWidth - 2)}</Text>
+          </Box>
+          <Box paddingX={1}>
+            <Text color={theme.text.secondary}>
+              {t('↑↓ to navigate · Enter to select · Esc to go back')}
+            </Text>
+          </Box>
+        </Box>
+      </Box>
+    );
+  }
+
+  // Legacy confirm phase (when file checkpointing is off)
   if (confirmItem) {
     const promptPreview = truncateText(
       confirmItem.text || '(empty)',

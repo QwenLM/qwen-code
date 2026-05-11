@@ -448,6 +448,8 @@ export const DialogManager = ({
         history={uiState.history}
         onRewind={uiActions.handleRewindConfirm}
         onCancel={uiActions.closeRewindSelector}
+        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+        fileHistoryService={config.getFileHistoryService()}
       />
     );
   }
