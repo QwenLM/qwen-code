@@ -127,6 +127,45 @@ describe('isDeletionKey', () => {
     );
     expect(isPrintableSearchChar(k({ name: '', sequence: '\b' }))).toBe(false);
   });
+
+  it('does not treat Ctrl+H (BS byte with ctrl) as a deletion key', () => {
+    // Ctrl+H delivers name:'h', ctrl:true, sequence:'\b' on many terminals.
+    // The byte fallback must not fire when a modifier is active.
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'a', sequence: 'a' }));
+    });
+    expect(result.current.searchQuery).toBe('a');
+    // Ctrl+H must be swallowed, not treated as Backspace
+    act(() => {
+      result.current.handleSearchKey(
+        k({ name: 'h', sequence: '\b', ctrl: true }),
+      );
+    });
+    expect(result.current.searchQuery).toBe('a');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not treat Meta+BS byte as a deletion key', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'a', sequence: 'a' }));
+    });
+    expect(result.current.searchQuery).toBe('a');
+    act(() => {
+      result.current.handleSearchKey(
+        k({ name: '', sequence: '\x7f', meta: true }),
+      );
+    });
+    expect(result.current.searchQuery).toBe('a');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
 });
 
 describe('useSessionSearchInput', () => {

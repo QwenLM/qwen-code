@@ -34,11 +34,16 @@ const DELETION_KEY_NAMES = new Set(['backspace', 'delete']);
  * recognised.  The `name` field is the primary signal; the sequence-byte
  * fallback covers the case where the terminal emulator or ink-testing-library
  * does not normalise the key name on Windows.
+ *
+ * The byte fallback is guarded by `!key.ctrl && !key.meta` so that
+ * Ctrl+H (`name: 'h'`, `ctrl: true`, `sequence: '\b'`) is not
+ * misidentified as a deletion key.
  */
 const isDeletionKey = (key: Key): boolean =>
   DELETION_KEY_NAMES.has(key.name) ||
-  key.sequence === '\x7f' || // DEL — common Backspace byte
-  key.sequence === '\b'; // BS — alternate Windows Backspace byte
+  (!key.ctrl &&
+    !key.meta &&
+    (key.sequence === '\x7f' || key.sequence === '\b'));
 
 /**
  * True when the key represents a single printable character that
