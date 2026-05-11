@@ -318,7 +318,7 @@ print_header() {
 
 print_node_help() {
     echo ""
-    echo "Node.js 20 or newer is required before installing Qwen Code with npm."
+    echo "Node.js 22 or newer is required before installing Qwen Code with npm."
     echo ""
     echo "Install Node.js, then rerun this installer:"
     case "$(uname -s 2>/dev/null || echo unknown)" in
@@ -335,7 +335,7 @@ print_node_help() {
             ;;
     esac
     echo ""
-    echo "If you already use a Node version manager, activate Node.js 20+"
+    echo "If you already use a Node version manager, activate Node.js 22+"
     echo "in this shell before rerunning the installer."
 }
 
@@ -357,8 +357,8 @@ require_node() {
         return 1
     fi
 
-    if [[ "${node_major}" -lt 20 ]]; then
-        log_error "Node.js ${node_version:-unknown} is installed, but Node.js 20 or newer is required."
+    if [[ "${node_major}" -lt 22 ]]; then
+        log_error "Node.js ${node_version:-unknown} is installed, but Node.js 22 or newer is required."
         print_node_help
         return 1
     fi
@@ -977,7 +977,7 @@ main() {
                         print_final_instructions "$(get_npm_global_bin)"
                     else
                         log_warning "Standalone archive was unavailable before npm fallback; npm fallback also failed."
-                        log_warning "Retry with --method standalone to debug the standalone failure, or install Node.js 20+ and rerun --method npm."
+                        log_warning "Retry with --method standalone to debug the standalone failure, or install Node.js 22+ and rerun --method npm."
                         exit 1
                     fi
                 else

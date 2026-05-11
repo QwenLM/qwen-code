@@ -16,7 +16,7 @@ The installers are intentionally lightweight:
   `%USERPROFILE%\.qwen\source.json` when `--source` is provided.
 
 Standalone archives include a private Node.js runtime, so users do not need a
-local Node.js installation on the standalone path. Node.js 20 or newer and npm
+local Node.js installation on the standalone path. Node.js 22 or newer and npm
 are only required when the installer falls back to npm or when
 `--method npm` is used.
 
@@ -248,7 +248,7 @@ unreadable source files are ignored.
 
 ## Manual Installation
 
-If source tracking is not needed and Node.js 20 or newer is already available:
+If source tracking is not needed and Node.js 22 or newer is already available:
 
 ```bash
 npm install -g @qwen-code/qwen-code@latest
@@ -269,7 +269,7 @@ fails so that automation can detect the missing artifact.
 
 ### Node.js Missing or Too Old
 
-This only blocks npm installation. Install or activate Node.js 20 or newer, then
+This only blocks npm installation. Install or activate Node.js 22 or newer, then
 rerun the installer with `--method npm` or let `detect` fall back again.
 
 ### npm Missing

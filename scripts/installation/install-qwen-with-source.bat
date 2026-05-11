@@ -172,7 +172,7 @@ if !STANDALONE_STATUS! EQU 2 (
     call :InstallNpm
     if !ERRORLEVEL! NEQ 0 (
         echo WARNING: Standalone archive was unavailable before npm fallback; npm fallback also failed.
-        echo WARNING: Retry with --method standalone to debug the standalone failure, or install Node.js 20+ and rerun --method npm.
+        echo WARNING: Retry with --method standalone to debug the standalone failure, or install Node.js 22+ and rerun --method npm.
         exit /b !ERRORLEVEL!
     )
     call :PrintFinalInstructions ""
@@ -745,7 +745,7 @@ where node >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Node.js was not found.
     echo.
-    echo Node.js 20 or newer is required before installing Qwen Code with npm.
+    echo Node.js 22 or newer is required before installing Qwen Code with npm.
     echo Please install Node.js from https://nodejs.org/ and rerun this installer.
     exit /b 1
 )
@@ -753,7 +753,7 @@ if %ERRORLEVEL% NEQ 0 (
 for /f "delims=" %%i in ('node -p "process.versions.node" 2^>nul') do set "NODE_VERSION=%%i"
 if "%NODE_VERSION%"=="" (
     echo ERROR: Unable to determine Node.js version.
-    echo Node.js 20 or newer is required before installing Qwen Code with npm.
+    echo Node.js 22 or newer is required before installing Qwen Code with npm.
     exit /b 1
 )
 
@@ -761,12 +761,12 @@ for /f "tokens=1 delims=." %%a in ("%NODE_VERSION%") do set "MAJOR_VERSION=%%a"
 set /a NODE_MAJOR_NUM=%MAJOR_VERSION% >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Unable to determine Node.js version.
-    echo Node.js 20 or newer is required before installing Qwen Code with npm.
+    echo Node.js 22 or newer is required before installing Qwen Code with npm.
     exit /b 1
 )
 
-if %NODE_MAJOR_NUM% LSS 20 (
-    echo ERROR: Node.js %NODE_VERSION% is installed, but Node.js 20 or newer is required.
+if %NODE_MAJOR_NUM% LSS 22 (
+    echo ERROR: Node.js %NODE_VERSION% is installed, but Node.js 22 or newer is required.
     echo Please install Node.js from https://nodejs.org/ and rerun this installer.
     exit /b 1
 )

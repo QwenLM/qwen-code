@@ -70,7 +70,7 @@ describe('installation scripts', () => {
     expect(script).toContain(
       '--source may only contain letters, numbers, dot, underscore, or dash',
     );
-    expect(script).toContain('Node.js 20 or newer is required');
+    expect(script).toContain('Node.js 22 or newer is required');
     expect(script).toContain(
       'npm install -g @qwen-code/qwen-code@latest --registry',
     );
@@ -159,7 +159,7 @@ describe('installation scripts', () => {
     expect(script).toContain(
       '--source may only contain letters, numbers, dot, underscore, or dash',
     );
-    expect(script).toContain('Node.js 20 or newer is required');
+    expect(script).toContain('Node.js 22 or newer is required');
     expect(script).toContain('Please install Node.js');
     expect(script).toContain(
       'npm install -g @qwen-code/qwen-code@latest --registry',
@@ -1469,8 +1469,8 @@ describe('Linux/macOS installer end-to-end', () => {
             '#!/usr/bin/env sh',
             'if [ "$1" = "-p" ]; then',
             '  case "$2" in',
-            '    *split*) echo 20 ;;',
-            '    *) echo 20.19.0 ;;',
+            '    *split*) echo 22 ;;',
+            '    *) echo 22.0.0 ;;',
             '  esac',
             '  exit 0',
             'fi',
