@@ -1505,77 +1505,138 @@ export class ShellToolInvocation extends BaseToolInvocation<
       : null;
 
     let cumulativeOutput: string | AnsiOutput = '';
-    let lastUpdateTime = Date.now();
+    let lastUpdateTime = Number.NEGATIVE_INFINITY;
     let isBinaryStream = false;
     let totalLines = 0;
     let totalBytes = 0;
+    let trailingFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const { result: resultPromise, pid } = await ShellExecutionService.execute(
-      commandToExecute,
-      cwd,
-      (event: ShellOutputEvent) => {
-        let shouldUpdate = false;
+    const cancelTrailingFlush = () => {
+      if (trailingFlushTimer !== null) {
+        clearTimeout(trailingFlushTimer);
+        trailingFlushTimer = null;
+      }
+    };
 
-        switch (event.type) {
-          case 'data':
-            if (isBinaryStream) break;
-            cumulativeOutput = event.chunk;
-            // Stats are only consumed by the ANSI-output branch below,
-            // so skip the per-chunk accounting for plain string chunks.
-            if (Array.isArray(event.chunk)) {
-              totalLines = event.chunk.length;
-              totalBytes = event.chunk.reduce(
-                (sum, line) =>
-                  sum +
-                  line.reduce(
-                    (ls, token) => ls + Buffer.byteLength(token.text, 'utf-8'),
-                    0,
-                  ),
-                0,
-              );
-            }
-            shouldUpdate = true;
-            break;
-          case 'binary_detected':
-            isBinaryStream = true;
-            cumulativeOutput = '[Binary output detected. Halting stream...]';
-            shouldUpdate = true;
-            break;
-          case 'binary_progress':
-            isBinaryStream = true;
-            cumulativeOutput = `[Receiving binary output... ${formatMemoryUsage(
-              event.bytesReceived,
-            )} received]`;
-            if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
-              shouldUpdate = true;
-            }
-            break;
-          default: {
-            throw new Error('An unhandled ShellOutputEvent was found.');
+    const doUpdate = () => {
+      // Any path that emits an update supersedes a pending trailing flush —
+      // cancel centrally so leading-edge text, ANSI, binary_detected, and
+      // binary_progress branches all stay consistent without each having to
+      // remember to clear the timer themselves.
+      cancelTrailingFlush();
+      lastUpdateTime = Date.now();
+      if (!updateOutput) return;
+      if (typeof cumulativeOutput === 'string') {
+        updateOutput(cumulativeOutput);
+      } else {
+        updateOutput({
+          ansiOutput: cumulativeOutput,
+          totalLines,
+          totalBytes,
+          ...(this.params.timeout != null && {
+            timeoutMs: this.params.timeout,
+          }),
+        });
+      }
+    };
+
+    // If the command is aborted (user cancel or timeout) while a trailing
+    // flush is pending, cancel the timer so we don't emit a stale frame
+    // between the abort signal firing and the result promise settling.
+    const onAbort = () => {
+      cancelTrailingFlush();
+    };
+    combinedSignal.addEventListener('abort', onAbort, { once: true });
+
+    const onShellOutputEvent = (event: ShellOutputEvent) => {
+      let shouldUpdate = false;
+
+      switch (event.type) {
+        case 'data':
+          if (isBinaryStream) break;
+          cumulativeOutput = event.chunk;
+          // Stats are only consumed by the ANSI-output branch below,
+          // so skip the per-chunk accounting for plain string chunks.
+          if (Array.isArray(event.chunk)) {
+            totalLines = event.chunk.length;
+            totalBytes = event.chunk.reduce(
+              (sum, line) =>
+                sum +
+                line.reduce(
+                  (ls, token) => ls + Buffer.byteLength(token.text, 'utf-8'),
+                  0,
+                ),
+              0,
+            );
           }
-        }
-
-        if (shouldUpdate && updateOutput) {
-          if (typeof cumulativeOutput === 'string') {
-            updateOutput(cumulativeOutput);
-          } else {
-            updateOutput({
-              ansiOutput: cumulativeOutput,
-              totalLines,
-              totalBytes,
-              // Only include timeout when user explicitly set it
-              ...(this.params.timeout != null && {
-                timeoutMs: this.params.timeout,
-              }),
-            });
+          // ANSI output is already throttled and semantically deduped by
+          // ShellExecutionService, so preserve its live responsiveness.
+          // Plain text data can arrive in bursts and does not need every
+          // chunk to force a React render; the final ToolResult still
+          // carries the complete output after command completion.
+          if (Array.isArray(event.chunk)) {
+            shouldUpdate = true;
+          } else if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
+            shouldUpdate = true;
+          } else if (trailingFlushTimer === null) {
+            // Throttled: schedule a trailing flush so the last suppressed
+            // chunk is still shown if the command goes quiet within the
+            // window. The timer's callback reads `cumulativeOutput` by
+            // closure, so subsequent suppressed chunks within the same
+            // window don't need to reschedule — the latest value will be
+            // emitted when the timer fires.
+            const remaining =
+              OUTPUT_UPDATE_INTERVAL_MS - (Date.now() - lastUpdateTime);
+            trailingFlushTimer = setTimeout(() => {
+              trailingFlushTimer = null;
+              doUpdate();
+            }, remaining);
           }
-          lastUpdateTime = Date.now();
+          break;
+        case 'binary_detected':
+          isBinaryStream = true;
+          cumulativeOutput = '[Binary output detected. Halting stream...]';
+          shouldUpdate = true;
+          break;
+        case 'binary_progress':
+          isBinaryStream = true;
+          cumulativeOutput = `[Receiving binary output... ${formatMemoryUsage(
+            event.bytesReceived,
+          )} received]`;
+          if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
+            shouldUpdate = true;
+          }
+          break;
+        default: {
+          throw new Error('An unhandled ShellOutputEvent was found.');
         }
-      },
-      combinedSignal,
-      this.config.getShouldUseNodePtyShell(),
-      shellExecutionConfig ?? {},
-    );
+      }
+
+      if (shouldUpdate) {
+        doUpdate();
+      }
+    };
+
+    let executionHandle;
+    try {
+      executionHandle = await ShellExecutionService.execute(
+        commandToExecute,
+        cwd,
+        onShellOutputEvent,
+        combinedSignal,
+        this.config.getShouldUseNodePtyShell(),
+        shellExecutionConfig ?? {},
+      );
+    } catch (err) {
+      // ShellExecutionService.execute() can throw before resolving (e.g.
+      // PTY dynamic import failure). Tear down the abort listener and any
+      // (theoretically) scheduled trailing flush so nothing fires after we
+      // re-throw to the caller.
+      cancelTrailingFlush();
+      combinedSignal.removeEventListener('abort', onAbort);
+      throw err;
+    }
+    const { result: resultPromise, pid } = executionHandle;
 
     if (pid && setPidCallback) {
       setPidCallback(pid);
@@ -1604,7 +1665,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // difference matters here.
     const executionStartTime = performance.now();
 
-    const result = await resultPromise;
+    let result;
+    try {
+      result = await resultPromise;
+    } finally {
+      // Cancel any pending trailing flush — the command has settled (or
+      // threw) and either the final ToolResult carries the complete output
+      // or the caller will surface an error. Either way the timer must not
+      // fire a stale frame after we've returned. `finally` covers both the
+      // happy path and the (theoretical) reject path so no timer leaks.
+      cancelTrailingFlush();
+      combinedSignal.removeEventListener('abort', onAbort);
+    }
 
     // Background-promote path: the user pressed Ctrl+B (PR-3 wires the
     // keybind to `promoteAbortController.abort({ kind: 'background' })`),

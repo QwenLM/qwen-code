@@ -688,6 +688,11 @@ export class MonitorTool extends BaseDeclarativeTool<
         required: ['command'],
         additionalProperties: false,
       },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — monitoring is infrequent
+      false, // alwaysLoad
+      'monitor watch tail log stream background',
     );
   }
 

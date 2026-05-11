@@ -6,6 +6,7 @@
 
 import type { HistoryItem } from '../types.js';
 import type { Content } from '@google/genai';
+import { STARTUP_CONTEXT_MODEL_ACK } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
 
 /**
@@ -18,12 +19,6 @@ export function isRealUserTurn(item: HistoryItem): boolean {
   if (item.type !== 'user' || !item.text) return false;
   return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }
-
-/**
- * The well-known startup context model acknowledgment.
- * Used to identify the startup context pair in the API history.
- */
-const STARTUP_CONTEXT_MODEL_ACK = 'Got it. Thanks for the context!';
 
 /**
  * Checks if a Content entry is a user-initiated text prompt

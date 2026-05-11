@@ -24,6 +24,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
 import { createDebugLogger } from './debugLogger.js';
 
@@ -142,6 +143,22 @@ export function parseLineTolerant<T>(line: string, filePath: string): T[] {
   }
 }
 
+async function closeLineReader(
+  rl: readline.Interface | undefined,
+  fileStream: fs.ReadStream | undefined,
+): Promise<void> {
+  rl?.close();
+  if (!fileStream || fileStream.closed) {
+    return;
+  }
+
+  const closed = finished(fileStream, { cleanup: true }).catch(() => undefined);
+  if (!fileStream.destroyed) {
+    fileStream.destroy();
+  }
+  await closed;
+}
+
 /**
  * Reads the first N lines from a JSONL file efficiently.
  * Returns an array of parsed objects.
@@ -150,9 +167,11 @@ export async function readLines<T = unknown>(
   filePath: string,
   count: number,
 ): Promise<T[]> {
+  let fileStream: fs.ReadStream | undefined;
+  let rl: readline.Interface | undefined;
   try {
-    const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
+    fileStream = fs.createReadStream(filePath);
+    rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
     });
@@ -177,6 +196,8 @@ export async function readLines<T = unknown>(
       );
     }
     return [];
+  } finally {
+    await closeLineReader(rl, fileStream);
   }
 }
 
@@ -185,9 +206,11 @@ export async function readLines<T = unknown>(
  * Returns an array of parsed objects.
  */
 export async function read<T = unknown>(filePath: string): Promise<T[]> {
+  let fileStream: fs.ReadStream | undefined;
+  let rl: readline.Interface | undefined;
   try {
-    const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
+    fileStream = fs.createReadStream(filePath);
+    rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
     });
@@ -207,6 +230,8 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
       debugLogger.error(`Error reading ${filePath}:`, error);
     }
     return [];
+  } finally {
+    await closeLineReader(rl, fileStream);
   }
 }
 
@@ -278,9 +303,11 @@ export function write(filePath: string, data: unknown[]): void {
  * Counts the number of non-empty lines in a JSONL file.
  */
 export async function countLines(filePath: string): Promise<number> {
+  let fileStream: fs.ReadStream | undefined;
+  let rl: readline.Interface | undefined;
   try {
-    const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
+    fileStream = fs.createReadStream(filePath);
+    rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
     });
@@ -297,6 +324,8 @@ export async function countLines(filePath: string): Promise<number> {
       debugLogger.error(`Error counting lines in ${filePath}:`, error);
     }
     return 0;
+  } finally {
+    await closeLineReader(rl, fileStream);
   }
 }
 

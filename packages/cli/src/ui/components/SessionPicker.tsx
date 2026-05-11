@@ -88,7 +88,15 @@ function SessionListItemView({
   boldSelectedPrefix = true,
 }: SessionListItemViewProps): React.JSX.Element {
   const timeAgo = formatRelativeTime(session.mtime);
-  const messageText = formatMessageCount(session.messageCount);
+  // `messageCount` is now optional on `SessionListItem` because counting
+  // requires a full readline pass over the JSONL — far too expensive to do
+  // in the listing path. The row simply omits the "N messages" segment
+  // when the count isn't available; preview-style consumers that care can
+  // call `SessionService.countSessionMessages(sessionId)` lazily.
+  const messageText =
+    typeof session.messageCount === 'number'
+      ? formatMessageCount(session.messageCount)
+      : undefined;
 
   const showUpIndicator = isFirst && showScrollUp;
   const showDownIndicator = isLast && showScrollDown;
@@ -139,7 +147,8 @@ function SessionListItemView({
       </Box>
       <Box paddingLeft={2}>
         <Text color={theme.text.secondary}>
-          {timeAgo} · {messageText}
+          {timeAgo}
+          {messageText !== undefined && ` · ${messageText}`}
           {session.gitBranch && ` · ${session.gitBranch}`}
         </Text>
       </Box>

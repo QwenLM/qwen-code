@@ -4,8 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { t } from '../../../i18n/index.js';
 import type { MCPServerDisplayInfo, GroupedServers } from './types.js';
-import { SOURCE_DISPLAY_NAMES } from './constants.js';
+import { SOURCE_ORDER } from './constants.js';
+
+function getSourceDisplayName(source: string): string {
+  switch (source) {
+    case 'user':
+      return t('User MCPs');
+    case 'project':
+      return t('Project MCPs');
+    case 'extension':
+      return t('Extension MCPs');
+    default:
+      return source;
+  }
+}
 
 /**
  * 按来源分组服务器
@@ -25,15 +39,14 @@ export function groupServersBySource(
   }
 
   // 按优先级排序: user > project > extension
-  const sourceOrder = ['user', 'project', 'extension'];
   const result: GroupedServers[] = [];
 
-  for (const source of sourceOrder) {
+  for (const source of SOURCE_ORDER) {
     const servers = groups.get(source);
     if (servers && servers.length > 0) {
       result.push({
         source,
-        displayName: SOURCE_DISPLAY_NAMES[source] || source,
+        displayName: getSourceDisplayName(source),
         servers,
       });
     }
@@ -99,7 +112,7 @@ export function formatServerCommand(server: MCPServerDisplayInfo): string {
     const args = config.args?.join(' ') || '';
     return `${config.command} ${args} (stdio)`.trim();
   }
-  return 'Unknown';
+  return t('Unknown');
 }
 
 /**
@@ -123,7 +136,7 @@ export function getToolInvalidReasons(
   description?: string,
 ): string[] {
   const reasons: string[] = [];
-  if (!name) reasons.push('missing name');
-  if (!description) reasons.push('missing description');
+  if (!name) reasons.push(t('missing name'));
+  if (!description) reasons.push(t('missing description'));
   return reasons;
 }

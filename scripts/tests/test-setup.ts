@@ -6,7 +6,15 @@
 
 import { vi } from 'vitest';
 
-vi.mock('fs', () => ({
-  ...vi.importActual('fs'),
-  appendFileSync: vi.fn(),
-}));
+vi.mock('fs', async () => {
+  const actual = await vi.importActual<typeof import('fs')>('fs');
+  const appendFileSync = vi.fn();
+  return {
+    ...actual,
+    appendFileSync,
+    default: {
+      ...actual,
+      appendFileSync,
+    },
+  };
+});

@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
+import { SpanStatusCode } from '@opentelemetry/api';
 import { GeminiClient, SendMessageType } from './client.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
 import {
@@ -158,6 +159,30 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   getLastPromptTokenCount: vi.fn(),
   reset: vi.fn(),
   addEvent: vi.fn(),
+}));
+const clientSpanCalls = vi.hoisted(
+  (): Array<{
+    name: string;
+    attributes: Record<string, string | number | boolean>;
+    statuses: Array<{ code: number; message?: string }>;
+  }> => [],
+);
+const mockWithSpan = vi.hoisted(() => vi.fn());
+
+vi.mock('../telemetry/tracer.js', () => ({
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
+  safeSetStatus: (
+    span: { setStatus: (status: { code: number; message?: string }) => void },
+    status: { code: number; message?: string },
+  ) => {
+    try {
+      span.setStatus(status);
+    } catch {
+      // Match production best-effort telemetry behavior.
+    }
+  },
+  withSpan: mockWithSpan,
 }));
 
 vi.mock('../telemetry/index.js', async (importOriginal) => {
@@ -303,6 +328,32 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    clientSpanCalls.length = 0;
+    mockWithSpan.mockImplementation(
+      async (
+        name: string,
+        attributes: Record<string, string | number | boolean>,
+        fn: (span: {
+          setStatus: ReturnType<typeof vi.fn>;
+          setAttribute: ReturnType<typeof vi.fn>;
+          end: ReturnType<typeof vi.fn>;
+        }) => Promise<unknown>,
+      ) => {
+        const spanCall = {
+          name,
+          attributes,
+          statuses: [] as Array<{ code: number; message?: string }>,
+        };
+        clientSpanCalls.push(spanCall);
+        return fn({
+          setStatus: vi.fn((status: { code: number; message?: string }) => {
+            spanCall.statuses.push(status);
+          }),
+          setAttribute: vi.fn(),
+          end: vi.fn(),
+        });
+      },
+    );
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
 
     // Default: createContentGenerator rejects (simulates test env without auth).
@@ -352,6 +403,10 @@ describe('Gemini Client (client.ts)', () => {
       warmAll: vi.fn().mockResolvedValue(undefined),
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
+      getDeferredToolSummary: vi.fn().mockReturnValue([]),
+      clearRevealedDeferredTools: vi.fn(),
+      revealDeferredTool: vi.fn(),
+      isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getTool: vi.fn().mockReturnValue(null),
     };
     const fileService = new FileDiscoveryService('/test/dir');
@@ -492,6 +547,91 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('startChat — deferred tools', () => {
+    // Pulls the registry mock used by the surrounding suite so each test
+    // can stub the deferred-summary + ToolSearch availability per case.
+    function getRegistryMock() {
+      return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getTool: ReturnType<typeof vi.fn>;
+        isDeferredToolRevealed: ReturnType<typeof vi.fn>;
+        revealDeferredTool: ReturnType<typeof vi.fn>;
+      };
+    }
+
+    it('re-reveals deferred tools that appear in resumed history', async () => {
+      // Resume contract: a transcript referencing `cron_create` (a
+      // deferred tool) must re-reveal it on startChat so the API
+      // declaration list includes its schema — otherwise a follow-up
+      // call to that tool would be rejected as unknown.
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+        { name: 'cron_list', description: 'list' },
+      ]);
+      // ToolSearch is available so we DON'T enter the eager-reveal branch.
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.revealDeferredTool.mockClear();
+
+      // Pass extraHistory containing a functionCall to cron_create.
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { name: 'cron_create', args: {} },
+            } as never,
+          ],
+        },
+      ]);
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
+      // cron_list NOT in history → must NOT be revealed by the resume scan.
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('cron_list');
+    });
+
+    it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
+      // When ToolSearch is filtered out (deny rule / --exclude-tools
+      // tool_search), the model has no way to reach deferred schemas.
+      // Silent disappearance is the worst failure mode — instead, reveal
+      // every deferred tool eagerly so they all land in the declaration
+      // list. The token-saving rationale of deferral was predicated on
+      // the discovery surface being available.
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+        { name: 'cron_list', description: 'list' },
+      ]);
+      reg.getTool.mockReturnValue(null); // ToolSearch absent
+      reg.revealDeferredTool.mockClear();
+
+      await client.startChat();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_list');
+    });
+
+    it('does NOT eagerly reveal when ToolSearch is available', async () => {
+      // When ToolSearch IS registered, deferred tools stay hidden until
+      // the model discovers them — that's the whole point of deferral.
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.revealDeferredTool.mockClear();
+
+      await client.startChat();
+
+      // No history scan match, ToolSearch available → no reveal at all.
+      expect(reg.revealDeferredTool).not.toHaveBeenCalled();
+    });
+  });
+
   describe('addHistory', () => {
     it('should call chat.addHistory with the provided content', async () => {
       const mockChat = {
@@ -542,6 +682,21 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('clears revealedDeferred set so /clear gives a clean tool slate', async () => {
+      // resetChat() must call clearRevealedDeferredTools() — without
+      // this, deferred tools revealed via ToolSearch in the previous
+      // session would carry over as phantom declarations, defeating
+      // the "clean slate" expectation of `/clear`.
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        clearRevealedDeferredTools: ReturnType<typeof vi.fn>;
+      };
+      reg.clearRevealedDeferredTools.mockClear();
+
+      await client.resetChat();
+
+      expect(reg.clearRevealedDeferredTools).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -3042,6 +3197,15 @@ Other open files:
         }),
         'btw-prompt-id',
       );
+      expect(clientSpanCalls.at(-1)).toEqual(
+        expect.objectContaining({
+          name: 'client.generateContent',
+          attributes: {
+            model: DEFAULT_QWEN_FLASH_MODEL,
+            prompt_id: 'btw-prompt-id',
+          },
+        }),
+      );
     });
 
     it('should prefer an explicit prompt id override over the current context', async () => {
@@ -3069,6 +3233,15 @@ Other open files:
         }),
         'override-prompt-id',
       );
+      expect(clientSpanCalls.at(-1)).toEqual(
+        expect.objectContaining({
+          name: 'client.generateContent',
+          attributes: {
+            model: DEFAULT_QWEN_FLASH_MODEL,
+            prompt_id: 'override-prompt-id',
+          },
+        }),
+      );
     });
 
     it('should use config system prompt override when provided', async () => {
@@ -3095,6 +3268,7 @@ Other open files:
       expect(getCustomSystemPrompt).toHaveBeenCalledWith(
         'Override prompt',
         'Saved memory',
+        undefined,
         undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
@@ -3127,6 +3301,7 @@ Other open files:
         '',
         'test-model',
         'Be extra concise.',
+        undefined,
       );
     });
 
@@ -3158,6 +3333,7 @@ Other open files:
         'Override prompt',
         'Saved memory',
         'Focus on findings only.',
+        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -3167,6 +3343,53 @@ Other open files:
         }),
         'test-session-id',
       );
+    });
+
+    it('sets a generic span status when content generation fails', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+      mockGenerateContentFn.mockRejectedValueOnce(
+        new Error('raw upstream 500 with sensitive details'),
+      );
+
+      await expect(
+        client.generateContent(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+        ),
+      ).rejects.toThrow('raw upstream 500 with sensitive details');
+
+      const spanCall = clientSpanCalls.at(-1);
+      expect(spanCall?.statuses).toEqual([
+        { code: SpanStatusCode.ERROR, message: 'API call failed' },
+      ]);
+      expect(JSON.stringify(spanCall?.statuses)).not.toContain('raw upstream');
+    });
+
+    it('sets a generic aborted span status when content generation is aborted', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortController = new AbortController();
+      abortController.abort();
+      mockGenerateContentFn.mockRejectedValueOnce(
+        new Error('raw abort reason with sensitive details'),
+      );
+
+      await expect(
+        client.generateContent(
+          contents,
+          {},
+          abortController.signal,
+          DEFAULT_QWEN_FLASH_MODEL,
+        ),
+      ).rejects.toThrow('raw abort reason with sensitive details');
+
+      const spanCall = clientSpanCalls.at(-1);
+      expect(spanCall?.statuses).toEqual([
+        { code: SpanStatusCode.ERROR, message: 'API call aborted' },
+      ]);
+      expect(JSON.stringify(spanCall?.statuses)).not.toContain('raw abort');
     });
 
     // Note: there is currently no "fallback mode" model routing; the model used

@@ -13,6 +13,7 @@ import type {
   ExecutionMode,
 } from '../commands/types.js';
 import { Colors } from '../colors.js';
+import { t } from '../../i18n/index.js';
 export interface Suggestion {
   label: string;
   value: string;
@@ -55,7 +56,7 @@ export function SuggestionsDisplay({
   if (isLoading) {
     return (
       <Box width={width}>
-        <Text color="gray">Loading suggestions...</Text>
+        <Text color="gray">{t('Loading suggestions...')}</Text>
       </Box>
     );
   }
@@ -92,6 +93,11 @@ export function SuggestionsDisplay({
         const textColor = isActive ? theme.text.accent : theme.text.secondary;
         const displayLabel = suggestion.label ?? suggestion.value;
         const isLong = displayLabel.length >= MAX_WIDTH;
+        const expansionIndicatorWidth = isActive && isLong ? 3 : 0;
+        const descriptionColumnWidth = Math.max(
+          width - commandColumnWidth - 2 - expansionIndicatorWidth,
+          1,
+        );
         const labelElement = (
           <PrepareLabel
             label={displayLabel}
@@ -124,8 +130,13 @@ export function SuggestionsDisplay({
             </Box>
 
             {suggestion.description && (
-              <Box flexGrow={1} paddingLeft={2}>
-                <Text color={textColor} wrap="truncate">
+              <Box
+                width={descriptionColumnWidth}
+                flexGrow={1}
+                flexShrink={1}
+                paddingLeft={2}
+              >
+                <Text color={textColor} wrap="wrap">
                   {suggestion.description}
                 </Text>
               </Box>

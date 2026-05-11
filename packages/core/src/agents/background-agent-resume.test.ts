@@ -399,13 +399,13 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume with hooks',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
       prompt: 'Resume with hooks',
       outputFile,
       metaPath,
-      isBackgrounded: true,
     });
 
     const execute = vi.fn(
@@ -488,13 +488,13 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume stop hook path',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
       prompt: 'Resume stop hook path',
       outputFile,
       metaPath,
-      isBackgrounded: true,
     });
 
     const subagent = {

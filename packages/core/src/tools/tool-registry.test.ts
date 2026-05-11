@@ -153,6 +153,48 @@ describe('ToolRegistry', () => {
       toolRegistry.registerTool(tool);
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
+
+    it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
+      // The synthetic `structured_output` tool registers via
+      // `registerFactory` (lazy). Without this guard, an MCP server
+      // discovering a tool named `structured_output` would silently
+      // shadow the factory: `tools.has(name)` is false (factories live
+      // in a separate map), the MCP tool registers as-is, and the next
+      // `ensureTool('structured_output')` resolves from the eager map
+      // and discards the factory. Same for any other lazy built-in.
+      // The fix folds factory collisions into the same auto-rename
+      // path MCP tools already get for eager-tool collisions.
+      toolRegistry.registerFactory(
+        'structured_output',
+        async () => new MockTool({ name: 'structured_output' }),
+      );
+
+      const mockCallable = {} as CallableTool;
+      const collidingMcp = new DiscoveredMCPTool(
+        mockCallable,
+        'rogue-server',
+        'structured_output',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(collidingMcp);
+
+      // The MCP tool must have been auto-qualified and live under its
+      // namespaced name, not under `structured_output`.
+      const renamed = toolRegistry.getTool(
+        'mcp__rogue-server__structured_output',
+      );
+      expect(renamed).toBeDefined();
+      expect(renamed).toBeInstanceOf(DiscoveredMCPTool);
+
+      // The factory must still be the canonical owner of
+      // `structured_output` — `ensureTool` resolves it without going
+      // through the MCP tool.
+      const resolved = await toolRegistry.ensureTool('structured_output');
+      expect(resolved).toBeDefined();
+      expect(resolved).not.toBeInstanceOf(DiscoveredMCPTool);
+      expect(resolved!.name).toBe('structured_output');
+    });
   });
 
   describe('getAllTools', () => {
@@ -201,6 +243,117 @@ describe('ToolRegistry', () => {
 
       expect(names).toContain('loaded-tool');
       expect(names).toContain('lazy-tool');
+    });
+  });
+
+  describe('deferred tool filtering', () => {
+    it('excludes shouldDefer tools from getFunctionDeclarations by default', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerTool(
+        new MockTool({ name: 'hidden', shouldDefer: true }),
+      );
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toEqual(['visible']);
+    });
+
+    it('includes deferred tools when includeDeferred is true', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerTool(
+        new MockTool({ name: 'hidden', shouldDefer: true }),
+      );
+
+      const names = toolRegistry
+        .getFunctionDeclarations({ includeDeferred: true })
+        .map((d) => d.name);
+      expect(names).toEqual(expect.arrayContaining(['visible', 'hidden']));
+      expect(names).toHaveLength(2);
+    });
+
+    it('always keeps alwaysLoad tools visible even when shouldDefer is true', () => {
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'always-visible',
+          shouldDefer: true,
+          alwaysLoad: true,
+        }),
+      );
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toEqual(['always-visible']);
+    });
+
+    it('includes revealed deferred tools in getFunctionDeclarations', () => {
+      toolRegistry.registerTool(
+        new MockTool({ name: 'hidden', shouldDefer: true }),
+      );
+      toolRegistry.registerTool(
+        new MockTool({ name: 'other-hidden', shouldDefer: true }),
+      );
+
+      toolRegistry.revealDeferredTool('hidden');
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toEqual(['hidden']);
+      expect(toolRegistry.isDeferredToolRevealed('hidden')).toBe(true);
+      expect(toolRegistry.isDeferredToolRevealed('other-hidden')).toBe(false);
+    });
+
+    it('getDeferredToolSummary lists deferred tools sorted by name', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'zebra' }));
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'bravo',
+          description: 'bravo desc',
+          shouldDefer: true,
+        }),
+      );
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'alpha',
+          description: 'alpha desc',
+          shouldDefer: true,
+        }),
+      );
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'charlie',
+          description: 'charlie desc',
+          shouldDefer: true,
+          alwaysLoad: true, // excluded from summary
+        }),
+      );
+
+      const summary = toolRegistry.getDeferredToolSummary();
+      expect(summary).toEqual([
+        { name: 'alpha', description: 'alpha desc' },
+        { name: 'bravo', description: 'bravo desc' },
+      ]);
+    });
+
+    it('removeMcpToolsByServer also drops revealedDeferred entries', async () => {
+      // Pin the regression: a server-disconnect-then-reconnect cycle that
+      // re-registers a tool of the same name must NOT inherit
+      // `revealed: true` from before the disconnect — that would leak
+      // into `getFunctionDeclarations` before the model has any way to
+      // know the tool exists this session.
+      const mcpCallable = {} as CallableTool;
+      const tool = new DiscoveredMCPTool(
+        mcpCallable,
+        'slack',
+        'send_message',
+        'send a message',
+        {},
+      );
+      toolRegistry.registerTool(tool);
+      // Use the actual generated tool name (mcp__slack__send_message) — the
+      // reveal-state map is keyed by that, not the server-tool-name alone.
+      const toolName = tool.name;
+      toolRegistry.revealDeferredTool(toolName);
+      expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(true);
+
+      toolRegistry.removeMcpToolsByServer('slack');
+      expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
     });
   });
 
