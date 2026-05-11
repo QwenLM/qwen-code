@@ -76,37 +76,50 @@ afterAll(async () => {
 }, 15_000);
 
 describe('qwen serve — bearer auth (timing-safe compare)', () => {
+  // Probe `/capabilities` for the rejection cases instead of `/health`
+  // — `/health` is intentionally registered before the bearer middleware
+  // so liveness probes work without credentials. `/capabilities` is the
+  // cheapest route still gated by the bearer chain.
   it('right token → 200', async () => {
-    const res = await fetch(`${base}/health`, {
+    const res = await fetch(`${base}/capabilities`, {
       headers: { Authorization: `Bearer ${TOKEN}` },
     });
     expect(res.status).toBe(200);
   });
 
   it('wrong same-length token → 401', async () => {
-    const res = await fetch(`${base}/health`, {
+    const res = await fetch(`${base}/capabilities`, {
       headers: { Authorization: `Bearer ${'X'.repeat(TOKEN.length)}` },
     });
     expect(res.status).toBe(401);
   });
 
   it('wrong shorter token → 401', async () => {
-    const res = await fetch(`${base}/health`, {
+    const res = await fetch(`${base}/capabilities`, {
       headers: { Authorization: 'Bearer x' },
     });
     expect(res.status).toBe(401);
   });
 
   it('missing Authorization header → 401', async () => {
-    const res = await fetch(`${base}/health`);
+    const res = await fetch(`${base}/capabilities`);
     expect(res.status).toBe(401);
   });
 
   it('Basic scheme (not Bearer) → 401', async () => {
-    const res = await fetch(`${base}/health`, {
+    const res = await fetch(`${base}/capabilities`, {
       headers: { Authorization: `Basic ${TOKEN}` },
     });
     expect(res.status).toBe(401);
+  });
+
+  it('/health exempt: missing Authorization header → 200', async () => {
+    // Locks the auth-bypass exemption documented in
+    // docs/developers/qwen-serve-protocol.md so a future middleware
+    // ordering change can't silently break liveness probes.
+    const res = await fetch(`${base}/health`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'ok' });
   });
 });
 
@@ -176,21 +189,28 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     expect([a.attached, b.attached].sort()).toEqual([false, true]);
   });
 
-  it('bad modelServiceId tears down half-init session (no orphan)', async () => {
+  it('bad modelServiceId keeps the session alive on the default model', async () => {
+    // Per #3889 review A05Ym: when the requested model is rejected at
+    // create-session time, the session stays operational on the
+    // agent's default model. The caller gets a sessionId they can
+    // retry the model switch against (via POST /session/:id/model).
+    // Tearing the session down on model-switch failure would force
+    // the caller into a 500 with no way to recover. The
+    // `model_switch_failed` SSE event is the visible failure signal.
     const cwd = '/tmp';
-    let threw: unknown = null;
-    try {
-      await client.createOrAttachSession({
-        workspaceCwd: cwd,
-        modelServiceId: 'definitely-not-a-real-model',
-      });
-    } catch (err) {
-      threw = err;
-    }
-    expect(threw).toBeInstanceOf(DaemonHttpError);
-    expect((threw as DaemonHttpError).status).toBe(500);
+    const session = await client.createOrAttachSession({
+      workspaceCwd: cwd,
+      modelServiceId: 'definitely-not-a-real-model',
+    });
+    expect(session.sessionId).toBeTypeOf('string');
+    expect(session.attached).toBe(false);
     const sessions = await client.listWorkspaceSessions(cwd);
-    expect(sessions).toEqual([]);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.sessionId).toBe(session.sessionId);
+    // No teardown — Stage 1 has no DELETE /session route, and the
+    // session persists in `byId` until daemon shutdown. The other
+    // tests in this file use unique workspace cwds so the surviving
+    // session here doesn't interfere.
   });
 });
 

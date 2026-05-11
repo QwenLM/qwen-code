@@ -51,8 +51,10 @@ SESSION_ID="<from step 3>"
 curl -N http://127.0.0.1:4170/session/$SESSION_ID/events
 # → id: 1
 #   event: session_update
-#   data: {"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}
+#   data: {"id":1,"v":1,"type":"session_update","data":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}}
 ```
+
+The `data:` line is the **full event envelope** — `{id?, v, type, data, originatorClientId?}` — JSON-stringified on a single line. The ACP payload (the `sessionUpdate` block in this example) sits under `data` inside that envelope. The SSE-level `id:` / `event:` lines are convenience for EventSource clients; the same values appear inside the JSON envelope so raw-`fetch` consumers get them too.
 
 Open this **before** sending the prompt — the SSE replay buffer holds the
 last 1000 events so a late subscriber can catch up via `Last-Event-ID`,

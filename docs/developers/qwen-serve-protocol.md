@@ -203,22 +203,24 @@ Accept: text/event-stream
 Last-Event-ID: 42        ← optional, replays from after id 42
 ```
 
-Frame format:
+Frame format. The `data:` line is the **full event envelope**, JSON-stringified on a single line — `{id?, v, type, data, originatorClientId?}`. The ACP-specific payload (`sessionUpdate`, `requestPermission` arguments, etc.) sits under the envelope's `data` field; the envelope's own `type` matches the SSE `event:` line.
 
 ```
 id: 7
 event: session_update
-data: {"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}
+data: {"id":7,"v":1,"type":"session_update","data":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}}
 
 id: 8
 event: permission_request
-data: {"requestId":"<uuid>","sessionId":"<sid>","toolCall":{...},"options":[...]}
+data: {"id":8,"v":1,"type":"permission_request","data":{"requestId":"<uuid>","sessionId":"<sid>","toolCall":{...},"options":[...]}}
 
 : heartbeat              ← every 15s, no payload
 
 event: client_evicted    ← terminal frame, no id (synthetic)
-data: {"reason":"queue_overflow","droppedAfter":42}
+data: {"v":1,"type":"client_evicted","data":{"reason":"queue_overflow","droppedAfter":42}}
 ```
+
+The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` for EventSource compatibility. Raw-`fetch` consumers (the SDK's `parseSseStream`) read everything off the JSON envelope and ignore the SSE preamble lines.
 
 | Event type            | Trigger                                                                                                                                                                                     |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
