@@ -84,6 +84,7 @@ describe('EditTool', () => {
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
+      getFileHistoryService: () => ({ trackEdit: vi.fn() }),
     } as unknown as Config;
 
     // Reset mocks before each test

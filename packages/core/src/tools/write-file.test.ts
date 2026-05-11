@@ -72,6 +72,7 @@ const mockConfigInternal = {
   getDefaultFileEncoding: () => 'utf-8',
   getFileReadCache: () => fileReadCache,
   getFileReadCacheDisabled: () => false,
+  getFileHistoryService: () => ({ trackEdit: vi.fn() }),
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
