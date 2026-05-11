@@ -34,6 +34,8 @@ import {
   tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
+import { ToolNames } from '../tools/tool-names.js';
+import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
@@ -53,6 +55,41 @@ import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+
+/**
+ * Replaces the args on a `structured_output` `functionCall` with the
+ * same `__redacted` placeholder used by `ToolCallEvent` telemetry
+ * (`packages/core/src/telemetry/types.ts`).
+ *
+ * The chat-recording JSONL (`<projectDir>/chats/<sessionId>.jsonl`)
+ * persists assistant turns to disk and re-feeds them on
+ * `--continue` / `--resume`. For `--json-schema` runs the tool args
+ * ARE the user's structured payload — already emitted on stdout via
+ * `result` / `structured_result`. Recording them verbatim here would
+ * mean the same payload (and every validation-failure retry along the
+ * way) sits on disk indefinitely, contradicting the privacy contract
+ * documented next to the telemetry redaction. Mirror the placeholder
+ * here so the chat-recording surface matches.
+ *
+ * Non-`structured_output` `functionCall`s pass through untouched.
+ *
+ * Exported for tests; callers should prefer the inline use inside
+ * `recordAssistantTurn` invocation below.
+ */
+export function redactStructuredOutputArgsForRecording(
+  part: Part,
+): { functionCall: NonNullable<Part['functionCall']> } | null {
+  if (!part.functionCall) return null;
+  if (part.functionCall.name !== ToolNames.STRUCTURED_OUTPUT) {
+    return { functionCall: part.functionCall };
+  }
+  return {
+    functionCall: {
+      ...part.functionCall,
+      args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS },
+    },
+  };
+}
 
 function isCompressionFailureStatus(status: CompressionStatus): boolean {
   return (
@@ -1257,8 +1294,13 @@ export class GeminiChat {
           ...(contentText ? [{ text: contentText }] : []),
           ...(hasToolCall
             ? contentParts
-                .filter((part) => part.functionCall)
-                .map((part) => ({ functionCall: part.functionCall }))
+                .map(redactStructuredOutputArgsForRecording)
+                .filter(
+                  (
+                    p,
+                  ): p is { functionCall: NonNullable<Part['functionCall']> } =>
+                    p !== null,
+                )
             : []),
         ],
         tokens: usageMetadata,

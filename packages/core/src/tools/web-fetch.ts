@@ -289,6 +289,11 @@ export class WebFetchTool extends BaseDeclarativeTool<
         required: ['url', 'prompt'],
         type: 'object',
       },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — web fetching is infrequent
+      false, // alwaysLoad
+      'web fetch url http download content',
     );
   }
 

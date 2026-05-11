@@ -4,13 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
   _recoverObjectsFromLine,
   _resetEnsuredDirsCacheForTest,
+  countLines,
   parseLineTolerant,
   read,
   readLines,
@@ -23,7 +32,12 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  fs.rmSync(tmpRoot, { recursive: true, force: true });
+  fs.rmSync(tmpRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
 });
 
 afterEach(() => {
@@ -37,6 +51,39 @@ function tmpFile(content: string): string {
   );
   fs.writeFileSync(p, content, 'utf8');
   return p;
+}
+
+async function waitForStreamClosed(
+  getStream: () => fs.ReadStream | undefined,
+): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (!getStream()?.closed && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(getStream()?.closed).toBe(true);
+}
+
+async function withCapturedReadStream<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  let capturedStream: fs.ReadStream | undefined;
+  const originalCreateReadStream = fs.createReadStream.bind(fs);
+  const spy = vi
+    .spyOn(fs, 'createReadStream')
+    .mockImplementation((...args: Parameters<typeof fs.createReadStream>) => {
+      const stream = originalCreateReadStream(...args);
+      capturedStream = stream;
+      return stream;
+    });
+
+  try {
+    const result = await operation();
+    expect(capturedStream).toBeDefined();
+    await waitForStreamClosed(() => capturedStream);
+    return result;
+  } finally {
+    spy.mockRestore();
+  }
 }
 
 describe('_recoverObjectsFromLine', () => {
@@ -180,5 +227,35 @@ describe('read() / readLines() with malformed lines', () => {
       { a: 1 },
       { a: 2 },
     ]);
+  });
+});
+
+describe('reader resource cleanup', () => {
+  it('closes the file stream after readLines stops at the requested limit', async () => {
+    const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}\n');
+
+    const result = await withCapturedReadStream(() =>
+      readLines<{ i: number }>(file, 1),
+    );
+
+    expect(result).toEqual([{ i: 1 }]);
+  });
+
+  it('closes the file stream after read consumes all lines', async () => {
+    const file = tmpFile('{"i":1}\n{"i":2}\n');
+
+    const result = await withCapturedReadStream(() =>
+      read<{ i: number }>(file),
+    );
+
+    expect(result).toEqual([{ i: 1 }, { i: 2 }]);
+  });
+
+  it('closes the file stream after countLines consumes all lines', async () => {
+    const file = tmpFile('{"i":1}\n\n{"i":2}\n');
+
+    const result = await withCapturedReadStream(() => countLines(file));
+
+    expect(result).toBe(2);
   });
 });

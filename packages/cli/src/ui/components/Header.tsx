@@ -14,16 +14,39 @@ import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { getRenderableGradientColors } from '../utils/gradientUtils.js';
 import { pickAsciiArtTier } from '../utils/customBanner.js';
+import { t } from '../../i18n/index.js';
 
 /**
  * Auth display type for the Header component.
  * Simplified representation of authentication method shown to users.
  */
 export enum AuthDisplayType {
-  QWEN_OAUTH = 'Qwen OAuth',
-  CODING_PLAN = 'Coding Plan',
-  API_KEY = 'API Key',
-  UNKNOWN = 'Unknown',
+  QWEN_OAUTH = 'qwen_oauth',
+  CODING_PLAN = 'coding_plan',
+  API_KEY = 'api_key',
+  UNKNOWN = 'unknown',
+}
+
+function formatAuthDisplayType(
+  authDisplayType?: AuthDisplayType | string,
+): string {
+  if (!authDisplayType || !authDisplayType.trim()) {
+    return t('Unknown');
+  }
+
+  const value = authDisplayType.trim();
+  switch (value) {
+    case AuthDisplayType.QWEN_OAUTH:
+      return t('Qwen OAuth');
+    case AuthDisplayType.CODING_PLAN:
+      return t('Coding Plan');
+    case AuthDisplayType.API_KEY:
+      return t('API Key');
+    case AuthDisplayType.UNKNOWN:
+      return t('Unknown');
+    default:
+      return authDisplayType;
+  }
 }
 
 interface HeaderProps {
@@ -64,7 +87,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
 
-  const formattedAuthType = authDisplayType ?? AuthDisplayType.UNKNOWN;
+  const formattedAuthType = formatAuthDisplayType(authDisplayType);
 
   // Calculate available space properly:
   // First determine if logo can be shown, then use remaining space for path

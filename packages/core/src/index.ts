@@ -276,6 +276,7 @@ export * from './utils/environmentContext.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
 export * from './utils/fileUtils.js';
+export * from './utils/runtimeStatus.js';
 export * from './utils/filesearch/fileSearch.js';
 export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';

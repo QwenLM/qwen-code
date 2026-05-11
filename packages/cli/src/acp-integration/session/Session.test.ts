@@ -455,6 +455,7 @@ describe('Session', () => {
         mockConfig,
         expect.any(AbortSignal),
         'acp',
+        mockSettings,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -471,6 +472,50 @@ describe('Session', () => {
                 sourceLabel: 'Built-in',
                 supportedModes: ['interactive', 'non_interactive', 'acp'],
                 subcommands: ['visible'],
+                modelInvocable: false,
+              },
+            },
+          ],
+        },
+      });
+    });
+
+    it('forwards localized command descriptions from getAvailableCommands()', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'review',
+          description: '审查代码变更',
+          kind: CommandKind.SKILL,
+          source: 'skill-dir-command',
+          sourceLabel: '用户',
+          sourceDetail: 'user',
+          supportedModes: ['acp'],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.any(AbortSignal),
+        'acp',
+        mockSettings,
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'review',
+              description: '审查代码变更',
+              input: { hint: '' },
+              _meta: {
+                argumentHint: undefined,
+                source: 'skill-dir-command',
+                sourceLabel: '用户',
+                supportedModes: ['acp'],
+                subcommands: [],
                 modelInvocable: false,
               },
             },

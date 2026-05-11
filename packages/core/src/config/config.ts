@@ -72,6 +72,7 @@ import {
   isTelemetrySdkInitialized,
   initializeTelemetry,
   shutdownTelemetry,
+  refreshSessionContext,
   logStartSession,
   logRipgrepFallback,
   RipgrepFallbackEvent,
@@ -116,6 +117,10 @@ import {
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
+import {
+  clearRuntimeStatus,
+  writeRuntimeStatus,
+} from '../utils/runtimeStatus.js';
 import {
   SessionService,
   type ResumedSessionData,
@@ -734,6 +739,7 @@ export class Config {
   private readonly overrideExtensions?: string[];
 
   private readonly cliVersion?: string;
+  private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
@@ -1442,6 +1448,7 @@ export class Config {
       // Best-effort — don't block session switch
     }
 
+    const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
     setDebugLogSession(this);
@@ -1459,6 +1466,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
     // and a session-scoped prompt counter — both stop being meaningful
     // when the session resets. Without this, pending attributions
@@ -1468,7 +1476,54 @@ export class Config {
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }
+
+    // Refresh the runtime.json sidecar so external observers (terminal
+    // multiplexers, IDE integrations, status daemons) see the new
+    // session id rather than a stale claim against a still-live PID.
+    // /clear, /reset, /new, and /resume all flow through this method,
+    // so handling the swap centrally covers every same-PID session
+    // transition. Best-effort: must never block /clear or /resume.
+    //
+    // Only refresh when THIS process established its own sidecar at
+    // startup (interactive UI). A non-interactive `/clear` (e.g.
+    // qwen --prompt-interactive) must not delete a sibling shell's
+    // sidecar that happens to share the outgoing session id —
+    // mirrors kimi-cli PR #2082's "write only when a session is
+    // established for this process" rule.
+    if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
+      const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
+      const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
+      const cliVersion = this.cliVersion ?? null;
+      const workDir = this.targetDir;
+      const newSessionId = this.sessionId;
+      void (async () => {
+        try {
+          await clearRuntimeStatus(oldPath);
+          await writeRuntimeStatus(newPath, {
+            sessionId: newSessionId,
+            workDir,
+            qwenVersion: cliVersion,
+          });
+        } catch {
+          // ignored: best-effort cleanup
+        }
+      })();
+    }
+
     return this.sessionId;
+  }
+
+  /**
+   * Marks this Config as the owner of a runtime.json sidecar for the
+   * current PID. Call once after the initial sidecar write succeeds
+   * (typically from the interactive UI bootstrap). When set, subsequent
+   * startNewSession() calls will refresh the sidecar on session swap;
+   * when unset, startNewSession() leaves sibling sidecars alone so a
+   * short-lived non-interactive process can't trample a concurrent
+   * shell's sidecar that happens to share the outgoing session id.
+   */
+  markRuntimeStatusEnabled(): void {
+    this.runtimeStatusEnabled = true;
   }
 
   /**
@@ -2841,7 +2896,7 @@ export class Config {
 
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
-    options?: { skipDiscovery?: boolean },
+    options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -2875,6 +2930,37 @@ export class Config {
       }
     };
 
+    // The synthetic structured_output tool is the terminal contract for
+    // --json-schema runs. It must be registered in BOTH the bare-mode
+    // branch and the regular branch — without it the model can't finish
+    // a structured run, so omitting either branch causes
+    // `qwen [--bare] --json-schema X -p "..."` to loop until
+    // maxSessionTurns and exit via the "plain text" failure path. Hoisted
+    // out of the two branches so the dynamic-import factory shape stays
+    // in sync between them.
+    //
+    // Skipped when building a subagent-context registry. `this.jsonSchema`
+    // propagates to subagent overrides via prototype delegation
+    // (`Object.create(base)` in `createApprovalModeOverride` /
+    // `buildSubagentContextOverride`), but only `runNonInteractive`'s main
+    // and drain loops detect a successful structured_output call as
+    // terminal. A subagent that called the tool would receive the
+    // "Session will end now" llmContent, then keep running because its
+    // own loop has no termination handler — wasted tokens with no
+    // structured payload surfacing on stdout. Strip the registration in
+    // those contexts.
+    const registerStructuredOutputIfRequested = async (): Promise<void> => {
+      if (!this.jsonSchema) return;
+      if (options?.forSubAgent) return;
+      const schema = this.jsonSchema;
+      await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
+        const { SyntheticOutputTool } = await import(
+          '../tools/syntheticOutput.js'
+        );
+        return new SyntheticOutputTool(schema);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -2888,6 +2974,7 @@ export class Config {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
       });
+      await registerStructuredOutputIfRequested();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );
@@ -3005,15 +3092,9 @@ export class Config {
     // Register synthetic structured-output tool when --json-schema is set.
     // The tool's parameter schema IS the user-supplied JSON Schema, so the
     // model's arguments must match it (Ajv-validated in BaseDeclarativeTool).
-    if (this.jsonSchema) {
-      const schema = this.jsonSchema;
-      await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
-        const { SyntheticOutputTool } = await import(
-          '../tools/syntheticOutput.js'
-        );
-        return new SyntheticOutputTool(this, schema);
-      });
-    }
+    // Same helper as the bare-mode branch above to keep the registration
+    // shape and permission gating in sync between the two paths.
+    await registerStructuredOutputIfRequested();
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {

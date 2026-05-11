@@ -737,6 +737,65 @@ describe('UiTelemetryService', () => {
       expect(tools.byName['tool_A'].count).toBe(1);
       expect(tools.byName['tool_B'].count).toBe(1);
     });
+
+    it('redacts function_args for structured_output calls while preserving metrics', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'structured_output',
+        true,
+        250,
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      // The fake helper hardcodes args to { foo: 'bar' }; in the real
+      // structured-output flow this would be the user's extracted payload.
+      // ToolCallEvent must not pass that through to telemetry.
+      (toolCall.request as { args: Record<string, unknown> }).args = {
+        secret: 'extracted private value',
+      };
+
+      const event = new ToolCallEvent(toolCall);
+
+      expect(event.function_name).toBe('structured_output');
+      expect(event.function_args).not.toHaveProperty('secret');
+      expect(event.function_args).toEqual({
+        __redacted: 'structured_output payload (see stdout result)',
+      });
+
+      // Metrics still flow through normally — duration, success, decision.
+      service.addEvent({
+        ...structuredClone(event),
+        'event.name': EVENT_TOOL_CALL,
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
+
+      const { tools } = service.getMetrics();
+      expect(tools.totalCalls).toBe(1);
+      expect(tools.totalSuccess).toBe(1);
+      expect(tools.totalDurationMs).toBe(250);
+      expect(tools.byName['structured_output']).toMatchObject({
+        count: 1,
+        success: 1,
+        durationMs: 250,
+      });
+    });
+
+    it('does not redact function_args for non-structured_output tools', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'write_file',
+        true,
+        100,
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      (toolCall.request as { args: Record<string, unknown> }).args = {
+        path: '/tmp/x',
+        content: 'hello',
+      };
+
+      const event = new ToolCallEvent(toolCall);
+
+      expect(event.function_args).toEqual({
+        path: '/tmp/x',
+        content: 'hello',
+      });
+    });
   });
 
   describe('resetLastPromptTokenCount', () => {

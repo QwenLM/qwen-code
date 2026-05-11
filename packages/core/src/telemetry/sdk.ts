@@ -30,6 +30,8 @@ import {
 } from './file-exporters.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
+import { createSessionRootContext } from './tracer.js';
+import { setSessionContext } from './session-context.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
   const debugLogger = createDebugLogger('OTEL');
@@ -287,9 +289,24 @@ export function initializeTelemetry(config: Config): void {
     sdk.start();
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
+    setSessionContext(createSessionRootContext(config.getSessionId()));
     initializeMetrics(config);
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
+  }
+}
+
+/**
+ * Refresh the session root context with a new session ID.
+ * Must be called whenever the session changes (e.g. /clear, /resume)
+ * so that new spans inherit the correct traceId.
+ */
+export function refreshSessionContext(sessionId: string): void {
+  if (!telemetryInitialized) return;
+  try {
+    setSessionContext(createSessionRootContext(sessionId));
+  } catch (error) {
+    createDebugLogger('OTEL').warn('Failed to refresh session context:', error);
   }
 }
 
@@ -347,6 +364,7 @@ export async function shutdownTelemetry(): Promise<void> {
       telemetryInitialized = false;
       sdk = undefined;
       telemetryShutdownPromise = undefined;
+      setSessionContext(undefined);
     }
   })();
   return telemetryShutdownPromise;

@@ -281,6 +281,7 @@ export async function rebuildToolRegistryOnOverride(
   const ov = override as any;
   const agentRegistry = await ov.createToolRegistry(undefined, {
     skipDiscovery: true,
+    forSubAgent: true,
   });
   agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   ov.getToolRegistry = () => agentRegistry;
