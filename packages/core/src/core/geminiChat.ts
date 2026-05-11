@@ -146,13 +146,15 @@ function isSignificantRecoveryOverlap(overlap: string): boolean {
 /**
  * Returns true if `text` opens with a Markdown block-level structural marker
  * (table row, fenced code, ATX heading, blockquote, list item). Leading
- * blank/newline chars are skipped because providers often prepend them when
- * restarting a block. The marker must appear at the start of a line and be
- * followed by the syntactic gap the spec requires (e.g. `# ` not `#abc`), so
- * incidental `#` or `|` characters in prose do not count.
+ * whitespace/newline chars are skipped because providers often prepend them
+ * when restarting a block — some completion APIs re-emit the suffix with
+ * leading spaces or tabs, not just newlines. The marker must appear at the
+ * start of a line and be followed by the syntactic gap the spec requires
+ * (e.g. `# ` not `#abc`), so incidental `#` or `|` characters in prose do
+ * not count.
  */
 function startsWithMarkdownStructuralAnchor(text: string): boolean {
-  const trimmed = text.replace(/^\n+/, '');
+  const trimmed = text.replace(/^\s+/, '');
   return /^(\|[^\n]*\||#{1,6} |```|>\s|[-*+] |\d+\. )/.test(trimmed);
 }
 

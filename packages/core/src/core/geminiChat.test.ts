@@ -2861,6 +2861,70 @@ describe('GeminiChat', async () => {
       expect(recoveryMessage).not.toContain('<previous_response_suffix>');
     });
 
+    it('should truncate the previous_response_suffix to the trailing 1200 chars when the previous turn is longer', async () => {
+      // Covers the slice(-OUTPUT_RECOVERY_TAIL_CHARS) branch in
+      // buildOutputRecoveryMessage. The truncation tail is 1200 chars; we
+      // build a previous response of 1300 chars so the head (100 chars) is
+      // dropped and the tail (1200 chars) is what shows up in the
+      // <previous_response_suffix> block sent to the recovery turn.
+      const head = 'A'.repeat(100);
+      const tail = 'B'.repeat(1200);
+      const previous = `${head}${tail}`;
+      expect(previous.length).toBe(1300);
+
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' continuation tail' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      const recoveryPayloads: string[] = [];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (params) => {
+          const contents = (params as { contents?: Content[] }).contents ?? [];
+          const lastTurn = contents[contents.length - 1];
+          if (lastTurn && lastTurn.role === 'user') {
+            const lastPart = lastTurn.parts?.[0];
+            if (
+              lastPart &&
+              typeof (lastPart as { text?: string }).text === 'string'
+            ) {
+              recoveryPayloads.push((lastPart as { text: string }).text);
+            }
+          }
+          return streams[callIndex++]!;
+        },
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a very long answer' },
+        'prompt-recovery-tail-truncation',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const recoveryMessage = recoveryPayloads.find((p) =>
+        p.includes('Output token limit hit'),
+      );
+      expect(recoveryMessage).toBeDefined();
+      // The recovery prompt must contain the suffix block...
+      expect(recoveryMessage).toContain('<previous_response_suffix>');
+      expect(recoveryMessage).toContain('</previous_response_suffix>');
+      // ...with exactly the trailing 1200 chars of the previous response.
+      const match = recoveryMessage!.match(
+        /<previous_response_suffix>\n([\s\S]*)\n<\/previous_response_suffix>/,
+      );
+      expect(match).not.toBeNull();
+      const suffix = match![1]!;
+      expect(suffix.length).toBe(1200);
+      expect(suffix).toBe(tail);
+      // The 100-char head must NOT leak into the recovery prompt.
+      expect(suffix.startsWith('A')).toBe(false);
+      expect(recoveryMessage).not.toContain(head);
+    });
+
     it('should skip recovery when truncated turn has a functionCall', async () => {
       // Initial stream returns a functionCall + MAX_TOKENS. Escalated stream
       // returns the same (functionCall + MAX_TOKENS). Recovery must NOT run
