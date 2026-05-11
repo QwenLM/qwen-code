@@ -66,7 +66,7 @@ describe('installation scripts', () => {
     expect(script).not.toContain('.npm-global');
     expect(script).not.toMatch(/^\s*exec\s+qwen\s*$/m);
     expect(script).not.toContain('--print-env');
-    expect(script).not.toContain('brew install node@20');
+    expect(script).not.toMatch(/brew install node@\d+/);
     expect(script).toContain('brew install node');
     expect(script).toContain(
       '--source may only contain letters, numbers, dot, underscore, or dash',
@@ -439,8 +439,8 @@ describe('standalone release packaging', () => {
   it('normalizes Node.js versions passed to the release helper', async () => {
     const { normalizeNodeVersion } = await import(standaloneReleaseScriptUrl);
 
-    expect(normalizeNodeVersion('v20.19.0')).toBe('20.19.0');
-    expect(normalizeNodeVersion('20.19.0')).toBe('20.19.0');
+    expect(normalizeNodeVersion('v22.0.0')).toBe('22.0.0');
+    expect(normalizeNodeVersion('22.0.0')).toBe('22.0.0');
   });
 
   it('loads the hosted installation asset staging helper', () => {
@@ -526,16 +526,14 @@ describe('standalone release packaging', () => {
 
     const checksums = parseChecksums(
       [
-        'a'.repeat(64) + '  node-v20.19.0-linux-x64.tar.xz',
-        'b'.repeat(64) + ' *node-v20.19.0-win-x64.zip',
+        'a'.repeat(64) + '  node-v22.0.0-linux-x64.tar.xz',
+        'b'.repeat(64) + ' *node-v22.0.0-win-x64.zip',
         '',
       ].join('\n'),
     );
 
-    expect(checksums.get('node-v20.19.0-linux-x64.tar.xz')).toBe(
-      'a'.repeat(64),
-    );
-    expect(checksums.get('node-v20.19.0-win-x64.zip')).toBe('b'.repeat(64));
+    expect(checksums.get('node-v22.0.0-linux-x64.tar.xz')).toBe('a'.repeat(64));
+    expect(checksums.get('node-v22.0.0-win-x64.zip')).toBe('b'.repeat(64));
   });
 
   it('validates standalone release checksum output', async () => {
@@ -1850,7 +1848,7 @@ function ensureMinimalDist() {
 }
 
 function createFakeNodeArchive(tmpDir, options = {}) {
-  const fakeNodeDir = path.join(tmpDir, 'node-v20.0.0-linux-x64');
+  const fakeNodeDir = path.join(tmpDir, 'node-v22.0.0-linux-x64');
   mkdirSync(path.join(fakeNodeDir, 'bin'), { recursive: true });
   writeFileSync(
     path.join(fakeNodeDir, 'bin', 'node'),
@@ -1874,7 +1872,7 @@ function createFakeNodeArchive(tmpDir, options = {}) {
     symlinkSync('../bin', path.join(fakeNodeDir, 'bin', 'cycle'));
   }
 
-  const archive = path.join(tmpDir, 'node-v20.0.0-linux-x64.tar.gz');
+  const archive = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.gz');
   execFileSync(
     'tar',
     ['-czf', archive, '-C', tmpDir, path.basename(fakeNodeDir)],
@@ -1910,11 +1908,11 @@ function createBadWindowsNodeArchive(tmpDir) {
 }
 
 function createFakeWindowsNodeArchive(tmpDir) {
-  const fakeNodeDir = path.join(tmpDir, 'node-v20.0.0-win-x64');
+  const fakeNodeDir = path.join(tmpDir, 'node-v22.0.0-win-x64');
   mkdirSync(fakeNodeDir, { recursive: true });
   writeFileSync(path.join(fakeNodeDir, 'node.exe'), 'fake node.exe\n');
 
-  const archive = path.join(tmpDir, 'node-v20.0.0-win-x64.zip');
+  const archive = path.join(tmpDir, 'node-v22.0.0-win-x64.zip');
   createZipForTest(archive, tmpDir, path.basename(fakeNodeDir));
   return archive;
 }
