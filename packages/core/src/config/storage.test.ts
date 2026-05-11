@@ -259,8 +259,9 @@ describe('Storage – getPlansDir', () => {
       }
 
       const result = Storage.getPlansDir(project, './plans-link');
-      // realpathSync resolves the symlink, so result should equal the target
-      expect(result).toBe(target);
+      // The configured symlink path is accepted as long as it stays inside
+      // the project root.
+      expect(result).toBe(symlink);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
