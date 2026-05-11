@@ -5,6 +5,8 @@
  */
 
 const STANDALONE_ARCHIVE_PREFIX = 'qwen-code-';
+// Keep this extension allowlist in sync with the standalone packager target
+// output extensions and the release workflow upload globs.
 const STANDALONE_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'];
 
 function isStandaloneArchiveName(fileName) {

@@ -532,7 +532,7 @@ async function writeSha256Sums(outDir) {
 
   if (entries.length === 0) {
     fail(
-      `No release checksum assets found in ${outDir}; refusing to write empty SHA256SUMS.`,
+      `No standalone archive files found in ${outDir}; refusing to write empty SHA256SUMS.`,
     );
   }
 

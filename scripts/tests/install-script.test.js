@@ -732,7 +732,8 @@ describe('standalone release packaging', () => {
     expect(workflow).not.toContain('install-qwen.bat');
     expect(workflow).not.toContain('verify_node_checksum()');
     expect(workflow).not.toContain('download_node()');
-    expect(workflow).toContain('dist/standalone/qwen-code-*');
+    expect(workflow).toContain('dist/standalone/qwen-code-*.tar.gz');
+    expect(workflow).toContain('dist/standalone/qwen-code-*.zip');
     expect(workflow).toContain('dist/standalone/SHA256SUMS');
   });
 

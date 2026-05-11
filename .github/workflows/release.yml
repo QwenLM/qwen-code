@@ -418,7 +418,8 @@ jobs:
 
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
-            dist/standalone/qwen-code-* \
+            dist/standalone/qwen-code-*.tar.gz \
+            dist/standalone/qwen-code-*.zip \
             dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
