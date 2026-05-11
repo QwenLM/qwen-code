@@ -12,6 +12,7 @@ import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   createHttpAcpBridge,
+  SessionLimitExceededError,
   SessionNotFoundError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
@@ -75,11 +76,39 @@ export function createServeApp(
   // gate `/health` behind their token alongside everything else.
   // CORS deny + Host allowlist still apply to `/health` in both
   // cases.
+  // Shared handler so loopback (pre-auth) and non-loopback (post-auth)
+  // routes return the same shape. `?deep=1` opts into a probe that
+  // touches bridge state — if the bridge is wedged the property
+  // accesses throw and we surface 503 so k8s probes can distinguish
+  // a zombie daemon from a healthy one. Default (no query) stays
+  // cheap so high-frequency liveness probes don't load the bridge.
+  const healthHandler = (
+    req: import('express').Request,
+    res: import('express').Response,
+  ): void => {
+    const deepQuery = req.query['deep'];
+    const deep = deepQuery === '1' || deepQuery === 'true' || deepQuery === '';
+    if (!deep) {
+      res.status(200).json({ status: 'ok' });
+      return;
+    }
+    try {
+      res.status(200).json({
+        status: 'ok',
+        sessions: bridge.sessionCount,
+        pendingPermissions: bridge.pendingPermissionCount,
+      });
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /health deep probe failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(503).json({ status: 'degraded' });
+    }
+  };
+
   const loopback = isLoopbackBind(opts.hostname);
   if (loopback) {
-    app.get('/health', (_req, res) => {
-      res.status(200).json({ status: 'ok' });
-    });
+    app.get('/health', healthHandler);
   }
 
   app.use(bearerAuth(opts.token));
@@ -89,9 +118,7 @@ export function createServeApp(
     // Non-loopback: register `/health` AFTER `bearerAuth` so probes
     // must carry the token. Otherwise unauthenticated callers can
     // ping any reachable address:port to confirm a daemon exists.
-    app.get('/health', (_req, res) => {
-      res.status(200).json({ status: 'ok' });
-    });
+    app.get('/health', healthHandler);
   }
 
   app.get('/capabilities', (_req, res) => {
@@ -622,6 +649,20 @@ type OmitId<T> = Omit<T, 'id'>;
 function sendBridgeError(res: import('express').Response, err: unknown): void {
   if (err instanceof SessionNotFoundError) {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    return;
+  }
+  if (err instanceof SessionLimitExceededError) {
+    // 503 Service Unavailable + `Retry-After` is the canonical
+    // "we'd serve you, but we're full right now" shape. The hint
+    // is intentionally conservative (5s) because a session that
+    // finishes a prompt frees a slot quickly under normal load;
+    // a client that backs off too aggressively wastes capacity.
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'session_limit_exceeded',
+      limit: err.limit,
+    });
     return;
   }
   // 5xx is the kind of error operators need to see in their daemon log

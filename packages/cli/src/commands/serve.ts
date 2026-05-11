@@ -16,6 +16,7 @@ interface ServeArgs {
   port: number;
   hostname: string;
   token?: string;
+  'max-sessions': number;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -44,6 +45,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         description:
           'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var.',
+      })
+      .option('max-sessions', {
+        type: 'number',
+        default: 20,
+        description:
+          'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
+          'attach to existing sessions still works. Set to 0 to disable.',
       })
       .option('http-bridge', {
         type: 'boolean',
@@ -79,6 +87,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         hostname: argv.hostname,
         token: argv.token,
         mode: 'http-bridge',
+        maxSessions: argv['max-sessions'],
       });
     } catch (err) {
       writeStderrLine(

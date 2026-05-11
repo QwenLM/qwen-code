@@ -17,6 +17,7 @@ import type {
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  SessionLimitExceededError,
   SessionNotFoundError,
   type BridgeSession,
   type BridgeSessionSummary,
@@ -756,6 +757,69 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({ error: 'Request body too large (max 10 MB)' });
       // Body parser short-circuits before the route handler runs.
       expect(bridge.calls).toHaveLength(0);
+    });
+  });
+
+  describe('GET /health?deep=1 (chiga0 Risk 3)', () => {
+    it('default /health stays cheap (no bridge touch)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ status: 'ok' });
+    });
+
+    it('deep=1 includes bridge state', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get('/health?deep=1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        status: 'ok',
+        sessions: 0,
+        pendingPermissions: 0,
+      });
+    });
+
+    it('deep=1 returns 503 when bridge state access throws', async () => {
+      // Simulate a wedged bridge by replacing the getter to throw.
+      const bridge = fakeBridge();
+      Object.defineProperty(bridge, 'sessionCount', {
+        get() {
+          throw new Error('bridge wedged');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get('/health?deep=1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ status: 'degraded' });
+    });
+  });
+
+  describe('session limit (chiga0 Rec 3 — --max-sessions)', () => {
+    it('503 + Retry-After + structured error when bridge throws SessionLimitExceededError', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new SessionLimitExceededError(20);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body).toMatchObject({
+        code: 'session_limit_exceeded',
+        limit: 20,
+      });
     });
   });
 });

@@ -74,7 +74,8 @@ export async function runQwenServe(
     );
   }
 
-  const bridge = deps.bridge ?? createHttpAcpBridge();
+  const bridge =
+    deps.bridge ?? createHttpAcpBridge({ maxSessions: opts.maxSessions });
   let actualPort = opts.port;
   const app = createServeApp(opts, () => actualPort, { bridge });
 

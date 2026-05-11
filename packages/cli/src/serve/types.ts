@@ -25,6 +25,17 @@ export interface ServeOptions {
    */
   token?: string;
   mode: ServeMode;
+  /**
+   * Cap on concurrent live sessions. Once `bridge.sessionCount` reaches
+   * this, new `POST /session` requests that would spawn fresh sessions
+   * return 503. Attaching to an existing session (same workspace under
+   * `sessionScope: 'single'`) still works — so an idle daemon doesn't
+   * block reconnects from existing users. Defaults to 20: comfortably
+   * above single-user usage, well below the design's N≈50 cliff where
+   * per-session RSS (~30–50 MB) and FD pressure start to bite. Set to
+   * `0` or `Infinity` to disable.
+   */
+  maxSessions?: number;
 }
 
 /**

@@ -40,6 +40,18 @@ with status `400`.
 
 with status `404`.
 
+`POST /session` past the daemon's `--max-sessions` cap returns `503` with a `Retry-After: 5` header and:
+
+```json
+{
+  "error": "Session limit reached (20)",
+  "code": "session_limit_exceeded",
+  "limit": 20
+}
+```
+
+Attaches to existing sessions are NOT counted toward the cap, so an idle daemon's reconnects keep working even when at-capacity.
+
 ## Capabilities
 
 Every Stage 1 daemon advertises 9 feature tags. Clients **must** gate UI off `features`, not off `mode` (per design §10).
@@ -60,7 +72,15 @@ Every Stage 1 daemon advertises 9 feature tags. Clients **must** gate UI off `fe
 
 ### `GET /health`
 
-Liveness probe. Returns `200 {"status":"ok"}` if the listener is up.
+Liveness probe. Default form returns `200 {"status":"ok"}` if the listener is up — cheap, no bridge access, suitable for high-frequency k8s/Compose liveness probes.
+
+Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that touches bridge state. The deep probe is what catches a "zombie daemon" — listener answering, bridge wedged:
+
+```json
+{ "status": "ok", "sessions": 3, "pendingPermissions": 1 }
+```
+
+A 503 with `{"status":"degraded"}` indicates the bridge state access threw — pull the daemon out of rotation and investigate.
 
 **Auth:** required **only on non-loopback binds**. On loopback (`127.0.0.1`, `::1`, `[::1]`) `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the loopback exemption.
 
@@ -237,7 +257,7 @@ The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` f
 
 Reconnect semantics:
 
-- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth 1000)
+- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth 4000)
 - **Gap detection (client-side):** if `<n>` predates the oldest event still in the ring (e.g. you reconnect with `Last-Event-ID: 50` but the ring now holds 200–1199), the daemon replays from the oldest available event without raising. Compare the first replayed event's `id` against `n + 1`; any difference is the size of the lost window. Stage 2 will inject an explicit `stream_gap` synthetic frame on the daemon side; in Stage 1 detection is the client's responsibility.
 - IDs are monotonic per session, starting at 1
 - Synthetic terminal frames (`client_evicted`, `stream_error`) intentionally omit `id` so they don't burn a sequence slot for other subscribers

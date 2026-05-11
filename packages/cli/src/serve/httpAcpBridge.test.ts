@@ -1785,4 +1785,87 @@ describe('createHttpAcpBridge', () => {
       expect(events[0]?.type).toBe('session_died');
     });
   });
+
+  describe('maxSessions cap (chiga0 Rec 3)', () => {
+    it('refuses NEW spawns past the cap with SessionLimitExceededError', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        maxSessions: 2,
+        // `thread` so each call is a fresh session, not an attach.
+        sessionScope: 'thread',
+      });
+
+      // First two spawns succeed.
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_B });
+      expect(bridge.sessionCount).toBe(2);
+
+      // Third hits the cap.
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({
+        name: 'SessionLimitExceededError',
+        limit: 2,
+      });
+      // Cap rejection must NOT register a new session.
+      expect(bridge.sessionCount).toBe(2);
+
+      await bridge.shutdown();
+    });
+
+    it('attach to an existing session under single scope is NOT counted toward the cap', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        maxSessions: 1,
+        sessionScope: 'single',
+      });
+
+      // First call spawns.
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(a.attached).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Second call to the SAME workspace attaches — cap doesn't apply.
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      expect(b.sessionId).toBe(a.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+
+      // But a NEW workspace (would need a fresh spawn) is rejected.
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_B }),
+      ).rejects.toMatchObject({
+        name: 'SessionLimitExceededError',
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('maxSessions: 0 disables the cap', async () => {
+      // Distinct sessionIdPrefix per spawn so each call gets a unique
+      // sessionId (otherwise they'd collide in `byId` and only the
+      // last would remain — making `sessionCount` stay at 1).
+      let n = 0;
+      const factory: ChannelFactory = async () =>
+        makeChannel({ sessionIdPrefix: `s${n++}` }).channel;
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        maxSessions: 0,
+        sessionScope: 'thread',
+      });
+      // 5 spawns is far past the would-be default of 20 isn't, but
+      // it's enough to confirm the cap is disabled (with default of
+      // 20 a thread-scope flood could go 5 deep without hitting it
+      // anyway, so we use a smaller test value with 0/disabled
+      // explicit so a regression that re-enabled some default cap
+      // would still surface).
+      for (let i = 0; i < 5; i++) {
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      }
+      expect(bridge.sessionCount).toBe(5);
+      await bridge.shutdown();
+    });
+  });
 });

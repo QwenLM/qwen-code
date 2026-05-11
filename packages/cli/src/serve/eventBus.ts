@@ -61,7 +61,17 @@ export interface SubscribeOptions {
 }
 
 const DEFAULT_MAX_QUEUED = 256;
-const DEFAULT_RING_SIZE = 1000;
+/**
+ * Default replay-ring depth per session. Sized for a 5-second
+ * reconnect window over a chatty turn — a single long-running prompt
+ * can emit hundreds of frames (test plan reports 13 for a short
+ * turn, real workloads can be 10× that or more once tool-call /
+ * thought streams pile up). 1000 was the original default and could
+ * be exhausted by a moderate turn before the client reconnected;
+ * 4000 gives ~30× headroom over a typical-but-busy turn at the cost
+ * of a few hundred KB of RAM per session.
+ */
+const DEFAULT_RING_SIZE = 4000;
 /**
  * Per-bus subscriber cap. With per-subscriber `maxQueued` defaulting to
  * 256 frames, 64 concurrent subscribers caps the per-session subscriber
@@ -133,7 +143,7 @@ export class EventBus {
       ...input,
     };
     this.ring.push(event);
-    // Eviction-by-shift is O(n) once the ring is full. With ringSize=1000
+    // Eviction-by-shift is O(n) once the ring is full. With ringSize=4000
     // and per-publish work measured in hundreds of microseconds even on
     // chatty sessions, this isn't a real hotspot today. A circular-buffer
     // refactor would push it to O(1) but adds index bookkeeping; deferred

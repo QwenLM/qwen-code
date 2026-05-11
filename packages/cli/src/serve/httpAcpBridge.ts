@@ -178,6 +178,22 @@ export class SessionNotFoundError extends Error {
 }
 
 /**
+ * Thrown by `spawnOrAttach` when a fresh-spawn would push `sessionCount`
+ * past `BridgeOptions.maxSessions`. The HTTP route maps this to 503
+ * with a `Retry-After` hint. Attaches (same workspace under `single`
+ * scope) never trip this — only NEW children. Distinct error type so
+ * routes can branch without text-matching.
+ */
+export class SessionLimitExceededError extends Error {
+  readonly limit: number;
+  constructor(limit: number) {
+    super(`Session limit reached (${limit})`);
+    this.name = 'SessionLimitExceededError';
+    this.limit = limit;
+  }
+}
+
+/**
  * One ACP NDJSON channel to a single agent. Tests inject a fake by replacing
  * the channel factory; production uses `defaultSpawnChannelFactory`.
  */
@@ -208,6 +224,14 @@ export interface BridgeOptions {
   channelFactory?: ChannelFactory;
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
+  /**
+   * Cap on concurrent live sessions. `spawnOrAttach` calls that would
+   * cross this throw `SessionLimitExceededError`; attaches to an
+   * existing session (same workspace under `single` scope) are not
+   * counted. `0` / `Infinity` disable the cap. Defaults to 20 — see
+   * `ServeOptions.maxSessions` for the rationale.
+   */
+  maxSessions?: number;
 }
 
 interface SessionEntry {
@@ -394,9 +418,21 @@ class BridgeClient implements Client {
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_SESSIONS = 20;
 
 export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   const sessionScope = opts.sessionScope ?? 'single';
+  // `undefined` → default 20 (intentionally tight per #3803 N≈50 cliff).
+  // `0` or non-finite (Infinity / NaN) → unlimited.
+  // Positive finite → use as-is.
+  let maxSessions: number;
+  if (opts.maxSessions === undefined) {
+    maxSessions = DEFAULT_MAX_SESSIONS;
+  } else if (opts.maxSessions <= 0 || !Number.isFinite(opts.maxSessions)) {
+    maxSessions = Infinity;
+  } else {
+    maxSessions = opts.maxSessions;
+  }
   if (sessionScope !== 'single' && sessionScope !== 'thread') {
     throw new TypeError(
       `Invalid sessionScope: ${JSON.stringify(sessionScope)}. ` +
@@ -799,6 +835,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           }
           return { ...session, attached: true };
         }
+      }
+
+      // Cap check: count both registered sessions and in-flight spawns
+      // (a fresh-spawn races that's about to register hasn't hit
+      // `byId` yet but should still count toward the limit). Attaches
+      // returned above bypass this — only NEW children are gated.
+      if (byId.size + inFlightSpawns.size >= maxSessions) {
+        throw new SessionLimitExceededError(maxSessions);
       }
 
       const promise = doSpawn(workspaceKey, req.modelServiceId);

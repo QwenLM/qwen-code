@@ -57,7 +57,7 @@ curl -N http://127.0.0.1:4170/session/$SESSION_ID/events
 The `data:` line is the **full event envelope** — `{id?, v, type, data, originatorClientId?}` — JSON-stringified on a single line. The ACP payload (the `sessionUpdate` block in this example) sits under `data` inside that envelope. The SSE-level `id:` / `event:` lines are convenience for EventSource clients; the same values appear inside the JSON envelope so raw-`fetch` consumers get them too.
 
 Open this **before** sending the prompt — the SSE replay buffer holds the
-last 1000 events so a late subscriber can catch up via `Last-Event-ID`,
+last 4000 events so a late subscriber can catch up via `Last-Event-ID`,
 but for the simple "watch a single prompt" case it's easiest to subscribe
 first and let it stream live.
 
@@ -100,12 +100,13 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 
 ## CLI flags
 
-| Flag                | Default     | Purpose                                                                                                                             |
-| ------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `--port <n>`        | `4170`      | TCP port. `0` = OS-assigned ephemeral port.                                                                                         |
-| `--hostname <addr>` | `127.0.0.1` | Bind interface. Anything beyond loopback requires a token.                                                                          |
-| `--token <str>`     | —           | Bearer token. Falls back to `QWEN_SERVER_TOKEN` env var (with leading/trailing whitespace stripped — handy for `$(cat token.txt)`). |
-| `--http-bridge`     | `true`      | Stage 1 mode: per-session `qwen --acp` child process. Stage 2 native in-process becomes available later.                            |
+| Flag                 | Default     | Purpose                                                                                                                                                                                                                                                                                                                                             |
+| -------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--port <n>`         | `4170`      | TCP port. `0` = OS-assigned ephemeral port.                                                                                                                                                                                                                                                                                                         |
+| `--hostname <addr>`  | `127.0.0.1` | Bind interface. Anything beyond loopback requires a token.                                                                                                                                                                                                                                                                                          |
+| `--token <str>`      | —           | Bearer token. Falls back to `QWEN_SERVER_TOKEN` env var (with leading/trailing whitespace stripped — handy for `$(cat token.txt)`).                                                                                                                                                                                                                 |
+| `--max-sessions <n>` | `20`        | Cap on concurrent live sessions. New `POST /session` requests that would spawn a fresh child return `503` (with `Retry-After: 5`) when the cap is hit; attaches to existing sessions are NOT counted. Set to `0` to disable. Sized for single-user / small-team usage; raise it if your deployment has the RAM/FD headroom (~30–50 MB per session). |
+| `--http-bridge`      | `true`      | Stage 1 mode: per-session `qwen --acp` child process. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                            |
 
 ## Default deployment threat model
 
