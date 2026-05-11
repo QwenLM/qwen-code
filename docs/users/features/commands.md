@@ -45,13 +45,14 @@ Commands for adjusting interface appearance and work environment.
 
 Commands specifically for controlling interface and output language.
 
-| Command               | Description                      | Usage Examples             |
-| --------------------- | -------------------------------- | -------------------------- |
-| `/language`           | View or change language settings | `/language`                |
-| → `ui [language]`     | Set UI interface language        | `/language ui zh-CN`       |
-| → `output [language]` | Set LLM output language          | `/language output Chinese` |
+| Command               | Description                                                                 | Usage Examples             |
+| --------------------- | --------------------------------------------------------------------------- | -------------------------- |
+| `/language`           | View or change language settings                                            | `/language`                |
+| → `ui [language]`     | Set UI interface language                                                   | `/language ui zh-CN`       |
+| → `output [language]` | Set LLM output language                                                     | `/language output Chinese` |
+| → `translate on/off`  | Toggle AI translation for dynamic slash command descriptions (default: off) | `/language translate on`   |
 
-- Available built-in UI languages: `zh-CN` (Simplified Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German)
+- Available built-in UI languages: `zh-CN` (Simplified Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German), `ja-JP` (Japanese), `pt-BR` (Portuguese - Brazil), `fr-FR` (French), `ca-ES` (Catalan)
 - Output language examples: `Chinese`, `English`, `Japanese`, etc.
 
 ### 1.4 Tool and Model Management

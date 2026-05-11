@@ -360,6 +360,7 @@ describe('AppContainer State Management', () => {
           hideWindowTitle: false,
         },
       },
+      setValue: vi.fn(),
     } as unknown as LoadedSettings;
 
     // Mock InitializationResult
@@ -1839,6 +1840,108 @@ describe('AppContainer State Management', () => {
       expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/quit');
 
       vi.useRealTimers();
+    });
+
+    describe('Ctrl+O compact mode toggle (issue #3899)', () => {
+      const ctrlOKey: Key = {
+        name: 'o',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+      };
+
+      // The global handler is the one that calls compactToggleHasVisualEffect.
+      // Mirrors the discriminator pattern used by the renderMode test above.
+      const findGlobalKeypressHandler = () =>
+        mockedUseKeypress.mock.calls
+          .map((call) => call[0])
+          .reverse()
+          .find(
+            (handler): handler is (key: Key) => void =>
+              typeof handler === 'function' &&
+              handler.toString().includes('compactToggleHasVisualEffect'),
+          );
+
+      it('skips refreshStatic on Ctrl+O when history has no tool_group/thought items', () => {
+        mockedUseHistory.mockReturnValue({
+          history: [
+            { type: 'user', id: 1, text: 'hi' },
+            { type: 'gemini', id: 2, text: 'hello' },
+          ],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        mockStdout.write.mockClear();
+
+        const handler = findGlobalKeypressHandler();
+        expect(handler).toBeDefined();
+        handler!(ctrlOKey);
+
+        // refreshStatic writes ansiEscapes.clearTerminal — its absence
+        // proves we took the no-op short-circuit.
+        expect(mockStdout.write).not.toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+      });
+
+      it('calls refreshStatic on Ctrl+O when history contains a tool_group', () => {
+        mockedUseHistory.mockReturnValue({
+          history: [
+            { type: 'user', id: 1, text: 'run ls' },
+            {
+              type: 'tool_group',
+              id: 2,
+              tools: [
+                {
+                  callId: 'c1',
+                  name: 'shell',
+                  description: 'shell description',
+                  status: ToolCallStatus.Success,
+                  resultDisplay: undefined,
+                  confirmationDetails: undefined,
+                },
+              ],
+            },
+          ],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        mockStdout.write.mockClear();
+
+        const handler = findGlobalKeypressHandler();
+        expect(handler).toBeDefined();
+        handler!(ctrlOKey);
+
+        expect(mockStdout.write).toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+      });
     });
   });
 

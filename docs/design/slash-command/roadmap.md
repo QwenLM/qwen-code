@@ -258,13 +258,11 @@
 
 #### 3.5 Claude Code 缺失命令补齐
 
-补充 Qwen Code 当前没有、Claude Code 有且常用的命令：
+确认并回归 Qwen Code 已有的 `/doctor` 命令；`/release-notes` 不纳入本阶段，避免引入无明确产品需求的 built-in 命令表面。
 
-| 命令             | 类型    | 说明                                     |
-| ---------------- | ------- | ---------------------------------------- |
-| `/doctor`        | `local` | 环境自检，输出配置/连接/工具状态诊断     |
-| `/release-notes` | `local` | 展示当前版本的更新日志                   |
-| `/cost`          | `local` | 展示当前 session 的 token 消耗和费用估算 |
+| 命令      | 类型    | 说明                                 |
+| --------- | ------- | ------------------------------------ |
+| `/doctor` | `local` | 环境自检，输出配置/连接/工具状态诊断 |
 
 > 注：`/review`、`/commit` 等任务类命令以 bundled skill 形式提供，不在此列。
 
@@ -275,10 +273,11 @@
 - [ ] 近期使用的命令在补全列表中优先出现
 - [ ] alias 命中时在补全项中注明原名
 - [ ] mid-input slash：ghost text 提示正确渲染
-- [ ] `/help` 输出按来源分组，每条命令展示支持模式标记
+- [ ] `/help` 以 Claude Code 风格分 tab 展示，避免命令堆砌，并在命令页展示支持模式标记
 - [ ] ACP available commands 包含 `argumentHint`、`source`、`subcommands` 字段
-- [ ] `/doctor`、`/release-notes`、`/cost` 三个命令可用
+- [ ] `/doctor` 命令可用
 - [ ] `/doctor` 在 non-interactive 模式下可执行（返回 `message`）
+- [ ] 不新增 `/release-notes`
 
 ---
 

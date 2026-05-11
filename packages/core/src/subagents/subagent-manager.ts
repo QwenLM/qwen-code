@@ -43,12 +43,12 @@ import { parseSubagentModelSelection } from './model-selection.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
+import { QWEN_DIR, Storage } from '../config/storage.js';
 import {
   hasRebuiltToolRegistry,
   rebuildToolRegistryOnOverride,
 } from '../tools/agent/agent.js';
 
-const QWEN_CONFIG_DIR = '.qwen';
 const AGENT_CONFIG_DIR = 'agents';
 
 /**
@@ -904,12 +904,8 @@ export class SubagentManager {
 
     const baseDir =
       level === 'project'
-        ? path.join(
-            this.config.getProjectRoot(),
-            QWEN_CONFIG_DIR,
-            AGENT_CONFIG_DIR,
-          )
-        : path.join(os.homedir(), QWEN_CONFIG_DIR, AGENT_CONFIG_DIR);
+        ? path.join(this.config.getProjectRoot(), QWEN_DIR, AGENT_CONFIG_DIR)
+        : path.join(Storage.getGlobalQwenDir(), AGENT_CONFIG_DIR);
 
     return path.join(baseDir, `${name}.md`);
   }
@@ -944,8 +940,10 @@ export class SubagentManager {
       return [];
     }
 
-    let baseDir = level === 'project' ? projectRoot : homeDir;
-    baseDir = path.join(baseDir, QWEN_CONFIG_DIR, AGENT_CONFIG_DIR);
+    const baseDir =
+      level === 'project'
+        ? path.join(projectRoot, QWEN_DIR, AGENT_CONFIG_DIR)
+        : path.join(Storage.getGlobalQwenDir(), AGENT_CONFIG_DIR);
 
     try {
       const files = await fs.readdir(baseDir);

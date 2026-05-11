@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SpanKind, SpanStatusCode, type HrTime } from '@opentelemetry/api';
+import {
+  isSpanContextValid,
+  SpanKind,
+  SpanStatusCode,
+  TraceFlags,
+  type HrTime,
+  type SpanContext,
+} from '@opentelemetry/api';
 import type {
   LogRecordProcessor,
   ReadableLogRecord,
@@ -15,13 +22,23 @@ import {
   resourceFromAttributes,
 } from '@opentelemetry/resources';
 
-import { createHash } from 'node:crypto';
-
 import { SERVICE_NAME } from './constants.js';
+import {
+  deriveTraceId,
+  randomHexString,
+  randomSpanId,
+} from './trace-id-utils.js';
 
 const EXPORT_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_BUFFER_SIZE = 10_000;
+const BUFFER_OVERFLOW_WARNING_INTERVAL_MS = 30_000;
+const LOG_EVENT_ERROR_STATUS_MESSAGE = 'Log event recorded error';
+const DEFAULT_LOG_SPAN_NAME = 'log.event';
 const MAX_SPAN_NAME_LENGTH = 128;
 const SENSITIVE_ATTRIBUTE_KEYS = new Set([
+  'error',
+  'error.message',
+  'error_message',
   'prompt',
   'function_args',
   'response_text',
@@ -30,6 +47,7 @@ const SENSITIVE_ATTRIBUTE_KEYS = new Set([
 interface LogToSpanProcessorOptions {
   flushIntervalMs?: number;
   includeSensitiveSpanAttributes?: boolean;
+  maxBufferSize?: number;
 }
 
 /**
@@ -50,22 +68,38 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private flushTimer: ReturnType<typeof setInterval> | undefined;
   private inFlightExport: Promise<void> | undefined;
   private readonly flushIntervalMs: number;
+  private cachedSessionId: string | undefined;
+  private cachedTraceId: string | undefined;
   private readonly includeSensitiveSpanAttributes: boolean;
+  private readonly maxBufferSize: number;
+  private lastBufferOverflowWarningMs: number | undefined;
+  private droppedSpansSinceLastBufferWarning = 0;
+  private totalDroppedSpans = 0;
+  private isShutdown = false;
 
   constructor(spanExporter: SpanExporter);
-  constructor(spanExporter: SpanExporter, flushIntervalMs: number);
+  constructor(
+    spanExporter: SpanExporter,
+    flushIntervalMs: number,
+    maxBufferSize?: number,
+  );
   constructor(spanExporter: SpanExporter, options: LogToSpanProcessorOptions);
   constructor(
     private readonly spanExporter: SpanExporter,
     flushIntervalMsOrOptions: number | LogToSpanProcessorOptions = 5000,
+    maxBufferSize = DEFAULT_MAX_BUFFER_SIZE,
   ) {
     if (typeof flushIntervalMsOrOptions === 'number') {
       this.flushIntervalMs = flushIntervalMsOrOptions;
       this.includeSensitiveSpanAttributes = false;
+      this.maxBufferSize = normalizeMaxBufferSize(maxBufferSize);
     } else {
       this.flushIntervalMs = flushIntervalMsOrOptions.flushIntervalMs ?? 5000;
       this.includeSensitiveSpanAttributes =
         flushIntervalMsOrOptions.includeSensitiveSpanAttributes ?? false;
+      this.maxBufferSize = normalizeMaxBufferSize(
+        flushIntervalMsOrOptions.maxBufferSize,
+      );
     }
     this.flushTimer = setInterval(() => {
       void this.flush();
@@ -74,7 +108,11 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   }
 
   onEmit(logRecord: ReadableLogRecord): void {
-    const name = sanitizeSpanName(logRecord.body);
+    if (this.isShutdown) {
+      return;
+    }
+
+    const name = deriveSpanName(logRecord);
     const startTime = logRecord.hrTime;
 
     const attributes: Record<string, string | number | boolean> = {};
@@ -116,13 +154,25 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       endTime = [secs + Math.floor(endNanos / 1e9), endNanos % 1e9] as HrTime;
     }
 
-    // Derive traceId from session.id so all events in one session
-    // appear under a single trace. spanId is random per event.
+    // Prefer a real active span context when OTel logs provide one, preserving
+    // direct parentage. Otherwise derive traceId from session.id so all events
+    // in one session appear under a single trace.
+    const parentSpanContext = getValidParentSpanContext(logRecord.spanContext);
     const sessionId = logRecord.attributes?.['session.id'];
-    const traceId = sessionId
-      ? deriveTraceId(String(sessionId))
-      : randomHexString(32);
-    const spanId = randomHexString(16);
+    let traceId: string;
+    if (parentSpanContext) {
+      traceId = parentSpanContext.traceId;
+    } else if (sessionId) {
+      const sid = String(sessionId);
+      if (sid !== this.cachedSessionId) {
+        this.cachedSessionId = sid;
+        this.cachedTraceId = deriveTraceId(sid);
+      }
+      traceId = this.cachedTraceId!;
+    } else {
+      traceId = randomHexString(32);
+    }
+    const spanId = randomSpanId();
 
     this.buffer.push({
       name,
@@ -130,7 +180,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       spanContext: () => ({
         traceId,
         spanId,
-        traceFlags: 1, // SAMPLED
+        traceFlags: parentSpanContext?.traceFlags ?? TraceFlags.SAMPLED,
       }),
       startTime,
       endTime,
@@ -145,12 +195,49 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         version: '',
       },
       ended: true,
-      parentSpanContext: undefined,
+      parentSpanContext,
       droppedAttributesCount: 0,
       droppedEventsCount: 0,
       droppedLinksCount: 0,
       recordException: () => {},
     });
+    if (this.buffer.length > this.maxBufferSize) {
+      const droppedSpanCount = this.buffer.length - this.maxBufferSize;
+      this.buffer.splice(0, droppedSpanCount);
+      this.warnBufferOverflow(droppedSpanCount);
+    }
+  }
+
+  private warnBufferOverflow(droppedSpanCount: number): void {
+    this.droppedSpansSinceLastBufferWarning += droppedSpanCount;
+    this.totalDroppedSpans += droppedSpanCount;
+    const now = Date.now();
+    if (
+      this.lastBufferOverflowWarningMs !== undefined &&
+      now - this.lastBufferOverflowWarningMs <
+        BUFFER_OVERFLOW_WARNING_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    this.emitBufferOverflowWarning(now);
+  }
+
+  private emitBufferOverflowWarning(now = Date.now()): void {
+    if (this.droppedSpansSinceLastBufferWarning === 0) {
+      return;
+    }
+
+    const droppedSinceLastWarning = this.droppedSpansSinceLastBufferWarning;
+    this.droppedSpansSinceLastBufferWarning = 0;
+    this.lastBufferOverflowWarningMs = now;
+    try {
+      process.stderr.write(
+        `[LogToSpan] buffer exceeded max size (${this.maxBufferSize}); dropped ${droppedSinceLastWarning} oldest span(s) since last warning, ${this.totalDroppedSpans} total\n`,
+      );
+    } catch {
+      // Logging diagnostics must not interrupt telemetry ingestion.
+    }
   }
 
   private flush(): Promise<void> {
@@ -194,6 +281,10 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   }
 
   async shutdown(): Promise<void> {
+    if (this.isShutdown) {
+      return;
+    }
+    this.isShutdown = true;
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
       this.flushTimer = undefined;
@@ -203,16 +294,27 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       await this.inFlightExport;
     }
     await this.flush();
+    this.emitBufferOverflowWarning();
     await this.spanExporter.shutdown();
   }
 
   async forceFlush(): Promise<void> {
+    if (this.isShutdown) {
+      return;
+    }
     if (this.inFlightExport) {
       await this.inFlightExport;
     }
     await this.flush();
     await this.spanExporter.forceFlush?.();
   }
+}
+
+function normalizeMaxBufferSize(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) {
+    return DEFAULT_MAX_BUFFER_SIZE;
+  }
+  return Math.floor(value);
 }
 
 interface ReadableSpanLike {
@@ -229,11 +331,19 @@ interface ReadableSpanLike {
   resource: Resource;
   instrumentationScope: { name: string; version?: string; schemaUrl?: string };
   ended: boolean;
-  parentSpanContext?: { traceId: string; spanId: string; traceFlags: number };
+  parentSpanContext?: SpanContext;
   droppedAttributesCount: number;
   droppedEventsCount: number;
   droppedLinksCount: number;
   recordException: () => void;
+}
+
+function deriveSpanName(logRecord: ReadableLogRecord): string {
+  const eventName = logRecord.attributes?.['event.name'] ?? logRecord.eventName;
+  if (typeof eventName === 'string' && eventName.trim().length > 0) {
+    return sanitizeSpanName(eventName);
+  }
+  return DEFAULT_LOG_SPAN_NAME;
 }
 
 function sanitizeSpanName(body: unknown): string {
@@ -241,6 +351,15 @@ function sanitizeSpanName(body: unknown): string {
   return rawName.length > MAX_SPAN_NAME_LENGTH
     ? `${rawName.slice(0, MAX_SPAN_NAME_LENGTH)}...`
     : rawName;
+}
+
+function getValidParentSpanContext(
+  spanContext: SpanContext | undefined,
+): SpanContext | undefined {
+  if (!spanContext || !isSpanContextValid(spanContext)) {
+    return undefined;
+  }
+  return spanContext;
 }
 
 /**
@@ -256,23 +375,6 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function randomHexString(length: number): string {
-  const bytes = new Uint8Array(length / 2);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/**
- * Derive a deterministic 32-char hex traceId from a session ID.
- * All events in the same session will share this traceId,
- * making them appear under a single trace in the backend.
- * Uses SHA-256 truncated to 32 hex chars (128 bits) to match the
- * OTel trace ID format.
- */
-function deriveTraceId(sessionId: string): string {
-  return createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
-}
-
 /**
  * Derive span status from log record attributes.
  * Marks the span as ERROR when explicit error indicators are present
@@ -285,11 +387,16 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
   message?: string;
 } {
   if (!attrs) return { code: SpanStatusCode.OK };
-  if (!!attrs['error'] || !!attrs['error_message'] || !!attrs['error_type']) {
-    const msg = String(
-      attrs['error_message'] ?? attrs['error'] ?? attrs['error_type'] ?? '',
-    );
-    return { code: SpanStatusCode.ERROR, ...(msg && { message: msg }) };
+  if (
+    !!attrs['error'] ||
+    !!attrs['error.message'] ||
+    !!attrs['error_message'] ||
+    !!attrs['error_type']
+  ) {
+    return {
+      code: SpanStatusCode.ERROR,
+      message: LOG_EVENT_ERROR_STATUS_MESSAGE,
+    };
   }
   return { code: SpanStatusCode.OK };
 }

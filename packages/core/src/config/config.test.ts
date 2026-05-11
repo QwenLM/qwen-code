@@ -17,6 +17,7 @@ import {
   QwenLogger,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
+  refreshSessionContext,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -152,7 +153,6 @@ vi.mock('../memory/const.js', () => ({
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
-  QWEN_CONFIG_DIR: '.qwen',
 }));
 vi.mock('../tools/memory-config', () => ({
   setGeminiMdFilename: vi.fn(),
@@ -160,7 +160,6 @@ vi.mock('../tools/memory-config', () => ({
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
   AGENT_CONTEXT_FILENAME: 'AGENTS.md',
-  QWEN_CONFIG_DIR: '.qwen',
   MEMORY_SECTION_HEADER: '## Qwen Added Memories',
 }));
 
@@ -181,6 +180,7 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     initializeTelemetry: vi.fn(),
     isTelemetrySdkInitialized: vi.fn(() => false),
     shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
+    refreshSessionContext: vi.fn(),
     uiTelemetryService: {
       getLastPromptTokenCount: vi.fn(),
     },
@@ -395,6 +395,15 @@ describe('Server Config (config.ts)', () => {
 
       config.startNewSession();
       expect(cache.size()).toBe(0);
+    });
+
+    it('refreshes the telemetry session context with the new session ID', () => {
+      const config = new Config(baseParams);
+      vi.mocked(refreshSessionContext).mockClear();
+
+      const newSessionId = config.startNewSession();
+
+      expect(refreshSessionContext).toHaveBeenCalledWith(newSessionId);
     });
   });
 

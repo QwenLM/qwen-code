@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ControlDispatcher } from './ControlDispatcher.js';
 import type { IControlContext } from './ControlContext.js';
+import { createMinimalSettings } from '../../config/settings.js';
 import type { SystemController } from './controllers/systemController.js';
 import type { StreamJsonOutputAdapter } from '../io/StreamJsonOutputAdapter.js';
 import type {
@@ -40,6 +41,7 @@ function createMockContext(debugMode: boolean = false): IControlContext {
     sessionId: 'test-session-id',
     abortSignal: abortController.signal,
     debugMode,
+    settings: createMinimalSettings(),
     permissionMode: 'default',
     sdkMcpServers: new Set<string>(),
     mcpClients: new Map(),

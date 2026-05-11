@@ -495,6 +495,9 @@ export class BackgroundAgentResumeService {
       notified: false,
     });
 
+    let cleanupOwnedMonitorNotifications: (() => void) | undefined;
+    let cleanupJsonl: (() => void) | undefined;
+
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
       const target = await this.resolveResumeTarget(subagentName);
@@ -605,22 +608,18 @@ export class BackgroundAgentResumeService {
             });
 
       const projectRoot = this.config.getProjectRoot();
-      const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
-        bgEventEmitter,
-        outputFile,
-        {
-          agentId: meta.agentId,
-          agentName: target.agentName,
-          agentColor: target.subagentConfig?.color ?? meta.agentColor,
-          sessionId: meta.parentSessionId,
-          cwd: projectRoot,
-          version: this.config.getCliVersion() || 'unknown',
-          gitBranch: getGitBranch(projectRoot),
-          initialUserPrompt: writerInitialPrompt,
-          appendToExisting: true,
-          initialParentUuid: recovery.lastStableUuid,
-        },
-      );
+      cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
+        agentId: meta.agentId,
+        agentName: target.agentName,
+        agentColor: target.subagentConfig?.color ?? meta.agentColor,
+        sessionId: meta.parentSessionId,
+        cwd: projectRoot,
+        version: this.config.getCliVersion() || 'unknown',
+        gitBranch: getGitBranch(projectRoot),
+        initialUserPrompt: writerInitialPrompt,
+        appendToExisting: true,
+        initialParentUuid: recovery.lastStableUuid,
+      }).cleanup;
 
       const nextResumeCount = (meta.resumeCount ?? 0) + 1;
       patchAgentMeta(metaPath, {
@@ -662,6 +661,34 @@ export class BackgroundAgentResumeService {
       subagent.setExternalMessageProvider(() =>
         registry.drainMessages(meta.agentId),
       );
+      subagent.setExternalMessageWaiter?.((waitSignal) =>
+        registry.waitForMessages(meta.agentId, waitSignal),
+      );
+      const monitorRegistry = this.config.getMonitorRegistry();
+      subagent.setExternalMessageWaitPredicate?.(() =>
+        monitorRegistry.hasRunningForOwner(meta.agentId),
+      );
+      monitorRegistry.setAgentNotificationCallback(
+        meta.agentId,
+        (_displayText, modelText) =>
+          void registry.queueExternalInput(meta.agentId, {
+            kind: 'notification',
+            text: modelText,
+          }),
+      );
+      monitorRegistry.setAgentLifecycleCallback(meta.agentId, () =>
+        registry.wakeExternalInputWaiters(meta.agentId),
+      );
+      let cleanedUpOwnedMonitorNotifications = false;
+      cleanupOwnedMonitorNotifications = () => {
+        if (cleanedUpOwnedMonitorNotifications) return;
+        cleanedUpOwnedMonitorNotifications = true;
+        monitorRegistry.cancelRunningForOwner(meta.agentId, {
+          notify: false,
+        });
+        monitorRegistry.setAgentNotificationCallback(meta.agentId, undefined);
+        monitorRegistry.setAgentLifecycleCallback(meta.agentId, undefined);
+      };
 
       const hookSystem = this.config.getHookSystem();
       const contextState = new ContextState();
@@ -770,6 +797,7 @@ export class BackgroundAgentResumeService {
         } finally {
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+          cleanupOwnedMonitorNotifications?.();
           cleanupJsonl?.();
           // Release the per-subagent ToolRegistry the resumed agent's
           // wrapper Config built in `createApprovalModeOverride` so any
@@ -788,6 +816,8 @@ export class BackgroundAgentResumeService {
       void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
       return entry;
     } catch (error) {
+      cleanupOwnedMonitorNotifications?.();
+      cleanupJsonl?.();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.warn(

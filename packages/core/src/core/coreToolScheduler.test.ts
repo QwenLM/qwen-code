@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
+import { SpanStatusCode } from '@opentelemetry/api';
 import type {
   AnyDeclarativeTool,
   Config,
@@ -25,12 +26,12 @@ import {
   ToolConfirmationOutcome,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  ToolErrorType,
 } from '../index.js';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
-import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
 import {
@@ -54,6 +55,88 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+
+type ToolSpanRecord = {
+  name: string;
+  attributes: Record<string, string | number | boolean>;
+  statusCalls: Array<{ code: number; message?: string }>;
+  spanAttributes: Record<string, string | number | boolean>;
+  ended: boolean;
+};
+
+const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
+const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
+const shouldThrowToolSpanSetStatus = vi.hoisted(() => ({ value: false }));
+
+vi.mock('../telemetry/tracer.js', () => ({
+  safeSetStatus: (
+    span: { setStatus: (status: { code: number; message?: string }) => void },
+    status: { code: number; message?: string },
+  ) => {
+    try {
+      span.setStatus(status);
+    } catch {
+      // Match production best-effort telemetry behavior.
+    }
+  },
+  withSpan: vi.fn(
+    async (
+      name: string,
+      attributes: Record<string, string | number | boolean>,
+      fn: (span: {
+        setStatus: (status: { code: number; message?: string }) => void;
+        setAttribute: (key: string, value: string | number | boolean) => void;
+        end: () => void;
+      }) => Promise<unknown>,
+    ) => {
+      const record: ToolSpanRecord = {
+        name,
+        attributes,
+        statusCalls: [],
+        spanAttributes: {},
+        ended: false,
+      };
+      toolSpanRecords.push(record);
+      let statusSet = false;
+      const span = {
+        setStatus(status: { code: number; message?: string }) {
+          statusSet = true;
+          if (shouldThrowToolSpanSetStatus.value) {
+            throw new Error('setStatus failed');
+          }
+          record.statusCalls.push(status);
+        },
+        setAttribute(key: string, value: string | number | boolean) {
+          if (shouldThrowToolSpanSetAttribute.value) {
+            throw new Error('setAttribute failed');
+          }
+          record.spanAttributes[key] = value;
+        },
+        end() {
+          record.ended = true;
+        },
+      };
+
+      try {
+        const result = await fn(span);
+        if (!statusSet) {
+          record.statusCalls.push({ code: 1 });
+        }
+        return result;
+      } catch (error) {
+        if (!statusSet) {
+          record.statusCalls.push({
+            code: 2,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+        throw error;
+      } finally {
+        record.ended = true;
+      }
+    },
+  ),
+}));
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
@@ -2845,6 +2928,417 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('cancelled');
+  });
+});
+
+describe('CoreToolScheduler telemetry spans', () => {
+  afterEach(() => {
+    shouldThrowToolSpanSetAttribute.value = false;
+    shouldThrowToolSpanSetStatus.value = false;
+  });
+
+  function getLastToolSpan(): ToolSpanRecord {
+    const spanRecord = toolSpanRecords.at(-1);
+    if (!spanRecord) {
+      throw new Error('tool span was not created');
+    }
+    return spanRecord;
+  }
+
+  function buildScheduler(options: {
+    execute?: () => Promise<ToolResult>;
+    messageBus?: { request: ReturnType<typeof vi.fn> };
+    disableHooks?: boolean;
+  }): {
+    scheduler: CoreToolScheduler;
+    onAllToolCallsComplete: ReturnType<typeof vi.fn>;
+  } {
+    const mockTool = new MockTool({
+      name: 'mockTool',
+      execute:
+        options.execute ??
+        vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        }),
+    });
+    const mockToolRegistry = {
+      getTool: () => mockTool,
+      ensureTool: async () => mockTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => mockTool,
+      getToolByDisplayName: () => mockTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(options.messageBus),
+      getDisableAllHooks: vi.fn().mockReturnValue(options.disableHooks ?? true),
+    } as unknown as Config;
+
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    return { scheduler, onAllToolCallsComplete };
+  }
+
+  async function runSingleTool(
+    options: {
+      execute?: () => Promise<ToolResult>;
+      messageBus?: { request: ReturnType<typeof vi.fn> };
+      disableHooks?: boolean;
+      abortController?: AbortController;
+      throwSpanSetAttribute?: boolean;
+      throwSpanSetStatus?: boolean;
+    } = {},
+  ): Promise<{
+    spanRecord: ToolSpanRecord;
+    completedCalls: ToolCall[];
+  }> {
+    toolSpanRecords.length = 0;
+    shouldThrowToolSpanSetAttribute.value =
+      options.throwSpanSetAttribute ?? false;
+    shouldThrowToolSpanSetStatus.value = options.throwSpanSetStatus ?? false;
+    const { scheduler, onAllToolCallsComplete } = buildScheduler(options);
+    const abortController = options.abortController ?? new AbortController();
+    await scheduler.schedule(
+      [
+        {
+          callId: 'span-call',
+          name: 'mockTool',
+          args: { input: '/secret/path' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-telemetry',
+        },
+      ],
+      abortController.signal,
+    );
+
+    return {
+      spanRecord: getLastToolSpan(),
+      completedCalls: onAllToolCallsComplete.mock.calls.at(
+        -1,
+      )?.[0] as ToolCall[],
+    };
+  }
+
+  function expectSanitizedFailure(
+    spanRecord: ToolSpanRecord,
+    message: string,
+    failureKind: string,
+  ): void {
+    expect(spanRecord.statusCalls).toEqual([
+      { code: SpanStatusCode.ERROR, message },
+    ]);
+    expect(spanRecord.spanAttributes['tool.failure_kind']).toBe(failureKind);
+    expect(JSON.stringify(spanRecord.statusCalls)).not.toContain('/secret');
+    expect(JSON.stringify(spanRecord.statusCalls)).not.toContain('sensitive');
+    expect(spanRecord.ended).toBe(true);
+  }
+
+  it('marks pre-hook denial with a sanitized failure kind', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'pre-hook',
+        success: true,
+        output: {
+          decision: 'deny',
+          reason: 'sensitive /secret/path',
+        },
+      }),
+    };
+
+    const { spanRecord, completedCalls } = await runSingleTool({
+      execute,
+      messageBus,
+      disableHooks: false,
+    });
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(completedCalls[0].status).toBe('error');
+    expectSanitizedFailure(
+      spanRecord,
+      'Tool execution blocked by hook',
+      'pre_hook_blocked',
+    );
+  });
+
+  it('marks post-hook stop with a sanitized failure kind', async () => {
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'post-hook',
+          success: true,
+          output: {
+            decision: 'allow',
+            continue: false,
+            stopReason: 'sensitive /secret/path',
+          },
+        }),
+    };
+
+    const { spanRecord, completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expectSanitizedFailure(
+      spanRecord,
+      'Tool execution stopped by hook',
+      'post_hook_stopped',
+    );
+  });
+
+  it('marks toolResult.error with a sanitized failure kind', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'sensitive /secret/path',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
+  });
+
+  it('sets tool failure status when span attribute recording fails', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      throwSpanSetAttribute: true,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'sensitive /secret/path',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expect(spanRecord.statusCalls).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'Tool execution failed' },
+    ]);
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('preserves tool failures when span status recording fails', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      throwSpanSetStatus: true,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'sensitive /secret/path',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expect(spanRecord.statusCalls).toEqual([]);
+    expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('tool_error');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('preserves original tool errors when the failure hook rejects', async () => {
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockRejectedValueOnce(new Error('failure hook failed')),
+    };
+    const { spanRecord, completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'original tool error',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe('original tool error');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_FAILED,
+      );
+    }
+    expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
+  });
+
+  it('marks thrown tool exceptions with a sanitized failure kind', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('sensitive /secret/path')),
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expectSanitizedFailure(
+      spanRecord,
+      'Tool execution failed with exception',
+      'tool_exception',
+    );
+  });
+
+  it('preserves original tool exceptions when the failure hook rejects', async () => {
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockRejectedValueOnce(new Error('failure hook failed')),
+    };
+    const { spanRecord, completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockRejectedValue(new Error('original exception')),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe('original exception');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.UNHANDLED_EXCEPTION,
+      );
+    }
+    expectSanitizedFailure(
+      spanRecord,
+      'Tool execution failed with exception',
+      'tool_exception',
+    );
+  });
+
+  it('marks cancellation as UNSET with a failure kind and no auto-OK', async () => {
+    const abortController = new AbortController();
+    const { spanRecord, completedCalls } = await runSingleTool({
+      abortController,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'cancelled',
+          returnDisplay: 'cancelled',
+        };
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('cancelled');
+    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
+    expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('cancelled');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('sets cancellation status when span attribute recording fails', async () => {
+    const abortController = new AbortController();
+    const { spanRecord, completedCalls } = await runSingleTool({
+      abortController,
+      throwSpanSetAttribute: true,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'cancelled',
+          returnDisplay: 'cancelled',
+        };
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('cancelled');
+    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('preserves cancellation when span status recording fails', async () => {
+    const abortController = new AbortController();
+    const { spanRecord, completedCalls } = await runSingleTool({
+      abortController,
+      throwSpanSetStatus: true,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'cancelled',
+          returnDisplay: 'cancelled',
+        };
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('cancelled');
+    expect(spanRecord.statusCalls).toEqual([]);
+    expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('cancelled');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('leaves successful tool calls to be marked OK by withSpan', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool();
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.OK }]);
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
+    expect(spanRecord.ended).toBe(true);
   });
 });
 

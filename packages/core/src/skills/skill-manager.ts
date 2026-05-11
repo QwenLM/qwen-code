@@ -35,7 +35,11 @@ import {
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
-import { SKILL_PROVIDER_CONFIG_DIRS } from '../config/storage.js';
+import {
+  QWEN_DIR,
+  SKILL_PROVIDER_CONFIG_DIRS,
+  Storage,
+} from '../config/storage.js';
 import {
   HookEventName,
   HookType,
@@ -45,8 +49,6 @@ import {
 } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
-
-const QWEN_CONFIG_DIR = '.qwen';
 const SKILLS_CONFIG_DIR = 'skills';
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
@@ -835,7 +837,9 @@ export class SkillManager {
         );
       case 'user':
         return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
-          path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          v === QWEN_DIR
+            ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
+            : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
         );
       case 'bundled':
         return [this.bundledSkillsDir];
@@ -1111,7 +1115,7 @@ export class SkillManager {
   }
 
   private async ensureUserSkillsDir(): Promise<void> {
-    const baseDir = path.join(os.homedir(), QWEN_CONFIG_DIR, SKILLS_CONFIG_DIR);
+    const baseDir = path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR);
     try {
       await fs.mkdir(baseDir, { recursive: true });
     } catch (error) {

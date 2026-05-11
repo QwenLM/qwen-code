@@ -80,6 +80,15 @@ vi.mock('../../services/McpPromptLoader.js', () => ({
   })),
 }));
 
+const { mockLocalizeCommands } = vi.hoisted(() => ({
+  mockLocalizeCommands: vi.fn(),
+}));
+vi.mock('../../services/DynamicCommandLocalizationService.js', () => ({
+  dynamicCommandLocalizationService: {
+    localizeCommands: mockLocalizeCommands,
+  },
+}));
+
 vi.mock('../contexts/SessionContext.js', () => ({
   useSessionStats: vi.fn(() => ({ stats: {} })),
 }));
@@ -122,7 +131,7 @@ describe('useSlashCommandProcessor', () => {
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
     recordSlashCommand: vi.fn(),
   });
-  const mockSettings = {} as LoadedSettings;
+  const mockSettings = { merged: {} } as LoadedSettings;
 
   const createMockActions = (): SlashCommandProcessorActions => ({
     openAuthDialog: mockOpenAuthDialog,
@@ -136,6 +145,7 @@ describe('useSlashCommandProcessor', () => {
     openTrustDialog: vi.fn(),
     openPermissionsDialog: vi.fn(),
     openApprovalModeDialog: vi.fn(),
+    openHelpDialog: vi.fn(),
     openResumeDialog: vi.fn(),
     handleResume: vi.fn(),
     handleBranch: vi.fn().mockResolvedValue(undefined),
@@ -158,6 +168,12 @@ describe('useSlashCommandProcessor', () => {
     mockBuiltinLoadCommands.mockResolvedValue([]);
     mockFileLoadCommands.mockResolvedValue([]);
     mockMcpLoadCommands.mockResolvedValue([]);
+    mockLocalizeCommands.mockImplementation(
+      async (
+        _config: unknown,
+        commands: readonly SlashCommand[],
+      ): Promise<readonly SlashCommand[]> => commands,
+    );
     mockOpenModelDialog.mockClear();
     mockOpenMemoryDialog.mockClear();
   });
@@ -167,6 +183,7 @@ describe('useSlashCommandProcessor', () => {
     fileCommands: SlashCommand[] = [],
     mcpCommands: SlashCommand[] = [],
     setIsProcessing = vi.fn(),
+    settings: LoadedSettings = mockSettings,
   ) => {
     mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
@@ -175,7 +192,7 @@ describe('useSlashCommandProcessor', () => {
     const { result } = renderHook(() =>
       useSlashCommandProcessor(
         mockConfig,
-        mockSettings,
+        settings,
         mockAddItem,
         mockClearItems,
         mockLoadHistory,
@@ -231,6 +248,50 @@ describe('useSlashCommandProcessor', () => {
         // @ts-expect-error - We are intentionally testing a violation of the readonly type.
         commands.push(createTestCommand({ name: 'rogue' }));
       }).toThrow(TypeError);
+    });
+
+    it('localizes dynamically loaded commands when the setting is enabled', async () => {
+      const dynamicCommand = createTestCommand(
+        {
+          name: 'review',
+          description: 'Review code changes',
+          modelDescription: 'Review code changes',
+          localizeDescription: true,
+          supportedModes: ['interactive'],
+        },
+        CommandKind.FILE,
+      );
+      mockLocalizeCommands.mockResolvedValueOnce([
+        {
+          ...dynamicCommand,
+          description: '审查代码变更',
+        },
+      ]);
+
+      const result = setupProcessorHook([], [dynamicCommand], [], vi.fn(), {
+        merged: {
+          general: {
+            dynamicCommandTranslation: true,
+          },
+        },
+      } as LoadedSettings);
+
+      await waitFor(() => {
+        expect(result.current.slashCommands[0]?.description).toBe(
+          '审查代码变更',
+        );
+      });
+      expect(mockLocalizeCommands).toHaveBeenCalledWith(
+        mockConfig,
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: 'review',
+            modelDescription: 'Review code changes',
+          }),
+        ]),
+        expect.any(AbortSignal),
+        true,
+      );
     });
 
     it('should override built-in commands with file-based commands of the same name', async () => {
@@ -1005,6 +1066,193 @@ describe('useSlashCommandProcessor', () => {
       unmount();
 
       expect(abortSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reload commands when SkillManager fires a change event', async () => {
+      const removeListener = vi.fn();
+      const addChangeListener = vi.fn().mockReturnValue(removeListener);
+      const fakeSkillManager = { addChangeListener };
+      const skillManagerSpy = vi
+        .spyOn(mockConfig, 'getSkillManager')
+        .mockReturnValue(
+          fakeSkillManager as unknown as ReturnType<
+            typeof mockConfig.getSkillManager
+          >,
+        );
+
+      try {
+        mockBuiltinLoadCommands.mockResolvedValue([]);
+        mockFileLoadCommands.mockResolvedValue([]);
+        mockMcpLoadCommands.mockResolvedValue([]);
+
+        const { unmount } = renderHook(() =>
+          useSlashCommandProcessor(
+            mockConfig,
+            mockSettings,
+            mockAddItem,
+            mockClearItems,
+            mockLoadHistory,
+            vi.fn(),
+            vi.fn(),
+            false,
+            vi.fn(),
+            { current: true },
+            vi.fn(),
+            createMockActions(),
+            new Map(),
+            true,
+            null,
+          ),
+        );
+
+        await waitFor(() => expect(addChangeListener).toHaveBeenCalledTimes(1));
+        // Initial CommandService.create() pass: BuiltinCommandLoader is
+        // constructed once. Firing the SkillManager listener bumps the
+        // reloadTrigger and the loader effect re-runs, constructing the
+        // builtin loader a second time — that is the observable signal
+        // that a reload happened.
+        await waitFor(() =>
+          expect(BuiltinCommandLoader).toHaveBeenCalledTimes(1),
+        );
+
+        const listener = addChangeListener.mock.calls[0][0] as () => void;
+        await act(async () => {
+          listener();
+        });
+
+        await waitFor(() =>
+          expect(BuiltinCommandLoader).toHaveBeenCalledTimes(2),
+        );
+
+        unmount();
+        expect(removeListener).toHaveBeenCalledTimes(1);
+      } finally {
+        skillManagerSpy.mockRestore();
+      }
+    });
+
+    it('should register SkillManager listener after config initialization', async () => {
+      const removeListener = vi.fn();
+      const addChangeListener = vi.fn().mockReturnValue(removeListener);
+      const fakeSkillManager = { addChangeListener };
+      let initializedForConfig = false;
+      const skillManagerSpy = vi
+        .spyOn(mockConfig, 'getSkillManager')
+        .mockImplementation(() =>
+          initializedForConfig
+            ? (fakeSkillManager as unknown as ReturnType<
+                typeof mockConfig.getSkillManager
+              >)
+            : null,
+        );
+
+      try {
+        mockBuiltinLoadCommands.mockResolvedValue([]);
+        mockFileLoadCommands.mockResolvedValue([]);
+        mockMcpLoadCommands.mockResolvedValue([]);
+
+        const { rerender, unmount } = renderHook(
+          ({ isConfigInitialized }) => {
+            initializedForConfig = isConfigInitialized;
+            return useSlashCommandProcessor(
+              mockConfig,
+              mockSettings,
+              mockAddItem,
+              mockClearItems,
+              mockLoadHistory,
+              vi.fn(),
+              vi.fn(),
+              false,
+              vi.fn(),
+              { current: true },
+              vi.fn(),
+              createMockActions(),
+              new Map(),
+              isConfigInitialized,
+              null,
+            );
+          },
+          { initialProps: { isConfigInitialized: false } },
+        );
+
+        expect(addChangeListener).not.toHaveBeenCalled();
+
+        rerender({ isConfigInitialized: true });
+
+        await waitFor(() => expect(addChangeListener).toHaveBeenCalledTimes(1));
+
+        unmount();
+        expect(removeListener).toHaveBeenCalledTimes(1);
+      } finally {
+        skillManagerSpy.mockRestore();
+      }
+    });
+
+    it('should not publish model-invocable commands from an aborted reload', async () => {
+      const staleCommand = createTestCommand({
+        name: 'stale',
+        modelInvocable: true,
+      });
+      const freshCommand = createTestCommand({
+        name: 'fresh',
+        modelInvocable: true,
+      });
+      let resolveStaleLoad!: (commands: SlashCommand[]) => void;
+
+      mockBuiltinLoadCommands
+        .mockImplementationOnce(
+          () =>
+            new Promise<SlashCommand[]>((resolve) => {
+              resolveStaleLoad = resolve;
+            }),
+        )
+        .mockResolvedValueOnce([freshCommand]);
+      mockFileLoadCommands.mockResolvedValue([]);
+      mockMcpLoadCommands.mockResolvedValue([]);
+
+      const { rerender } = renderHook(
+        ({ isConfigInitialized }) =>
+          useSlashCommandProcessor(
+            mockConfig,
+            mockSettings,
+            mockAddItem,
+            mockClearItems,
+            mockLoadHistory,
+            vi.fn(),
+            vi.fn(),
+            false,
+            vi.fn(),
+            { current: true },
+            vi.fn(),
+            createMockActions(),
+            new Map(),
+            isConfigInitialized,
+            null,
+          ),
+        { initialProps: { isConfigInitialized: false } },
+      );
+
+      rerender({ isConfigInitialized: true });
+
+      await waitFor(() =>
+        expect(
+          mockConfig
+            .getModelInvocableCommandsProvider?.()?.()
+            .map((c) => c.name),
+        ).toEqual(['fresh']),
+      );
+
+      await act(async () => {
+        resolveStaleLoad([staleCommand]);
+      });
+
+      await waitFor(() =>
+        expect(
+          mockConfig
+            .getModelInvocableCommandsProvider?.()?.()
+            .map((c) => c.name),
+        ).toEqual(['fresh']),
+      );
     });
   });
 

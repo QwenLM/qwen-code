@@ -8,8 +8,8 @@
  * Integration tests for SessionService corruption-recovery paths.
  *
  * Lives in its own file (no module-level `vi.mock`) because both
- * `countSessionMessages` and `readLastRecordUuid` walk real bytes from disk
- * via `fs.createReadStream` / `fs.readSync`, and need the real
+ * `countSessionMessagesFromPath` and `readLastRecordUuid` walk real bytes
+ * from disk via `fs.createReadStream` / `fs.readSync`, and need the real
  * `jsonl.parseLineTolerant` to exercise the `}{`-glued recovery path
  * introduced for #3606. The unit-test file (sessionService.test.ts) mocks
  * jsonl-utils wholesale, so corruption shapes can't be exercised there.
@@ -59,11 +59,14 @@ function writeJsonl(name: string, content: string): string {
   return p;
 }
 
-describe('SessionService.countSessionMessages (corruption recovery)', () => {
+describe('SessionService.countSessionMessagesFromPath (corruption recovery)', () => {
   // The method is private; cast is the cheapest way to test the unit
-  // without exposing it on the public surface.
+  // without exposing it on the public surface. The public
+  // `countSessionMessages(sessionId)` enforces the SESSION_FILE_PATTERN
+  // and project-scoping check before delegating here, neither of which
+  // is what these corruption-recovery tests are about.
   type Privates = {
-    countSessionMessages: (filePath: string) => Promise<number>;
+    countSessionMessagesFromPath: (filePath: string) => Promise<number>;
   };
   let svc: Privates;
 
@@ -80,7 +83,7 @@ describe('SessionService.countSessionMessages (corruption recovery)', () => {
     const r3 = JSON.stringify(recordFor('u3', 'user', 'u2'));
     const file = writeJsonl('glued.jsonl', `${r1}${r2}\n${r3}\n`);
 
-    expect(await svc.countSessionMessages(file)).toBe(3);
+    expect(await svc.countSessionMessagesFromPath(file)).toBe(3);
   });
 
   it('does not zero out the count when a line is valid JSON but not an object', async () => {
@@ -92,7 +95,7 @@ describe('SessionService.countSessionMessages (corruption recovery)', () => {
     const r2 = JSON.stringify(recordFor('u2', 'assistant', 'u1'));
     const file = writeJsonl('scalar-line.jsonl', `${r1}\nnull\n${r2}\n`);
 
-    expect(await svc.countSessionMessages(file)).toBe(2);
+    expect(await svc.countSessionMessagesFromPath(file)).toBe(2);
   });
 
   it('deduplicates uuids across recovered fragments', async () => {
@@ -101,12 +104,12 @@ describe('SessionService.countSessionMessages (corruption recovery)', () => {
     const r1 = JSON.stringify(recordFor('u1', 'user', null));
     const file = writeJsonl('dup.jsonl', `${r1}${r1}\n`);
 
-    expect(await svc.countSessionMessages(file)).toBe(1);
+    expect(await svc.countSessionMessagesFromPath(file)).toBe(1);
   });
 
   it('returns 0 for a missing file', async () => {
     expect(
-      await svc.countSessionMessages(path.join(tmpRoot, 'nope.jsonl')),
+      await svc.countSessionMessagesFromPath(path.join(tmpRoot, 'nope.jsonl')),
     ).toBe(0);
   });
 });

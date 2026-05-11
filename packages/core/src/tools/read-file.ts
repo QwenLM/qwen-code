@@ -215,14 +215,34 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     }
 
     // Record a cache entry so that subsequent identical Reads can hit
-    // the file_unchanged fast-path. An entry is "cacheable" only when
-    //   - the content is plain text (not binary / image / audio / video
-    //     / PDF / notebook — those need their structured payload), and
-    //   - the read was not truncated. A truncated full Read means the
-    //     model only saw the head of the file; returning a placeholder
-    //     on the next call would falsely imply "you've already seen
-    //     everything", so we force the next call back through the full
-    //     pipeline.
+    // the file_unchanged fast-path, and so prior-read enforcement on
+    // Edit / WriteFile can recognise the read.
+    //
+    // Two independent flags are recorded:
+    //
+    //  - `cacheable` — whether the content is plain text (not binary /
+    //    image / audio / video / PDF / notebook). This is the flag
+    //    `priorReadEnforcement.ts` consults to decide whether the
+    //    model has seen a payload that Edit / WriteFile can mutate as
+    //    text. It must NOT include "was the read truncated", because
+    //    a truncated text read still produced text — bundling those
+    //    two concerns is what produced the issue #3964 regression
+    //    where a partial Read of a regular `.kt` / `.cpp` / `.py`
+    //    file caused the next Edit to be rejected with the
+    //    misleading "binary / image / audio / video / PDF / notebook
+    //    payload" error.
+    //
+    //  - `full` — whether the model has seen every byte of the
+    //    current file. This now gates ONLY the file_unchanged
+    //    fast-path; PR #4002 removed WriteFile's `requireFullRead`
+    //    (the truncate-tool-output limit made "fully read" an
+    //    impossible precondition on files past the limit, deadlocking
+    //    issue #3945). A "full" Read at the request level (no
+    //    offset / limit / pages) only counts as full at the cache
+    //    level if the produced content was not truncated, otherwise
+    //    the model only saw the head and a follow-up `file_unchanged`
+    //    placeholder would falsely imply "you've already seen
+    //    everything".
     //
     // The stat we record is the one taken inside `processSingleFileContent`
     // and surfaced via `result.stats`. The internal stat happens
@@ -242,11 +262,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     if (cacheEnabled && (result.stats ?? stats)) {
       const cacheable =
         typeof result.llmContent === 'string' &&
-        result.originalLineCount !== undefined &&
-        !result.isTruncated;
+        result.originalLineCount !== undefined;
       const recordStats: Stats = result.stats ?? stats!;
       cache.recordRead(absPath, recordStats, {
-        full: isFullRead,
+        full: isFullRead && !result.isTruncated,
         cacheable,
       });
     }
