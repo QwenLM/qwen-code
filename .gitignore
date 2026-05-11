@@ -30,6 +30,7 @@ CLAUDE.md
 
 # Qwen Code Configs
 .qwen/*
+!.qwen/review-rules.md
 !.qwen/commands/
 !.qwen/commands/**
 !.qwen/skills/
