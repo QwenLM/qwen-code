@@ -39,9 +39,11 @@ Three properties fall out of this for free:
    three.
 
 The tool is registered with `alwaysLoad: true` so the ToolSearch
-on-demand-loading infrastructure (introduced in #3589) never hides it
-from the model — without that flag, the model wouldn't know the
-terminal contract exists.
+on-demand-loading infrastructure (introduced in #3589 — keeps the
+exposed tool surface small by deferring rarely-used tools behind a
+search call, only mounting their full schemas when the model asks)
+never hides it from the model. Without that flag, the model wouldn't
+know the terminal contract exists.
 
 ## Parse-time validation pipeline
 
@@ -87,7 +89,7 @@ needs whole-schema satisfiability analysis to Ajv at runtime.
 | `anyOf`/`oneOf`: no branch admits object | reject |
 | `allOf`: any branch is `false` or rejects object | reject |
 | Root `$ref` (with or without sibling `type`) | reject |
-| `not`: bare `{type: "object"[…]}` (no narrowing keywords) | reject |
+| `not`: bare `{type: "object"}` (no narrowing keywords) | reject |
 | `not`: `{type: "object", required: […], …}` etc. | accept (narrowing keywords leave some objects satisfiable; defer) |
 | `if: true` + `then` rejects object | reject |
 | `if: false` + `else` rejects object | reject |
@@ -168,8 +170,11 @@ the shared "we got a valid call, shut down" path:
 2. Bounded holdback (`STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500` ms) so
    the natural cancel handlers of just-aborted agents have a chance
    to emit their terminal `task_notification` and land it in
-   `localQueue`. Without the holdback, stream-json consumers would see
-   `task_started` events without matching `task_notification`.
+   `localQueue`. This is best-effort — orphaned `task_started` events
+   remain possible under load if a particular agent's abort handler
+   exceeds the budget. Without the holdback, stream-json consumers
+   would routinely see `task_started` events without matching
+   `task_notification`.
 3. `flushQueuedNotificationsToSdk(localQueue)` drains everything still
    queued.
 4. `finalizeOneShotMonitors()` (idempotent — safe to call twice; the
@@ -206,11 +211,14 @@ its own line.
 
 ## Privacy: cross-surface redaction
 
-The args submitted via `structured_output` ARE the structured payload,
-already on stdout. Persisting them again on durable on-device surfaces
-(or worse, exporting them off-device through telemetry) is duplication
-that leaks the payload into longer-lived storage than the user asked
-for.
+The args submitted via `structured_output` ARE the structured payload.
+On the success path they're already on stdout; on validation-failure
+retries they may never reach stdout at all. Either way, persisting
+them on durable on-device surfaces (or exporting them off-device
+through telemetry) is duplication that leaks the payload into
+longer-lived storage than the user asked for. The redaction rule is
+therefore "never persist any args from this synthetic tool, regardless
+of outcome," not just "dedup what's already on stdout."
 
 Two surfaces have to redact, and both share the same placeholder
 constant
@@ -229,11 +237,14 @@ metrics (duration, success, decision) are preserved.
 
 ## Permission gating
 
-`structured_output` is in the deliberately-excluded set in
-`PermissionManager.CORE_TOOLS` alongside `agent`, `skill`,
-`exit_plan_mode`, `ask_user_question`, `task_stop`, and
-`send_message`. The synthetic tool only exists when `--json-schema`
-is set; adding it to the `--core-tools` allowlist machinery would mean
+`structured_output` is deliberately excluded from
+`PermissionManager.CORE_TOOLS` (the set of tools subject to the
+`--core-tools` allowlist check) — alongside the other synthetic
+tools (`agent`, `exit_plan_mode`, `ask_user_question`, `task_stop`,
+`send_message`). Dynamically discovered tools (`skill`, MCP) are a
+separate exclusion category that also bypasses the allowlist for
+unrelated reasons. The synthetic tool only exists when `--json-schema`
+is set; adding it to the allowlist machinery would mean
 `--core-tools read_file --json-schema X` silently drops the terminal
 contract.
 
@@ -256,6 +267,15 @@ llmContent — but only `runNonInteractive`'s main / drain loops detect
 that as terminal, so the subagent would keep running and burn tokens
 on a tool whose contract its loop can't honor.
 
+> **Maintainer note.** This suppression hangs on the single call path
+> through `createToolRegistry(forSubAgent: true)`. Any future subagent
+> spawn mechanism that bypasses this path will leak the synthetic
+> tool into the subagent's registry and reintroduce the
+> burn-tokens-forever failure mode. The fail-safe complement would be
+> a runtime guard inside `syntheticOutput.execute()` that returns a
+> `fatalError` (or no-op) when invoked from a subagent context. Land
+> one if a second leak path appears.
+
 ## MCP shadow-tool guard
 
 `tool-registry.ts:registerTool` checks the lazy `factories` map for
@@ -274,7 +294,7 @@ the structured-output contract.
 | `--json-schema` + `-p` (or stdin, or positional) | Supported | Primary headless path. |
 | `--json-schema` + `--output-format text` (default) | Supported | `JSON.stringify(payload)` + newline. |
 | `--json-schema` + `--output-format json` / `stream-json` | Supported | `structured_result` field carries the raw object. |
-| `--json-schema` + `--bare` | Supported | Synthetic tool registered alongside the bare three. |
+| `--json-schema` + `--bare` | Supported | `--bare` restricts the registry to `read_file`, `edit`, `run_shell_command`; the synthetic tool is registered alongside that minimal set. |
 | `--json-schema` + `-i` | Rejected at parse time | TUI has no terminal contract for the synthetic tool. |
 | `--json-schema` + `--input-format stream-json` | Rejected at parse time | Single-shot contract vs. long-lived protocol. |
 | `--json-schema` + `--acp` / `--experimental-acp` | Rejected at parse time | ACP loop is independent. |
@@ -317,8 +337,9 @@ points users at "schema is satisfiable" as a likely cause.
   in `--json-schema` arguments.
 - SDK protocol additions (Python / TypeScript / Java SDKs exposing a
   typed `structured_result` field) — track separately;
-  [PR #4001](https://github.com/QwenLM/qwen-code/pull/4001) covered
-  that scope before the cli/core work landed.
+  [PR #4001](https://github.com/QwenLM/qwen-code/pull/4001) (closed
+  unmerged on 2026-05-11) covered that scope before the cli/core work
+  landed and was superseded.
 
 ## File index
 

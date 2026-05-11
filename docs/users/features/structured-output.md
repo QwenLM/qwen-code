@@ -33,6 +33,16 @@ Output on stdout (default `--output-format text`):
 The line is exactly the JSON-stringified payload + newline — no
 envelope, no event log. Pipe it straight into `jq` or another consumer.
 
+All error messages, log lines, and the model's incidental prose go
+to **stderr**. Stdout in text mode is reserved for the JSON payload on
+success and is empty on failure, so `$(qwen --json-schema …)` capture
+patterns are safe — failures land in stderr, not mixed into the
+captured variable.
+
+> **Empty schema:** Passing `{}` always produces `null` on stdout. The
+> model calls `structured_output` with no arguments, and `undefined`
+> payloads normalize to literal JSON `null`.
+
 ## Supplying the schema
 
 Two equivalent forms:
@@ -47,6 +57,19 @@ qwen -p "…" --json-schema @./schemas/summary.json
 
 The `@path` form expands `~`, normalizes the path, and reads the file
 with `utf8` encoding.
+
+> **Latency note:** Successful runs incur a fixed ~500 ms shutdown
+> holdback while in-flight background agents flush their final
+> notifications before the result is emitted. Single runs barely
+> notice it; batch pipelines that fan out hundreds of `--json-schema`
+> invocations should account for this floor.
+
+> **Security note:** Schemas may contain user-supplied regular
+> expressions in `pattern` keywords. Ajv compiles these with the
+> ECMAScript regex engine, which is vulnerable to catastrophic
+> backtracking — a malicious schema like `{"pattern": "(a+)+b"}` can
+> hang the CLI on a moderately long input. Only run `--json-schema`
+> with schemas from sources you trust.
 
 Validation at parse time:
 
@@ -69,6 +92,20 @@ Validation at parse time:
 The root-acceptance check walks `type`, `const`, `enum`, `anyOf`,
 `oneOf`, `allOf`, `not`, and `if`/`then`/`else` (best-effort for the
 decidable cases). When in doubt it defers to Ajv at runtime.
+
+> **Root `$ref` is rejected** by the parse-time check. If your schema
+> reuses a definition via `$ref`, wrap it in `allOf`:
+>
+> ```jsonc
+> // Rejected:
+> { "$ref": "#/$defs/MyObj", "$defs": { … } }
+>
+> // Accepted (root accepts objects via the allOf branch):
+> { "allOf": [{ "$ref": "#/$defs/MyObj" }], "$defs": { … } }
+> ```
+>
+> `$ref` inside `anyOf` / `oneOf` / `allOf` is deferred to Ajv at
+> runtime, so the wrapped form passes the root-acceptance check.
 
 ## Output shape per format
 
@@ -100,20 +137,37 @@ The session ends on the first valid call. Until then:
 - **Args fail validation.** `structured_output` returns a tool-result
   error with Ajv's message, the model sees it on the next turn, and
   may correct the arguments and call again.
+
+  > **Cost note:** every retry is a full model turn (request +
+  > inference + response). A schema that the model misses repeatedly
+  > will multiply your token spend and latency for that run. Constrain
+  > schemas enough to guide the model, simple enough to nail on the
+  > first try; consider raising `--max-session-turns` when retries are
+  > expected.
+
 - **Model calls a side-effecting tool in the same turn as
-  `structured_output`.** The pre-scan suppresses the sibling — it never
-  runs. The model sees a synthesised "Skipped:" `tool_result` for the
-  suppressed call in the next turn (only if validation failed) so it
-  can re-issue the suppressed call when appropriate.
+  `structured_output`.** The pre-scan suppresses the sibling — it
+  never runs, regardless of whether the structured call ultimately
+  validates. The two paths split on what the model sees next:
+  - **Validation succeeds:** the run ends immediately, and the model
+    never gets another turn — the suppressed sibling is silently
+    discarded.
+  - **Validation fails:** the model gets another turn and sees a
+    synthesised "Skipped:" `tool_result` for the suppressed call,
+    so it can re-issue that call in a separate turn alongside the
+    retried structured call.
 - **Model emits plain text instead of calling
-  `structured_output`.** The run exits with code `1` and an error
-  message that includes the turn count and a truncated preview of the
-  model's output so you can see what it actually said.
-- **Run reaches `maxSessionTurns`.** Standard "Reached max session
-  turns" exit, plus a `--json-schema`-specific hint that points at the
-  three common stuck-run causes: model never called the tool,
-  `structured_output` is denied by permission rules, or the schema is
-  unsatisfiable.
+  `structured_output`.** Exit code `1`. The error message includes
+  the turn count and a truncated preview of the model's output so
+  you can see what it actually said.
+- **Run reaches `maxSessionTurns`.** Exit code `53`. Standard
+  "Reached max session turns" exit, plus a `--json-schema`-specific
+  hint that points at the three common stuck-run causes: model never
+  called the tool, `structured_output` is denied by permission rules,
+  or the schema is unsatisfiable.
+- **Run is interrupted (SIGINT / Ctrl-C).** Exit code `130`. No
+  structured result is emitted, even if one had been captured during
+  the shutdown holdback.
 
 ## Privacy
 
@@ -131,6 +185,26 @@ the machine, args are redacted with the placeholder
 
 Tool-call metrics (duration, success, decision) and surrounding event
 metadata are preserved.
+
+## Session resumption (`--continue` / `--resume`)
+
+`--json-schema` is a per-run flag, not a per-session property. The
+synthetic tool is registered when the CLI parses its arguments, so:
+
+- Re-pass `--json-schema` on every `--continue` / `--resume` you want
+  the terminal contract to apply to. The same schema as the original
+  run is the safe default — a mid-session schema swap is allowed but
+  changes the contract the model is being held to.
+- If you `--continue` without `--json-schema`, the resumed run is an
+  ordinary headless session: `structured_output` simply doesn't
+  exist as a tool, and the model will respond in free-form text.
+- The `__redacted` placeholder in the resumed chat-recording does
+  not affect resumability in practice. A successful `structured_output`
+  call terminates the session immediately, so the only redacted args
+  a resumed run could see are from failed attempts. The model still
+  has each attempt's Ajv validation error in the recorded `tool_result`
+  and the live parameter schema (re-registered from `--json-schema`),
+  which is enough to retry.
 
 ## Permission gating
 
