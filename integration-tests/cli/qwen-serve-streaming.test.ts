@@ -28,7 +28,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
-import type { DaemonEvent } from '@qwen-code/sdk';
+import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = path.resolve(__dirname, '../../packages/cli/dist/index.js');
@@ -181,8 +181,12 @@ describeLLM('qwen serve — child-crash recovery (real SIGKILL)', () => {
 
     // Listing must NOT show the dead session.
     const remaining = await client.listWorkspaceSessions(REPO_ROOT);
+    // Explicit `s` type for resilience against a stale dist .d.ts
+    // in the reviewer's tsc env (see same note in routes.test.ts).
     expect(
-      remaining.find((s) => s.sessionId === session.sessionId),
+      remaining.find(
+        (s: DaemonSessionSummary) => s.sessionId === session.sessionId,
+      ),
     ).toBeUndefined();
 
     // Retry must spawn fresh, not reuse the corpse.

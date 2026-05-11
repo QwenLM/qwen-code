@@ -272,8 +272,8 @@ Backpressure:
 Cast a vote on a pending `permission_request`. **First responder wins** — once one client answers, every other client trying to answer the same id gets `404`.
 
 > **Stage 1 limitation — no permission timeout.** A `permission_request`
-> stays pending until: (a) some client votes here, (b) `POST
-/session/:id/cancel` fires, (c) the HTTP client driving the prompt
+> stays pending until: (a) some client votes here, (b) `POST /session/:id/cancel`
+> fires, (c) the HTTP client driving the prompt
 > disconnects (mid-prompt cancel resolves outstanding permissions as
 > `cancelled`), (d) the session is killed, or (e) the daemon shuts
 > down. **In a fully-headless deployment with no SSE subscriber,
@@ -282,7 +282,7 @@ Cast a vote on a pending `permission_request`. **First responder wins** — once
 > `permissionTimeoutMs`. Until then, headless callers should keep an
 > SSE subscription open or wrap their prompt loop in their own timeout
 >
-> - `POST /session/:id/cancel`.
+> - `POST /session/:id/cancel` on expiry.
 
 Request:
 

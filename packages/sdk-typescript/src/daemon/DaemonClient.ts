@@ -41,12 +41,17 @@ export interface DaemonClientOptions {
    */
   fetch?: typeof globalThis.fetch;
   /**
-   * Per-call request timeout in milliseconds. Applied to every non-streaming
-   * method (createOrAttachSession, prompt, setSessionModel, cancel, …) so
-   * an unresponsive daemon doesn't block callers indefinitely. Streaming
-   * (`subscribeEvents`) is intentionally excluded — SSE connections are
-   * long-lived; cancellation is via `opts.signal`. Defaults to 30s. Set to
-   * `0` or `Infinity` to disable.
+   * Per-call request timeout in milliseconds. Applied to short-lived
+   * methods (`health`, `capabilities`, `createOrAttachSession`,
+   * `listWorkspaceSessions`, `setSessionModel`, `cancel`,
+   * `respondToPermission`) so an unresponsive daemon doesn't block
+   * callers indefinitely. **NOT** applied to `prompt()` — model + tool
+   * turns can take minutes, so prompt explicitly bypasses
+   * `fetchTimeoutMs`; cancellation is via the optional `signal` arg.
+   * Streaming (`subscribeEvents`) is similarly excluded for the
+   * long-lived SSE body, though it does apply `fetchTimeoutMs` to the
+   * initial connect phase (request → headers received).
+   * Defaults to 30s. Set to `0` or `Infinity` to disable.
    */
   fetchTimeoutMs?: number;
 }

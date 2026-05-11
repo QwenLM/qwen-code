@@ -23,7 +23,11 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { DaemonClient, DaemonHttpError } from '@qwen-code/sdk';
+import {
+  DaemonClient,
+  DaemonHttpError,
+  type DaemonSessionSummary,
+} from '@qwen-code/sdk';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = path.resolve(__dirname, '../../packages/cli/dist/index.js');
@@ -322,6 +326,13 @@ describe('qwen serve — cancel + list', () => {
     await client.createOrAttachSession({ workspaceCwd: REPO_ROOT });
     const sessions = await client.listWorkspaceSessions(REPO_ROOT);
     expect(sessions.length).toBeGreaterThanOrEqual(1);
-    expect(sessions.every((s) => s.workspaceCwd === REPO_ROOT)).toBe(true);
+    // Explicit `s` type because the reviewer's tsc run resolves
+    // `@qwen-code/sdk` against a possibly-stale dist .d.ts (per
+    // integration-tests/tsconfig.json `paths` mapping); without
+    // the annotation `s` widens to `any` in that environment and
+    // trips strict-mode TS7006.
+    expect(
+      sessions.every((s: DaemonSessionSummary) => s.workspaceCwd === REPO_ROOT),
+    ).toBe(true);
   });
 });

@@ -222,9 +222,20 @@ export function createServeApp(
     // Propagate HTTP-client disconnect to an ACP cancel notification so
     // the agent winds down promptly and the per-session FIFO doesn't
     // stay blocked on a dead client. Detached after the prompt settles.
+    //
+    // Use `res.on('close')` (NOT `req.on('close')`) — `IncomingMessage`'s
+    // close event fires once the request body has been fully consumed
+    // even when the client is still listening for the response, which
+    // would cancel every ordinary prompt the moment its upload
+    // finished. `ServerResponse`'s close event only fires when the
+    // socket goes away. Guard with `!res.writableEnded` so a normal
+    // response flush (which also triggers `res.close`) doesn't fire
+    // the abort retroactively.
     const abort = new AbortController();
-    const onClientClose = () => abort.abort();
-    req.on('close', onClientClose);
+    const onResClose = () => {
+      if (!res.writableEnded) abort.abort();
+    };
+    res.once('close', onResClose);
     try {
       const result = await bridge.sendPrompt(
         sessionId,
@@ -237,17 +248,17 @@ export function createServeApp(
       );
       res.status(200).json(result);
     } catch (err) {
-      // The HTTP client disconnecting fires `req.on('close')` → abort,
-      // and the bridge re-throws as `AbortError`. That's a normal
-      // wind-down path, not an error worth a 500 + stderr stack
-      // trace. Drop it silently — the socket is already closed so we
-      // can't send a response anyway, and active clients (e.g. an
-      // IDE plugin scrubbing a stuck prompt) would otherwise spam
-      // the daemon log.
+      // The HTTP client disconnecting fires the abort path above and
+      // the bridge re-throws as `AbortError`. That's a normal
+      // wind-down, not an error worth a 500 + stderr stack trace.
+      // Drop it silently — the socket is already closed so we can't
+      // send a response anyway, and active clients (e.g. an IDE
+      // plugin scrubbing a stuck prompt) would otherwise spam the
+      // daemon log.
       if (err instanceof DOMException && err.name === 'AbortError') return;
       sendBridgeError(res, err);
     } finally {
-      req.off('close', onClientClose);
+      res.off('close', onResClose);
     }
   });
 
