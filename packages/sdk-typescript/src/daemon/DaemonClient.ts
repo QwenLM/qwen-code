@@ -247,17 +247,28 @@ export class DaemonClient {
     return (await res.json()) as SetModelResult;
   }
 
-  // `prompt` is intentionally exempt from `fetchTimeoutMs` — the request
-  // is long-lived (model + tool turns can take minutes). Callers who
-  // want cancellation should pass an `AbortSignal` (we'd add one to
-  // PromptRequest in a follow-up) or rely on `cancel(sessionId)`.
-  async prompt(sessionId: string, req: PromptRequest): Promise<PromptResult> {
+  /**
+   * Send a prompt to the agent. Long-lived: a model + tool turn can
+   * take minutes, so this method bypasses `fetchTimeoutMs` (which
+   * would force a default 30s deadline that's too short for normal
+   * use). Cancellation is via the optional `signal` — when it fires,
+   * the daemon receives the underlying TCP close and forwards an
+   * ACP `cancel` notification to the agent, resolving the prompt
+   * with `stopReason: 'cancelled'`. `cancel(sessionId)` is the
+   * out-of-band alternative.
+   */
+  async prompt(
+    sessionId: string,
+    req: PromptRequest,
+    signal?: AbortSignal,
+  ): Promise<PromptResult> {
     const res = await this._fetch(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(req),
+        signal,
       },
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
@@ -288,10 +299,42 @@ export class DaemonClient {
     if (opts.lastEventId !== undefined) {
       headers['Last-Event-ID'] = String(opts.lastEventId);
     }
-    const res = await this._fetch(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`,
-      { headers, signal: opts.signal },
-    );
+    // Apply `fetchTimeoutMs` to the CONNECT phase only (request → headers
+    // received). The SSE body itself must NOT be timed out — it's
+    // long-lived by design — so once `_fetch` returns the timer is
+    // cleared. Without this, an unresponsive daemon (TCP open but no
+    // headers) blocks `subscribeEvents` indefinitely instead of
+    // failing with the same 30s default the rest of the SDK uses.
+    const connectCtrl = new AbortController();
+    let connectTimer: ReturnType<typeof setTimeout> | undefined;
+    if (this.fetchTimeoutMs && Number.isFinite(this.fetchTimeoutMs)) {
+      connectTimer = setTimeout(
+        () =>
+          connectCtrl.abort(
+            new DOMException('Initial connect timed out', 'TimeoutError'),
+          ),
+        this.fetchTimeoutMs,
+      );
+      if (
+        typeof connectTimer === 'object' &&
+        connectTimer &&
+        'unref' in connectTimer
+      ) {
+        (connectTimer as { unref: () => void }).unref();
+      }
+    }
+    const fetchSignal = opts.signal
+      ? composeAbortSignals([opts.signal, connectCtrl.signal])
+      : connectCtrl.signal;
+    let res: Response;
+    try {
+      res = await this._fetch(
+        `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`,
+        { headers, signal: fetchSignal },
+      );
+    } finally {
+      if (connectTimer !== undefined) clearTimeout(connectTimer);
+    }
     if (!res.ok) {
       throw await this.failOnError(res, 'GET /session/:id/events');
     }
@@ -336,13 +379,25 @@ export class DaemonClient {
         body: JSON.stringify(response),
       },
     );
-    if (res.status === 200) return true;
-    if (res.status === 404) {
-      // Drain the body so the connection can be reused; ignore the payload.
+    if (res.status === 200) {
+      // Drain the body so undici doesn't keep the underlying socket
+      // pinned waiting for the consumer. On long-running clients with
+      // frequent permission votes this would exhaust the connection
+      // pool. Use `res.body?.cancel()` rather than `await res.json()`
+      // because the daemon returns `{}` (no useful payload here) and
+      // cancel is cheaper than a parse round-trip.
       try {
-        await res.json();
+        await res.body?.cancel();
       } catch {
-        /* body already consumed or empty */
+        /* body already consumed or no body */
+      }
+      return true;
+    }
+    if (res.status === 404) {
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* body already consumed or no body */
       }
       return false;
     }

@@ -112,6 +112,16 @@ export async function runQwenServe(
 
   return await new Promise<RunHandle>((resolve, reject) => {
     const server = app.listen(opts.port, listenHostname, () => {
+      // Listener-level connection cap, set inside the listen callback
+      // because Node only exposes the underlying `Server` after
+      // `app.listen()` returns. Each session's `EventBus` already
+      // refuses to admit more than `DEFAULT_MAX_SUBSCRIBERS` (64), but
+      // an attacker can still open *connections* that never finish
+      // their headers, never reach the bus, and just sit consuming
+      // socket descriptors. 256 leaves room for many sessions × many
+      // legitimate clients while keeping the FD count bounded.
+      // Configurable via `--max-connections` would be a Stage 2 add.
+      server.maxConnections = 256;
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;

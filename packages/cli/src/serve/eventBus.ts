@@ -62,6 +62,16 @@ export interface SubscribeOptions {
 
 const DEFAULT_MAX_QUEUED = 256;
 const DEFAULT_RING_SIZE = 1000;
+/**
+ * Per-bus subscriber cap. With per-subscriber `maxQueued` defaulting to
+ * 256 frames, 64 concurrent subscribers caps the per-session subscriber
+ * memory at ~64 × 256 = 16k queued frames (worst case). Keeps a single
+ * session from being opened thousands of times by an attacker to amplify
+ * each `publish()` (which is O(N) over subscribers) into a CPU/memory
+ * DoS. Daemon's HTTP listener also wants `server.maxConnections`
+ * configured at the listener level — see `runQwenServe.ts`.
+ */
+const DEFAULT_MAX_SUBSCRIBERS = 64;
 
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
@@ -74,7 +84,10 @@ export class EventBus {
   private readonly subs = new Set<InternalSub>();
   private closed = false;
 
-  constructor(private readonly ringSize: number = DEFAULT_RING_SIZE) {}
+  constructor(
+    private readonly ringSize: number = DEFAULT_RING_SIZE,
+    private readonly maxSubscribers: number = DEFAULT_MAX_SUBSCRIBERS,
+  ) {}
 
   /** Most recent id ever assigned by `publish`. 0 if no events published. */
   get lastEventId(): number {
@@ -111,7 +124,10 @@ export class EventBus {
     // refactor would push it to O(1) but adds index bookkeeping; deferred
     // until profiling actually flags it.
     if (this.ring.length > this.ringSize) this.ring.shift();
-    for (const sub of this.subs) {
+    // Snapshot the subscribers so an in-loop `this.subs.delete(sub)`
+    // (the new immediate-eviction cleanup below) doesn't mutate the
+    // Set we're iterating.
+    for (const sub of Array.from(this.subs)) {
       if (sub.evicted) continue;
       if (!sub.queue.push(event)) {
         sub.evicted = true;
@@ -133,6 +149,16 @@ export class EventBus {
         // consumer iterator unwinds with a final synthetic event.
         sub.queue.forcePush(evictionFrame);
         sub.queue.close();
+        // Drop the evicted sub from the Set IMMEDIATELY rather than
+        // waiting for the consumer's next `next()` call. A stalled
+        // (already-evicted, never-iterated) consumer would otherwise
+        // linger in `this.subs` forever — every subsequent `publish()`
+        // pays its `if (sub.evicted) continue` cost AND the
+        // `BoundedAsyncQueue` it owns is never GC'd. Under attack
+        // (thousands of opened-then-stalled SSE connections) this
+        // amplifies every event into thousands of dead-sub iterations
+        // and pins memory.
+        this.subs.delete(sub);
       }
     }
     return event;
@@ -154,6 +180,18 @@ export class EventBus {
    */
   subscribe(opts: SubscribeOptions = {}): AsyncIterable<BridgeEvent> {
     if (this.closed) {
+      return emptyAsyncIterable<BridgeEvent>();
+    }
+    // Per-bus subscriber cap: refuse rather than admit a subscriber
+    // that would push us past the limit. An accepted-but-immediately-
+    // evicted alternative would still pay the `BoundedAsyncQueue`
+    // allocation + the per-publish iteration cost. Returning an empty
+    // iterable lets the caller (the SSE route) cleanly close the
+    // response with no frames sent — under attack this is exactly
+    // the desired "drop new connections" behavior. Healthy callers
+    // won't normally hit the cap; if they do, raise `maxSubscribers`
+    // at construction.
+    if (this.subs.size >= this.maxSubscribers) {
       return emptyAsyncIterable<BridgeEvent>();
     }
     const queue = new BoundedAsyncQueue<BridgeEvent>(

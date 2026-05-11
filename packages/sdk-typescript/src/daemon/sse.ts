@@ -34,8 +34,17 @@ import type { DaemonEvent } from './types.js';
  * a misconfigured proxy returned a non-streaming body, or the server
  * never emits the `\n\n` separator. Without a cap, `buf` grows until
  * the consumer OOMs.
+ *
+ * Cap is in UTF-16 code units (`buf.length`), NOT bytes — `buf` is a
+ * decoded JS string. For mostly-ASCII content (the daemon's JSON
+ * envelope) one code unit ≈ one byte, so the cap behaves like a
+ * ~16 MiB byte cap. Mixed BMP / supplementary content can push the
+ * actual byte count up to ~64 MiB before tripping (one code unit per
+ * UTF-16 unit, but UTF-8 bytes can be 1–4 per code point). Either way
+ * the threshold's job is "stop runaway non-SSE bodies", not exact
+ * accounting, so the proxy is intentional.
  */
-const MAX_BUF_BYTES = 16 * 1024 * 1024;
+const MAX_BUF_CHARS = 16 * 1024 * 1024;
 
 export async function* parseSseStream(
   body: ReadableStream<Uint8Array>,
@@ -70,15 +79,11 @@ export async function* parseSseStream(
         return;
       }
       buf += decoder.decode(value, { stream: true });
-      // Unbounded buffer is a memory-pressure vector — see MAX_BUF_BYTES.
-      // Use UTF-16 code-unit length as a proxy for bytes; it slightly
-      // over-estimates for ASCII (1:2) and under-estimates for 4-byte
-      // characters (2:4), both within the same order of magnitude as
-      // the cap, so the threshold is still meaningful as a guard.
-      if (buf.length > MAX_BUF_BYTES) {
+      // Unbounded buffer is a memory-pressure vector — see MAX_BUF_CHARS.
+      if (buf.length > MAX_BUF_CHARS) {
         throw new Error(
-          `parseSseStream: unread buffer exceeded ${MAX_BUF_BYTES} bytes ` +
-            `without a frame separator — upstream likely not SSE`,
+          `parseSseStream: unread buffer exceeded ${MAX_BUF_CHARS} ` +
+            `UTF-16 code units without a frame separator — upstream likely not SSE`,
         );
       }
       const consumed = consumeFrames(buf);

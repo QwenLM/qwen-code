@@ -53,17 +53,28 @@ beforeAll(async () => {
   // Read stdout until we see the listening line + parse the port.
   port = await new Promise<number>((resolve, reject) => {
     let buf = '';
+    // Capture the timeout handle so we can clear it on success — an
+    // un-cleared 10s timer outlives the spawn promise and keeps the
+    // vitest event loop alive past the test, manifesting as
+    // intermittent `Test timed out` retries on slow CI.
+    const bootTimer = setTimeout(
+      () => reject(new Error('daemon boot timeout')),
+      10_000,
+    );
     const onData = (chunk: Buffer) => {
       buf += chunk.toString();
       const m = buf.match(/listening on http:\/\/127\.0\.0\.1:(\d+)/);
       if (m) {
         daemon.stdout?.off('data', onData);
+        clearTimeout(bootTimer);
         resolve(Number(m[1]));
       }
     };
     daemon.stdout!.on('data', onData);
-    daemon.once('exit', (c) => reject(new Error(`daemon exited with ${c}`)));
-    setTimeout(() => reject(new Error('daemon boot timeout')), 10_000);
+    daemon.once('exit', (c) => {
+      clearTimeout(bootTimer);
+      reject(new Error(`daemon exited with ${c}`));
+    });
   });
   base = `http://127.0.0.1:${port}`;
   client = new DaemonClient({ baseUrl: base, token: TOKEN });
