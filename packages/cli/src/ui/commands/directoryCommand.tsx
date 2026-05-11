@@ -388,10 +388,21 @@ export const directoryCommand: SlashCommand = {
           return;
         }
 
-        // Persist removal to settings first.  If this fails we can roll
-        // back the in-memory removal so the two stay in sync.
+        // Persist removal to settings.  If setValue throws partway through
+        // the multi-scope loop we roll back all in-memory mutations so
+        // settings stay consistent with what is on disk.
         const targetDir = canonicalDirectory;
         let found = false;
+
+        // Snapshot in-memory state for rollback.
+        const workspaceBefore = {
+          settings: { ...settings.workspace.settings },
+          originalSettings: { ...settings.workspace.originalSettings },
+        };
+        const userBefore = {
+          settings: { ...settings.user.settings },
+          originalSettings: { ...settings.user.originalSettings },
+        };
 
         try {
           for (const scope of [
@@ -419,6 +430,13 @@ export const directoryCommand: SlashCommand = {
             }
           }
         } catch (error) {
+          // Roll back any in-memory mutations that already happened.
+          settings.workspace.settings = workspaceBefore.settings;
+          settings.workspace.originalSettings =
+            workspaceBefore.originalSettings;
+          settings.user.settings = userBefore.settings;
+          settings.user.originalSettings = userBefore.originalSettings;
+          settings.recomputeMerged();
           addItem(
             {
               type: MessageType.ERROR,
@@ -433,13 +451,28 @@ export const directoryCommand: SlashCommand = {
 
         // Now remove from memory — persisted settings are already updated.
         const removed = workspaceContext.removeDirectory(expandedDir);
-        if (!removed && !found) {
+        if (!removed) {
+          if (!found) {
+            addItem(
+              {
+                type: MessageType.ERROR,
+                text: t('Directory not found in workspace: {{directory}}', {
+                  directory,
+                }),
+              },
+              Date.now(),
+            );
+            return;
+          }
+          // Persisted entry was removed from settings but the directory
+          // is still present in the active workspace.  Report as error
+          // so the user knows it was not fully removed.
           addItem(
             {
               type: MessageType.ERROR,
-              text: t('Directory not found in workspace: {{directory}}', {
-                directory,
-              }),
+              text: t(
+                'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.',
+              ),
             },
             Date.now(),
           );

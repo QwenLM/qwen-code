@@ -77,9 +77,10 @@ describe('directoryCommand', () => {
         originalSettings: {},
       },
       setValue: vi.fn(),
+      recomputeMerged: vi.fn(),
     };
     mockSettings.forScope = vi.fn((scope: string) => {
-      if (scope === 'user') return mockSettings.user;
+      if (scope === 'User') return mockSettings.user;
       return mockSettings.workspace;
     });
 
@@ -451,9 +452,10 @@ describe('directoryCommand', () => {
         setValue: vi.fn().mockImplementation(() => {
           throw settingsError;
         }),
+        recomputeMerged: vi.fn(),
       };
       newSettings.forScope = vi.fn((scope: string) => {
-        if (scope === 'user') return newSettings.user;
+        if (scope === 'User') return newSettings.user;
         return newSettings.workspace;
       });
 
@@ -476,6 +478,232 @@ describe('directoryCommand', () => {
         expect.objectContaining({
           type: MessageType.ERROR,
           text: `Error updating settings: ${settingsError.message}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should remove a directory stored only in user settings', async () => {
+      const removableDir = path.normalize('/home/user/project2');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        isInitialDirectory: vi.fn().mockReturnValue(false),
+        getInitialDirectories: vi
+          .fn()
+          .mockReturnValue([path.normalize('/home/user/project1')]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+      } as unknown as Config;
+
+      mockSettings.workspace = {
+        settings: {},
+        originalSettings: {
+          context: {
+            includeDirectories: [path.normalize('/home/user/project1')],
+          },
+        },
+      };
+      mockSettings.user = {
+        settings: {},
+        originalSettings: {
+          context: {
+            includeDirectories: [removableDir],
+          },
+        },
+      };
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, removableDir);
+
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'context.includeDirectories',
+        [],
+      );
+      expect(mockWorkspaceContext.removeDirectory).toHaveBeenCalledWith(
+        removableDir,
+      );
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: `Removed directory: ${removableDir}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should remove a directory stored in both workspace and user settings', async () => {
+      const removableDir = path.normalize('/home/user/project2');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        isInitialDirectory: vi.fn().mockReturnValue(false),
+        getInitialDirectories: vi
+          .fn()
+          .mockReturnValue([path.normalize('/home/user/project1')]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+      } as unknown as Config;
+
+      mockSettings.workspace = {
+        settings: {},
+        originalSettings: {
+          context: {
+            includeDirectories: [
+              path.normalize('/home/user/project1'),
+              removableDir,
+            ],
+          },
+        },
+      };
+      mockSettings.user = {
+        settings: {},
+        originalSettings: {
+          context: {
+            includeDirectories: [removableDir],
+          },
+        },
+      };
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, removableDir);
+
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [path.normalize('/home/user/project1')],
+      );
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'context.includeDirectories',
+        [],
+      );
+      expect(mockWorkspaceContext.removeDirectory).toHaveBeenCalledWith(
+        removableDir,
+      );
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: `Removed directory: ${removableDir}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should roll back workspace settings when user scope fails', async () => {
+      const removableDir = path.normalize('/home/user/project2');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        isInitialDirectory: vi.fn().mockReturnValue(false),
+        getInitialDirectories: vi
+          .fn()
+          .mockReturnValue([path.normalize('/home/user/project1')]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+      } as unknown as Config;
+
+      const originalWorkspaceDirs = [
+        path.normalize('/home/user/project1'),
+        removableDir,
+      ];
+      const originalUserDirs = [removableDir];
+
+      mockSettings.workspace = {
+        settings: {
+          context: { includeDirectories: [...originalWorkspaceDirs] },
+        },
+        originalSettings: {
+          context: { includeDirectories: [...originalWorkspaceDirs] },
+        },
+      };
+      mockSettings.user = {
+        settings: {
+          context: { includeDirectories: [...originalUserDirs] },
+        },
+        originalSettings: {
+          context: { includeDirectories: [...originalUserDirs] },
+        },
+      };
+
+      let callCount = 0;
+      mockSettings.setValue = vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 2) {
+          throw new Error('user scope write failed');
+        }
+      });
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, removableDir);
+
+      // Should have rolled back workspace settings to original state.
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: 'Error updating settings: user scope write failed',
+        }),
+        expect.any(Number),
+      );
+      // Directory should NOT have been removed from memory.
+      expect(mockWorkspaceContext.removeDirectory).not.toHaveBeenCalled();
+    });
+
+    it('should report error when in-memory removal fails but settings were updated', async () => {
+      const removableDir = path.normalize('/home/user/project2');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(false),
+        isInitialDirectory: vi.fn().mockReturnValue(false),
+        getInitialDirectories: vi
+          .fn()
+          .mockReturnValue([path.normalize('/home/user/project1')]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+      } as unknown as Config;
+
+      mockSettings.workspace = {
+        settings: {},
+        originalSettings: {
+          context: {
+            includeDirectories: [
+              path.normalize('/home/user/project1'),
+              removableDir,
+            ],
+          },
+        },
+      };
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, removableDir);
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining(
+            'could not be removed from the active workspace',
+          ),
+        }),
+        expect.any(Number),
+      );
+      // Should NOT show success message.
+      expect(mockContext.ui.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: `Removed directory: ${removableDir}`,
         }),
         expect.any(Number),
       );

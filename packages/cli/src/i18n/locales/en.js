@@ -1326,7 +1326,10 @@ export default {
     'Directory not found in workspace: {{directory}}',
   'Directory removed from workspace but error updating settings: {{error}}':
     'Directory removed from workspace but error updating settings: {{error}}',
+  'Error updating settings: {{error}}': 'Error updating settings: {{error}}',
   'Removed directory: {{directory}}': 'Removed directory: {{directory}}',
+  'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.':
+    'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.',
   'The /directory remove command is not supported in restrictive sandbox profiles.':
     'The /directory remove command is not supported in restrictive sandbox profiles.',
   'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.':
