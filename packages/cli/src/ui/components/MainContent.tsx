@@ -373,39 +373,107 @@ export const MainContent = () => {
     [mergedHistory, pendingHistoryItems],
   );
 
-  // Stable renderItem: completed items receive the original item reference so
-  // VirtualHistoryItem.memo can bail out on unchanged props. Pending items
-  // get id:0 (matching the legacy path) and always re-render during streaming.
-  //
-  // In VP mode, pending items do NOT receive an availableTerminalHeight bound.
-  // All items (including pending) are rendered inside VirtualizedList's
-  // overflowY="hidden" container, which uses ink 7's native clipping as the
-  // viewport guard. Passing undefined lets the full streaming content be
-  // available for virtual scrolling — JS truncation at terminal height would
-  // silently cut off content the user could otherwise scroll to read.
+  // Source-copy index offsets propagation. The legacy <Static> path threads
+  // per-item offsets so `/copy mermaid N` / `/copy latex N` hints under each
+  // diagram stay stable across continuation messages. Build lookup tables so
+  // the VP renderItem can attach the same offsets without changing the
+  // VirtualizedList API.
+  //   - Static items: look up by HistoryItem reference (mergedHistory items
+  //     are passed by ref, so identity-keyed lookup is stable).
+  //   - Pending items: look up by pending-array index (the spread
+  //     `{...item, id: -(i+1)}` creates a new object every render, so the
+  //     index is the only stable handle).
+  const sourceCopyOffsetsByHistoryItem = useMemo(() => {
+    const map = new Map<
+      HistoryItem | HistoryItemWithoutId,
+      MarkdownSourceCopyIndexOffsets
+    >();
+    for (const {
+      item,
+      sourceCopyIndexOffsets,
+    } of historyItemsWithSourceCopyOffsets) {
+      if (sourceCopyIndexOffsets) {
+        map.set(item, sourceCopyIndexOffsets);
+      }
+    }
+    return map;
+  }, [historyItemsWithSourceCopyOffsets]);
+
+  const pendingSourceCopyOffsetsByIndex = useMemo(
+    () =>
+      pendingHistoryItemsWithSourceCopyOffsets.map(
+        ({ sourceCopyIndexOffsets }) => sourceCopyIndexOffsets,
+      ),
+    [pendingHistoryItemsWithSourceCopyOffsets],
+  );
+
+  // Refs for streaming-only UI state (activePtyId, embeddedShellFocused,
+  // isEditorDialogOpen). Reading these via refs inside `renderVirtualItem`
+  // keeps the callback identity stable when these flip mid-stream (e.g., a
+  // shell tool starts/stops while a Gemini turn streams). Without the refs,
+  // every flip would rebuild `renderVirtualItem`, invalidate
+  // `VirtualizedList.renderedItems`'s useMemo, and force every static item
+  // to re-render — defeating the `StaticRender`/memo freeze. Pending items
+  // are correctly captured because their `item` reference changes per tick,
+  // so the per-item render is called fresh and reads the latest ref values.
+  const pendingStateRef = useRef({
+    activePtyId: uiState.activePtyId,
+    embeddedShellFocused: uiState.embeddedShellFocused,
+    isEditorDialogOpen: uiState.isEditorDialogOpen,
+    constrainHeight: uiState.constrainHeight,
+    availableTerminalHeight,
+  });
+  pendingStateRef.current = {
+    activePtyId: uiState.activePtyId,
+    embeddedShellFocused: uiState.embeddedShellFocused,
+    isEditorDialogOpen: uiState.isEditorDialogOpen,
+    constrainHeight: uiState.constrainHeight,
+    availableTerminalHeight,
+  };
+
+  // Stable renderItem: deps shrink to inputs that legitimately change the
+  // render output for a given item identity (terminalWidth, slashCommands,
+  // compactLabel, summary absorption, source-copy offsets). Streaming-only
+  // state is read from `pendingStateRef` so callback identity is stable.
   const renderVirtualItem = useCallback(
     ({ item }: { item: HistoryItem }) => {
       const isPending = item.id < 0;
+      const sourceCopyIndexOffsets = isPending
+        ? pendingSourceCopyOffsetsByIndex[-item.id - 1]
+        : sourceCopyOffsetsByHistoryItem.get(item);
+      if (isPending) {
+        const ps = pendingStateRef.current;
+        return (
+          <VirtualHistoryItem
+            terminalWidth={terminalWidth}
+            mainAreaWidth={mainAreaWidth}
+            availableTerminalHeight={
+              ps.constrainHeight ? ps.availableTerminalHeight : undefined
+            }
+            item={{ ...item, id: 0 }}
+            isPending={true}
+            isFocused={!ps.isEditorDialogOpen}
+            activeShellPtyId={ps.activePtyId}
+            embeddedShellFocused={ps.embeddedShellFocused}
+            commands={uiState.slashCommands}
+            compactLabel={getCompactLabel(item)}
+            summaryAbsorbed={isSummaryAbsorbed(item)}
+            sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+          />
+        );
+      }
       return (
         <VirtualHistoryItem
           terminalWidth={terminalWidth}
           mainAreaWidth={mainAreaWidth}
-          availableTerminalHeight={
-            isPending ? undefined : staticAreaMaxItemHeight
-          }
-          availableTerminalHeightGemini={
-            isPending ? undefined : MAX_GEMINI_MESSAGE_LINES
-          }
-          item={isPending ? { ...item, id: 0 } : item}
-          isPending={isPending}
-          isFocused={isPending ? !uiState.isEditorDialogOpen : undefined}
-          activeShellPtyId={isPending ? uiState.activePtyId : undefined}
-          embeddedShellFocused={
-            isPending ? uiState.embeddedShellFocused : undefined
-          }
+          availableTerminalHeight={staticAreaMaxItemHeight}
+          availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
+          item={item}
+          isPending={false}
           commands={uiState.slashCommands}
           compactLabel={getCompactLabel(item)}
           summaryAbsorbed={isSummaryAbsorbed(item)}
+          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       );
     },
@@ -413,12 +481,11 @@ export const MainContent = () => {
       terminalWidth,
       mainAreaWidth,
       staticAreaMaxItemHeight,
-      uiState.isEditorDialogOpen,
-      uiState.activePtyId,
-      uiState.embeddedShellFocused,
       uiState.slashCommands,
       getCompactLabel,
       isSummaryAbsorbed,
+      sourceCopyOffsetsByHistoryItem,
+      pendingSourceCopyOffsetsByIndex,
     ],
   );
 

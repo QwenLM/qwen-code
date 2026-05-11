@@ -228,6 +228,34 @@ function VirtualizedList<T>(
     });
   }, []);
 
+  // Prune stale height entries when the data set shrinks (`/clear`, history
+  // reset) or when item keys change (pending → completed key transition).
+  // Without this the heights record grows unbounded across long sessions —
+  // every `p-N` from a turn that finalized is left behind, every cleared
+  // turn's `h-N` lingers. Run in useLayoutEffect so the prune commits in the
+  // same paint as the data shrink, avoiding one frame of stale offsets.
+  useLayoutEffect(() => {
+    const currentKeys = new Set<string>();
+    for (let i = 0; i < data.length; i++) {
+      currentKeys.add(keyExtractor(data[i], i));
+    }
+    setHeights((prev) => {
+      let changed = false;
+      for (const k of Object.keys(prev)) {
+        if (!currentKeys.has(k)) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed) return prev;
+      const next: Record<string, number> = {};
+      for (const k of Object.keys(prev)) {
+        if (currentKeys.has(k)) next[k] = prev[k];
+      }
+      return next;
+    });
+  }, [data, keyExtractor]);
+
   const { totalHeight, offsets } = useMemo(() => {
     const offsets: number[] = [0];
     let totalHeight = 0;
