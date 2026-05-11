@@ -40,7 +40,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
     const isDashscopeOrigin =
-      /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(baseUrl);
+      /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(normalizedBaseUrl);
 
     // Check if proxy is configured and matches
     const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
