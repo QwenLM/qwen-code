@@ -129,6 +129,11 @@ export class SendMessageTool extends BaseDeclarativeTool<
         required: ['task_id', 'message'],
         additionalProperties: false,
       },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — only useful once a background task is running
+      false, // alwaysLoad
+      'send a message to a running background task',
     );
   }
 

@@ -677,6 +677,11 @@ export class MonitorTool extends BaseDeclarativeTool<
         required: ['command'],
         additionalProperties: false,
       },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — long-running streamer, only needed when explicit event streaming is required
+      false, // alwaysLoad
+      'stream output from a long-running shell command',
     );
   }
 
