@@ -496,6 +496,44 @@ describe('<TableRenderer />', () => {
       expect(output).toContain('┌');
     });
 
+    // Boundary equality tests: the comparator is strict `<`, so the threshold
+    // value itself must still render horizontally. Without these, a future
+    // off-by-one change from `<` to `<=` would slip through the < / > pair.
+    it('renders horizontal at exact absolute floor (2 cols, contentWidth=24)', () => {
+      // ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH is 24. With strict `<`, equality
+      // means horizontal mode is selected.
+      const output = renderTable(['A', 'B'], [['x', 'y']], 24);
+      expect(output).toContain('┌');
+      expect(output).toContain('└');
+    });
+
+    it('falls back to vertical one below absolute floor (2 cols, contentWidth=23)', () => {
+      const output = renderTable(['A', 'B'], [['x', 'y']], 23);
+      expect(output).not.toContain('┌');
+      expect(output).toContain('A:');
+    });
+
+    it('renders horizontal at exact column-budget threshold (5 cols, contentWidth=35)', () => {
+      // 5 cols → minHorizontal = 5*3 + (1+5*3) + 4 = 35. Equality must still
+      // render horizontally under the strict `<` comparator.
+      const output = renderTable(
+        ['A', 'B', 'C', 'D', 'E'],
+        [['1', '2', '3', '4', '5']],
+        35,
+      );
+      expect(output).toContain('┌');
+    });
+
+    it('falls back to vertical one below column-budget threshold (5 cols, contentWidth=34)', () => {
+      const output = renderTable(
+        ['A', 'B', 'C', 'D', 'E'],
+        [['1', '2', '3', '4', '5']],
+        34,
+      );
+      expect(output).not.toContain('┌');
+      expect(output).toContain('A:');
+    });
+
     it('forces vertical for many-column tables on narrow terminals', () => {
       // 5 cols → minHorizontal = 5*3 + (1+5*3) + 4 = 35; 30 cols is below that.
       const output = renderTable(

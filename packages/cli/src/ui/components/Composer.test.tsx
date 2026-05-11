@@ -229,6 +229,36 @@ describe('Composer', () => {
       expect(lastFrame()).not.toContain('LoadingIndicator');
     });
 
+    it('preserves "esc to cancel" fallback when LoadingIndicator is suppressed', () => {
+      // Even when the full LoadingIndicator is hidden on ultra-narrow
+      // terminals, the cancel affordance must remain so users can abort.
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 25,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame();
+      expect(output).not.toContain('LoadingIndicator');
+      expect(output).toContain('esc to cancel');
+    });
+
+    it('does not render the esc fallback once the full indicator is visible', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 31,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame();
+      expect(output).toContain('LoadingIndicator');
+      // The minimal fallback string only appears when the full indicator is
+      // suppressed — when LoadingIndicator renders, it owns the cancel hint.
+      expect(output).not.toContain('esc to cancel');
+    });
+
     it('shows LoadingIndicator when Responding on a 31-col terminal', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,

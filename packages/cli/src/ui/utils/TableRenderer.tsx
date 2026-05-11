@@ -331,7 +331,10 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   });
 
   // ── Step 2: Calculate available space ──
-  // Border overhead: │ content │ content │ = 1 + (width + 3) per column
+  // Border overhead: │ content │ content │ = 1 + (width + 3) per column.
+  // NOTE: this value is reused below in the horizontal-vs-vertical threshold
+  // (`minHorizontalTableWidth`). Any change to this formula will silently
+  // shift the layout threshold — adjust both call sites together.
   const borderOverhead = 1 + colCount * 3;
   const availableWidth = Math.max(
     contentWidth - borderOverhead - SAFETY_MARGIN,
