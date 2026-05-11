@@ -52,6 +52,7 @@ vi.mock('undici', () => {
 
 import {
   buildRuntimeFetchOptions,
+  extractHostnameFromProxyUrl,
   getOrCreateSharedDispatcher,
   redactProxyCredentials,
   resetDispatcherCache,
@@ -186,6 +187,18 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     // Should log each failure (no dedup)
     expect(mockWarn).toHaveBeenCalledTimes(3);
     expect(mockConsoleError).toHaveBeenCalledTimes(3);
+    expect(mockWarn).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('(first failure)'),
+    );
+    expect(mockWarn).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('(failure #2)'),
+    );
+    expect(mockWarn).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('(failure #3)'),
+    );
   });
 });
 
@@ -257,6 +270,20 @@ describe('redactProxyCredentials', () => {
     );
   });
 
+  it('redacts token-only credentials in Node.js native error format', () => {
+    const msg = 'connect ECONNREFUSED token@proxy.local:8080';
+    expect(redactProxyCredentials(msg)).toBe(
+      'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+  });
+
+  it('redacts bare credentials when the password contains colons', () => {
+    const msg = 'connect ECONNREFUSED user:pass:word@proxy.local:8080';
+    expect(redactProxyCredentials(msg)).toBe(
+      'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+  });
+
   it('does not double-redact when both patterns are present', () => {
     const msg =
       'http://user:pass@proxy.local — cause: connect ECONNREFUSED user:pass@proxy.local:8080';
@@ -264,5 +291,25 @@ describe('redactProxyCredentials', () => {
     expect(result).not.toContain('user');
     expect(result).not.toContain('pass');
     expect(result).toContain('proxy.local');
+  });
+});
+
+describe('extractHostnameFromProxyUrl', () => {
+  it('extracts host and port from a valid credentialed proxy URL', () => {
+    expect(
+      extractHostnameFromProxyUrl('http://user:secret@proxy.local:8080'),
+    ).toBe('proxy.local:8080');
+  });
+
+  it('extracts host and port from a scheme-less credentialed proxy value', () => {
+    expect(extractHostnameFromProxyUrl('user:secret@proxy.local:8080')).toBe(
+      'proxy.local:8080',
+    );
+  });
+
+  it('redacts fallback output when no safe hostname can be extracted', () => {
+    expect(extractHostnameFromProxyUrl('http://user:secret@')).toBe(
+      'http://<redacted>@',
+    );
   });
 });

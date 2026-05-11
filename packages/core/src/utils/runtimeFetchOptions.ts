@@ -143,6 +143,11 @@ export function buildRuntimeFetchOptions(
 const dispatcherCache = new Map<string | undefined, Dispatcher>();
 
 /**
+ * Proxy dispatcher creation failure counts keyed by sanitized host.
+ */
+const proxyFailureCounts = new Map<string, number>();
+
+/**
  * Fallback return value when no custom dispatcher is used.
  * OpenAI SDK accepts `undefined` for fetchOptions to use runtime built-in fetch;
  * Anthropic SDK requires an empty object `{}`.
@@ -156,6 +161,9 @@ const NO_DISPATCHER_FALLBACK = {
  * Get or create a shared undici dispatcher for the given proxy configuration.
  * The dispatcher is cached so that preconnect and subsequent SDK requests
  * share the same connection pool, enabling TCP+TLS connection reuse.
+ * The no-proxy Agent branch is intentionally retained for external consumers
+ * that call this exported helper directly; internal SDK setup skips it when no
+ * proxy is configured.
  *
  * @param proxyUrl - Optional proxy URL; undefined for direct connections
  * @returns A cached undici Dispatcher (Agent or ProxyAgent)
@@ -189,6 +197,7 @@ export function getOrCreateSharedDispatcher(proxyUrl?: string): Dispatcher {
  */
 export function resetDispatcherCache(): void {
   dispatcherCache.clear();
+  proxyFailureCounts.clear();
 }
 
 /**
@@ -209,12 +218,15 @@ export function resetDispatcherCache(): void {
 export function extractHostnameFromProxyUrl(proxyUrl: string): string {
   try {
     const url = new URL(proxyUrl);
-    return url.port ? `${url.hostname}:${url.port}` : url.hostname;
+    if (url.hostname) {
+      return url.port ? `${url.hostname}:${url.port}` : url.hostname;
+    }
   } catch {
-    // Fallback: if URL parsing fails, use regex to extract host after '@'
-    const match = proxyUrl.match(/@([^:/]+)(:\d+)?/);
-    return match ? match[1] + (match[2] ?? '') : proxyUrl;
+    // Fall through to the regex fallback below.
   }
+
+  const match = proxyUrl.match(/@([^:/\s]+)(:\d+)?/);
+  return match ? match[1] + (match[2] ?? '') : redactProxyCredentials(proxyUrl);
 }
 
 /**
@@ -226,7 +238,7 @@ export function extractHostnameFromProxyUrl(proxyUrl: string): string {
  *
  * Two patterns are supported:
  * - With scheme: `http://user:pass@proxy.local` → `http://<redacted>@proxy.local`
- * - Without scheme (Node.js native errors): `user:pass@proxy.local:8080` → `<redacted>@proxy.local:8080`
+ * - Without scheme (Node.js native errors): `token@proxy.local:8080` → `<redacted>@proxy.local:8080`
  *
  * @param message - Error message that may contain proxy URLs with credentials
  * @returns Message with all proxy credentials replaced by '<redacted>'
@@ -235,9 +247,16 @@ export function redactProxyCredentials(message: string): string {
   // Primary: match URLs with scheme (http://user:pass@host or https://user:pass@host)
   let result = message.replace(/\/\/[^/\s]*@/g, '//<redacted>@');
   // Fallback: match bare credential patterns without scheme (e.g., Node.js native errors)
-  // Negative lookbehind for :// avoids matching already-handled URLs or schemes
-  result = result.replace(/(?<!:\/\/)[^\s/]+:[^\s/@]*@/g, '<redacted>@');
+  // The prefix guard avoids reprocessing scheme URLs and path-local email-like
+  // text such as `/contact@example.com`.
+  result = result.replace(/(^|[\s([=:])([^\s/@]+@)/g, '$1<redacted>@');
   return result;
+}
+
+function recordProxyFailure(hostname: string): number {
+  const failureCount = (proxyFailureCounts.get(hostname) ?? 0) + 1;
+  proxyFailureCounts.set(hostname, failureCount);
+  return failureCount;
 }
 
 function buildFetchOptionsWithDispatcher(
@@ -265,9 +284,12 @@ function buildFetchOptionsWithDispatcher(
     // and do not deduplicate so that administrators can see each credential change
     // attempt's failure when debugging proxy issues.
     const hostname = extractHostnameFromProxyUrl(proxyUrl);
+    const failureCount = recordProxyFailure(hostname);
+    const failureLabel =
+      failureCount === 1 ? 'first failure' : `failure #${failureCount}`;
     const errorMessage = error instanceof Error ? error.message : String(error);
     const redactedMessage = redactProxyCredentials(errorMessage);
-    const logMessage = `Failed to create proxy dispatcher for ${hostname}, falling back to direct connection: ${redactedMessage}`;
+    const logMessage = `Failed to create proxy dispatcher for ${hostname} (${failureLabel}), falling back to direct connection: ${redactedMessage}`;
     debugLogger.warn(logMessage);
     // Dual logging: debugLogger writes to ~/.qwen/debug/ (for local debugging),
     // console.error writes to stderr (captured by container orchestrators and log aggregators).

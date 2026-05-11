@@ -28,8 +28,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => mockDebugLogger,
   detectRuntime: () => 'node',
   getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,
-  redactProxyCredentials: (msg: string) =>
-    msg.replace(/\/\/[^/\s]*@/g, '//<redacted>@'),
+  redactProxyCredentials: (msg: string) => {
+    let result = msg.replace(/\/\/[^/\s]*@/g, '//<redacted>@');
+    result = result.replace(/(^|[\s([=:])([^\s/@]+@)/g, '$1<redacted>@');
+    return result;
+  },
 }));
 
 describe('apiPreconnect', () => {
@@ -222,7 +225,7 @@ describe('apiPreconnect', () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://proxy.example.com:8080',
       });
-      preconnectApi('openai');
+      preconnectApi('openai', { proxy: 'http://proxy.example.com:8080' });
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
@@ -272,6 +275,25 @@ describe('apiPreconnect', () => {
       ).not.toThrow();
     });
 
+    it('should redact proxy credentials from async fetch errors', async () => {
+      mockFetch.mockRejectedValue(
+        new Error('connect ECONNREFUSED token@proxy.local:8080'),
+      );
+      preconnectApi('qwen-oauth', {
+        proxy: 'http://token@proxy.local:8080',
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'Preconnect failed (ignored): Error: connect ECONNREFUSED <redacted>@proxy.local:8080',
+      );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('token@'),
+      );
+    });
+
     it('should handle synchronous dispatcher errors gracefully', () => {
       mockGetOrCreateSharedDispatcher.mockImplementation(() => {
         throw new Error('Failed to create dispatcher');
@@ -279,6 +301,23 @@ describe('apiPreconnect', () => {
       expect(() =>
         preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' }),
       ).not.toThrow();
+    });
+
+    it('should redact proxy credentials from synchronous dispatcher errors', () => {
+      mockGetOrCreateSharedDispatcher.mockImplementation(() => {
+        throw new Error('connect ECONNREFUSED user:pass@proxy.local:8080');
+      });
+
+      preconnectApi('qwen-oauth', {
+        proxy: 'http://user:pass@proxy.local:8080',
+      });
+
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'Preconnect failed (ignored): Error: connect ECONNREFUSED <redacted>@proxy.local:8080',
+      );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('user:pass@'),
+      );
     });
 
     it('should skip when QWEN_CODE_DISABLE_PRECONNECT is set', () => {
