@@ -765,7 +765,7 @@ describe('standalone release packaging', () => {
       );
       await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
         new RegExp(
-          `Checksum verification failed for ${EXPECTED_STANDALONE_ARCHIVE_NAMES[0].replace(/\./g, '\\.')}`,
+          `Checksum verification failed for ${escapeRegExp(EXPECTED_STANDALONE_ARCHIVE_NAMES[0])}`,
         ),
       );
     } finally {
@@ -2278,4 +2278,8 @@ function placeholderChecksumContent(archiveNames) {
           .digest('hex')}  ${assetName}`,
     )
     .join('\n')}\n`;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
