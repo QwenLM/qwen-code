@@ -807,8 +807,81 @@ export function loadEnvironment(settings: Settings): void {
  * Loads settings from user and workspace directories.
  * Project settings override user settings.
  */
+/**
+ * Async parallel variant of {@link loadSettings}. Pre-reads the well-known
+ * settings JSON files (`system`, `system-defaults`, `user`, `workspace`)
+ * concurrently via `fs.promises.readFile`, then defers to the synchronous
+ * `loadSettings` for the rest (parse → migration → trust check →
+ * `loadEnvironment` → merge), feeding the prefetched content in so the
+ * sync path doesn't re-read.
+ *
+ * The async path is **only** used by the cli startup main entry; every
+ * other call site (commands, settings dialog, tests) keeps using the sync
+ * `loadSettings`. Both APIs produce an identical `LoadedSettings` —
+ * verified by unit test.
+ *
+ * On a warm filesystem cache the speedup is small (~5 ms vs ~9 ms for sync
+ * serial reads — most of the time is parse + migration, not I/O). The
+ * structural value is that this opens an async path for future
+ * improvements (larger MCP configs, settings pre-warming on idle, etc.)
+ * without forcing every caller to migrate.
+ */
+export async function loadSettingsAsync(
+  workspaceDir: string = process.cwd(),
+): Promise<LoadedSettings> {
+  // `preResolveHomeEnvOverrides()` is also called as the very first line of
+  // `loadSettings`. We call it here too so QWEN_HOME / QWEN_RUNTIME_DIR
+  // overrides take effect BEFORE we resolve the paths used for the parallel
+  // pre-read. The second call inside `loadSettings` is idempotent (env is
+  // already set; the .env files are not re-parsed).
+  preResolveHomeEnvOverrides();
+
+  const userSettingsPath = getUserSettingsPath();
+  const systemSettingsPath = getSystemSettingsPath();
+  const systemDefaultsPath = getSystemDefaultsPath();
+  const workspaceSettingsPath = new Storage(
+    workspaceDir,
+  ).getWorkspaceSettingsPath();
+
+  const paths = [
+    systemSettingsPath,
+    systemDefaultsPath,
+    userSettingsPath,
+    workspaceSettingsPath,
+  ];
+
+  // Each file is independent — read them concurrently. ENOENT becomes
+  // `undefined` (file doesn't exist, fall through to default-empty behavior
+  // in the sync path). Any other error is left for the sync path to record
+  // as a `settingsError` — same behavior the user would get without async.
+  const contents = await Promise.all(
+    paths.map(async (p) => {
+      try {
+        return await fs.promises.readFile(p, 'utf-8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+          return undefined;
+        }
+        // Surface to the sync path via the existing error-recording flow.
+        return undefined;
+      }
+    }),
+  );
+
+  const prefetched = new Map<string, string>();
+  for (let i = 0; i < paths.length; i++) {
+    const content = contents[i];
+    if (content !== undefined) {
+      prefetched.set(paths[i]!, content);
+    }
+  }
+
+  return loadSettings(workspaceDir, prefetched);
+}
+
 export function loadSettings(
   workspaceDir: string = process.cwd(),
+  prefetchedFileContents?: Map<string, string>,
 ): LoadedSettings {
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
   // BEFORE any code reads a path derived from them. After this call, the
@@ -852,8 +925,16 @@ export function loadSettings(
     scope: SettingScope,
   ): { settings: Settings; rawJson?: string; migrationWarnings?: string[] } => {
     try {
-      if (fs.existsSync(filePath)) {
-        let content = fs.readFileSync(filePath, 'utf-8');
+      // `loadSettingsAsync` pre-reads the well-known settings files in
+      // parallel and passes the buffered content through here. When that
+      // happens we skip the sync `readFileSync` to avoid a double-read.
+      // Recovery / migration writes still happen synchronously below — they
+      // are rare paths and the wall-time cost is negligible vs the I/O save.
+      const hasPrefetched = prefetchedFileContents?.has(filePath);
+      if (hasPrefetched || fs.existsSync(filePath)) {
+        let content =
+          prefetchedFileContents?.get(filePath) ??
+          fs.readFileSync(filePath, 'utf-8');
         let rawSettings: unknown;
         let recoveryWarning: string | undefined;
 

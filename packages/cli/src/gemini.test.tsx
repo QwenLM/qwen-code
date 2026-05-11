@@ -106,6 +106,9 @@ vi.mock('./core/initializer.js', () => ({
     shouldOpenAuthDialog: false,
     geminiMdFileCount: 0,
   }),
+  // PR-B-β1: gemini.tsx now imports `initializeI18nFromSettings` so it can
+  // fire i18n in parallel with `loadCliConfig`. The mock must expose it.
+  initializeI18nFromSettings: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe('gemini.tsx main function', () => {

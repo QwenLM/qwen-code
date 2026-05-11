@@ -5,7 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { initializeApp } from './initializer.js';
+import { initializeApp, initializeI18nFromSettings } from './initializer.js';
 
 const mockPerformInitialAuth = vi.fn();
 const mockValidateTheme = vi.fn();
@@ -186,5 +186,52 @@ describe('initializeApp', () => {
     await initializeApp(mockConfig as never, mockSettings as never);
 
     expect(mockInitializeI18n).toHaveBeenCalledWith('auto');
+  });
+
+  // PR-B-β1: parallelization tests
+  it('skips i18n when called with { skipI18n: true } (caller already awaited)', async () => {
+    mockInitializeI18n.mockClear();
+    await initializeApp(mockConfig as never, mockSettings as never, {
+      skipI18n: true,
+    });
+    expect(mockInitializeI18n).not.toHaveBeenCalled();
+  });
+
+  it('initializeI18nFromSettings can be invoked independently for parallel use', async () => {
+    mockInitializeI18n.mockClear();
+    await initializeI18nFromSettings(mockSettings as never);
+    expect(mockInitializeI18n).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs auth and IDE connect concurrently — auth failure does not abort IDE init', async () => {
+    mockConfig.getIdeMode.mockReturnValue(true);
+    mockPerformInitialAuth.mockRejectedValue(new Error('auth-boom'));
+
+    // allSettled means both are attempted; auth's rejection becomes a string
+    // in the result and IDE still gets to connect.
+    const result = await initializeApp(
+      mockConfig as never,
+      mockSettings as never,
+    );
+
+    expect(mockPerformInitialAuth).toHaveBeenCalled();
+    expect(mockGetInstance).toHaveBeenCalled();
+    expect(mockConnect).toHaveBeenCalled();
+    expect(result.authError).toContain('auth-boom');
+  });
+
+  it('runs auth and IDE connect concurrently — IDE failure does not abort auth', async () => {
+    mockConfig.getIdeMode.mockReturnValue(true);
+    mockConnect.mockRejectedValue(new Error('ide-boom'));
+    mockPerformInitialAuth.mockResolvedValue(null);
+
+    const result = await initializeApp(
+      mockConfig as never,
+      mockSettings as never,
+    );
+
+    // Auth still ran to completion and returned null (no error).
+    expect(mockPerformInitialAuth).toHaveBeenCalled();
+    expect(result.authError).toBeNull();
   });
 });

@@ -30,11 +30,12 @@ import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import {
   createMinimalSettings,
   getSettingsWarnings,
-  loadSettings,
+  loadSettingsAsync,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import {
   initializeApp,
+  initializeI18nFromSettings,
   type InitializationResult,
 } from './core/initializer.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
@@ -385,9 +386,14 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
+  // PR-B-α: the cli startup main path uses the async parallel loader so
+  // the 4 settings files (system / system-defaults / user / workspace) can
+  // be read concurrently rather than serially. Every other call site
+  // (commands, settings dialog, tests) keeps using the sync `loadSettings`
+  // — verified to produce identical results in `settings.test.ts`.
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()
-    : loadSettings();
+    : await loadSettingsAsync();
   await cleanupCheckpoints();
   profileCheckpoint('after_load_settings');
 
@@ -574,17 +580,26 @@ export async function main() {
   }
 
   {
-    const config = await loadCliConfig(
-      settings.merged,
-      argv,
-      process.cwd(),
-      argv.extensions,
-      // Pass separated hooks for proper source attribution
-      {
-        userHooks: settings.getUserHooks(),
-        projectHooks: settings.getProjectHooks(),
-      },
-    );
+    // PR-B-β1: i18n only depends on `settings.merged`, not on `config`, so
+    // we kick it off in parallel with `loadCliConfig`. The `Promise.all`
+    // resolves when both complete; the heavier `loadCliConfig` typically
+    // dominates the wall time. `initializeApp` below is told to skip i18n
+    // (via `skipI18n: true`) so we don't initialize it a second time.
+    const i18nPromise = initializeI18nFromSettings(settings);
+    const [config] = await Promise.all([
+      loadCliConfig(
+        settings.merged,
+        argv,
+        process.cwd(),
+        argv.extensions,
+        // Pass separated hooks for proper source attribution
+        {
+          userHooks: settings.getUserHooks(),
+          projectHooks: settings.getProjectHooks(),
+        },
+      ),
+      i18nPromise,
+    ]);
     profileCheckpoint('after_load_cli_config');
 
     // Register cleanup for MCP clients as early as possible
@@ -664,8 +679,11 @@ export async function main() {
         : InputFormat.TEXT;
 
     // For stream-json mode, defer config.initialize() until after the initialize control request
-    // For other modes, initialize normally
-    const initializationResult = await initializeApp(config, settings);
+    // For other modes, initialize normally. `skipI18n` because the
+    // `loadCliConfig` step above already awaited i18n in parallel.
+    const initializationResult = await initializeApp(config, settings, {
+      skipI18n: true,
+    });
     profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {

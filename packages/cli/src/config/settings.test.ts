@@ -46,6 +46,7 @@ import * as commentJsonUtils from '../utils/commentJson.js';
 import {
   getSettingsWarnings,
   loadSettings,
+  loadSettingsAsync,
   getUserSettingsPath,
   getSystemSettingsPath,
   getSystemDefaultsPath,
@@ -2446,6 +2447,76 @@ describe('Settings Loading and Merging', () => {
           'updateSettingsFilePreservingFormat returned false',
         ),
       );
+    });
+  });
+
+  describe('loadSettingsAsync (parallel I/O parity)', () => {
+    it('produces the same LoadedSettings as the sync loader', async () => {
+      // Set up a non-trivial multi-scope fixture so the parity check
+      // exercises merge logic, not just the empty path.
+      const userContent = {
+        ui: { theme: 'DefaultLight' },
+        model: { name: 'qwen3-coder' },
+      };
+      const systemContent = {
+        tools: { sandbox: false },
+      };
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [getSystemSettingsPath(), USER_SETTINGS_PATH].includes(String(p)),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemSettingsPath())
+            return JSON.stringify(systemContent);
+          if (p === USER_SETTINGS_PATH) return JSON.stringify(userContent);
+          return '{}';
+        },
+      );
+      // Mock the async file reader to feed the same content the sync path sees.
+      const readFileMock = vi
+        .spyOn(fs.promises, 'readFile')
+        .mockImplementation(async (p: fs.PathLike | fs.promises.FileHandle) => {
+          const path = String(p);
+          if (path === getSystemSettingsPath()) {
+            return JSON.stringify(systemContent);
+          }
+          if (path === USER_SETTINGS_PATH) {
+            return JSON.stringify(userContent);
+          }
+          const err = new Error('ENOENT') as NodeJS.ErrnoException;
+          err.code = 'ENOENT';
+          throw err;
+        });
+
+      const syncSettings = loadSettings(MOCK_WORKSPACE_DIR);
+      const asyncSettings = await loadSettingsAsync(MOCK_WORKSPACE_DIR);
+
+      // The two paths must produce structurally identical merged settings.
+      // Comparing `.merged` is the strongest invariant for downstream
+      // consumers — every other field flows out of the same merge logic.
+      expect(asyncSettings.merged).toEqual(syncSettings.merged);
+      expect(asyncSettings.user.settings).toEqual(syncSettings.user.settings);
+      expect(asyncSettings.system.settings).toEqual(
+        syncSettings.system.settings,
+      );
+
+      readFileMock.mockRestore();
+    });
+
+    it('treats ENOENT from fs.promises.readFile as a missing file (no error)', async () => {
+      (mockFsExistsSync as Mock).mockReturnValue(false);
+      const readFileMock = vi
+        .spyOn(fs.promises, 'readFile')
+        .mockImplementation(async () => {
+          const err = new Error('ENOENT') as NodeJS.ErrnoException;
+          err.code = 'ENOENT';
+          throw err;
+        });
+
+      const settings = await loadSettingsAsync(MOCK_WORKSPACE_DIR);
+      expect(settings.merged).toEqual({});
+
+      readFileMock.mockRestore();
     });
   });
 
