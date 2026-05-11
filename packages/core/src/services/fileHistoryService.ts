@@ -84,10 +84,7 @@ function getBackupFileName(filePath: string, version: number): string {
   return `${fileNameHash}@v${version}`;
 }
 
-function resolveBackupPath(
-  backupFileName: string,
-  sessionId: string,
-): string {
+function resolveBackupPath(backupFileName: string, sessionId: string): string {
   return join(
     Storage.getGlobalQwenDir(),
     FILE_HISTORY_DIR,
@@ -143,9 +140,7 @@ async function restoreBackup(
     backupStats = await stat(backupPath);
   } catch (e: unknown) {
     if (isENOENT(e)) {
-      debugLogger.error(
-        `FileHistory: Backup file not found: ${backupPath}`,
-      );
+      debugLogger.error(`FileHistory: Backup file not found: ${backupPath}`);
       return;
     }
     throw e;
@@ -258,11 +253,7 @@ export class FileHistoryService {
   private readonly enabled: boolean;
   private readonly cwd: string;
 
-  constructor(
-    sessionId: string,
-    enabled: boolean,
-    cwd: string,
-  ) {
+  constructor(sessionId: string, enabled: boolean, cwd: string) {
     this.sessionId = sessionId;
     this.enabled = enabled;
     this.cwd = cwd;
@@ -334,9 +325,7 @@ export class FileHistoryService {
       this.state.trackedFiles.add(trackingPath);
     }
 
-    debugLogger.debug(
-      `FileHistory: Tracked file modification for ${filePath}`,
-    );
+    debugLogger.debug(`FileHistory: Tracked file modification for ${filePath}`);
   }
 
   async makeSnapshot(promptId: string): Promise<void> {
@@ -352,8 +341,7 @@ export class FileHistoryService {
         Array.from(this.state.trackedFiles, async (trackingPath) => {
           try {
             const filePath = this.maybeExpandFilePath(trackingPath);
-            const latestBackup =
-              mostRecent.trackedFileBackups[trackingPath];
+            const latestBackup = mostRecent.trackedFileBackups[trackingPath];
             const nextVersion = latestBackup ? latestBackup.version + 1 : 1;
 
             let fileStats: Stats | undefined;
@@ -431,13 +419,9 @@ export class FileHistoryService {
       throw new Error('The selected snapshot was not found');
     }
 
-    debugLogger.debug(
-      `FileHistory: Rewinding to snapshot for ${promptId}`,
-    );
+    debugLogger.debug(`FileHistory: Rewinding to snapshot for ${promptId}`);
     const filesChanged = await this.applySnapshot(targetSnapshot);
-    debugLogger.debug(
-      `FileHistory: Finished rewinding to ${promptId}`,
-    );
+    debugLogger.debug(`FileHistory: Finished rewinding to ${promptId}`);
     return filesChanged;
   }
 
@@ -517,24 +501,23 @@ export class FileHistoryService {
           continue;
         }
         if (
-          await checkOriginFileChanged(
-            filePath,
-            backupFileName,
-            this.sessionId,
-          )
+          await checkOriginFileChanged(filePath, backupFileName, this.sessionId)
         )
           return true;
       } catch (error) {
-        debugLogger.error(
-          `FileHistory: Error checking changes: ${error}`,
-        );
+        debugLogger.error(`FileHistory: Error checking changes: ${error}`);
       }
     }
     return false;
   }
 
   private findSnapshot(promptId: string): FileHistorySnapshot | undefined {
-    return this.state.snapshots.findLast((s) => s.promptId === promptId);
+    for (let i = this.state.snapshots.length - 1; i >= 0; i--) {
+      if (this.state.snapshots[i]!.promptId === promptId) {
+        return this.state.snapshots[i];
+      }
+    }
+    return undefined;
   }
 
   private async applySnapshot(
@@ -569,11 +552,7 @@ export class FileHistoryService {
         }
 
         if (
-          await checkOriginFileChanged(
-            filePath,
-            backupFileName,
-            this.sessionId,
-          )
+          await checkOriginFileChanged(filePath, backupFileName, this.sessionId)
         ) {
           await restoreBackup(filePath, backupFileName, this.sessionId);
           debugLogger.debug(
@@ -604,10 +583,7 @@ export class FileHistoryService {
 
   private maybeShortenFilePath(filePath: string): string {
     if (!isAbsolute(filePath)) return filePath;
-    if (
-      filePath.startsWith(this.cwd + '/') ||
-      filePath === this.cwd
-    ) {
+    if (filePath.startsWith(this.cwd + '/') || filePath === this.cwd) {
       return relative(this.cwd, filePath);
     }
     return filePath;
