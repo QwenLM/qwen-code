@@ -263,6 +263,11 @@ describe('redactProxyCredentials', () => {
     expect(redactProxyCredentials(msg)).toBe(msg);
   });
 
+  it('does not redact ordinary email addresses', () => {
+    const msg = 'Contact support@example.com or set email=user@example.com';
+    expect(redactProxyCredentials(msg)).toBe(msg);
+  });
+
   it('redacts credentials in Node.js native error format (no scheme)', () => {
     const msg = 'connect ECONNREFUSED user:pass@proxy.local:8080';
     expect(redactProxyCredentials(msg)).toBe(
@@ -281,6 +286,13 @@ describe('redactProxyCredentials', () => {
     const msg = 'connect ECONNREFUSED user:pass:word@proxy.local:8080';
     expect(redactProxyCredentials(msg)).toBe(
       'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+  });
+
+  it('preserves labels and delimiters around bare proxy credentials', () => {
+    const msg = 'cause=(user:pass@proxy.local:8080)';
+    expect(redactProxyCredentials(msg)).toBe(
+      'cause=(<redacted>@proxy.local:8080)',
     );
   });
 

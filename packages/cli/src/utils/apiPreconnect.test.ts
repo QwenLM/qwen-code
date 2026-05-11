@@ -30,7 +30,20 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,
   redactProxyCredentials: (msg: string) => {
     let result = msg.replace(/\/\/[^/\s]*@/g, '//<redacted>@');
-    result = result.replace(/(^|[\s([=:])([^\s/@]+@)/g, '$1<redacted>@');
+    result = result.replace(
+      /(^|[\s([=:])([^\s/@()[\]=]+@[^@\s/()[\]=]+)/g,
+      (match, prefix: string, candidate: string) => {
+        const atIndex = candidate.indexOf('@');
+        const userInfo = candidate.slice(0, atIndex);
+        const host = candidate.slice(atIndex + 1);
+
+        if (!userInfo.includes(':') && !/:\d+$/.test(host)) {
+          return match;
+        }
+
+        return `${prefix}<redacted>@${host}`;
+      },
+    );
     return result;
   },
 }));

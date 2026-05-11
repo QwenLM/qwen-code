@@ -247,9 +247,23 @@ export function redactProxyCredentials(message: string): string {
   // Primary: match URLs with scheme (http://user:pass@host or https://user:pass@host)
   let result = message.replace(/\/\/[^/\s]*@/g, '//<redacted>@');
   // Fallback: match bare credential patterns without scheme (e.g., Node.js native errors)
-  // The prefix guard avoids reprocessing scheme URLs and path-local email-like
-  // text such as `/contact@example.com`.
-  result = result.replace(/(^|[\s([=:])([^\s/@]+@)/g, '$1<redacted>@');
+  // Redact only candidates that look like proxy credentials: either userinfo
+  // contains ':' or the host has an explicit port. This avoids over-redacting
+  // ordinary email-like text such as `support@example.com`.
+  result = result.replace(
+    /(^|[\s([=:])([^\s/@()[\]=]+@[^@\s/()[\]=]+)/g,
+    (match, prefix: string, candidate: string) => {
+      const atIndex = candidate.indexOf('@');
+      const userInfo = candidate.slice(0, atIndex);
+      const host = candidate.slice(atIndex + 1);
+
+      if (!userInfo.includes(':') && !/:\d+$/.test(host)) {
+        return match;
+      }
+
+      return `${prefix}<redacted>@${host}`;
+    },
+  );
   return result;
 }
 
