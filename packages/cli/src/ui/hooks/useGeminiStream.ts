@@ -256,6 +256,16 @@ function showCitations(settings: LoadedSettings): boolean {
 export interface CancelSubmitInfo {
   /** `pendingHistoryItemRef.current` captured before any cancel mutation. */
   pendingItem: HistoryItemWithoutId | null;
+  /**
+   * The USER history item that this turn added, if any. `null` when the
+   * turn took a path that does NOT push a user history item (Cron,
+   * Notification, slash `submit_prompt`, etc.). Consumers use this to
+   * verify the candidate `user` item being rewound actually came from
+   * the cancelled turn before truncating — without this guard, an older
+   * user item that happens to be followed only by synthetic content
+   * could be wrongly auto-restored when a non-USER turn is cancelled.
+   */
+  lastTurnUserItem: { text: string } | null;
 }
 
 /**
@@ -292,6 +302,15 @@ export const useGeminiStream = (
   const turnCancelledRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
   const lastPromptRef = useRef<PartListUnion | null>(null);
+  // Records the USER history item that THIS turn's prepareQueryForGemini
+  // added (if any). Reset to null at the start of every turn. Cron /
+  // Notification / slash submit_prompt paths don't add a user item, so
+  // this stays null on those turns. The cancel handler uses this to
+  // verify that the candidate `lastUserItem` it's about to rewind
+  // actually came from the cancelled turn — without the guard, an
+  // older user item with only-synthetic trailing could be wrongly
+  // truncated when a non-USER turn is cancelled.
+  const lastTurnUserItemRef = useRef<{ text: string } | null>(null);
   const lastPromptErroredRef = useRef(false);
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
@@ -640,7 +659,10 @@ export const useGeminiStream = (
     // either move the auto-restore check to read functional setState
     // or revisit isSyntheticHistoryItem.
     try {
-      onCancelSubmit({ pendingItem: pendingItemAtCancel });
+      onCancelSubmit({
+        pendingItem: pendingItemAtCancel,
+        lastTurnUserItem: lastTurnUserItemRef.current,
+      });
     } finally {
       setIsResponding(false);
       setShellInputFocused(false);
@@ -674,6 +696,12 @@ export const useGeminiStream = (
       if (typeof query === 'string' && query.trim().length === 0) {
         return { queryToSend: null, shouldProceed: false };
       }
+
+      // Reset at turn start. Only the user-typed-text path below assigns
+      // this — paths that don't add a USER history item (Cron /
+      // Notification / slash submit_prompt) leave it null so cancel
+      // never wrongly targets an older user item.
+      lastTurnUserItemRef.current = null;
 
       let localQueryToSendToGemini: PartListUnion | null = null;
 
@@ -750,6 +778,9 @@ export const useGeminiStream = (
             { type: MessageType.USER, text: trimmedQuery },
             userMessageTimestamp,
           );
+          // Record what we added so the cancel handler can verify it
+          // owns the user item it's about to rewind.
+          lastTurnUserItemRef.current = { text: trimmedQuery };
         }
 
         // Handle @-commands (which might involve tool calls)

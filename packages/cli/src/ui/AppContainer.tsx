@@ -1416,6 +1416,14 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
+      // The cancelled turn must have added a `user` history item itself —
+      // Cron / Notification / slash submit_prompt paths submit without
+      // pushing a user item, so an older user item that happens to be
+      // followed only by synthetic content must NOT be wrongly auto-
+      // restored on top of those turns.
+      const cancelledTurnUserText = info?.lastTurnUserItem?.text;
+      if (cancelledTurnUserText == null) return;
+
       const history = historyRef.current;
       const lastUserIdx = findLastUserItemIndex(history);
       if (lastUserIdx === -1) return;
@@ -1423,6 +1431,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
       const lastUserItem = history[lastUserIdx];
       if (lastUserItem.type !== 'user') return;
+      // Identity match: the user item we're rewinding has to be the one
+      // this turn added. Text equality is sufficient because
+      // useGeminiStream sets lastTurnUserItemRef synchronously next to
+      // the addItem call, and no concurrent turn can interleave —
+      // submitQuery is serialized on isSubmittingQueryRef.
+      if (lastUserItem.text !== cancelledTurnUserText) return;
       historyManager.truncateToItem(lastUserItem.id);
       buffer.setText(lastUserItem.text);
       // Also undo the cross-session ↑-history disk entry written by
@@ -1433,7 +1447,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // errors and returns false, but attach a .catch as defence so a
       // future code path that throws doesn't surface as an
       // UnhandledPromiseRejection.
-      void logger?.removeLastUserMessage().catch((err) => {
+      void logger?.removeLastUserMessage().catch((err: unknown) => {
         debugLogger.debug('Failed to undo cancelled prompt from log:', err);
       });
     },

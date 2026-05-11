@@ -851,6 +851,32 @@ describe('Logger', () => {
       expect(logger['lastLoggedUserEntry']).not.toBeNull();
     });
 
+    it('rolls back the optimistic in-memory removal when the disk READ fails', async () => {
+      // Companion to the write-failure regression: if _readLogFile throws
+      // (filesystem permission change, mid-rotation, etc.) the
+      // restoreOptimistic path must run too — otherwise the same
+      // false-but-removed contract violation appears on the read leg.
+      await logger.logMessage(MessageSenderType.USER, 'cancelled prompt');
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+
+      vi.spyOn(fs, 'readFile').mockRejectedValueOnce(
+        new Error('Permission denied'),
+      );
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(false);
+
+      // In-memory state restored: caller observes the entry again, so
+      // AppContainer's userMessages effect doesn't display a stale
+      // "removed but disk still has it" view.
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+      // Tracker also restored so a follow-up retry has a target.
+      expect(logger['lastLoggedUserEntry']).not.toBeNull();
+    });
+
     it('preserves the USER undo target when a non-USER write (MODEL_SWITCH) fails', async () => {
       // Regression: blanket-clearing the tracker in the catch branch
       // would discard a still-valid undo target whenever an unrelated
