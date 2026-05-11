@@ -188,6 +188,8 @@ vi.mock('../../utils/languageUtils.js', async () => {
 
 describe('SettingsDialog', () => {
   // Yield to Ink/React updates without adding broad real-time sleeps.
+  // The string-editing path goes through ink-testing-library's stdin event
+  // stream, which needs a macrotask tick rather than only React microtasks.
   const wait = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // Custom waitFor utility for ink testing environment (not compatible with @testing-library/react)

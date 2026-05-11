@@ -188,6 +188,7 @@ describe('InputPrompt', () => {
       showSuggestions: false,
       visibleStartIndex: 0,
       isPerfectMatch: false,
+      midInputGhostText: null,
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       resetCompletionState: vi.fn(),
@@ -245,13 +246,15 @@ describe('InputPrompt', () => {
     };
   });
 
-  const wait = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
   const flush = async () => {
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
   };
+  // Most keypress paths in this file need a macrotask tick for
+  // ink-testing-library's stdin events, not just React microtask flushing.
+  const wait = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
   const advanceTimers = async (ms: number) => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(ms);
@@ -2050,8 +2053,7 @@ describe('InputPrompt', () => {
   });
 
   describe('vim mode', () => {
-    it('should not call buffer.handleInput when vim mode is enabled and vim handles the input', async () => {
-      props.vimModeEnabled = true;
+    it('should not call buffer.handleInput when vim handles the input', async () => {
       props.vimHandleInput = vi.fn().mockReturnValue(true); // Mock that vim handled it.
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -2066,8 +2068,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('should call buffer.handleInput when vim mode is enabled but vim does not handle the input', async () => {
-      props.vimModeEnabled = true;
+    it('should call buffer.handleInput when vim does not handle the input', async () => {
       props.vimHandleInput = vi.fn().mockReturnValue(false); // Mock that vim did NOT handle it.
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -2539,6 +2540,8 @@ describe('InputPrompt', () => {
       act(() => {
         stdin.write('\x1B');
       });
+      // Double-ESC behavior is time-windowed; keep the second press inside
+      // the real 500ms reset window instead of draining only React updates.
       await wait(50);
 
       act(() => {
@@ -3341,32 +3344,37 @@ describe('InputPrompt', () => {
       );
       await wait();
 
+      vi.useFakeTimers();
       const largeContent = 'x'.repeat(1001);
 
-      // First paste - gets ID 1
-      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
-      await wait(50);
+      try {
+        // First paste - gets ID 1
+        stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+        await flush();
 
-      // Verify first placeholder was inserted
-      expect(mockBuffer.text).toBe('[Pasted Content 1001 chars]');
+        // Verify first placeholder was inserted
+        expect(mockBuffer.text).toBe('[Pasted Content 1001 chars]');
 
-      // Press backspace to delete the placeholder (cursor is at end of placeholder)
-      stdin.write('\x7f');
-      await wait(50);
+        // Press backspace to delete the placeholder (cursor is at end of placeholder)
+        stdin.write('\x7f');
+        await flush();
 
-      // Verify the placeholder was deleted (buffer is now empty)
-      expect(mockBuffer.text).toBe('');
+        // Verify the placeholder was deleted (buffer is now empty)
+        expect(mockBuffer.text).toBe('');
 
-      // Second paste - should reuse ID 1 since the first was deleted
-      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
-      await wait(50);
+        // Second paste - should reuse ID 1 since the first was deleted
+        stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+        await flush();
 
-      // Verify the ID was reused (no #2 suffix)
-      const insertCalls = vi.mocked(mockBuffer.insert).mock.calls;
-      const lastCall = insertCalls[insertCalls.length - 1];
-      expect(lastCall[0]).toBe('[Pasted Content 1001 chars]');
-
-      unmount();
+        // Verify the ID was reused (no #2 suffix)
+        const insertCalls = vi.mocked(mockBuffer.insert).mock.calls;
+        const lastCall = insertCalls[insertCalls.length - 1];
+        expect(lastCall[0]).toBe('[Pasted Content 1001 chars]');
+      } finally {
+        unmount();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
     });
 
     it('should handle mixed pastes with different character counts', async () => {
@@ -3550,7 +3558,7 @@ describe('InputPrompt', () => {
       vi.mocked(useUIState).mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-      } as ReturnType<typeof useUIState>);
+      } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(useUIActions).mockReturnValue({
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
@@ -3563,7 +3571,7 @@ describe('InputPrompt', () => {
       vi.mocked(useUIState).mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued msg 1', 'queued msg 2'],
-      } as ReturnType<typeof useUIState>);
+      } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(useUIActions).mockReturnValue({
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
@@ -3590,7 +3598,7 @@ describe('InputPrompt', () => {
       vi.mocked(useUIState).mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued msg'],
-      } as ReturnType<typeof useUIState>);
+      } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(useUIActions).mockReturnValue({
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
@@ -3623,7 +3631,7 @@ describe('InputPrompt', () => {
       vi.mocked(useUIState).mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued msg'],
-      } as ReturnType<typeof useUIState>);
+      } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(useUIActions).mockReturnValue({
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
@@ -3650,7 +3658,7 @@ describe('InputPrompt', () => {
       vi.mocked(useUIState).mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['stale msg'],
-      } as ReturnType<typeof useUIState>);
+      } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(useUIActions).mockReturnValue({
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
@@ -3688,7 +3696,7 @@ describe('InputPrompt', () => {
       vi.mocked(useUIState).mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued msg'],
-      } as ReturnType<typeof useUIState>);
+      } as unknown as ReturnType<typeof useUIState>);
 
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,

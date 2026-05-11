@@ -83,7 +83,7 @@ function createMockSessionService(
 }
 
 describe('SessionPicker', () => {
-  const wait = async () => {
+  const flush = async () => {
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -129,7 +129,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       const output = lastFrame();
       expect(output).toContain('Hello');
@@ -156,7 +156,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       const output = lastFrame();
       expect(output).toContain('0 messages');
@@ -189,7 +189,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       const output = lastFrame();
       expect(output).toContain('Single message');
@@ -201,8 +201,8 @@ describe('SessionPicker', () => {
 
   describe('Branch Filtering', () => {
     it('should filter by branch when Ctrl+B is pressed', async () => {
-      // Bare letter keys ('B', 'b', 'j', 'k', …) are reserved for the
-      // search query buffer. The branch toggle is Ctrl+B exclusively.
+      // Bare "b"/"B" should not toggle branch filtering; the branch toggle is
+      // Ctrl+B exclusively.
       const sessions = [
         createMockSession({
           sessionId: 's1',
@@ -238,7 +238,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       // All sessions should be visible initially
       let output = lastFrame();
@@ -246,7 +246,7 @@ describe('SessionPicker', () => {
       expect(output).toContain('Feature branch');
 
       stdin.write(CTRL_B);
-      await wait();
+      await flush();
 
       output = lastFrame();
       // Only main branch sessions should be visible
@@ -291,10 +291,10 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       stdin.write(CTRL_B);
-      await wait();
+      await flush();
 
       const output = lastFrame();
       // Should only show sessions from main branch (including 0-message sessions)
@@ -305,6 +305,48 @@ describe('SessionPicker', () => {
   });
 
   describe('Keyboard Navigation', () => {
+    it('should type j and k into the explicit search buffer', async () => {
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: 'jk target',
+          messageCount: 1,
+        }),
+        createMockSession({
+          sessionId: 's2',
+          prompt: 'other session',
+          messageCount: 1,
+        }),
+      ];
+      const mockService = createMockSessionService(sessions);
+      const onSelect = vi.fn();
+      const onCancel = vi.fn();
+
+      const { lastFrame, stdin } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={mockService as never}
+            onSelect={onSelect}
+            onCancel={onCancel}
+          />
+        </KeypressProvider>,
+      );
+
+      await flush();
+
+      stdin.write('/');
+      await flush();
+      stdin.write('j');
+      await flush();
+      stdin.write('k');
+      await flush();
+
+      const output = lastFrame();
+      expect(output).toContain('Search: jk');
+      expect(output).toContain('jk target');
+      expect(output).not.toContain('other session');
+    });
+
     it('should navigate with arrow keys', async () => {
       const sessions = [
         createMockSession({
@@ -337,7 +379,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       // First session should be selected initially (indicated by >)
       let output = lastFrame();
@@ -345,7 +387,7 @@ describe('SessionPicker', () => {
 
       // Navigate down
       stdin.write(ARROW_DOWN); // Down arrow
-      await wait();
+      await flush();
 
       output = lastFrame();
       // Selection indicator should move
@@ -374,11 +416,11 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       // Press Enter to select
       stdin.write('\r');
-      await wait();
+      await flush();
 
       expect(onSelect).toHaveBeenCalledWith('selected-session');
     });
@@ -401,12 +443,15 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       // Press Escape to cancel
       act(() => {
         stdin.write(ESC);
       });
+      // Escape cancellation is delivered through ink-testing-library's stdin
+      // event stream, so it needs a real macrotask tick rather than only
+      // flushing React microtasks.
       await realWait(50);
 
       expect(onCancel).toHaveBeenCalled();
@@ -438,7 +483,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       const output = lastFrame();
       expect(output).toContain('Test prompt text');
@@ -462,7 +507,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       const output = lastFrame();
       expect(output).toContain('Resume Session');
@@ -489,7 +534,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       const output = lastFrame();
       expect(output).toContain('Ctrl+B');
@@ -515,7 +560,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       const output = lastFrame();
       // Should contain ellipsis for truncated text
@@ -540,7 +585,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       const output = lastFrame();
       expect(output).toContain('(empty prompt)');
@@ -596,7 +641,7 @@ describe('SessionPicker', () => {
         </KeypressProvider>,
       );
 
-      await wait();
+      await flush();
 
       // First page should be loaded
       expect(mockService.listSessions).toHaveBeenCalled();
@@ -796,11 +841,11 @@ describe('SessionPicker', () => {
         />,
       );
 
-      await wait();
+      await flush();
       stdin.write(' '); // open preview on s1
-      await wait();
+      await flush();
       stdin.write('\r'); // Enter
-      await wait();
+      await flush();
       expect(onSelect).toHaveBeenCalledWith('s1');
     });
 
@@ -830,7 +875,7 @@ describe('SessionPicker', () => {
         />,
       );
 
-      await wait();
+      await flush();
       const beforeFrame = lastFrame() ?? '';
       expect(beforeFrame).toContain('Deletable session');
       // Hint must not appear, otherwise we are training users to press
@@ -838,7 +883,7 @@ describe('SessionPicker', () => {
       expect(beforeFrame).not.toContain('Space to preview');
 
       stdin.write(' '); // Space — no-op when preview is disabled
-      await wait();
+      await flush();
       const afterFrame = lastFrame() ?? '';
       // No preview body, still on the list.
       expect(afterFrame).not.toContain('USER-ASKED-THIS');
@@ -847,7 +892,7 @@ describe('SessionPicker', () => {
       // Enter must still call onSelect on the highlighted row (delete path
       // unchanged), not be eaten by a phantom preview.
       stdin.write('\r');
-      await wait();
+      await flush();
       expect(onSelect).toHaveBeenCalledWith('s1');
       expect(service.loadSession).not.toHaveBeenCalled();
     });
