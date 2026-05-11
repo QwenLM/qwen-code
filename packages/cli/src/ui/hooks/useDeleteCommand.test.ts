@@ -337,11 +337,12 @@ describe('useDeleteCommand', () => {
       expect(item.text).toContain('+2 more');
     });
 
-    it('drops a re-entrant call while a batch is in flight', async () => {
+    it('drops a re-entrant call while a batch is in flight and tells the user', async () => {
       // closeDeleteDialog() runs synchronously before removeSessions
       // resolves, so the user can re-open /delete and trigger a second
       // batch. Without the in-flight guard, two batches race on
-      // potentially overlapping ids — guard must drop the second call.
+      // potentially overlapping ids — guard must drop the second call
+      // and explain why it was ignored.
       let resolveRemove: (value: RemoveSessionsResult) => void = () => {};
       const removeSessions = vi.fn(
         () =>
@@ -366,13 +367,18 @@ describe('useDeleteCommand', () => {
       expect(removeSessions).toHaveBeenCalledTimes(1);
 
       // Second invocation while the first is still in flight — must
-      // be silently dropped (no extra removeSessions call, no extra
-      // toast beyond the first batch's progress).
+      // be dropped with feedback, but no extra removeSessions call.
       await act(async () => {
         result.current.handleDeleteMany(['b']);
         await flushAsync();
       });
       expect(removeSessions).toHaveBeenCalledTimes(1);
+      const [busyItem] = addItem.mock.calls.at(-1) as [
+        { type: string; text: string },
+        number,
+      ];
+      expect(busyItem.type).toBe('info');
+      expect(busyItem.text).toContain('already in progress');
 
       // Resolve the first batch and verify the guard releases so a
       // subsequent /delete works normally.
@@ -386,6 +392,49 @@ describe('useDeleteCommand', () => {
       });
       expect(removeSessions).toHaveBeenCalledTimes(2);
       expect(removeSessions).toHaveBeenLastCalledWith(['b']);
+    });
+
+    it('blocks single-delete while a batch delete is in flight', async () => {
+      let resolveRemove: (value: RemoveSessionsResult) => void = () => {};
+      const removeSessions = vi.fn(
+        () =>
+          new Promise<RemoveSessionsResult>((resolve) => {
+            resolveRemove = resolve;
+          }),
+      );
+      const removeSession = vi.fn().mockResolvedValue(true);
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+        removeSession,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['a']);
+        await flushAsync();
+      });
+
+      await act(async () => {
+        result.current.handleDelete('a');
+        await flushAsync();
+      });
+
+      expect(removeSession).not.toHaveBeenCalled();
+      const [busyItem] = addItem.mock.calls.at(-1) as [
+        { type: string; text: string },
+        number,
+      ];
+      expect(busyItem.type).toBe('info');
+      expect(busyItem.text).toContain('already in progress');
+
+      await act(async () => {
+        resolveRemove({ removed: ['a'], notFound: [], errors: [] });
+        await flushAsync();
+      });
     });
 
     it('releases the in-flight guard even when only the current session was selected', async () => {

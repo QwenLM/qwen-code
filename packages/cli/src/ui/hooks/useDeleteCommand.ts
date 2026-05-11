@@ -44,6 +44,16 @@ export function useDeleteCommand(
       if (!config) {
         return;
       }
+      if (isDeletingManyRef.current) {
+        addItem?.(
+          {
+            type: 'info',
+            text: t('A batch delete is already in progress. Please wait.'),
+          },
+          Date.now(),
+        );
+        return;
+      }
 
       // Close dialog immediately.
       closeDeleteDialog();
@@ -100,6 +110,13 @@ export function useDeleteCommand(
         return;
       }
       if (isDeletingManyRef.current) {
+        addItem?.(
+          {
+            type: 'info',
+            text: t('A batch delete is already in progress. Please wait.'),
+          },
+          Date.now(),
+        );
         return;
       }
       isDeletingManyRef.current = true;
