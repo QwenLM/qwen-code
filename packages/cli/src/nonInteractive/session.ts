@@ -136,6 +136,11 @@ class Session {
 
     try {
       await this.config.initialize(options);
+      // Stream-json sessions feed prompts straight to the model after init.
+      // Under progressive MCP availability `initialize()` returns before
+      // MCP servers settle, so we must explicitly await discovery here —
+      // otherwise the first prompt would see only built-in tools.
+      await this.config.waitForMcpReady();
       this.configInitialized = true;
       this.registerMonitorRegistrations();
       this.registerMonitorNotifications();

@@ -166,6 +166,7 @@ describe('runAcpAgent shutdown cleanup', () => {
     // Reset mockConfig after clearAllMocks
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -343,6 +344,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     };
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(mockHookSystem),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(true),
@@ -684,6 +686,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -744,6 +747,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   function makeInnerConfig() {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
@@ -759,6 +763,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getGeminiClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       setFileSystemService: vi.fn(),
@@ -1206,6 +1211,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -1229,6 +1235,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
   ) {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
@@ -1244,6 +1251,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
       getGeminiClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       setFileSystemService: vi.fn(),

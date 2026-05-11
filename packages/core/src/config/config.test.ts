@@ -468,6 +468,46 @@ describe('Server Config (config.ts)', () => {
         ),
       ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
     });
+
+    it('skips inline MCP discovery by default (progressive availability)', async () => {
+      const config = new Config({ ...baseParams, checkpointing: false });
+      await config.initialize();
+
+      // Default path passes `skipDiscovery: true` to createToolRegistry,
+      // so the synchronous tool-registry construction must NOT invoke
+      // discoverAllTools. MCP is started in the background instead.
+      expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
+    });
+
+    it('honors QWEN_CODE_LEGACY_MCP_BLOCKING=1 by running MCP discovery inline', async () => {
+      const originalLegacy = process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
+      process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
+      try {
+        const config = new Config({ ...baseParams, checkpointing: false });
+        await config.initialize();
+
+        // Legacy escape hatch must call back into the synchronous discover
+        // path the cli relied on prior to PR-A.
+        expect(ToolRegistry.prototype.discoverAllTools).toHaveBeenCalledTimes(
+          1,
+        );
+      } finally {
+        if (originalLegacy === undefined) {
+          delete process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
+        } else {
+          process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = originalLegacy;
+        }
+      }
+    });
+
+    it('waitForMcpReady resolves immediately when no MCP discovery was started', async () => {
+      // No MCP servers + non-bare + default mode: startMcpDiscoveryInBackground
+      // is called but the registry mock returns no manager, so the discovery
+      // promise stays undefined and waitForMcpReady is a no-op.
+      const config = new Config({ ...baseParams, checkpointing: false });
+      await config.initialize();
+      await expect(config.waitForMcpReady()).resolves.toBeUndefined();
+    });
   });
 
   describe('refreshAuth', () => {

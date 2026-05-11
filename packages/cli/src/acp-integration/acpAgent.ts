@@ -84,6 +84,11 @@ export async function runAcpAgent(
   // Initialize config to set up hookSystem (required for SessionStart/SessionEnd hooks)
   // This is needed because gemini.tsx calls runAcpAgent without calling config.initialize()
   await config.initialize();
+  // ACP forwards session messages straight to the model; under progressive
+  // MCP availability `initialize()` returns before MCP servers settle, so
+  // we wait here to keep the first session's tool surface consistent with
+  // the legacy synchronous behavior.
+  await config.waitForMcpReady();
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
   const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -673,6 +678,10 @@ class QwenAgent implements Agent {
       },
     );
     await config.initialize();
+    // Same reasoning as the top-level runAcpAgent path: ACP feeds session
+    // messages to the model immediately, so we cannot return a Config whose
+    // MCP discovery is still in flight.
+    await config.waitForMcpReady();
     return config;
   }
 

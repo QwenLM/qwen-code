@@ -13,9 +13,9 @@ import {
   QWEN_CODE_SIMPLE_ENV_VAR,
   Storage,
   SessionService,
+  setStartupEventSink,
   type Config,
   createDebugLogger,
-  writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
@@ -64,6 +64,8 @@ import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
 import {
   profileCheckpoint,
+  recordStartupEvent,
+  setInteractiveMode,
   finalizeStartupProfile,
 } from './utils/startupProfiler.js';
 import {
@@ -217,28 +219,6 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
-
-  // Write a small runtime.json sidecar next to the chat log so external
-  // tools (terminal multiplexers, IDE integrations, status daemons) can
-  // map the running PID back to its session id and work directory.
-  // Best-effort: a read-only filesystem must not prevent the UI from
-  // starting up.
-  try {
-    const sessionId = config.getSessionId();
-    const runtimeStatusPath = config.storage.getRuntimeStatusPath(sessionId);
-    await writeRuntimeStatus(runtimeStatusPath, {
-      sessionId,
-      workDir: config.getTargetDir(),
-      qwenVersion: version,
-    });
-    // Mark this process as the runtime.json owner so subsequent
-    // session swaps (/clear, /resume, etc.) refresh the sidecar.
-    // Non-interactive entry points never reach here, so they won't
-    // trample a sibling shell's sidecar on the same session id.
-    config.markRuntimeStatusEnabled();
-  } catch {
-    // ignored: best-effort, never block UI startup.
-  }
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
@@ -350,6 +330,10 @@ export async function startInteractiveUI(
       isScreenReaderEnabled: config.getScreenReader(),
     },
   );
+  // Records the moment Ink has produced its first frame. AppContainer's mount
+  // effect runs after this — it carries the `config_initialize_*` and
+  // `input_enabled` checkpoints that complete the first-screen picture.
+  profileCheckpoint('first_paint');
 
   // Check for updates only if enableAutoUpdate is not explicitly disabled.
   // Using !== false ensures updates are enabled by default when undefined.
@@ -379,6 +363,11 @@ export async function startInteractiveUI(
 
 export async function main() {
   profileCheckpoint('main_entry');
+  // Bridge core-package startup events (Config.initialize, MCP discovery,
+  // GeminiClient.setTools) into the cli's startup profiler. No-op when
+  // QWEN_CODE_PROFILE_STARTUP is unset because `recordStartupEvent` returns
+  // early in that case.
+  setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
   setupUnhandledRejectionHandler();
 
   if (process.argv.includes('--bare')) {
@@ -708,7 +697,6 @@ export async function main() {
 
     // Render UI, passing necessary config values. Check that there is no command line question.
     profileCheckpoint('before_render');
-    finalizeStartupProfile(config.getSessionId());
 
     if (config.isInteractive()) {
       // --json-schema is a headless-only contract: the synthetic
@@ -729,6 +717,11 @@ export async function main() {
         await runExitCleanup();
         process.exit(1);
       }
+      // For the interactive path, the profile is finalized by AppContainer
+      // after `config.initialize()` and `input_enabled` are recorded — that's
+      // the only way `first_paint`, `config_initialize_*`, `input_enabled`,
+      // and the MCP events are captured. See AppContainer's mount effect.
+      setInteractiveMode(true);
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
       // Drain the auto-theme probe before render so the OSC 11 response is
@@ -746,6 +739,10 @@ export async function main() {
       return;
     }
 
+    // Non-interactive: defer finalize until after `config.initialize()` runs
+    // so MCP discovery events (mcp_first_tool_registered, mcp_all_servers_settled,
+    // gemini_tools_updated) are captured in the profile.
+
     // Print debug mode notice to stderr for non-interactive mode
     if (config.getDebugMode()) {
       writeStderrLine('Debug mode enabled');
@@ -761,8 +758,23 @@ export async function main() {
 
     // For non-stream-json mode, initialize config here
     if (inputFormat !== InputFormat.STREAM_JSON) {
+      profileCheckpoint('config_initialize_start');
       await config.initialize();
+      profileCheckpoint('config_initialize_end');
     }
+    // Non-interactive paths feed a prompt to the model immediately after
+    // init. Under PR-A's progressive MCP availability, `config.initialize()`
+    // returns BEFORE MCP servers settle, so without this wait the first
+    // sendMessage would see only built-in tools — a silent regression
+    // versus the legacy synchronous behavior. Interactive paths skip this
+    // (AppContainer's batch-flush subscriber updates the tool list as MCP
+    // servers come online; the UI is already visible).
+    await config.waitForMcpReady();
+    // Finalize the non-interactive startup profile here so MCP events emitted
+    // during initialize() / waitForMcpReady() are captured. Subsequent stdin
+    // reads / auth checks / prompt execution are not part of the
+    // "first-screen" budget.
+    finalizeStartupProfile(config.getSessionId());
 
     // Only read stdin if NOT in stream-json mode
     // In stream-json mode, stdin is used for protocol messages (control requests, etc.)
@@ -788,7 +800,6 @@ export async function main() {
       await runNonInteractiveStreamJson(
         nonInteractiveConfig,
         trimmedInput.length > 0 ? trimmedInput : '',
-        settings,
       );
       await runExitCleanup();
       // `runNonInteractiveStreamJson` doesn't return an explicit exit

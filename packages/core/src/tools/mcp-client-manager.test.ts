@@ -462,4 +462,106 @@ describe('McpClientManager', () => {
 
     expect(vi.mocked(McpClient)).not.toHaveBeenCalled();
   });
+
+  it('discoverAllMcpToolsIncremental enforces a per-server discoveryTimeoutMs', async () => {
+    // A stdio server whose `connect` hangs forever. The 50ms per-server
+    // timeout should fire and surface as a swallowed error, leaving the
+    // manager in COMPLETED state instead of stuck.
+    let neverResolve!: () => void;
+    const hung = new Promise<void>((resolve) => {
+      neverResolve = resolve;
+    });
+    const mockedMcpClient = {
+      connect: vi.fn().mockReturnValue(hung),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({
+        broken: { command: 'node', args: [], discoveryTimeoutMs: 50 },
+      }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+
+    const t0 = Date.now();
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    const elapsed = Date.now() - t0;
+
+    expect(elapsed).toBeGreaterThanOrEqual(40);
+    // Generous upper bound — the 50ms timeout should fire well within 2s
+    // even on a heavily-loaded CI runner.
+    expect(elapsed).toBeLessThan(2000);
+    // discoveryAllMcpToolsIncremental must always settle the state, even
+    // when every server times out. Otherwise the cli's deferred-finalize
+    // path would hang forever.
+    expect(manager.getDiscoveryState()).toBe(
+      (await import('./mcp-client.js')).MCPDiscoveryState.COMPLETED,
+    );
+
+    // Cleanup the stuck connect so test doesn't leak a pending promise.
+    neverResolve();
+  });
+
+  it('discoverAllMcpToolsIncremental emits the trailing mcp-client-update after COMPLETED', async () => {
+    // Without the trailing emit, the cli's deferred-finalize subscriber
+    // (which polls discoveryState on each `mcp-client-update`) would never
+    // observe the terminal state. Regression-protect the emit ordering.
+    const mockedMcpClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    const mcpClientModule = await import('./mcp-client.js');
+    const { MCPDiscoveryState } = mcpClientModule;
+    const observedStatesAtEmit: Array<
+      (typeof mcpClientModule.MCPDiscoveryState)[keyof typeof mcpClientModule.MCPDiscoveryState]
+    > = [];
+    const events = {
+      emit: vi.fn((eventName: string) => {
+        if (eventName === 'mcp-client-update') {
+          observedStatesAtEmit.push(manager.getDiscoveryState());
+        }
+        return true;
+      }),
+    } as unknown as import('node:events').EventEmitter;
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: { command: 'node', args: [] } }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      events,
+    );
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
+    // Must include at least one COMPLETED-state emit at the tail.
+    expect(observedStatesAtEmit.at(-1)).toBe(MCPDiscoveryState.COMPLETED);
+    // And must have started with an IN_PROGRESS emit (so progress UI shows
+    // the transition even when there are no servers to update).
+    expect(observedStatesAtEmit[0]).toBe(MCPDiscoveryState.IN_PROGRESS);
+  });
 });
