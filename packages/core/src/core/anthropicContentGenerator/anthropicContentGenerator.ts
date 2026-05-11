@@ -89,16 +89,17 @@ function isDeepSeekAnthropicProvider(
  * literal when nothing is configured so callers can do hostname matching
  * without a special case for the empty path.
  *
- * The env read mirrors the SDK's `readEnv` helper (whitespace-trim,
- * treat empty as missing). Without this, a user who configures the proxy
- * purely through `ANTHROPIC_BASE_URL` while leaving qwen-code's `baseUrl`
- * unset would route the request to the proxy but ship the native identity
- * bundle, defeating the proxy gate.
+ * Both inputs get the SDK's `readEnv`-style normalization
+ * (whitespace-trim + empty-as-missing). Trimming the config side too
+ * prevents a copy-pasted baseURL with stray whitespace from tripping
+ * `new URL(...)` in `isAnthropicNativeBaseUrl`, which would otherwise
+ * fall through the catch branch to proxy identity and ship Bearer auth
+ * against the real Anthropic API.
  */
 function resolveEffectiveBaseUrl(
   contentGeneratorConfig: ContentGeneratorConfig,
 ): string {
-  const fromConfig = contentGeneratorConfig.baseUrl;
+  const fromConfig = contentGeneratorConfig.baseUrl?.trim();
   if (fromConfig) return fromConfig;
   const fromEnv = process.env['ANTHROPIC_BASE_URL']?.trim();
   if (fromEnv) return fromEnv;
@@ -288,11 +289,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private buildHeaders(useProxyIdentity: boolean): Record<string, string> {
     // Beta headers are computed per-request in buildPerRequestHeaders so they
     // stay in sync with what the request body actually carries — see #3788
-    // review feedback. Constructor headers carry only User-Agent and any
-    // user-supplied custom headers EXCEPT anthropic-beta (any casing): the
-    // per-request path owns that header, and copying it into defaultHeaders
-    // would cause two physical headers on the wire (one mixed-case, one
-    // lowercase) when the per-request override fires.
+    // review feedback. Constructor headers carry User-Agent, the
+    // proxy-only `x-app: cli` (when useProxyIdentity is true), and any
+    // user-supplied custom headers EXCEPT anthropic-beta (any casing):
+    // the per-request path owns that header, and copying it into
+    // defaultHeaders would cause two physical headers on the wire (one
+    // mixed-case, one lowercase) when the per-request override fires.
     const version = this.cliConfig.getCliVersion() || 'unknown';
     // For non-Anthropic-native baseURLs (IdeaLab-style proxies), present as
     // `claude-cli` + `x-app: cli` to satisfy proxy Team rules that restrict

@@ -264,6 +264,34 @@ describe('AnthropicContentGenerator', () => {
     expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
   });
 
+  it('trims whitespace on config.baseUrl before classification', async () => {
+    // A copy-pasted baseURL with leading/trailing whitespace would
+    // otherwise trip `new URL(...)` in `isAnthropicNativeBaseUrl` and
+    // fall through to proxy identity — meaning real api.anthropic.com
+    // gets Bearer auth + claude-cli UA and 401s. Trim the config side
+    // before classification, mirroring how the env-side already
+    // handles whitespace.
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: '  https://api.anthropic.com  ',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
+    expect(headers['x-app']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
+    expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
+  });
+
   it('does not match spoofed anthropic.com.evil.com hostnames', async () => {
     // Mirror of the DeepSeek hostname-spoof test: a suffix like
     // `anthropic.com.evil.com` must NOT be classified as Anthropic-native —
