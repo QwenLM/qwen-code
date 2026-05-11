@@ -1582,6 +1582,88 @@ describe('useGeminiStream', () => {
       expect(setShellInputFocusedSpy).toHaveBeenCalledWith(false);
     });
 
+    it('flushes buffered stream events before snapshotting pendingItem so cancelling mid-throttle does not lose content', async () => {
+      // Regression: snapshotting pendingHistoryItemRef.current BEFORE the
+      // flush left content events stuck in bufferedEvents invisible to
+      // the snapshot — info.pendingItem would arrive null at AppContainer
+      // even though the stream had produced meaningful text. AppContainer's
+      // auto-restore would then truncate the just-committed content.
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const mockStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'partial response',
+        };
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const cancelSubmitSpy = vi.fn();
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          mockConfig.getGeminiClient(),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          cancelSubmitSpy,
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      // Let the async generator yield the content event into bufferedEvents
+      // (microtasks drain) — but DO NOT advance timers, so the throttle
+      // never fires and pendingHistoryItemRef stays null.
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Sanity: the throttle has not fired yet.
+      expect(result.current.pendingHistoryItems).toEqual([]);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      // The cancel path flushed FIRST, then snapshotted — so the content
+      // that was buffered must be visible in info.pendingItem.
+      expect(cancelSubmitSpy).toHaveBeenCalledTimes(1);
+      const [info] = cancelSubmitSpy.mock.calls[0];
+      expect(info?.pendingItem).toEqual(
+        expect.objectContaining({
+          type: 'gemini',
+          text: 'partial response',
+        }),
+      );
+
+      await act(async () => {
+        releaseStream();
+      });
+
+      vi.useRealTimers();
+    });
+
     it('still resets streamingState to Idle when onCancelSubmit throws', async () => {
       // Regression: a throw in AppContainer's cancel handler must not
       // strand the stream in Responding (which would lock the UI — Esc

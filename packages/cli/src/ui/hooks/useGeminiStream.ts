@@ -571,15 +571,23 @@ export const useGeminiStream = (
     if (turnCancelledRef.current) {
       return;
     }
-    // Snapshot the pending item BEFORE any flushes / addItem / setPendingHistoryItem(null)
-    // mutate it. This is what `onCancelSubmit` consumers (auto-restore in
-    // AppContainer) need to decide whether the model produced meaningful
-    // in-flight content — reading the React-state copy at the consumer
-    // would race with stream chunks that haven't re-rendered yet.
-    const pendingItemAtCancel = pendingHistoryItemRef.current;
+    // Flush throttled stream chunks FIRST so anything sitting in the
+    // per-turn bufferedEvents lands on `pendingHistoryItemRef.current`
+    // before we snapshot. Snapshotting before flush would miss content
+    // events that arrived inside the throttle window
+    // (STREAM_UPDATE_THROTTLE_MS), making AppContainer's auto-restore
+    // wrongly conclude the model produced nothing — and the subsequent
+    // addItem(pendingHistoryItemRef.current) below would commit content
+    // that auto-restore then truncates away.
     for (const flushBufferedStreamEvents of flushBufferedStreamEventsRef.current) {
       flushBufferedStreamEvents();
     }
+    // Snapshot AFTER flush, BEFORE any addItem / setPendingHistoryItem(null)
+    // mutate the ref. This is what `onCancelSubmit` consumers (auto-restore
+    // in AppContainer) need to decide whether the model produced meaningful
+    // in-flight content — reading the React-state copy at the consumer
+    // would race with stream chunks that haven't re-rendered yet.
+    const pendingItemAtCancel = pendingHistoryItemRef.current;
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
