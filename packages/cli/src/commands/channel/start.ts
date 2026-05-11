@@ -226,7 +226,13 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   registerToolCallDispatch(bridge, router, channels);
 
   // Restore sessions from previous run
-  await restoreAndLogSessions(router);
+  try {
+    await restoreAndLogSessions(router);
+  } catch (err) {
+    writeStderrLine(
+      `[Channel] Failed to restore sessions: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   try {
     await channel.connect();
@@ -375,7 +381,13 @@ async function startAll(proxy?: string): Promise<void> {
   registerToolCallDispatch(bridge, router, channels);
 
   // Restore sessions from previous run
-  await restoreAndLogSessions(router);
+  try {
+    await restoreAndLogSessions(router);
+  } catch (err) {
+    writeStderrLine(
+      `[Channel] Failed to restore sessions: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   // Connect all channels
   let connectedCount = 0;

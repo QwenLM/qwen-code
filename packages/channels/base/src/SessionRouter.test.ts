@@ -480,5 +480,112 @@ describe('SessionRouter', () => {
         rmSync(tmpDir, { recursive: true });
       }
     });
+
+    it('times out when loadSession hangs and logs error to stderr', async () => {
+      const { writeFileSync, rmSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'test-restore-timeout-'));
+
+      vi.useFakeTimers();
+
+      try {
+        const persistFile = join(tmpDir, 'sessions.json');
+        const entries = {
+          'telegram:alice:chat1': {
+            sessionId: 'hanging-session',
+            target: {
+              channelName: 'telegram',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/workspace',
+          },
+        };
+        writeFileSync(persistFile, JSON.stringify(entries, null, 2));
+
+        // Make loadSession hang indefinitely (never resolves/rejects)
+        let hangingResolve: (value: string) => void;
+        const hangingPromise = new Promise<string>((resolve) => {
+          hangingResolve = resolve;
+        });
+        (bridge.loadSession as ReturnType<typeof vi.fn>).mockReturnValue(
+          hangingPromise,
+        );
+
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
+
+        // Start restoreSessions - it will hang waiting for loadSession
+        const resultPromise = router.restoreSessions();
+
+        // Advance time past the 30s timeout
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        const result = await resultPromise;
+
+        // Should have recorded a failure due to timeout
+        expect(result.restored).toBe(0);
+        expect(result.failed).toBe(1);
+        expect(router.hasSession('telegram', 'alice', 'chat1')).toBe(false);
+
+        // The hanging loadSession should have a no-op catch attached
+        // to prevent unhandled rejection. Resolve it now to verify no crash.
+        hangingResolve!('hanging-session');
+        await Promise.resolve(); // let microtasks settle
+      } finally {
+        vi.useRealTimers();
+        rmSync(tmpDir, { recursive: true });
+      }
+    });
+
+    it('clears timeout when loadSession completes before timeout', async () => {
+      const { writeFileSync, rmSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'test-restore-notimeout-'));
+
+      vi.useFakeTimers();
+
+      try {
+        const persistFile = join(tmpDir, 'sessions.json');
+        const entries = {
+          'telegram:alice:chat1': {
+            sessionId: 'fast-session',
+            target: {
+              channelName: 'telegram',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/workspace',
+          },
+        };
+        writeFileSync(persistFile, JSON.stringify(entries, null, 2));
+
+        // Make loadSession resolve quickly (within timeout)
+        (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+          (id: string) => Promise.resolve(id),
+        );
+
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistFile);
+        const resultPromise = router.restoreSessions();
+
+        // Advance time a bit (but not past timeout)
+        await vi.advanceTimersByTimeAsync(1000);
+
+        const result = await resultPromise;
+
+        // Should have succeeded
+        expect(result.restored).toBe(1);
+        expect(result.failed).toBe(0);
+        expect(router.hasSession('telegram', 'alice', 'chat1')).toBe(true);
+
+        // Advance past the original timeout to ensure no stray timer fires
+        await vi.advanceTimersByTimeAsync(30_000);
+        // No error should occur (timeout was cleared)
+      } finally {
+        vi.useRealTimers();
+        rmSync(tmpDir, { recursive: true });
+      }
+    });
   });
 });

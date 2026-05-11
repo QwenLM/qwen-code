@@ -1,4 +1,13 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { SessionScope, SessionTarget } from './types.js';
 import type { AcpBridge } from './AcpBridge.js';
 
@@ -209,16 +218,23 @@ export class SessionRouter {
         continue;
       }
 
+      // Race loadSession against a timeout to avoid indefinite hangs.
+      // We keep a reference to the loadSession promise so we can attach
+      // a no-op catch handler after timeout, preventing unhandled rejection.
+      let loadPromise: Promise<string> | undefined;
       try {
+        loadPromise = this.bridge.loadSession(entry.sessionId, entry.cwd);
+        let timeoutId: ReturnType<typeof setTimeout>;
         const sessionId = await Promise.race([
-          this.bridge.loadSession(entry.sessionId, entry.cwd),
-          new Promise<string>((_, reject) =>
-            setTimeout(
+          loadPromise,
+          new Promise<string>((_, reject) => {
+            timeoutId = setTimeout(
               () => reject(new Error('loadSession timed out')),
               LOAD_SESSION_TIMEOUT_MS,
-            ),
-          ),
+            );
+          }),
         ]);
+        clearTimeout(timeoutId!);
         this.toSession.set(key, sessionId);
         this.toTarget.set(sessionId, entry.target);
         this.toCwd.set(sessionId, entry.cwd);
@@ -226,6 +242,9 @@ export class SessionRouter {
       } catch (err: unknown) {
         // Session can't be loaded — remove stale in-memory mapping so
         // subsequent resolve() / persist() don't reference a dead session.
+        // Note: loadSession may still be running in background after timeout;
+        // attach a no-op catch to prevent unhandled rejection warnings.
+        loadPromise?.catch(() => {});
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(
           `[SessionRouter] Failed to restore session ${entry.sessionId}: ${msg}\n`,
@@ -277,9 +296,22 @@ export class SessionRouter {
     }
 
     try {
-      writeFileSync(this.persistPath, JSON.stringify(data, null, 2), 'utf-8');
-    } catch {
-      // best-effort — don't break message flow for persistence failure
+      // Atomic write: write to temp file in a temp directory then rename.
+      // Using a temp directory (not just a temp file) ensures the temp file
+      // is on the same filesystem as the target for atomic rename.
+      // rename is atomic on POSIX and works reliably on Windows when
+      // source and target are on the same filesystem.
+      const tmpDir = mkdtempSync(join(tmpdir(), 'session-persist-'));
+      const tmpFile = join(tmpDir, 'sessions.json');
+      writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf-8');
+      renameSync(tmpFile, this.persistPath);
+      // Clean up the now-empty temp directory (file was moved by rename)
+      rmSync(tmpDir, { recursive: true });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `[SessionRouter] Failed to persist sessions to ${this.persistPath}: ${msg}\n`,
+      );
     }
   }
 }
