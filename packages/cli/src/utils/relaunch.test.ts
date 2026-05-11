@@ -111,7 +111,7 @@ describe('relaunchAppInChildProcess', () => {
 
     process.execArgv = [...originalExecArgv];
     process.argv = [...originalArgv];
-    process.execPath = '/usr/bin/node';
+    process.execPath = originalExecPath;
 
     processExitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('PROCESS_EXIT_CALLED');
