@@ -62,7 +62,25 @@ export type TrackedWaitingToolCall = WaitingToolCall & {
  * a `BackgroundShellEntry` and the child keeps running. The optional
  * `shellId` field on the abort reason is generated downstream by
  * `handlePromotedForeground` — callers leave it unset.
+ *
+ * The compile-time assertions below pin the inheritance: if a future
+ * core change renames or removes `pid` / `promoteAbortController` from
+ * `ExecutingToolCall`, these assertions break the React-side build
+ * (loud + local) instead of silently breaking the Ctrl+B handler at
+ * runtime. Cheaper than re-declaring the fields here (which the
+ * earlier review flagged as redundant noise on top of the
+ * intersection).
  */
+type _AssertExecutingHasPid = 'pid' extends keyof ExecutingToolCall
+  ? true
+  : never;
+type _AssertExecutingHasPromoteAc =
+  'promoteAbortController' extends keyof ExecutingToolCall ? true : never;
+// Construct so the type-only assertion above isn't dead code.
+const _ASSERT_INHERITED_FIELDS_PRESENT: _AssertExecutingHasPid &
+  _AssertExecutingHasPromoteAc = true;
+void _ASSERT_INHERITED_FIELDS_PRESENT;
+
 export type TrackedExecutingToolCall = ExecutingToolCall & {
   responseSubmittedToGemini?: boolean;
 };
