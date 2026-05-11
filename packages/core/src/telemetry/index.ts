@@ -17,6 +17,7 @@ export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
 export {
   initializeTelemetry,
   shutdownTelemetry,
+  refreshSessionContext,
   isTelemetrySdkInitialized,
 } from './sdk.js';
 export {

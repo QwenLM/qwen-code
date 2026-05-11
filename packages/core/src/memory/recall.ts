@@ -131,6 +131,8 @@ export interface ResolveRelevantAutoMemoryPromptOptions {
   excludedFilePaths?: Iterable<string>;
   limit?: number;
   recentTools?: readonly string[];
+  /** When provided and aborted, suppresses logMemoryRecall telemetry for discarded results. */
+  abortSignal?: AbortSignal;
 }
 
 export interface RelevantAutoMemoryPromptResult {
@@ -168,7 +170,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   const limit = options.limit ?? MAX_RELEVANT_DOCS;
 
   if (query.trim().length === 0 || docs.length === 0 || limit <= 0) {
-    if (options.config) {
+    if (options.config && !options.abortSignal?.aborted) {
       logMemoryRecall(
         options.config,
         new MemoryRecallEvent({
@@ -195,36 +197,57 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         docs,
         limit,
         options.recentTools ?? [],
+        options.abortSignal,
       );
       const strategy: RelevantAutoMemoryPromptResult['strategy'] =
         selectedDocs.length > 0 ? 'model' : 'none';
-      logMemoryRecall(
-        options.config,
-        new MemoryRecallEvent({
-          query_length: query.length,
-          docs_scanned: docs.length,
-          docs_selected: selectedDocs.length,
-          strategy,
-          duration_ms: Date.now() - t0,
-        }),
-      );
+      if (!options.abortSignal?.aborted) {
+        logMemoryRecall(
+          options.config,
+          new MemoryRecallEvent({
+            query_length: query.length,
+            docs_scanned: docs.length,
+            docs_selected: selectedDocs.length,
+            strategy,
+            duration_ms: Date.now() - t0,
+          }),
+        );
+      }
       return {
         prompt: buildRelevantAutoMemoryPrompt(selectedDocs),
         selectedDocs,
         strategy,
       };
     } catch (error) {
-      debugLogger.warn(
-        'Model-driven auto-memory recall failed; falling back to heuristic selection.',
-        error,
-      );
+      // Distinguish deadline-triggered cancellation from real model errors
+      // so oncall debugging is not misled by the fallback log.
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        debugLogger.debug(
+          'Model-driven auto-memory recall cancelled by deadline; heuristic result discarded.',
+        );
+      } else {
+        debugLogger.warn(
+          'Model-driven auto-memory recall failed; falling back to heuristic selection.',
+          error,
+        );
+      }
     }
+  }
+
+  // If the caller's abort signal is already set (e.g. deadline fired), skip the
+  // heuristic fallback — the result would be discarded anyway.
+  if (options.abortSignal?.aborted) {
+    return {
+      prompt: '',
+      selectedDocs: [],
+      strategy: 'none',
+    };
   }
 
   const selectedDocs = selectRelevantAutoMemoryDocuments(query, docs, limit);
   const strategy: RelevantAutoMemoryPromptResult['strategy'] =
     selectedDocs.length > 0 ? 'heuristic' : 'none';
-  if (options.config) {
+  if (options.config && !options.abortSignal?.aborted) {
     logMemoryRecall(
       options.config,
       new MemoryRecallEvent({

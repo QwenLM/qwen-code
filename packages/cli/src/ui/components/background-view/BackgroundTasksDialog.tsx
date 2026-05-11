@@ -33,8 +33,10 @@ import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
+  type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
+import { t } from '../../../i18n/index.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -56,13 +58,62 @@ function formatActivityLabel(name: string, description: string | undefined) {
   return singleLineDesc ? `${display}(${singleLineDesc})` : display;
 }
 
-const STATUS_VERBS: Record<EntryStatus, string> = {
-  running: 'Running',
-  paused: 'Paused',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Stopped',
-};
+function statusVerb(status: EntryStatus): string {
+  switch (status) {
+    case 'running':
+      return t('Running');
+    case 'paused':
+      return t('Paused');
+    case 'completed':
+      return t('Completed');
+    case 'failed':
+      return t('Failed');
+    case 'cancelled':
+      return t('Stopped');
+    default: {
+      const _exhaustive: never = status;
+      throw new Error(`statusVerb: unknown status: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+function formatSessionCount(count: number): string {
+  return count === 1
+    ? t('{{count}} session', { count: String(count) })
+    : t('{{count}} sessions', { count: String(count) });
+}
+
+function formatTopicCount(count: number): string {
+  return count === 1
+    ? t('{{count}} topic', { count: String(count) })
+    : t('{{count}} topics', { count: String(count) });
+}
+
+function formatToolUseCount(count: number): string {
+  return count === 1
+    ? t('{{count}} tool call', { count: String(count) })
+    : t('{{count}} tool calls', { count: String(count) });
+}
+
+function formatEventCount(count: number): string {
+  return count === 1
+    ? t('{{count}} event', { count: String(count) })
+    : t('{{count}} events', { count: String(count) });
+}
+
+function formatDreamRowLabel(entry: DreamDialogEntry): string {
+  if (entry.sessionCount === undefined) {
+    return t('[dream] memory consolidation');
+  }
+
+  return entry.sessionCount === 1
+    ? t('[dream] memory consolidation (reviewing {{count}} session)', {
+        count: String(entry.sessionCount),
+      })
+    : t('[dream] memory consolidation (reviewing {{count}} sessions)', {
+        count: String(entry.sessionCount),
+      });
+}
 
 interface StatusPresentation {
   icon: string;
@@ -103,10 +154,23 @@ function terminalStatusPresentation(
   }
 }
 
+// Foreground agent rows get this prefix so users can tell at a glance
+// that cancelling one will unblock — and end — the parent's current
+// turn, a much heavier consequence than cancelling a truly async
+// background entry. `[blocking]` reads more directly than the earlier
+// `[in turn]` (which was widely misread as "queued / sequential" —
+// the opposite meaning).
+const FOREGROUND_ROW_PREFIX = '[blocking]';
+const SHELL_ROW_PREFIX = '[shell]';
+
 function rowLabel(entry: DialogEntry): string {
   switch (entry.kind) {
-    case 'agent':
-      return buildBackgroundEntryLabel(entry, { includePrefix: false });
+    case 'agent': {
+      const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
+      return entry.flavor === 'foreground'
+        ? `${FOREGROUND_ROW_PREFIX} ${label}`
+        : label;
+    }
     case 'shell':
       // Shell / monitor prefixes mirror the dialog's "section" visual hint
       // without needing per-kind section headers (which would complicate
@@ -115,9 +179,11 @@ function rowLabel(entry: DialogEntry): string {
       // is acceptable for the dialog's information-density profile —
       // adding `wrap="truncate-end"` here would hide context the user
       // explicitly opened the dialog to see.
-      return `[shell] ${entry.command}`;
+      return `${SHELL_ROW_PREFIX} ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
+    case 'dream':
+      return formatDreamRowLabel(entry);
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -174,11 +240,13 @@ const ListBody: React.FC<{
     return (
       <Box flexDirection="column">
         <Box paddingX={1}>
-          <Text bold>Background tasks</Text>
+          <Text bold>{t('Background tasks')}</Text>
           <Text color={theme.text.secondary}> (0)</Text>
         </Box>
         <Box paddingX={1}>
-          <Text color={theme.text.secondary}>No tasks currently running</Text>
+          <Text color={theme.text.secondary}>
+            {t('No tasks currently running')}
+          </Text>
         </Box>
       </Box>
     );
@@ -209,14 +277,14 @@ const ListBody: React.FC<{
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
-        <Text bold>Background tasks</Text>
+        <Text bold>{t('Background tasks')}</Text>
         <Text color={theme.text.secondary}> ({entries.length})</Text>
       </Box>
       <Box flexDirection="column">
         {hiddenAbove > 0 && (
           <Box paddingX={1}>
             <Text color={theme.text.secondary}>
-              {`  ^ ${hiddenAbove} more above`}
+              {`  ^ ${t('{{count}} more above', { count: String(hiddenAbove) })}`}
             </Text>
           </Box>
         )}
@@ -241,7 +309,7 @@ const ListBody: React.FC<{
         {hiddenBelow > 0 && (
           <Box paddingX={1}>
             <Text color={theme.text.secondary}>
-              {`  v ${hiddenBelow} more below`}
+              {`  v ${t('{{count}} more below', { count: String(hiddenBelow) })}`}
             </Text>
           </Box>
         )}
@@ -282,6 +350,14 @@ const DetailBody: React.FC<{
           maxWidth={maxWidth}
         />
       );
+    case 'dream':
+      return (
+        <DreamDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -289,6 +365,191 @@ const DetailBody: React.FC<{
       );
     }
   }
+};
+
+// ─── Dream detail body ─────────────────────────────────────
+//
+// Shows what the agent is reviewing (session count), what it has
+// touched (topic files, only populated on completion), and the latest
+// progress text from MemoryManager. Cancellation is wired through the
+// shared `x stop` keystroke (handled by `cancelSelected` in the
+// context, which routes dream entries to `MemoryManager.cancelTask`).
+// In-flight progress is still static — the dream's fork agent reports
+// only at schedule + completion via MemoryManager.update; live
+// per-turn phase reporting requires extending runForkedAgent's
+// AgentPathParams with an onAssistantMessage callback (separate PR).
+//
+// Layout follows the Shell/Monitor convention — flat children of
+// MaxSizedBox separated by empty `<Box />` spacers (nesting a
+// `flexDirection="column"` container inside MaxSizedBox eats the
+// children silently).
+const DreamDetailBody: React.FC<{
+  entry: DreamDialogEntry;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = t('Dream');
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.sessionCount !== undefined) {
+    dimSubtitleParts.push(formatSessionCount(entry.sessionCount));
+  }
+  if (entry.touchedTopics && entry.touchedTopics.length > 0) {
+    dimSubtitleParts.push(formatTopicCount(entry.touchedTopics.length));
+  }
+
+  // Topic file lists can grow for an active session sweep; cap the
+  // displayed slice and add a "+N more" tail rather than letting the
+  // dialog body push the hint footer off-screen.
+  const MAX_TOPICS = 8;
+  const topics = entry.touchedTopics ?? [];
+  const visibleTopics = topics.slice(0, MAX_TOPICS);
+  const hiddenTopicCount = Math.max(0, topics.length - visibleTopics.length);
+  const hasError = Boolean(entry.error);
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      {entry.sessionCount !== undefined && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Sessions reviewing')}
+            </Text>
+          </Box>
+          <Box>
+            <Text>{String(entry.sessionCount)}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {entry.progressText && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Progress')}
+            </Text>
+          </Box>
+          <Box>
+            <Text wrap="wrap">{entry.progressText}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {topics.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Topics touched ({{count}})', {
+                count: String(topics.length),
+              })}
+            </Text>
+          </Box>
+          {visibleTopics.map((topic) => (
+            <Box key={topic}>
+              <Text>{`  · ${topic}`}</Text>
+            </Box>
+          ))}
+          {hiddenTopicCount > 0 && (
+            <Box>
+              <Text
+                color={theme.text.secondary}
+              >{`  · +${t('{{count}} more', { count: String(hiddenTopicCount) })}`}</Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              {t('Error')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {/*
+        Lock-release / metadata-write warnings on a successfully-
+        completed dream. Rendered as warnings (not errors) so the
+        terminal status stays Completed; explains why subsequent
+        dreams may be silently skipped as 'locked' (lock release
+        failure) or why the scheduler gate isn't picking up the
+        latest run (metadata write failure).
+      */}
+      {entry.lockReleaseError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.warning}>
+              {t('Lock release warning')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {entry.lockReleaseError}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="wrap">
+              {t(
+                "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.",
+              )}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+      {entry.metadataWriteError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.warning}>
+              {t('Metadata write warning')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {entry.metadataWriteError}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="wrap">
+              {t(
+                "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.",
+              )}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
 };
 
 const AgentDetailBody: React.FC<{
@@ -302,13 +563,13 @@ const AgentDetailBody: React.FC<{
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.stats?.totalTokens) {
     dimSubtitleParts.push(
-      `${formatTokenCount(entry.stats.totalTokens)} tokens`,
+      t('{{count}} tokens', {
+        count: formatTokenCount(entry.stats.totalTokens),
+      }),
     );
   }
   if (entry.stats?.toolUses !== undefined) {
-    dimSubtitleParts.push(
-      `${entry.stats.toolUses} tool${entry.stats.toolUses === 1 ? '' : 's'}`,
-    );
+    dimSubtitleParts.push(formatToolUseCount(entry.stats.toolUses));
   }
 
   // Registry stores activities newest-last; keep that order so the live
@@ -344,7 +605,7 @@ const AgentDetailBody: React.FC<{
       <Box>
         {terminal && (
           <Text color={terminal.color}>
-            {`${terminal.icon} ${STATUS_VERBS[entry.status]} \u00B7 `}
+            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
@@ -357,7 +618,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold dimColor>
-              Progress
+              {t('Progress')}
             </Text>
           </Box>
           {activities.map((a, i) => {
@@ -390,7 +651,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold dimColor>
-              Prompt
+              {t('Prompt')}
             </Text>
           </Box>
           {visiblePromptLines.map((line, i) => (
@@ -406,7 +667,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Resume blocked
+              {t('Resume blocked')}
             </Text>
           </Box>
           <Box>
@@ -422,7 +683,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Error
+              {t('Error')}
             </Text>
           </Box>
           <Box>
@@ -441,15 +702,17 @@ const ShellDetailBody: React.FC<{
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
-  const title = `Shell \u203A ${entry.command}`;
+  const title = `${t('Shell')} \u203A ${entry.command}`;
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
-    dimSubtitleParts.push(`pid ${entry.pid}`);
+    dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
   }
   if (entry.status === 'completed' && entry.exitCode !== undefined) {
-    dimSubtitleParts.push(`exit ${entry.exitCode}`);
+    dimSubtitleParts.push(
+      t('exit {{exitCode}}', { exitCode: String(entry.exitCode) }),
+    );
   }
 
   const hasError = entry.status === 'failed' && Boolean(entry.error);
@@ -468,7 +731,7 @@ const ShellDetailBody: React.FC<{
       <Box>
         {terminal && (
           <Text color={terminal.color}>
-            {`${terminal.icon} ${STATUS_VERBS[entry.status]} \u00B7 `}
+            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
@@ -479,7 +742,7 @@ const ShellDetailBody: React.FC<{
       <Box />
       <Box>
         <Text bold dimColor>
-          Working dir
+          {t('Working dir')}
         </Text>
       </Box>
       <Box>
@@ -489,7 +752,7 @@ const ShellDetailBody: React.FC<{
       <Box />
       <Box>
         <Text bold dimColor>
-          Output file
+          {t('Output file')}
         </Text>
       </Box>
       <Box>
@@ -501,7 +764,7 @@ const ShellDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Error
+              {t('Error')}
             </Text>
           </Box>
           <Box>
@@ -520,21 +783,23 @@ const MonitorDetailBody: React.FC<{
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
-  const title = `Monitor › ${entry.description}`;
+  const title = `${t('Monitor')} › ${entry.description}`;
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
-    dimSubtitleParts.push(`pid ${entry.pid}`);
+    dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
   }
-  dimSubtitleParts.push(
-    `${entry.eventCount} event${entry.eventCount === 1 ? '' : 's'}`,
-  );
+  dimSubtitleParts.push(formatEventCount(entry.eventCount));
   if (entry.droppedLines > 0) {
-    dimSubtitleParts.push(`${entry.droppedLines} dropped`);
+    dimSubtitleParts.push(
+      t('{{count}} dropped', { count: String(entry.droppedLines) }),
+    );
   }
   if (entry.exitCode !== undefined) {
-    dimSubtitleParts.push(`exit ${entry.exitCode}`);
+    dimSubtitleParts.push(
+      t('exit {{exitCode}}', { exitCode: String(entry.exitCode) }),
+    );
   }
 
   // `entry.error` is set on `failed` (spawn error) and on `completed`
@@ -558,7 +823,7 @@ const MonitorDetailBody: React.FC<{
       <Box>
         {terminal && (
           <Text color={terminal.color}>
-            {`${terminal.icon} ${STATUS_VERBS[entry.status]} · `}
+            {`${terminal.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -567,7 +832,7 @@ const MonitorDetailBody: React.FC<{
       <Box />
       <Box>
         <Text bold dimColor>
-          Command
+          {t('Command')}
         </Text>
       </Box>
       <Box>
@@ -579,7 +844,7 @@ const MonitorDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={errorColor}>
-              {errorIsFailure ? 'Error' : 'Stopped because'}
+              {errorIsFailure ? t('Error') : t('Stopped because')}
             </Text>
           </Box>
           <Box>
@@ -639,6 +904,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // detail body must see fresh `recentActivities` / `stats` between
   // those transitions — so we re-read from the registry here.
   const [activityTick, setActivityTick] = useState(0);
+
+  // Two-step cancel for foreground entries: cancelling one ends the
+  // parent's current turn with a partial result for that subagent —
+  // a much heavier consequence than cancelling a background async task.
+  // `pendingCancelEntryId` records the entry that has been armed for
+  // cancellation; the next `x` press confirms. Esc resets.
+  const [pendingCancelEntryId, setPendingCancelEntryId] = useState<
+    string | null
+  >(null);
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
@@ -748,6 +1022,32 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
   }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus, exitDetail]);
 
+  // Encapsulates the cancel flow with the foreground confirm-step.
+  // Foreground entries: first `x` arms; second `x` confirms. Background
+  // and shell entries: one-shot cancel (no behavior change).
+  const handleCancelKey = () => {
+    if (!selectedEntry) return;
+    // `x` only has a meaning for entries the user can still act on:
+    // `running` → cancel, `paused` (agent kind) → abandon. Terminal
+    // statuses (completed/failed/cancelled) ignore the keypress so a
+    // foreground entry that just settled can't display the misleading
+    // "x again to confirm stop" line during the brief window before it
+    // unregisters.
+    const isCancelable = selectedEntry.status === 'running';
+    const isAbandonable =
+      selectedEntry.kind === 'agent' && selectedEntry.status === 'paused';
+    if (!isCancelable && !isAbandonable) return;
+    const entryKey = entryId(selectedEntry);
+    const isForegroundAgent =
+      selectedEntry.kind === 'agent' && selectedEntry.flavor === 'foreground';
+    if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
+      setPendingCancelEntryId(entryKey);
+      return;
+    }
+    setPendingCancelEntryId(null);
+    cancelSelected();
+  };
+
   useKeypress(
     (key) => {
       if (!dialogOpen) return;
@@ -755,10 +1055,12 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       if (dialogMode === 'list') {
         if (key.name === 'up') {
           moveSelectionUp();
+          setPendingCancelEntryId(null);
           return;
         }
         if (key.name === 'down') {
           moveSelectionDown();
+          setPendingCancelEntryId(null);
           return;
         }
         if (key.name === 'return') {
@@ -766,6 +1068,11 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           return;
         }
         if (key.name === 'escape' || key.name === 'left') {
+          if (pendingCancelEntryId) {
+            // Esc backs out of the confirm step before closing the dialog.
+            setPendingCancelEntryId(null);
+            return;
+          }
           closeDialog();
           return;
         }
@@ -774,7 +1081,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           return;
         }
         if (key.sequence === 'x' && !key.ctrl && !key.meta) {
-          cancelSelected();
+          handleCancelKey();
           return;
         }
         // Note: the "stop all agents" chord (ctrl+x ctrl+k in claw-code)
@@ -787,6 +1094,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 
       // detail mode
       if (key.name === 'left') {
+        // Reset the foreground confirm-step before leaving detail so the
+        // armed state can't carry into list mode and turn a stray `x` into
+        // an unintended cancel on the same entry.
+        setPendingCancelEntryId(null);
         exitDetail();
         return;
       }
@@ -795,6 +1106,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         key.name === 'return' ||
         key.name === 'space'
       ) {
+        if (pendingCancelEntryId && key.name === 'escape') {
+          setPendingCancelEntryId(null);
+          return;
+        }
         closeDialog();
         return;
       }
@@ -803,7 +1118,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         return;
       }
       if (key.sequence === 'x' && !key.ctrl && !key.meta) {
-        cancelSelected();
+        handleCancelKey();
         return;
       }
     },
@@ -818,8 +1133,20 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     !selectedEntry.resumeBlockedReason;
 
   // Hint footer — context-sensitive.
+  const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
+  const showCancelConfirmHint =
+    pendingCancelEntryId !== null && pendingCancelEntryId === selectedEntryKey;
   const hints: string[] = [];
-  if (dialogMode === 'list') {
+  if (showCancelConfirmHint) {
+    // Force the confirmation step into the hint row so the user sees
+    // exactly what the next `x` will do. Phrasing matches the
+    // `[blocking]` row prefix \u2014 "blocking turn" reads as "your input
+    // is waiting on this", which is what the cancel actually unblocks.
+    hints.push(
+      'x again to confirm stop \u00b7 ends the blocking turn',
+      'Esc cancel',
+    );
+  } else if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
     if (selectedEntry?.status === 'running') hints.push('x stop');
     if (selectedEntryAllowsResume) hints.push('r resume');
@@ -847,7 +1174,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       {dialogMode === 'list' && (
         <Box paddingX={1}>
           <Text bold color={theme.text.accent}>
-            Background tasks
+            {t('Background tasks')}
           </Text>
         </Box>
       )}
@@ -866,7 +1193,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           />
         ) : (
           <Box paddingX={1}>
-            <Text color={theme.text.secondary}>No entry to show.</Text>
+            <Text color={theme.text.secondary}>{t('No entry to show.')}</Text>
           </Box>
         )}
       </Box>

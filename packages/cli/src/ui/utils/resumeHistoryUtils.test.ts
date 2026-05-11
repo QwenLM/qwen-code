@@ -286,4 +286,35 @@ describe('resumeHistoryUtils', () => {
       { id: 8, type: 'gemini', text: 'Follow-up' },
     ]);
   });
+
+  it('preserves model-sent slash command metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/filecmd',
+            sentToModel: true,
+          },
+        },
+        {
+          type: 'assistant',
+          message: { parts: [{ text: 'Follow-up' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 20);
+
+    expect(items).toEqual([
+      { id: 21, type: 'user', text: '/filecmd', sentToModel: true },
+      { id: 22, type: 'gemini', text: 'Follow-up' },
+    ]);
+  });
 });

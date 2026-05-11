@@ -13,28 +13,73 @@ import { shortAsciiLogo } from './AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { getRenderableGradientColors } from '../utils/gradientUtils.js';
+import { pickAsciiArtTier } from '../utils/customBanner.js';
+import { t } from '../../i18n/index.js';
 
 /**
  * Auth display type for the Header component.
  * Simplified representation of authentication method shown to users.
  */
 export enum AuthDisplayType {
-  QWEN_OAUTH = 'Qwen OAuth',
-  CODING_PLAN = 'Coding Plan',
-  API_KEY = 'API Key',
-  UNKNOWN = 'Unknown',
+  QWEN_OAUTH = 'qwen_oauth',
+  CODING_PLAN = 'coding_plan',
+  API_KEY = 'api_key',
+  UNKNOWN = 'unknown',
+}
+
+function formatAuthDisplayType(
+  authDisplayType?: AuthDisplayType | string,
+): string {
+  if (!authDisplayType || !authDisplayType.trim()) {
+    return t('Unknown');
+  }
+
+  const value = authDisplayType.trim();
+  switch (value) {
+    case AuthDisplayType.QWEN_OAUTH:
+      return t('Qwen OAuth');
+    case AuthDisplayType.CODING_PLAN:
+      return t('Coding Plan');
+    case AuthDisplayType.API_KEY:
+      return t('API Key');
+    case AuthDisplayType.UNKNOWN:
+      return t('Unknown');
+    default:
+      return authDisplayType;
+  }
 }
 
 interface HeaderProps {
-  customAsciiArt?: string; // For user-defined ASCII art
+  /**
+   * Width-aware override for the logo column. Each tier is a sanitized
+   * ASCII string; the renderer picks `large` when it fits, then `small`,
+   * then falls through to the default Qwen logo. Either tier may be
+   * omitted: a missing tier simply skips that step.
+   */
+  customAsciiArt?: { small?: string; large?: string };
+  /**
+   * Sanitized replacement for the bold ">_ Qwen Code" title in the info
+   * panel. The version suffix is always appended. When undefined or empty
+   * the default title is used; the leading `>_` glyph is part of the
+   * default brand and is dropped when a custom title is set.
+   */
+  customBannerTitle?: string;
+  /**
+   * Sanitized subtitle string rendered between the title and the
+   * auth/model line. When undefined the existing blank spacer row is
+   * preserved so unset users see the same layout as before.
+   */
+  customBannerSubtitle?: string;
   version: string;
-  authDisplayType?: AuthDisplayType;
+  authDisplayType?: AuthDisplayType | string;
   model: string;
   workingDirectory: string;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   customAsciiArt,
+  customBannerTitle,
+  customBannerSubtitle,
   version,
   authDisplayType,
   model,
@@ -42,9 +87,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
 
-  const displayLogo = customAsciiArt ?? shortAsciiLogo;
-  const logoWidth = getAsciiArtWidth(displayLogo);
-  const formattedAuthType = authDisplayType ?? AuthDisplayType.UNKNOWN;
+  const formattedAuthType = formatAuthDisplayType(authDisplayType);
 
   // Calculate available space properly:
   // First determine if logo can be shown, then use remaining space for path
@@ -61,8 +104,30 @@ export const Header: React.FC<HeaderProps> = ({
     terminalWidth - containerMarginX * 2,
   );
 
-  // Check if we have enough space for logo + gap + minimum info panel
+  // Two distinct fallback paths:
+  //   - User supplied a custom tier and at least one tier fits → render that.
+  //   - User supplied custom art but neither tier fits → hide the logo column.
+  //     Falling back to the bundled QWEN logo here would silently undo a
+  //     white-label deployment on narrow terminals.
+  //   - User supplied no custom art → fall through to `shortAsciiLogo` and let
+  //     the existing width gate decide whether to show or hide it.
+  const hasCustomArt = Boolean(customAsciiArt?.small || customAsciiArt?.large);
+  const customTier = pickAsciiArtTier(
+    customAsciiArt?.small,
+    customAsciiArt?.large,
+    availableTerminalWidth,
+    logoGap,
+    minInfoPanelWidth,
+    getAsciiArtWidth,
+  );
+  const displayLogo = customTier ?? (hasCustomArt ? '' : shortAsciiLogo);
+  const logoWidth = getAsciiArtWidth(displayLogo);
+
+  // Check if we have enough space for logo + gap + minimum info panel.
+  // When `displayLogo` is empty (custom art too wide for both tiers) showLogo
+  // will be false, hiding the column entirely.
   const showLogo =
+    displayLogo !== '' &&
     availableTerminalWidth >= logoWidth + logoGap + minInfoPanelWidth;
 
   // Calculate available width for info panel (use all remaining space)
@@ -138,15 +203,22 @@ export const Header: React.FC<HeaderProps> = ({
         flexGrow={showLogo ? 0 : 1}
         width={showLogo ? availableInfoPanelWidth : undefined}
       >
-        {/* Title line: >_ Qwen Code (v{version}) */}
+        {/* Title line: customBannerTitle (already sanitized) or the default
+            ">_ Qwen Code" brand. Version suffix is always appended. */}
         <Text>
           <Text bold color={theme.text.accent}>
-            &gt;_ Qwen Code
+            {customBannerTitle ? customBannerTitle : '>_ Qwen Code'}
           </Text>
           <Text color={theme.text.secondary}> (v{version})</Text>
         </Text>
-        {/* Empty line for spacing */}
-        <Text> </Text>
+        {/* Subtitle (when set) replaces the blank spacer row. We always
+            emit a row here so the auth/model line stays at the same
+            vertical position regardless of whether the subtitle is set. */}
+        {customBannerSubtitle ? (
+          <Text color={theme.text.secondary}>{customBannerSubtitle}</Text>
+        ) : (
+          <Text> </Text>
+        )}
         {/* Auth and Model line */}
         <Text>
           <Text color={theme.text.secondary}>{authModelText}</Text>

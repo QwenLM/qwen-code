@@ -13,7 +13,7 @@ import {
   loadRules,
   ConditionalRulesRegistry,
 } from './rulesDiscovery.js';
-import { QWEN_DIR } from './paths.js';
+import { QWEN_DIR, unescapePath } from './paths.js';
 
 vi.mock('os', async (importOriginal) => {
   const actualOs = await importOriginal<typeof os>();
@@ -325,6 +325,35 @@ Use hooks.`,
         `--- Rule from: ${QWEN_DIR}/rules/test.md ---`,
       );
     });
+
+    it('reads global rules from QWEN_HOME when set', async () => {
+      const customQwenHome = path.join(testRootDir, 'custom-qwen-home');
+      const originalQwenHome = process.env['QWEN_HOME'];
+      process.env['QWEN_HOME'] = customQwenHome;
+      try {
+        await createTestFile(
+          path.join(customQwenHome, 'rules', 'fromCustomHome.md'),
+          'CustomHome rule.',
+        );
+        // A stale rule in the legacy ~/.qwen/rules location should NOT be
+        // loaded once QWEN_HOME points elsewhere.
+        await createTestFile(
+          path.join(homedir, QWEN_DIR, 'rules', 'fromLegacyHome.md'),
+          'LegacyHome rule.',
+        );
+
+        const result = await loadRules(projectRoot, true);
+
+        expect(result.content).toContain('CustomHome rule.');
+        expect(result.content).not.toContain('LegacyHome rule.');
+      } finally {
+        if (originalQwenHome === undefined) {
+          delete process.env['QWEN_HOME'];
+        } else {
+          process.env['QWEN_HOME'] = originalQwenHome;
+        }
+      }
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -423,5 +452,58 @@ Use hooks.`,
       const result = reg.matchAndConsume('src/foo.ts');
       expect(result).toContain('Strict.');
     });
+
+    it('activates on dotfiles when glob covers them (dot: true semantics)', () => {
+      // **/*.yml must match .github/workflows/ci.yml, .prettierrc.yml, etc.
+      // Regression: previously picomatch used { dot: false } so hidden paths
+      // were silently excluded.
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/yml.md', ['**/*.yml'], 'YAML rule.')],
+        '/project',
+      );
+      expect(
+        reg.matchAndConsume('/project/.github/workflows/ci.yml'),
+      ).toContain('YAML rule.');
+    });
+
+    it('rejects Windows cross-drive paths (shared cross-drive guard)', () => {
+      // Regression: ConditionalRulesRegistry historically only checked
+      // `..` / `../` and accepted the absolute string that
+      // `path.win32.relative('C:\\proj', 'D:\\elsewhere')` produces. The
+      // shared `resolveProjectRelativePath` helper (now used by both the
+      // skill and rules registries) catches the cross-drive case via
+      // `pathModule.isAbsolute(rawRelativePath)`. Direct unit cover for
+      // the helper lives in skill-activation.test.ts via the
+      // `path.win32`-parameterized test; this case asserts the rules
+      // registry calls into the hardened path. On POSIX runners the
+      // input shape exercises the existing `..` branch — either
+      // platform must return undefined for off-project paths.
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/broad.md', ['**/*.ts'], 'Broad rule.')],
+        '/project',
+      );
+      expect(
+        reg.matchAndConsume('/totally/other/place/file.ts'),
+      ).toBeUndefined();
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'should match shell-escaped file paths after unescaping',
+      () => {
+        // On Windows, unescapePath is a no-op (backslash is a path
+        // separator, not a shell escape character).
+        const reg = new ConditionalRulesRegistry(
+          [rule('/r/ts.md', ['src/**/*.tsx'], 'Use hooks.')],
+          '/project',
+        );
+        const escapedPath = 'src/App\\ file.tsx';
+        const normalizedPath = unescapePath(escapedPath.trim());
+        expect(normalizedPath).toBe('src/App file.tsx');
+        const result = reg.matchAndConsume(
+          path.resolve('/project', normalizedPath),
+        );
+        expect(result).toContain('Use hooks.');
+      },
+    );
   });
 });

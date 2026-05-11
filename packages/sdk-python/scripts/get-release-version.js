@@ -10,12 +10,19 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  getArgs,
+  isExpectedMissingGitHubRelease,
+  validateVersion,
+} from '../../../scripts/lib/release-helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const PACKAGE_NAME = 'qwen-code-sdk';
-const TAG_PREFIX = 'sdk-python-';
+const TAG_PREFIX = 'sdk-python-v';
+const NETWORK_COMMAND_TIMEOUT_MS = 30_000;
+const LOCAL_COMMAND_TIMEOUT_MS = 10_000;
 
 function readPyprojectVersion() {
   const pyprojectPath = join(__dirname, '..', 'pyproject.toml');
@@ -25,18 +32,6 @@ function readPyprojectVersion() {
     throw new Error(`Could not find version in ${pyprojectPath}`);
   }
   return match[1];
-}
-
-function getArgs() {
-  const args = {};
-  for (const arg of process.argv.slice(2)) {
-    if (!arg.startsWith('--')) {
-      continue;
-    }
-    const [key, value] = arg.slice(2).split('=');
-    args[key] = value === undefined ? true : value;
-  }
-  return args;
 }
 
 function parseVersion(version) {
@@ -124,7 +119,7 @@ function toBaseVersion(version) {
 async function getAllVersionsFromPyPI() {
   const response = await fetch(`https://pypi.org/pypi/${PACKAGE_NAME}/json`, {
     headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(NETWORK_COMMAND_TIMEOUT_MS),
   });
 
   if (response.status === 404) {
@@ -248,48 +243,67 @@ function getUtcTimestamp() {
 }
 
 function getGitShortHash() {
-  return execSync('git rev-parse --short HEAD').toString().trim();
-}
-
-function validateVersion(version, format, name) {
-  const versionRegex = {
-    'X.Y.Z': /^\d+\.\d+\.\d+$/,
-    'X.Y.Z-preview.N': /^\d+\.\d+\.\d+-preview\.\d+$/,
-  };
-
-  if (!versionRegex[format]?.test(version)) {
-    throw new Error(
-      `Invalid ${name}: ${version}. Must be in ${format} format.`,
-    );
+  try {
+    return execSync('git rev-parse --short HEAD', {
+      timeout: LOCAL_COMMAND_TIMEOUT_MS,
+    })
+      .toString()
+      .trim();
+  } catch (error) {
+    if (isTimeoutError(error)) {
+      throw new Error(
+        `git rev-parse timed out after ${LOCAL_COMMAND_TIMEOUT_MS / 1000}s — local git may be unresponsive`,
+      );
+    }
+    throw error;
   }
 }
 
-function isExpectedMissingGitHubRelease(error) {
-  const stderr = error.stderr?.toString() ?? '';
-  const stdout = error.stdout?.toString() ?? '';
-  const message = `${error.message}\n${stderr}\n${stdout}`;
-  return message.includes('release not found') || message.includes('Not Found');
+function isTimeoutError(error) {
+  // Node.js execSync timeout: `code` is 'ETIMEDOUT' on POSIX; on some
+  // versions/platforms `killed` is true with signal 'SIGTERM' or null.
+  // Match the pattern used in packages/core/src/utils/pdf.ts.
+  return (
+    error.code === 'ETIMEDOUT' ||
+    (error.killed === true &&
+      (error.signal === 'SIGTERM' ||
+        error.signal === undefined ||
+        error.signal === null))
+  );
 }
 
-async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
+async function getReleaseState(
+  { packageVersion, releaseVersion },
+  allVersions,
+) {
   const state = {
     packageVersionExistsOnPyPI: allVersions.includes(packageVersion),
     gitTagExists: false,
     githubReleaseExists: false,
   };
-  const fullTag = `${TAG_PREFIX}${releaseTag}`;
+  const fullTag = `${TAG_PREFIX}${releaseVersion}`;
   try {
-    const tagOutput = execSync(`git tag -l '${fullTag}'`).toString().trim();
+    const tagOutput = execSync(`git tag -l '${fullTag}'`, {
+      timeout: LOCAL_COMMAND_TIMEOUT_MS,
+    })
+      .toString()
+      .trim();
     if (tagOutput === fullTag) {
       state.gitTagExists = true;
     }
   } catch (error) {
+    if (isTimeoutError(error)) {
+      throw new Error(
+        `git tag -l timed out after ${LOCAL_COMMAND_TIMEOUT_MS / 1000}s — local git may be unresponsive`,
+      );
+    }
     throw new Error(`Failed to check git tags for conflicts: ${error.message}`);
   }
 
   try {
     const output = execSync(
       `gh release view "${fullTag}" --json tagName --jq .tagName`,
+      { timeout: NETWORK_COMMAND_TIMEOUT_MS },
     )
       .toString()
       .trim();
@@ -297,6 +311,13 @@ async function getReleaseState({ packageVersion, releaseTag }, allVersions) {
       state.githubReleaseExists = true;
     }
   } catch (error) {
+    // Timeout check must precede isExpectedMissingGitHubRelease — a timed-out
+    // process may emit partial stderr matching "release not found".
+    if (isTimeoutError(error)) {
+      throw new Error(
+        `gh release view timed out after ${NETWORK_COMMAND_TIMEOUT_MS / 1000}s checking "${fullTag}" — GitHub API may be unavailable`,
+      );
+    }
     if (!isExpectedMissingGitHubRelease(error)) {
       throw new Error(
         `Failed to check GitHub releases for conflicts: ${error.message}`,
@@ -462,7 +483,7 @@ async function getVersion(options = {}) {
     const releaseState = await getReleaseState(
       {
         packageVersion: versionData.packageVersion,
-        releaseTag: `v${versionData.releaseVersion}`,
+        releaseVersion: versionData.releaseVersion,
       },
       allVersions,
     );
@@ -508,11 +529,11 @@ async function getVersion(options = {}) {
 
     if (releaseState.githubReleaseExists) {
       console.error(
-        `GitHub release ${TAG_PREFIX}v${versionData.releaseVersion} already exists.`,
+        `GitHub release ${TAG_PREFIX}${versionData.releaseVersion} already exists.`,
       );
     } else if (releaseState.gitTagExists) {
       console.error(
-        `::warning::Orphan git tag ${TAG_PREFIX}v${versionData.releaseVersion} exists without a PyPI version or GitHub release. Skipping to next version slot.`,
+        `::warning::Orphan git tag ${TAG_PREFIX}${versionData.releaseVersion} exists without a PyPI version or GitHub release. Skipping to next version slot.`,
       );
     } else if (releaseState.packageVersionExistsOnPyPI) {
       console.error(

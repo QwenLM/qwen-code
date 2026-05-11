@@ -32,7 +32,10 @@ import {
 } from './messages/StatusMessages.js';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
-import { MarkdownDisplay } from '../utils/MarkdownDisplay.js';
+import {
+  MarkdownDisplay,
+  type MarkdownSourceCopyIndexOffsets,
+} from '../utils/MarkdownDisplay.js';
 import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
@@ -51,6 +54,7 @@ import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
+import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 
 interface HistoryItemDisplayProps {
@@ -79,6 +83,7 @@ interface HistoryItemDisplayProps {
    * path to the screen) and for all tool_use_summary items in full mode.
    */
   summaryAbsorbed?: boolean;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
 const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
@@ -94,6 +99,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   availableTerminalHeightGemini,
   compactLabel,
   summaryAbsorbed = false,
+  sourceCopyIndexOffsets,
 }) => {
   const marginTop =
     item.type === 'gemini_content' || item.type === 'gemini_thought_content'
@@ -131,6 +137,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
+          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       )}
       {itemForDisplay.type === 'gemini_content' && (
@@ -141,6 +148,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
+          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       )}
       {!compactMode && itemForDisplay.type === 'gemini_thought' && (
@@ -191,6 +199,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'stats' && (
         <StatsDisplay duration={itemForDisplay.duration} width={boxWidth} />
       )}
+      {itemForDisplay.type === 'diff_stats' && (
+        <DiffStatsDisplay model={itemForDisplay.model} />
+      )}
       {itemForDisplay.type === 'model_stats' && (
         <ModelStatsDisplay width={boxWidth} />
       )}
@@ -210,6 +221,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           availableTerminalHeight={availableTerminalHeight}
           contentWidth={contentWidth}
           isFocused={isFocused}
+          isPending={isPending}
           activeShellPtyId={activeShellPtyId}
           embeddedShellFocused={embeddedShellFocused}
           memoryWriteCount={itemForDisplay.memoryWriteCount}

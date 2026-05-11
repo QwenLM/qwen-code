@@ -47,7 +47,10 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import { ToolNames } from '../tools/tool-names.js';
+import { fileURLToPath } from 'node:url';
+import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { escapeXml } from '../utils/xml.js';
+import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
@@ -72,6 +75,20 @@ import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
 import { IdeClient } from '../ide/ide-client.js';
+import { safeSetStatus, withSpan } from '../telemetry/tracer.js';
+import { SpanStatusCode, type Span } from '@opentelemetry/api';
+
+const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
+const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
+const TOOL_FAILURE_KIND_POST_HOOK_STOPPED = 'post_hook_stopped';
+const TOOL_FAILURE_KIND_TOOL_ERROR = 'tool_error';
+const TOOL_FAILURE_KIND_TOOL_EXCEPTION = 'tool_exception';
+const TOOL_FAILURE_KIND_CANCELLED = 'cancelled';
+
+const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
+const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
+const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
+const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
@@ -91,6 +108,60 @@ const TRUNCATION_EDIT_REJECTION =
   'first write_file with a skeleton/partial content, ' +
   'then use edit to add the remaining sections incrementally. ' +
   'Do NOT retry with the same large content.';
+
+function setToolSpanFailure(
+  span: Span,
+  failureKind: string,
+  message: string,
+): void {
+  try {
+    span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, failureKind);
+  } catch {
+    // OTel errors must not block the failure status update.
+  }
+  safeSetStatus(span, {
+    code: SpanStatusCode.ERROR,
+    message,
+  });
+}
+
+function setToolSpanCancelled(span: Span): void {
+  try {
+    span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, TOOL_FAILURE_KIND_CANCELLED);
+  } catch {
+    // OTel errors must not block the cancellation status update.
+  }
+  safeSetStatus(span, {
+    code: SpanStatusCode.UNSET,
+  });
+}
+
+async function safelyFirePostToolUseFailureHook(
+  messageBus: MessageBus | undefined,
+  toolUseId: string,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  errorMessage: string,
+  isInterrupt: boolean,
+  permissionMode?: string,
+): ReturnType<typeof firePostToolUseFailureHook> {
+  try {
+    return await firePostToolUseFailureHook(
+      messageBus,
+      toolUseId,
+      toolName,
+      toolInput,
+      errorMessage,
+      isInterrupt,
+      permissionMode,
+    );
+  } catch (error) {
+    debugLogger.warn(
+      `PostToolUseFailure hook failed for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {};
+  }
+}
 
 export type ValidatingToolCall = {
   status: 'validating';
@@ -145,6 +216,16 @@ export type ExecutingToolCall = {
   executionStartTime?: number;
   outcome?: ToolConfirmationOutcome;
   pid?: number;
+  /**
+   * Set during a foreground shell-tool invocation: the AbortController
+   * the user/UI can fire (with `signal.reason = { kind: 'background' }`)
+   * to promote the running command to a background entry. Set right
+   * after `setPidCallback` fires (see ShellTool.execute), cleared
+   * implicitly when the tool transitions to a terminal status. Only
+   * meaningful for the shell tool's foreground path; absent on every
+   * other tool kind.
+   */
+  promoteAbortController?: AbortController;
 };
 
 export type CancelledToolCall = {
@@ -182,6 +263,222 @@ export type CompletedToolCall =
   | SuccessfulToolCall
   | CancelledToolCall
   | ErroredToolCall;
+
+/**
+ * Closed allowlist of tool names whose inputs name actual filesystem
+ * paths under the project root. Restricting `extractToolFilePaths` to
+ * this set prevents MCP tools (where `Record<string, unknown>` input
+ * conventions reuse `path` / `paths` for HTTP routes, JSON keys, search
+ * queries, etc.) from feeding non-filesystem strings into
+ * ConditionalRulesRegistry / SkillActivationRegistry — which would
+ * resolve them under projectRoot, normalize, and false-match against
+ * skill globs (e.g. `paths: ['**']` would activate on every MCP call).
+ *
+ * Custom FS tools added later need to opt in here. A future enhancement
+ * could replace this with a per-tool `pathFields?: string[]` annotation
+ * on tool declarations; the allowlist is the minimum-surface fix.
+ */
+const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
+  ToolNames.READ_FILE,
+  ToolNames.EDIT,
+  ToolNames.WRITE_FILE,
+  ToolNames.GREP,
+  ToolNames.GLOB,
+  ToolNames.LS,
+  ToolNames.LSP,
+]);
+
+function canonicalToolName(toolName: string): string {
+  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
+function isFilesystemPathTool(toolName: string): boolean {
+  return FS_PATH_TOOL_NAMES.has(canonicalToolName(toolName));
+}
+
+/**
+ * Trim trailing forward / back slashes from a path-shaped string without
+ * a regex. The regex form `s.replace(/[\\/]+$/, '')` is functionally
+ * equivalent but CodeQL #145 flags `+` on uncontrolled input as a
+ * polynomial ReDoS candidate; the loop is O(n) on the trailing
+ * separator run, no different from the regex engine, but quieter.
+ */
+function trimTrailingSlash(s: string): string {
+  let trimmed = s;
+  while (trimmed.endsWith('/') || trimmed.endsWith('\\')) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  return trimmed;
+}
+
+/**
+ * Combine a search-root path and a path-shaped glob into the effective
+ * selector that the tool actually walks. Used by GLOB (`path` + `pattern`)
+ * and GREP (`path` + `glob`). Plain string concat (rather than
+ * `path.join`) so we don't (1) emit OS-specific backslashes on Windows
+ * and silently diverge from the forward-slash form the activation
+ * registry matches against, or (2) collapse `..` segments and lose
+ * information about which directory the call escaped from.
+ */
+function joinSearchRootAndGlob(
+  searchRoot: string | undefined,
+  globField: string,
+): string {
+  if (!searchRoot || searchRoot.length === 0) return globField;
+  return `${trimTrailingSlash(searchRoot)}/${globField}`;
+}
+
+/**
+ * For LSP-shaped inputs, normalize `filePath`-style strings into project
+ * candidates. Accepts a plain absolute/relative path or a `file://` URI;
+ * silently drops other URI schemes (`http://`, `git://`, etc.) so an
+ * LSP call against a non-file resource cannot reach the activation
+ * registry as if it had touched a project file.
+ */
+function pushLspPathCandidate(out: string[], v: unknown): void {
+  if (typeof v !== 'string' || v.length === 0) return;
+  if (v.startsWith('file://')) {
+    try {
+      out.push(fileURLToPath(v));
+    } catch {
+      // Malformed file URI — drop silently rather than corrupt the
+      // activation pipeline.
+    }
+    return;
+  }
+  if (v.includes('://')) return; // non-file URI scheme: ignore
+  out.push(v);
+}
+
+/**
+ * Pull the filesystem path-bearing fields out of a tool's input.
+ * Per-tool dispatcher because the field name and shape differ:
+ *
+ *  - read_file / edit / write_file → `file_path`
+ *  - list_directory → `path` (search root)
+ *  - glob → `path` (search root, optional) + `pattern` (path-shaped
+ *    selector); `<path>/<pattern>` is the effective glob walked
+ *  - grep_search → `path` (search root, optional) + `glob` (path-shaped
+ *    file filter); `pattern` is a regex on contents, NOT a path
+ *  - lsp → `filePath` (URI-aware: `file://` accepted, others dropped)
+ *    plus `callHierarchyItem.uri` for incomingCalls / outgoingCalls
+ *
+ * Used by ConditionalRulesRegistry / SkillActivationRegistry hooks to
+ * route every project-relative path the tool actually touched through
+ * the same activation pipeline. Returns `[]` for tool names outside
+ * `FS_PATH_TOOL_NAMES` — see that set's docstring for why this is gated.
+ */
+export function extractToolFilePaths(
+  toolName: string,
+  toolInput: unknown,
+): string[] {
+  // Canonicalize legacy aliases (e.g. `replace` → `edit`,
+  // `search_file_content` → `grep_search`) before the allowlist check.
+  // The tool registry resolves these at execution time, so a tool call
+  // like `replace({ file_path: 'src/App.tsx' })` actually runs EditTool;
+  // gating only on the canonical name closes the alias-bypass hole.
+  const canonical = canonicalToolName(toolName);
+  if (!FS_PATH_TOOL_NAMES.has(canonical)) {
+    // Surface allowlist gaps at debug level when a non-FS tool's input
+    // *looks* path-shaped: we silently skip path activation for it, but
+    // the field naming suggests it might be a real FS tool that just
+    // hasn't been added to FS_PATH_TOOL_NAMES yet (or an MCP tool whose
+    // input convention legitimately reuses these field names — both are
+    // worth the debug breadcrumb when chasing "why didn't my path-gated
+    // skill activate?"). Cheap object-property reads, only fires when
+    // the user has DEBUG=tool-scheduler enabled, no production noise.
+    if (toolInput && typeof toolInput === 'object') {
+      const obj = toolInput as Record<string, unknown>;
+      if (
+        typeof obj['file_path'] === 'string' ||
+        typeof obj['filePath'] === 'string' ||
+        typeof obj['path'] === 'string' ||
+        Array.isArray(obj['paths'])
+      ) {
+        debugLogger.debug(
+          `Tool "${toolName}" (canonical "${canonical}") has path-like input fields ` +
+            `but is not in FS_PATH_TOOL_NAMES — path-gated skills / conditional rules ` +
+            `will not see its paths. If this is a filesystem tool, add it to the allowlist.`,
+        );
+      }
+    }
+    return [];
+  }
+  if (!toolInput || typeof toolInput !== 'object') return [];
+  const obj = toolInput as Record<string, unknown>;
+  const out: string[] = [];
+  const push = (v: unknown): void => {
+    if (typeof v === 'string' && v.length > 0) out.push(v);
+  };
+
+  switch (canonical) {
+    case ToolNames.LSP: {
+      // `filePath` may be a plain path, a `file://` URI, or a non-file
+      // URI (`http://`, `git://`, etc.). Only the first two correspond
+      // to project files — everything else must be ignored, otherwise
+      // an LSP call on a non-file resource could activate path-gated
+      // skills without the model having touched the project.
+      pushLspPathCandidate(out, obj['filePath']);
+      // incomingCalls / outgoingCalls operate on `callHierarchyItem.uri`,
+      // not the top-level `filePath`. Without this, the model can follow
+      // a call hierarchy through a project file and never trigger
+      // activation for a skill scoped to that file.
+      const item = obj['callHierarchyItem'];
+      if (item && typeof item === 'object') {
+        pushLspPathCandidate(out, (item as Record<string, unknown>)['uri']);
+      }
+      return out;
+    }
+
+    case ToolNames.GLOB: {
+      const pathField = obj['path'];
+      const patternField = obj['pattern'];
+      // The standalone search-root candidate (so a broad skill keyed on
+      // `paths: ['src/**']` still activates from `glob({ path: 'src' })`).
+      push(pathField);
+      // `pattern` is the actual selector. Combine with `path` to form
+      // the effective walked glob.
+      if (typeof patternField === 'string' && patternField.length > 0) {
+        push(
+          joinSearchRootAndGlob(
+            typeof pathField === 'string' ? pathField : undefined,
+            patternField,
+          ),
+        );
+      }
+      return out;
+    }
+
+    case ToolNames.GREP: {
+      const pathField = obj['path'];
+      const globField = obj['glob'];
+      push(pathField);
+      // `glob` is the path-shaped file filter (NOT `pattern`, which is a
+      // regex on contents). Combine with `path` for the effective
+      // filter selector.
+      if (typeof globField === 'string' && globField.length > 0) {
+        push(
+          joinSearchRootAndGlob(
+            typeof pathField === 'string' ? pathField : undefined,
+            globField,
+          ),
+        );
+      }
+      return out;
+    }
+
+    case ToolNames.LS:
+      push(obj['path']);
+      return out;
+
+    case ToolNames.READ_FILE:
+    case ToolNames.EDIT:
+    case ToolNames.WRITE_FILE:
+    default:
+      push(obj['file_path']);
+      return out;
+  }
+}
 
 export type ConfirmHandler = (
   toolCall: WaitingToolCall,
@@ -1245,13 +1542,22 @@ export class CoreToolScheduler {
             continue;
           }
 
+          // Errors thrown from getConfirmationDetails() may carry a
+          // structured ToolErrorType via an `errorType` instance
+          // field (see StructuredToolError in
+          // tools/priorReadEnforcement.ts). When present, surface
+          // that code instead of collapsing every confirmation-time
+          // failure into UNHANDLED_EXCEPTION.
+          const explicitErrorType = (
+            error as { errorType?: ToolErrorType } | undefined
+          )?.errorType;
           this.setStatusInternal(
             reqInfo.callId,
             'error',
             createErrorResponse(
               reqInfo,
               error instanceof Error ? error : new Error(String(error)),
-              ToolErrorType.UNHANDLED_EXCEPTION,
+              explicitErrorType ?? ToolErrorType.UNHANDLED_EXCEPTION,
             ),
           );
         }
@@ -1321,10 +1627,23 @@ export class CoreToolScheduler {
           isModifying: true,
         } as ToolCallConfirmationDetails);
 
+        // Normalize shell-escaped paths so the editor receives actual
+        // filesystem paths (request.args may still hold escaped values
+        // since buildInvocation normalizes a structuredClone).
+        const normalizedArgs = {
+          ...waitingToolCall.request.args,
+        } as typeof waitingToolCall.request.args;
+        for (const key of PATH_ARG_KEYS) {
+          if (typeof normalizedArgs[key] === 'string') {
+            (normalizedArgs as Record<string, unknown>)[key] = unescapePath(
+              String(normalizedArgs[key]).trim(),
+            );
+          }
+        }
         const { updatedParams, updatedDiff } = await modifyWithEditor<
           typeof waitingToolCall.request.args
         >(
-          waitingToolCall.request.args,
+          normalizedArgs,
           modifyContext as ModifyContext<typeof waitingToolCall.request.args>,
           editorType,
           signal,
@@ -1532,286 +1851,423 @@ export class CoreToolScheduler {
 
     const scheduledCall = toolCall;
     const { callId, name: toolName } = scheduledCall.request;
-    const invocation = scheduledCall.invocation;
-    const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
-    // Generate unique tool_use_id for hook tracking
-    const toolUseId = generateToolUseId();
+    return withSpan(
+      `tool.${toolName}`,
+      { tool_name: toolName, call_id: callId },
+      async (span: Span) => {
+        const invocation = scheduledCall.invocation;
+        const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
-    // Get MessageBus for hook execution
-    const messageBus = this.config.getMessageBus() as MessageBus | undefined;
-    const hooksEnabled = !this.config.getDisableAllHooks();
-
-    // PreToolUse Hook
-    if (hooksEnabled && messageBus) {
-      // Convert ApprovalMode to permission_mode string for hooks
-      const permissionMode = this.config.getApprovalMode();
-      const preHookResult = await firePreToolUseHook(
-        messageBus,
-        toolName,
-        toolInput,
-        toolUseId,
-        permissionMode,
-      );
-
-      if (!preHookResult.shouldProceed) {
-        // Hook blocked the execution
-        const blockMessage =
-          preHookResult.blockReason || 'Tool execution blocked by hook';
-        const errorResponse = createErrorResponse(
-          scheduledCall.request,
-          new Error(blockMessage),
-          ToolErrorType.EXECUTION_DENIED,
-        );
-        this.setStatusInternal(callId, 'error', errorResponse);
-        return;
-      }
-    }
-
-    this.setStatusInternal(callId, 'executing');
-
-    const liveOutputCallback = scheduledCall.tool.canUpdateOutput
-      ? (outputChunk: ToolResultDisplay) => {
-          if (this.outputUpdateHandler) {
-            this.outputUpdateHandler(callId, outputChunk);
+        // Normalize shell-escaped path params so hooks operate on actual filesystem
+        // paths, matching the normalization done in tool validation.
+        for (const key of PATH_ARG_KEYS) {
+          if (typeof toolInput[key] === 'string') {
+            toolInput[key] = unescapePath(String(toolInput[key]).trim());
           }
-          this.toolCalls = this.toolCalls.map((tc) =>
-            tc.request.callId === callId && tc.status === 'executing'
-              ? { ...tc, liveOutput: outputChunk }
-              : tc,
-          );
-          this.notifyToolCallsUpdate();
         }
-      : undefined;
 
-    const shellExecutionConfig = this.config.getShellExecutionConfig();
+        // Generate unique tool_use_id for hook tracking
+        const toolUseId = generateToolUseId();
 
-    // TODO: Refactor to remove special casing for ShellToolInvocation.
-    // Introduce a generic callbacks object for the execute method to handle
-    // things like `onPid` and `onLiveOutput`. This will make the scheduler
-    // agnostic to the invocation type.
-    let promise: Promise<ToolResult>;
-    if (invocation instanceof ShellToolInvocation) {
-      const setPidCallback = (pid: number) => {
-        this.toolCalls = this.toolCalls.map((tc) =>
-          tc.request.callId === callId && tc.status === 'executing'
-            ? { ...tc, pid }
-            : tc,
-        );
-        this.notifyToolCallsUpdate();
-      };
-      promise = invocation.execute(
-        signal,
-        liveOutputCallback,
-        shellExecutionConfig,
-        setPidCallback,
-      );
-    } else {
-      promise = invocation.execute(
-        signal,
-        liveOutputCallback,
-        shellExecutionConfig,
-      );
-    }
+        // Get MessageBus for hook execution
+        const messageBus = this.config.getMessageBus() as
+          | MessageBus
+          | undefined;
+        const hooksEnabled = !this.config.getDisableAllHooks();
 
-    try {
-      const toolResult: ToolResult = await promise;
-      if (signal.aborted) {
-        // PostToolUseFailure Hook
+        // PreToolUse Hook
         if (hooksEnabled && messageBus) {
-          const failureHookResult = await firePostToolUseFailureHook(
-            messageBus,
-            toolUseId,
-            toolName,
-            toolInput,
-            'User cancelled tool execution.',
-            true,
-            this.config.getApprovalMode(),
-          );
-
-          // Append additional context from hook if provided
-          let cancelMessage = 'User cancelled tool execution.';
-          if (failureHookResult.additionalContext) {
-            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
-          }
-          this.setStatusInternal(callId, 'cancelled', cancelMessage);
-        } else {
-          this.setStatusInternal(
-            callId,
-            'cancelled',
-            'User cancelled tool execution.',
-          );
-        }
-        return; // Both code paths should return here
-      }
-
-      if (toolResult.error === undefined) {
-        let content = toolResult.llmContent;
-        const contentLength =
-          typeof content === 'string' ? content.length : undefined;
-
-        // PostToolUse Hook
-        if (hooksEnabled && messageBus) {
-          const toolResponse = {
-            llmContent: content,
-            returnDisplay: toolResult.returnDisplay,
-          };
+          // Convert ApprovalMode to permission_mode string for hooks
           const permissionMode = this.config.getApprovalMode();
-          const postHookResult = await firePostToolUseHook(
+          const preHookResult = await firePreToolUseHook(
             messageBus,
             toolName,
             toolInput,
-            toolResponse,
             toolUseId,
             permissionMode,
           );
 
-          // Append additional context from hook if provided
-          if (postHookResult.additionalContext) {
-            content = appendAdditionalContext(
-              content,
-              postHookResult.additionalContext,
-            );
-          }
-
-          // Check if hook requested to stop execution
-          if (postHookResult.shouldStop) {
-            const stopMessage =
-              postHookResult.stopReason || 'Execution stopped by hook';
+          if (!preHookResult.shouldProceed) {
+            // Hook blocked the execution
+            const blockMessage =
+              preHookResult.blockReason || 'Tool execution blocked by hook';
             const errorResponse = createErrorResponse(
               scheduledCall.request,
-              new Error(stopMessage),
+              new Error(blockMessage),
               ToolErrorType.EXECUTION_DENIED,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
+            setToolSpanFailure(
+              span,
+              TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
+              TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
+            );
             return;
           }
         }
 
-        // Inject conditional rules when the model accesses a matching file.
-        // Rules are injected at most once per session per rule file.
-        const filePath = toolInput?.['file_path'];
-        if (typeof filePath === 'string') {
-          const rulesCtx = this.config
-            .getConditionalRulesRegistry()
-            ?.matchAndConsume(filePath);
-          if (rulesCtx) {
-            content = appendAdditionalContext(
+        this.setStatusInternal(callId, 'executing');
+
+        const liveOutputCallback = scheduledCall.tool.canUpdateOutput
+          ? (outputChunk: ToolResultDisplay) => {
+              if (this.outputUpdateHandler) {
+                this.outputUpdateHandler(callId, outputChunk);
+              }
+              this.toolCalls = this.toolCalls.map((tc) =>
+                tc.request.callId === callId && tc.status === 'executing'
+                  ? { ...tc, liveOutput: outputChunk }
+                  : tc,
+              );
+              this.notifyToolCallsUpdate();
+            }
+          : undefined;
+
+        const shellExecutionConfig = this.config.getShellExecutionConfig();
+
+        // TODO: Refactor to remove special casing for ShellToolInvocation.
+        // Introduce a generic callbacks object for the execute method to handle
+        // things like `onPid` and `onLiveOutput`. This will make the scheduler
+        // agnostic to the invocation type.
+        let promise: Promise<ToolResult>;
+        if (invocation instanceof ShellToolInvocation) {
+          const setPidCallback = (pid: number) => {
+            this.toolCalls = this.toolCalls.map((tc) =>
+              tc.request.callId === callId && tc.status === 'executing'
+                ? { ...tc, pid }
+                : tc,
+            );
+            this.notifyToolCallsUpdate();
+          };
+          // Stash the promote AbortController on the executing tool call so
+          // a UI surface (Ctrl+B keybind) can find the foreground shell's
+          // promote trigger by callId.
+          const setPromoteAbortControllerCallback = (ac: AbortController) => {
+            this.toolCalls = this.toolCalls.map((tc) =>
+              tc.request.callId === callId && tc.status === 'executing'
+                ? { ...tc, promoteAbortController: ac }
+                : tc,
+            );
+            this.notifyToolCallsUpdate();
+          };
+          promise = invocation.execute(
+            signal,
+            liveOutputCallback,
+            shellExecutionConfig,
+            setPidCallback,
+            setPromoteAbortControllerCallback,
+          );
+        } else {
+          promise = invocation.execute(
+            signal,
+            liveOutputCallback,
+            shellExecutionConfig,
+          );
+        }
+
+        try {
+          const toolResult: ToolResult = await promise;
+          if (signal.aborted) {
+            // PostToolUseFailure Hook
+            if (hooksEnabled && messageBus) {
+              const failureHookResult = await safelyFirePostToolUseFailureHook(
+                messageBus,
+                toolUseId,
+                toolName,
+                toolInput,
+                'User cancelled tool execution.',
+                true,
+                this.config.getApprovalMode(),
+              );
+
+              // Append additional context from hook if provided
+              let cancelMessage = 'User cancelled tool execution.';
+              if (failureHookResult.additionalContext) {
+                cancelMessage += `\n\n${failureHookResult.additionalContext}`;
+              }
+              this.setStatusInternal(callId, 'cancelled', cancelMessage);
+            } else {
+              this.setStatusInternal(
+                callId,
+                'cancelled',
+                'User cancelled tool execution.',
+              );
+            }
+            // Load-bearing: prevents withSpan from auto-setting OK on normal return
+            setToolSpanCancelled(span);
+            return; // Both code paths should return here
+          }
+
+          if (toolResult.error === undefined) {
+            let content = toolResult.llmContent;
+            const contentLength =
+              typeof content === 'string' ? content.length : undefined;
+
+            // PostToolUse Hook
+            if (hooksEnabled && messageBus) {
+              const toolResponse = {
+                llmContent: content,
+                returnDisplay: toolResult.returnDisplay,
+              };
+              const permissionMode = this.config.getApprovalMode();
+              const postHookResult = await firePostToolUseHook(
+                messageBus,
+                toolName,
+                toolInput,
+                toolResponse,
+                toolUseId,
+                permissionMode,
+              );
+
+              // Append additional context from hook if provided
+              if (postHookResult.additionalContext) {
+                content = appendAdditionalContext(
+                  content,
+                  postHookResult.additionalContext,
+                );
+              }
+
+              // Check if hook requested to stop execution
+              if (postHookResult.shouldStop) {
+                const stopMessage =
+                  postHookResult.stopReason || 'Execution stopped by hook';
+                const errorResponse = createErrorResponse(
+                  scheduledCall.request,
+                  new Error(stopMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                );
+                this.setStatusInternal(callId, 'error', errorResponse);
+                setToolSpanFailure(
+                  span,
+                  TOOL_FAILURE_KIND_POST_HOOK_STOPPED,
+                  TOOL_SPAN_STATUS_POST_HOOK_STOPPED,
+                );
+                return;
+              }
+            }
+
+            // Collect filesystem paths the tool just touched. Different tools
+            // use different parameter names: `file_path` (read/edit/write),
+            // `path` (ls, glob), `filePath` (grep, lsp), and `paths`
+            // (ripGrep array form). Conditional rules and skill activation
+            // both key off the same path set, so inspect the union — and
+            // gate the inspection on a tool-name allowlist (see
+            // FS_PATH_TOOL_NAMES) so MCP / non-FS tools that reuse those
+            // parameter names with different semantics never enter the
+            // activation pipeline.
+            const inputPaths = extractToolFilePaths(toolName, toolInput);
+            const resultPaths =
+              isFilesystemPathTool(toolName) &&
+              Array.isArray(toolResult.resultFilePaths)
+                ? toolResult.resultFilePaths
+                : [];
+            const candidatePaths = Array.from(
+              new Set([
+                ...inputPaths.map((p) => unescapePath(p)),
+                ...resultPaths,
+              ]),
+            );
+
+            if (candidatePaths.length > 0) {
+              const rulesRegistry = this.config.getConditionalRulesRegistry();
+              const skillManager = this.config.getSkillManager();
+
+              // Collect every reminder block produced by this tool call, then
+              // emit them as a single `<system-reminder>` envelope at the end.
+              // The previous version emitted one envelope per matching rule
+              // PLUS one for skill activation — a multi-path tool could
+              // produce N+1 envelopes, diluting the model's attention. One
+              // wrapper / one append also lets us share the breakout-prevention
+              // sanitization step (closing-tag scrub) in one place.
+              const reminderBlocks: string[] = [];
+
+              for (const candidatePath of candidatePaths) {
+                // Inject conditional rules at most once per session per rule
+                // file. The registry tracks dedup internally.
+                const rulesCtx = rulesRegistry?.matchAndConsume(candidatePath);
+                if (rulesCtx) reminderBlocks.push(rulesCtx);
+              }
+
+              // Skill activation runs in a single batch over all candidate
+              // paths so `notifyChangeListeners` (and therefore
+              // `SkillTool.refreshSkills` / `geminiClient.setTools()`) fires
+              // exactly once for this tool call, regardless of how many
+              // paths produced new activations. The await is load-bearing:
+              // matchAndActivateByPaths only resolves after the listener
+              // chain settles, so the activation reminder we append below
+              // never lands in a turn where <available_skills> is still
+              // stale.
+              const activatedSkills =
+                await skillManager?.matchAndActivateByPaths(candidatePaths);
+              if (activatedSkills && activatedSkills.length > 0) {
+                // Subagents share the parent's SkillManager but may have a
+                // restricted toolsList that excludes SkillTool entirely.
+                // Telling such a context "skill X is now available via the
+                // Skill tool" is misleading — the subagent can't invoke it
+                // and would waste a turn trying. Gate the reminder on
+                // whether the active tool registry actually exposes
+                // SkillTool to the model.
+                const hasSkillTool = !!this.toolRegistry.getTool(
+                  ToolNames.SKILL,
+                );
+                if (hasSkillTool) {
+                  // Escape skill names defensively: validateSkillName already
+                  // excludes `<>&` for parsed file-based skills, but
+                  // extension skills (extension.skills array) bypass that
+                  // validator. A crafted extension name would otherwise
+                  // close the <system-reminder> envelope early.
+                  const names = activatedSkills.map(escapeXml).join(', ');
+                  reminderBlocks.push(
+                    `The following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.`,
+                  );
+                }
+              }
+
+              if (reminderBlocks.length > 0) {
+                // Final closing-tag scrub on the joined body — defense in
+                // depth against rules whose markdown body contains a
+                // literal `</system-reminder>` sequence (which would
+                // otherwise close our envelope mid-content). Full XML
+                // escaping would mangle code blocks in rule bodies; the
+                // targeted scrub is the minimum needed to keep the
+                // envelope intact.
+                const body = reminderBlocks
+                  .join('\n\n')
+                  .replace(/<\/system-reminder>/gi, '<\\/system-reminder>');
+                content = appendAdditionalContext(
+                  content,
+                  `<system-reminder>\n${body}\n</system-reminder>`,
+                );
+              }
+            }
+
+            const response = convertToFunctionResponse(
+              toolName,
+              callId,
               content,
-              `<system-reminder>\n${rulesCtx}\n</system-reminder>`,
+            );
+            const successResponse: ToolCallResponseInfo = {
+              callId,
+              responseParts: response,
+              resultDisplay: toolResult.returnDisplay,
+              error: undefined,
+              errorType: undefined,
+              contentLength,
+              // Propagate modelOverride from skill tools. Use `in` to distinguish
+              // "skill returned undefined (inherit)" from "non-skill tool (no field)".
+              ...('modelOverride' in toolResult
+                ? { modelOverride: toolResult.modelOverride }
+                : {}),
+            };
+            this.setStatusInternal(callId, 'success', successResponse);
+          } else {
+            // It is a failure
+            // PostToolUseFailure Hook
+            let errorMessage = toolResult.error.message;
+            if (hooksEnabled && messageBus) {
+              const failureHookResult = await safelyFirePostToolUseFailureHook(
+                messageBus,
+                toolUseId,
+                toolName,
+                toolInput,
+                toolResult.error.message,
+                false,
+                this.config.getApprovalMode(),
+              );
+
+              // Append additional context from hook if provided
+              if (failureHookResult.additionalContext) {
+                errorMessage += `\n\n${failureHookResult.additionalContext}`;
+              }
+            }
+
+            const error = new Error(errorMessage);
+            const errorResponse = createErrorResponse(
+              scheduledCall.request,
+              error,
+              toolResult.error.type,
+            );
+            this.setStatusInternal(callId, 'error', errorResponse);
+            setToolSpanFailure(
+              span,
+              TOOL_FAILURE_KIND_TOOL_ERROR,
+              TOOL_SPAN_STATUS_TOOL_ERROR,
+            );
+          }
+        } catch (executionError: unknown) {
+          const errorMessage =
+            executionError instanceof Error
+              ? executionError.message
+              : String(executionError);
+
+          if (signal.aborted) {
+            // PostToolUseFailure Hook (user interrupt)
+            if (hooksEnabled && messageBus) {
+              const failureHookResult = await safelyFirePostToolUseFailureHook(
+                messageBus,
+                toolUseId,
+                toolName,
+                toolInput,
+                'User cancelled tool execution.',
+                true,
+                this.config.getApprovalMode(),
+              );
+
+              // Append additional context from hook if provided
+              let cancelMessage = 'User cancelled tool execution.';
+              if (failureHookResult.additionalContext) {
+                cancelMessage += `\n\n${failureHookResult.additionalContext}`;
+              }
+              this.setStatusInternal(callId, 'cancelled', cancelMessage);
+            } else {
+              this.setStatusInternal(
+                callId,
+                'cancelled',
+                'User cancelled tool execution.',
+              );
+            }
+            // Load-bearing: prevents withSpan from auto-setting OK on normal return
+            setToolSpanCancelled(span);
+            return;
+          } else {
+            // PostToolUseFailure Hook
+            let exceptionErrorMessage = errorMessage;
+            if (hooksEnabled && messageBus) {
+              const failureHookResult = await safelyFirePostToolUseFailureHook(
+                messageBus,
+                toolUseId,
+                toolName,
+                toolInput,
+                errorMessage,
+                false,
+                this.config.getApprovalMode(),
+              );
+
+              // Append additional context from hook if provided
+              if (failureHookResult.additionalContext) {
+                exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
+              }
+            }
+            this.setStatusInternal(
+              callId,
+              'error',
+              createErrorResponse(
+                scheduledCall.request,
+                executionError instanceof Error
+                  ? new Error(exceptionErrorMessage)
+                  : new Error(String(executionError)),
+                ToolErrorType.UNHANDLED_EXCEPTION,
+              ),
+            );
+            setToolSpanFailure(
+              span,
+              TOOL_FAILURE_KIND_TOOL_EXCEPTION,
+              TOOL_SPAN_STATUS_TOOL_EXCEPTION,
             );
           }
         }
-
-        const response = convertToFunctionResponse(toolName, callId, content);
-        const successResponse: ToolCallResponseInfo = {
-          callId,
-          responseParts: response,
-          resultDisplay: toolResult.returnDisplay,
-          error: undefined,
-          errorType: undefined,
-          contentLength,
-          // Propagate modelOverride from skill tools. Use `in` to distinguish
-          // "skill returned undefined (inherit)" from "non-skill tool (no field)".
-          ...('modelOverride' in toolResult
-            ? { modelOverride: toolResult.modelOverride }
-            : {}),
-        };
-        this.setStatusInternal(callId, 'success', successResponse);
-      } else {
-        // It is a failure
-        // PostToolUseFailure Hook
-        let errorMessage = toolResult.error.message;
-        if (hooksEnabled && messageBus) {
-          const failureHookResult = await firePostToolUseFailureHook(
-            messageBus,
-            toolUseId,
-            toolName,
-            toolInput,
-            toolResult.error.message,
-            false,
-            this.config.getApprovalMode(),
-          );
-
-          // Append additional context from hook if provided
-          if (failureHookResult.additionalContext) {
-            errorMessage += `\n\n${failureHookResult.additionalContext}`;
-          }
-        }
-
-        const error = new Error(errorMessage);
-        const errorResponse = createErrorResponse(
-          scheduledCall.request,
-          error,
-          toolResult.error.type,
-        );
-        this.setStatusInternal(callId, 'error', errorResponse);
-      }
-    } catch (executionError: unknown) {
-      const errorMessage =
-        executionError instanceof Error
-          ? executionError.message
-          : String(executionError);
-
-      if (signal.aborted) {
-        // PostToolUseFailure Hook (user interrupt)
-        if (hooksEnabled && messageBus) {
-          const failureHookResult = await firePostToolUseFailureHook(
-            messageBus,
-            toolUseId,
-            toolName,
-            toolInput,
-            'User cancelled tool execution.',
-            true,
-            this.config.getApprovalMode(),
-          );
-
-          // Append additional context from hook if provided
-          let cancelMessage = 'User cancelled tool execution.';
-          if (failureHookResult.additionalContext) {
-            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
-          }
-          this.setStatusInternal(callId, 'cancelled', cancelMessage);
-        } else {
-          this.setStatusInternal(
-            callId,
-            'cancelled',
-            'User cancelled tool execution.',
-          );
-        }
-        return;
-      } else {
-        // PostToolUseFailure Hook
-        let exceptionErrorMessage = errorMessage;
-        if (hooksEnabled && messageBus) {
-          const failureHookResult = await firePostToolUseFailureHook(
-            messageBus,
-            toolUseId,
-            toolName,
-            toolInput,
-            errorMessage,
-            false,
-            this.config.getApprovalMode(),
-          );
-
-          // Append additional context from hook if provided
-          if (failureHookResult.additionalContext) {
-            exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
-          }
-        }
-        this.setStatusInternal(
-          callId,
-          'error',
-          createErrorResponse(
-            scheduledCall.request,
-            executionError instanceof Error
-              ? new Error(exceptionErrorMessage)
-              : new Error(String(executionError)),
-            ToolErrorType.UNHANDLED_EXCEPTION,
-          ),
-        );
-      }
-    }
+      },
+    );
   }
 
   private async checkAndNotifyCompletion(): Promise<void> {

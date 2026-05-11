@@ -19,12 +19,9 @@ import {
 } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import * as os from 'node:os';
 
-import {
-  QWEN_CONFIG_DIR,
-  DEFAULT_CONTEXT_FILENAME,
-} from '@qwen-code/qwen-code-core/src/memory/const.js';
+import { DEFAULT_CONTEXT_FILENAME } from '@qwen-code/qwen-code-core/src/memory/const.js';
+import { Storage } from '@qwen-code/qwen-code-core/src/config/storage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -33,8 +30,7 @@ let runDir = ''; // Make runDir accessible in teardown
 let sdkE2eRunDir = ''; // SDK E2E test run directory
 
 const memoryFilePath = join(
-  os.homedir(),
-  QWEN_CONFIG_DIR,
+  Storage.getGlobalQwenDir(),
   DEFAULT_CONTEXT_FILENAME,
 );
 let originalMemoryContent: string | null = null;

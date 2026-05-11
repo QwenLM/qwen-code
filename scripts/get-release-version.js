@@ -8,23 +8,13 @@
 
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
 import semver from 'semver';
-
-function readJson(filePath) {
-  return JSON.parse(readFileSync(filePath, 'utf-8'));
-}
-
-function getArgs() {
-  const args = {};
-  process.argv.slice(2).forEach((arg) => {
-    if (arg.startsWith('--')) {
-      const [key, value] = arg.substring(2).split('=');
-      args[key] = value === undefined ? true : value;
-    }
-  });
-  return args;
-}
+import {
+  getArgs,
+  isExpectedMissingGitHubRelease,
+  readJson,
+  validateVersion,
+} from './lib/release-helpers.js';
 
 function getVersionFromNPM(distTag) {
   const command = `npm view @qwen-code/qwen-code version --tag=${distTag}`;
@@ -129,15 +119,6 @@ function detectRollbackAndGetBaseline(npmDistTag) {
 }
 
 function doesVersionExist(version) {
-  const isExpectedMissingGitHubRelease = (error) => {
-    const stderr = error.stderr?.toString() ?? '';
-    const stdout = error.stdout?.toString() ?? '';
-    const message = `${error.message}\n${stderr}\n${stdout}`;
-    return (
-      message.includes('release not found') || message.includes('Not Found')
-    );
-  };
-
   // Check NPM
   try {
     const command = `npm view @qwen-code/qwen-code@${version} version 2>/dev/null`;
@@ -242,19 +223,6 @@ function getNightlyVersion() {
     releaseVersion,
     npmTag: 'nightly',
   };
-}
-
-function validateVersion(version, format, name) {
-  const versionRegex = {
-    'X.Y.Z': /^\d+\.\d+\.\d+$/,
-    'X.Y.Z-preview.N': /^\d+\.\d+\.\d+-preview\.\d+$/,
-  };
-
-  if (!versionRegex[format] || !versionRegex[format].test(version)) {
-    throw new Error(
-      `Invalid ${name}: ${version}. Must be in ${format} format.`,
-    );
-  }
 }
 
 function getStableVersion(args) {

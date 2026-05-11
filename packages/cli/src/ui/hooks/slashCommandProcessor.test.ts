@@ -12,6 +12,7 @@ import {
 } from './slashCommandProcessor.js';
 import type {
   CommandContext,
+  ConfirmActionReturn,
   ConfirmShellCommandsActionReturn,
   SlashCommand,
 } from '../commands/types.js';
@@ -80,6 +81,15 @@ vi.mock('../../services/McpPromptLoader.js', () => ({
   })),
 }));
 
+const { mockLocalizeCommands } = vi.hoisted(() => ({
+  mockLocalizeCommands: vi.fn(),
+}));
+vi.mock('../../services/DynamicCommandLocalizationService.js', () => ({
+  dynamicCommandLocalizationService: {
+    localizeCommands: mockLocalizeCommands,
+  },
+}));
+
 vi.mock('../contexts/SessionContext.js', () => ({
   useSessionStats: vi.fn(() => ({ stats: {} })),
 }));
@@ -123,7 +133,7 @@ describe('useSlashCommandProcessor', () => {
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
     recordSlashCommand: vi.fn(),
   });
-  const mockSettings = {} as LoadedSettings;
+  const mockSettings = { merged: {} } as LoadedSettings;
 
   const createMockActions = (): SlashCommandProcessorActions => ({
     openAuthDialog: mockOpenAuthDialog,
@@ -137,8 +147,10 @@ describe('useSlashCommandProcessor', () => {
     openTrustDialog: vi.fn(),
     openPermissionsDialog: vi.fn(),
     openApprovalModeDialog: vi.fn(),
+    openHelpDialog: vi.fn(),
     openResumeDialog: vi.fn(),
     handleResume: vi.fn(),
+    handleBranch: vi.fn().mockResolvedValue(undefined),
     openDeleteDialog: vi.fn(),
     quit: mockSetQuittingMessages,
     setDebugMessage: vi.fn(),
@@ -159,6 +171,12 @@ describe('useSlashCommandProcessor', () => {
     mockBuiltinLoadCommands.mockResolvedValue([]);
     mockFileLoadCommands.mockResolvedValue([]);
     mockMcpLoadCommands.mockResolvedValue([]);
+    mockLocalizeCommands.mockImplementation(
+      async (
+        _config: unknown,
+        commands: readonly SlashCommand[],
+      ): Promise<readonly SlashCommand[]> => commands,
+    );
     mockOpenModelDialog.mockClear();
     mockOpenMemoryDialog.mockClear();
   });
@@ -168,6 +186,7 @@ describe('useSlashCommandProcessor', () => {
     fileCommands: SlashCommand[] = [],
     mcpCommands: SlashCommand[] = [],
     setIsProcessing = vi.fn(),
+    settings: LoadedSettings = mockSettings,
   ) => {
     mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
@@ -176,7 +195,7 @@ describe('useSlashCommandProcessor', () => {
     const { result } = renderHook(() =>
       useSlashCommandProcessor(
         mockConfig,
-        mockSettings,
+        settings,
         mockAddItem,
         mockClearItems,
         mockLoadHistory,
@@ -234,6 +253,50 @@ describe('useSlashCommandProcessor', () => {
         // @ts-expect-error - We are intentionally testing a violation of the readonly type.
         commands.push(createTestCommand({ name: 'rogue' }));
       }).toThrow(TypeError);
+    });
+
+    it('localizes dynamically loaded commands when the setting is enabled', async () => {
+      const dynamicCommand = createTestCommand(
+        {
+          name: 'review',
+          description: 'Review code changes',
+          modelDescription: 'Review code changes',
+          localizeDescription: true,
+          supportedModes: ['interactive'],
+        },
+        CommandKind.FILE,
+      );
+      mockLocalizeCommands.mockResolvedValueOnce([
+        {
+          ...dynamicCommand,
+          description: '审查代码变更',
+        },
+      ]);
+
+      const result = setupProcessorHook([], [dynamicCommand], [], vi.fn(), {
+        merged: {
+          general: {
+            dynamicCommandTranslation: true,
+          },
+        },
+      } as LoadedSettings);
+
+      await waitFor(() => {
+        expect(result.current.slashCommands[0]?.description).toBe(
+          '审查代码变更',
+        );
+      });
+      expect(mockLocalizeCommands).toHaveBeenCalledWith(
+        mockConfig,
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: 'review',
+            modelDescription: 'Review code changes',
+          }),
+        ]),
+        expect.any(AbortSignal),
+        true,
+      );
     });
 
     it('should override built-in commands with file-based commands of the same name', async () => {
@@ -516,7 +579,6 @@ describe('useSlashCommandProcessor', () => {
     it('should handle "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-        stripThoughtsFromHistory: vi.fn(),
       } as unknown as GeminiClient;
       vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
 
@@ -545,7 +607,6 @@ describe('useSlashCommandProcessor', () => {
     it('should preserve thoughts when handling "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-        stripThoughtsFromHistory: vi.fn(),
       } as unknown as GeminiClient;
       vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
 
@@ -572,7 +633,7 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockClient.setHistory).toHaveBeenCalledTimes(1);
-      expect(mockClient.stripThoughtsFromHistory).not.toHaveBeenCalled();
+      expect(mockClient.setHistory).toHaveBeenCalledWith(historyWithThoughts);
     });
 
     it('should handle a "quit" action', async () => {
@@ -624,6 +685,14 @@ describe('useSlashCommandProcessor', () => {
         expect.any(Number),
       );
       expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      expect(recorder.recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: '/filecmd',
+        sentToModel: true,
+      });
     });
 
     it('should handle "submit_prompt" action returned from a mcp-based command', async () => {
@@ -825,6 +894,68 @@ describe('useSlashCommandProcessor', () => {
       );
       expect(userInvocationCalls).toHaveLength(1);
       expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      expect(recorder.recordSlashCommand).toHaveBeenCalledTimes(2);
+      expect(recorder.recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: '/shellcmd',
+        sentToModel: true,
+      });
+    });
+
+    it('should not duplicate user history when a confirmed action submits a prompt', async () => {
+      const action = vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: 'confirm_action',
+          prompt: 'Continue?',
+          originalInvocation: { raw: '/actioncmd' },
+        } as ConfirmActionReturn)
+        .mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'run confirmed action' }],
+        });
+      const command = createTestCommand({
+        name: 'actioncmd',
+        action,
+      });
+
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      act(() => {
+        result.current.handleSlashCommand('/actioncmd');
+      });
+      await waitFor(() => {
+        expect(result.current.confirmationRequest).not.toBeNull();
+      });
+
+      await act(async () => {
+        result.current.confirmationRequest?.onConfirm(true);
+      });
+
+      await waitFor(() => {
+        expect(action).toHaveBeenCalledTimes(2);
+      });
+      const userInvocationCalls = mockAddItem.mock.calls.filter(
+        ([item]) =>
+          item.type === MessageType.USER && item.text === '/actioncmd',
+      );
+      expect(userInvocationCalls).toHaveLength(1);
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      expect(recorder.recordSlashCommand).toHaveBeenCalledTimes(2);
+      expect(recorder.recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: '/actioncmd',
+        sentToModel: true,
+      });
     });
 
     it('should re-run command and update session allowlist on "Proceed Always"', async () => {
@@ -1063,6 +1194,193 @@ describe('useSlashCommandProcessor', () => {
 
       expect(abortSpy).toHaveBeenCalledTimes(1);
     });
+
+    it('should reload commands when SkillManager fires a change event', async () => {
+      const removeListener = vi.fn();
+      const addChangeListener = vi.fn().mockReturnValue(removeListener);
+      const fakeSkillManager = { addChangeListener };
+      const skillManagerSpy = vi
+        .spyOn(mockConfig, 'getSkillManager')
+        .mockReturnValue(
+          fakeSkillManager as unknown as ReturnType<
+            typeof mockConfig.getSkillManager
+          >,
+        );
+
+      try {
+        mockBuiltinLoadCommands.mockResolvedValue([]);
+        mockFileLoadCommands.mockResolvedValue([]);
+        mockMcpLoadCommands.mockResolvedValue([]);
+
+        const { unmount } = renderHook(() =>
+          useSlashCommandProcessor(
+            mockConfig,
+            mockSettings,
+            mockAddItem,
+            mockClearItems,
+            mockLoadHistory,
+            vi.fn(),
+            vi.fn(),
+            false,
+            vi.fn(),
+            { current: true },
+            vi.fn(),
+            createMockActions(),
+            new Map(),
+            true,
+            null,
+          ),
+        );
+
+        await waitFor(() => expect(addChangeListener).toHaveBeenCalledTimes(1));
+        // Initial CommandService.create() pass: BuiltinCommandLoader is
+        // constructed once. Firing the SkillManager listener bumps the
+        // reloadTrigger and the loader effect re-runs, constructing the
+        // builtin loader a second time — that is the observable signal
+        // that a reload happened.
+        await waitFor(() =>
+          expect(BuiltinCommandLoader).toHaveBeenCalledTimes(1),
+        );
+
+        const listener = addChangeListener.mock.calls[0][0] as () => void;
+        await act(async () => {
+          listener();
+        });
+
+        await waitFor(() =>
+          expect(BuiltinCommandLoader).toHaveBeenCalledTimes(2),
+        );
+
+        unmount();
+        expect(removeListener).toHaveBeenCalledTimes(1);
+      } finally {
+        skillManagerSpy.mockRestore();
+      }
+    });
+
+    it('should register SkillManager listener after config initialization', async () => {
+      const removeListener = vi.fn();
+      const addChangeListener = vi.fn().mockReturnValue(removeListener);
+      const fakeSkillManager = { addChangeListener };
+      let initializedForConfig = false;
+      const skillManagerSpy = vi
+        .spyOn(mockConfig, 'getSkillManager')
+        .mockImplementation(() =>
+          initializedForConfig
+            ? (fakeSkillManager as unknown as ReturnType<
+                typeof mockConfig.getSkillManager
+              >)
+            : null,
+        );
+
+      try {
+        mockBuiltinLoadCommands.mockResolvedValue([]);
+        mockFileLoadCommands.mockResolvedValue([]);
+        mockMcpLoadCommands.mockResolvedValue([]);
+
+        const { rerender, unmount } = renderHook(
+          ({ isConfigInitialized }) => {
+            initializedForConfig = isConfigInitialized;
+            return useSlashCommandProcessor(
+              mockConfig,
+              mockSettings,
+              mockAddItem,
+              mockClearItems,
+              mockLoadHistory,
+              vi.fn(),
+              vi.fn(),
+              false,
+              vi.fn(),
+              { current: true },
+              vi.fn(),
+              createMockActions(),
+              new Map(),
+              isConfigInitialized,
+              null,
+            );
+          },
+          { initialProps: { isConfigInitialized: false } },
+        );
+
+        expect(addChangeListener).not.toHaveBeenCalled();
+
+        rerender({ isConfigInitialized: true });
+
+        await waitFor(() => expect(addChangeListener).toHaveBeenCalledTimes(1));
+
+        unmount();
+        expect(removeListener).toHaveBeenCalledTimes(1);
+      } finally {
+        skillManagerSpy.mockRestore();
+      }
+    });
+
+    it('should not publish model-invocable commands from an aborted reload', async () => {
+      const staleCommand = createTestCommand({
+        name: 'stale',
+        modelInvocable: true,
+      });
+      const freshCommand = createTestCommand({
+        name: 'fresh',
+        modelInvocable: true,
+      });
+      let resolveStaleLoad!: (commands: SlashCommand[]) => void;
+
+      mockBuiltinLoadCommands
+        .mockImplementationOnce(
+          () =>
+            new Promise<SlashCommand[]>((resolve) => {
+              resolveStaleLoad = resolve;
+            }),
+        )
+        .mockResolvedValueOnce([freshCommand]);
+      mockFileLoadCommands.mockResolvedValue([]);
+      mockMcpLoadCommands.mockResolvedValue([]);
+
+      const { rerender } = renderHook(
+        ({ isConfigInitialized }) =>
+          useSlashCommandProcessor(
+            mockConfig,
+            mockSettings,
+            mockAddItem,
+            mockClearItems,
+            mockLoadHistory,
+            vi.fn(),
+            vi.fn(),
+            false,
+            vi.fn(),
+            { current: true },
+            vi.fn(),
+            createMockActions(),
+            new Map(),
+            isConfigInitialized,
+            null,
+          ),
+        { initialProps: { isConfigInitialized: false } },
+      );
+
+      rerender({ isConfigInitialized: true });
+
+      await waitFor(() =>
+        expect(
+          mockConfig
+            .getModelInvocableCommandsProvider?.()?.()
+            .map((c) => c.name),
+        ).toEqual(['fresh']),
+      );
+
+      await act(async () => {
+        resolveStaleLoad([staleCommand]);
+      });
+
+      await waitFor(() =>
+        expect(
+          mockConfig
+            .getModelInvocableCommandsProvider?.()?.()
+            .map((c) => c.name),
+        ).toEqual(['fresh']),
+      );
+    });
   });
 
   describe('Slash Command Logging', () => {
@@ -1241,6 +1559,55 @@ describe('useSlashCommandProcessor', () => {
       expect(
         result.current.commandContext.ui.btwAbortControllerRef.current,
       ).toBeNull();
+    });
+  });
+
+  describe('SLASH_COMMANDS_SKIP_RECORDING', () => {
+    // Why these live in the skip set: the fork itself is the side effect
+    // (new JSONL file with full parent history), so also writing a
+    // `/branch <name>` slash-command record into the parent session would
+    // bleed into the fork's tail as a trailing user input — user-visible
+    // noise with no semantic value. Same rationale for /new, /resume,
+    // /delete, /clear: session-level commands whose outcome is the new
+    // session state, not a conversation turn.
+    it('does not record /branch via the chat recorder', async () => {
+      const branchCmd = createTestCommand({
+        name: 'branch',
+        action: vi.fn().mockResolvedValue({ type: 'dialog', dialog: 'branch' }),
+      });
+      const result = setupProcessorHook([branchCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      recorder.recordSlashCommand.mockClear();
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/branch my-branch');
+      });
+
+      expect(recorder.recordSlashCommand).not.toHaveBeenCalled();
+    });
+
+    it('still records unrelated commands via the chat recorder (control)', async () => {
+      const testCmd = createTestCommand({
+        name: 'regular',
+        action: vi.fn().mockResolvedValue(undefined),
+      });
+      const result = setupProcessorHook([testCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      recorder.recordSlashCommand.mockClear();
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/regular');
+      });
+
+      expect(recorder.recordSlashCommand).toHaveBeenCalled();
     });
   });
 });

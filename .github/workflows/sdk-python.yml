@@ -7,28 +7,64 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-python/**'
-      - 'docs/developers/sdk-python.md'
-      - 'docs/developers/_meta.ts'
-      - 'README.md'
-      - 'package.json'
       - '.github/workflows/sdk-python.yml'
-      - '.github/workflows/release-sdk-python.yml'
   push:
     branches:
       - 'main'
       - 'release/**'
     paths:
       - 'packages/sdk-python/**'
-      - 'docs/developers/sdk-python.md'
-      - 'docs/developers/_meta.ts'
-      - 'README.md'
-      - 'package.json'
       - '.github/workflows/sdk-python.yml'
-      - '.github/workflows/release-sdk-python.yml'
 
 jobs:
+  classify_pr:
+    name: 'Classify PR'
+    if: "${{ github.event_name == 'pull_request' }}"
+    runs-on: 'ubuntu-latest'
+    continue-on-error: true
+    outputs:
+      skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
+    steps:
+      - name: 'Detect release version-sync PR'
+        id: 'release_sync'
+        env:
+          # Repository variables can override these defaults if release naming
+          # or the CI bot account changes.
+          HEAD_REPO: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || '' }}"
+          HEAD_REF: "${{ github.event_name == 'pull_request' && github.head_ref || '' }}"
+          PR_TITLE: "${{ github.event_name == 'pull_request' && github.event.pull_request.title || '' }}"
+          RELEASE_SYNC_HEAD_PREFIX: "${{ vars.RELEASE_SYNC_HEAD_PREFIX || 'release/' }}"
+          RELEASE_SYNC_TITLE_PREFIX: "${{ vars.RELEASE_SYNC_TITLE_PREFIX || 'chore(release):' }}"
+          RELEASE_SYNC_ACTOR: "${{ vars.RELEASE_SYNC_ACTOR || 'qwen-code-ci-bot' }}"
+        run: |-
+          skip_ci=false
+          repo_match=false
+          actor_match=false
+          head_match=false
+          title_match=false
+          [[ "${HEAD_REPO}" == "${GITHUB_REPOSITORY}" ]] && repo_match=true
+          [[ "${GITHUB_ACTOR}" == "${RELEASE_SYNC_ACTOR}" ]] && actor_match=true
+          [[ "${HEAD_REF}" == "${RELEASE_SYNC_HEAD_PREFIX}"* ]] && head_match=true
+          [[ "${PR_TITLE}" == "${RELEASE_SYNC_TITLE_PREFIX}"* ]] && title_match=true
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" &&
+                "${repo_match}" == "true" &&
+                "${actor_match}" == "true" &&
+                "${head_match}" == "true" &&
+                "${title_match}" == "true" ]]; then
+            skip_ci=true
+            echo "Release sync PR detected: actor=${GITHUB_ACTOR}, head_ref=${HEAD_REF}, title=${PR_TITLE}"
+          else
+            echo "Not a release sync PR: event=${GITHUB_EVENT_NAME}, actor=${GITHUB_ACTOR}, expected_actor=${RELEASE_SYNC_ACTOR}, repo_match=${repo_match}, head_match=${head_match}, title_match=${title_match}"
+          fi
+
+          echo "skip_ci=${skip_ci}" >> "${GITHUB_OUTPUT}"
+          echo "skip_ci=${skip_ci}"
+
   sdk-python:
     name: 'SDK Python (${{ matrix.python-version }})'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
     runs-on: 'ubuntu-latest'
     strategy:
       fail-fast: false

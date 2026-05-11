@@ -532,6 +532,217 @@ describe('modelConfigUtils', () => {
       expect(result.warnings).toEqual(['Warning 1', 'Warning 2']);
     });
 
+    it('should warn when top-level generationConfig fields are ignored for a provider model', () => {
+      const argv = {};
+      const modelProvider: ProviderModelConfig = {
+        id: 'qwen3.6-27b',
+        name: 'qwen3.6-27b',
+        baseUrl: 'http://localhost:8080/v1',
+        envKey: 'IK_LLAMA_API_KEY',
+      };
+      const settings = makeMockSettings({
+        model: {
+          name: 'qwen3.6-27b',
+          generationConfig: {
+            contextWindowSize: 192000,
+            extra_body: {
+              enable_thinking: true,
+            },
+          } as Record<string, unknown>,
+        },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [modelProvider],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.6-27b',
+          apiKey: '',
+          baseUrl: 'http://localhost:8080/v1',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+      });
+
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain(
+        'model.generationConfig.contextWindowSize',
+      );
+      expect(result.warnings[0]).toContain('model.generationConfig.extra_body');
+      expect(result.warnings[0]).toContain(
+        'provider model "qwen3.6-27b" from modelProviders.openai',
+      );
+      expect(result.warnings[0]).toContain(
+        'modelProviders.openai[].generationConfig',
+      );
+    });
+
+    it('should not warn for top-level generationConfig on runtime models', () => {
+      const argv = {};
+      const settings = makeMockSettings({
+        model: {
+          name: 'runtime-model',
+          generationConfig: {
+            contextWindowSize: 192000,
+          } as Record<string, unknown>,
+        },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [{ id: 'other-model', name: 'Other Model' }],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'runtime-model',
+          apiKey: '',
+          baseUrl: '',
+          contextWindowSize: 192000,
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+      });
+
+      expect(result.warnings).toEqual([]);
+    });
+
+    it('should not warn for generationConfig fields defined by the provider model', () => {
+      const argv = {};
+      const modelProvider: ProviderModelConfig = {
+        id: 'provider-model',
+        name: 'Provider Model',
+        generationConfig: {
+          contextWindowSize: 192000,
+        },
+      };
+      const settings = makeMockSettings({
+        model: {
+          name: 'provider-model',
+          generationConfig: {
+            contextWindowSize: 128000,
+          } as Record<string, unknown>,
+        },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [modelProvider],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'provider-model',
+          apiKey: '',
+          baseUrl: '',
+          contextWindowSize: 192000,
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+      });
+
+      expect(result.warnings).toEqual([]);
+    });
+
+    it('should not warn for unknown top-level generationConfig fields', () => {
+      const argv = {};
+      const modelProvider: ProviderModelConfig = {
+        id: 'provider-model',
+        name: 'Provider Model',
+      };
+      const settings = makeMockSettings({
+        model: {
+          name: 'provider-model',
+          generationConfig: {
+            contextWindwSize: 128000,
+          } as Record<string, unknown>,
+        },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [modelProvider],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'provider-model',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+      });
+
+      expect(result.warnings).toEqual([]);
+    });
+
+    it('should append ignored generationConfig warnings to resolver warnings', () => {
+      const argv = {};
+      const modelProvider: ProviderModelConfig = {
+        id: 'provider-model',
+        name: 'Provider Model',
+      };
+      const settings = makeMockSettings({
+        model: {
+          name: 'provider-model',
+          generationConfig: {
+            modalities: { image: false },
+          } as Record<string, unknown>,
+        },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [modelProvider],
+        },
+      });
+      const selectedAuthType = AuthType.USE_OPENAI;
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'provider-model',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: ['Resolver warning'],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType,
+      });
+
+      expect(result.warnings).toHaveLength(2);
+      expect(result.warnings[0]).toBe('Resolver warning');
+      expect(result.warnings[1]).toContain(
+        'model.generationConfig.modalities is ignored',
+      );
+      expect(result.warnings[1]).toContain('Move this field');
+    });
+
     it('should use custom env when provided', () => {
       const argv = {};
       const settings = makeMockSettings({

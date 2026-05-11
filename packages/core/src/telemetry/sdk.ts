@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DiagConsoleLogger, DiagLogLevel, diag } from '@opentelemetry/api';
+import { DiagLogLevel, diag } from '@opentelemetry/api';
+import type { DiagLogger } from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
@@ -29,9 +30,24 @@ import {
 } from './file-exporters.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
+import { createSessionRootContext } from './tracer.js';
+import { setSessionContext } from './session-context.js';
 
-// For troubleshooting, set the log level to DiagLogLevel.DEBUG
-diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.WARN);
+function createTelemetryDiagLogger(): DiagLogger {
+  const debugLogger = createDebugLogger('OTEL');
+  return {
+    error: (message, ...args) => debugLogger.error(message, ...args),
+    warn: (message, ...args) => debugLogger.warn(message, ...args),
+    info: (message, ...args) => debugLogger.info(message, ...args),
+    debug: (message, ...args) => debugLogger.debug(message, ...args),
+    verbose: (message, ...args) => debugLogger.debug(message, ...args),
+  };
+}
+
+// For troubleshooting, set the log level to DiagLogLevel.DEBUG.
+// OTel SDK diagnostics must not write to console because console output can be
+// surfaced in user-visible UI. Keep diagnostics in the debug log instead.
+diag.setLogger(createTelemetryDiagLogger(), DiagLogLevel.WARN);
 
 /**
  * Standard OTLP HTTP signal-specific paths per the OpenTelemetry specification.
@@ -66,6 +82,11 @@ export function resolveHttpOtlpUrl(
   url.pathname = normalizedPath + '/' + signalPath;
   return url.href;
 }
+
+// Ceiling for sdk.shutdown() when called directly (e.g. non-interactive mode).
+// In interactive mode, runExitCleanup() imposes its own tighter per-function
+// (2s) and overall (5s) timeouts, so this value is effectively unreachable there.
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 let sdk: NodeSDK | undefined;
 let telemetryInitialized = false;
@@ -133,7 +154,8 @@ export function initializeTelemetry(config: Config): void {
   const debugLogger = createDebugLogger('OTEL');
   const resource = resourceFromAttributes({
     [SemanticResourceAttributes.SERVICE_NAME]: SERVICE_NAME,
-    [SemanticResourceAttributes.SERVICE_VERSION]: process.version,
+    [SemanticResourceAttributes.SERVICE_VERSION]:
+      config.getCliVersion() || 'unknown',
     'session.id': config.getSessionId(),
   });
 
@@ -197,6 +219,10 @@ export function initializeTelemetry(config: Config): void {
         // bridge owns its own forceFlush/shutdown lifecycle.
         logToSpanProcessor = new LogToSpanProcessor(
           new OTLPTraceExporterHttp({ url: tracesUrl }),
+          {
+            includeSensitiveSpanAttributes:
+              config.getTelemetryIncludeSensitiveSpanAttributes(),
+          },
         );
       }
       if (metricsUrl) {
@@ -263,9 +289,24 @@ export function initializeTelemetry(config: Config): void {
     sdk.start();
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
+    setSessionContext(createSessionRootContext(config.getSessionId()));
     initializeMetrics(config);
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
+  }
+}
+
+/**
+ * Refresh the session root context with a new session ID.
+ * Must be called whenever the session changes (e.g. /clear, /resume)
+ * so that new spans inherit the correct traceId.
+ */
+export function refreshSessionContext(sessionId: string): void {
+  if (!telemetryInitialized) return;
+  try {
+    setSessionContext(createSessionRootContext(sessionId));
+  } catch (error) {
+    createDebugLogger('OTEL').warn('Failed to refresh session context:', error);
   }
 }
 
@@ -279,15 +320,51 @@ export async function shutdownTelemetry(): Promise<void> {
   const currentSdk = sdk;
   const debugLogger = createDebugLogger('OTEL');
   telemetryShutdownPromise = (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     try {
-      await currentSdk.shutdown();
-      debugLogger.debug('OpenTelemetry SDK shut down successfully.');
+      // Wrap in Promise.resolve for safety — auto-mocked shutdown()
+      // may return undefined in test environments.
+      const sdkShutdown = Promise.resolve(currentSdk.shutdown());
+      // Prevent unhandled rejection if sdk.shutdown() rejects after the
+      // timeout wins the race — the process is exiting anyway.
+      // Only log when the timeout actually won; otherwise the catch block
+      // below handles the rejection with full diag.error logging.
+      sdkShutdown.catch((err) => {
+        if (timedOut) {
+          debugLogger.warn(
+            'SDK shutdown rejected after timeout:',
+            err instanceof Error ? err.message : err,
+          );
+        }
+        // If not timed out, the rejection will be caught by the
+        // try/catch below via the Promise.race await.
+      });
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve('timeout');
+        }, SHUTDOWN_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      const result = await Promise.race([sdkShutdown, timeout]);
+      clearTimeout(timer);
+      if (result === 'timeout') {
+        const msg = `Telemetry shutdown timed out after ${SHUTDOWN_TIMEOUT_MS}ms.`;
+        diag.warn(msg);
+        debugLogger.warn(msg);
+      } else {
+        debugLogger.debug('OpenTelemetry SDK shut down successfully.');
+      }
     } catch (error) {
+      clearTimeout(timer);
+      diag.error('Error shutting down SDK:', error);
       debugLogger.error('Error shutting down SDK:', error);
     } finally {
       telemetryInitialized = false;
       sdk = undefined;
       telemetryShutdownPromise = undefined;
+      setSessionContext(undefined);
     }
   })();
   return telemetryShutdownPromise;

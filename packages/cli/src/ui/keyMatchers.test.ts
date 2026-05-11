@@ -61,6 +61,9 @@ describe('keyMatchers', () => {
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
     [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
+    [Command.TOGGLE_RENDER_MODE]: (key: Key) => key.meta && key.name === 'm',
+    [Command.PROMOTE_SHELL_TO_BACKGROUND]: (key: Key) =>
+      key.ctrl && key.name === 'b',
     [Command.REVERSE_SEARCH]: (key: Key) => key.ctrl && key.name === 'r',
     [Command.SUBMIT_REVERSE_SEARCH]: (key: Key) =>
       key.name === 'return' && !key.ctrl,
@@ -285,6 +288,27 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_SHELL_INPUT_FOCUS,
       positive: [createKey('f', { ctrl: true })],
       negative: [createKey('f')],
+    },
+    {
+      command: Command.TOGGLE_RENDER_MODE,
+      positive: [createKey('m', { meta: true })],
+      negative: [
+        createKey('m'),
+        createKey('m', { ctrl: true }),
+        createKey('', { sequence: 'µ' }),
+        createKey('', { sequence: 'µ', paste: true }),
+      ],
+    },
+    {
+      command: Command.PROMOTE_SHELL_TO_BACKGROUND,
+      positive: [createKey('b', { ctrl: true })],
+      // No bare `b`, no Ctrl+other, no meta+b — Ctrl is required so
+      // typing `b` mid-prompt isn't accidentally swallowed.
+      negative: [
+        createKey('b'),
+        createKey('b', { meta: true }),
+        createKey('a', { ctrl: true }),
+      ],
     },
   ];
 

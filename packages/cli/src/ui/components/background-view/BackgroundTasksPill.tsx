@@ -19,6 +19,7 @@ const KIND_NAMES = {
   agent: { singular: 'local agent', plural: 'local agents' },
   shell: { singular: 'shell', plural: 'shells' },
   monitor: { singular: 'monitor', plural: 'monitors' },
+  dream: { singular: 'dream', plural: 'dreams' },
 } as const;
 
 /**
@@ -48,15 +49,17 @@ export function getPillLabel(entries: readonly DialogEntry[]): string {
 }
 
 function groupAndFormat(entries: readonly DialogEntry[]): string {
-  const counts = { agent: 0, shell: 0, monitor: 0 };
+  const counts = { agent: 0, shell: 0, monitor: 0, dream: 0 };
   for (const e of entries) counts[e.kind]++;
   const parts: string[] = [];
   // Order: shell first (matches Claude Code's pill convention), then
-  // agent, then monitor. Monitor sits last because it tends to be the
-  // longest-lived entry and least urgent to glance at.
+  // agent, then monitor, then dream. Dream sits last because it is
+  // system-initiated (not user-triggered) and the user is least likely
+  // to need it at a glance.
   if (counts.shell > 0) parts.push(formatCount('shell', counts.shell));
   if (counts.agent > 0) parts.push(formatCount('agent', counts.agent));
   if (counts.monitor > 0) parts.push(formatCount('monitor', counts.monitor));
+  if (counts.dream > 0) parts.push(formatCount('dream', counts.dream));
   return parts.join(', ');
 }
 
@@ -71,7 +74,14 @@ export const BackgroundTasksPill: React.FC = () => {
 
   const onKeypress = useCallback(
     (key: Key) => {
-      if (key.name === 'return') {
+      // `return` and `down` both open the dialog. Down completes the
+      // focus chain Composer ↓ → AgentTabBar ↓ → Pill ↓ → Dialog,
+      // so users can `↓ ↓ (↓)` their way from an empty composer
+      // straight into the roster without having to remember the
+      // Enter shortcut. The LiveAgentPanel's overflow callout
+      // (`↓ to view all`) relies on this; without a Down handler
+      // the chain dead-ends at the highlighted pill.
+      if (key.name === 'return' || key.name === 'down') {
         openDialog();
       } else if (key.name === 'up' || key.name === 'escape') {
         setPillFocused(false);

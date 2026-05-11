@@ -34,6 +34,17 @@ function shellEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
   } as DialogEntry;
 }
 
+function dreamEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
+  return {
+    kind: 'dream',
+    dreamId: 'd-1',
+    status: 'running',
+    startTime: 0,
+    sessionCount: 5,
+    ...overrides,
+  } as DialogEntry;
+}
+
 function monitorEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
   return {
     kind: 'monitor',
@@ -152,5 +163,45 @@ describe('getPillLabel', () => {
         shellEntry({ shellId: 'bg_a', status: 'failed' }),
       ]),
     ).toBe('2 tasks done');
+  });
+
+  it('uses singular form for one running dream', () => {
+    expect(getPillLabel([dreamEntry({ dreamId: 'd-1' })])).toBe('1 dream');
+  });
+
+  it('uses plural form for multiple running dreams', () => {
+    expect(
+      getPillLabel([
+        dreamEntry({ dreamId: 'd-1' }),
+        dreamEntry({ dreamId: 'd-2' }),
+      ]),
+    ).toBe('2 dreams');
+  });
+
+  it('places dream last in the kind ordering (shell, agent, monitor, dream)', () => {
+    // Ordering is asserted explicitly because it's a UX choice — dream
+    // is system-initiated (not user-triggered) and the user is least
+    // likely to need it at a glance, so it sits to the right of the
+    // user-launched kinds.
+    expect(
+      getPillLabel([
+        dreamEntry({ dreamId: 'd-1' }),
+        agentEntry({ agentId: 'a' }),
+        shellEntry({ shellId: 'bg_a' }),
+        monitorEntry({ monitorId: 'mon-a' }),
+      ]),
+    ).toBe('1 shell, 1 local agent, 1 monitor, 1 dream');
+  });
+
+  it('counts only running dreams when terminal dreams mix in', () => {
+    // Mirrors the existing monitor + agent terminal-mix tests so dream
+    // gets the same coverage profile.
+    expect(
+      getPillLabel([
+        dreamEntry({ dreamId: 'd-a', status: 'running' }),
+        dreamEntry({ dreamId: 'd-b', status: 'completed' }),
+        dreamEntry({ dreamId: 'd-c', status: 'failed' }),
+      ]),
+    ).toBe('1 dream');
   });
 });

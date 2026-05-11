@@ -8,6 +8,15 @@ import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
 import type { SubagentConfig } from './types.js';
 
 /**
+ * Canonical name of the default builtin subagent. Exported so UI
+ * surfaces (e.g. `LiveAgentPanel`'s default-type elision) can compare
+ * against the same source of truth instead of redeclaring the literal
+ * — a rename here would otherwise silently break "skip the type
+ * prefix when it's the default" logic.
+ */
+export const DEFAULT_BUILTIN_SUBAGENT_TYPE = 'general-purpose';
+
+/**
  * Registry of built-in subagents that are always available to all users.
  * These agents are embedded in the codebase and cannot be modified or deleted.
  */
@@ -16,7 +25,7 @@ export class BuiltinAgentRegistry {
     Omit<SubagentConfig, 'level' | 'filePath'>
   > = [
     {
-      name: 'general-purpose',
+      name: DEFAULT_BUILTIN_SUBAGENT_TYPE,
       description:
         'General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.',
       systemPrompt: `You are a general-purpose agent. Given the user's message, you should use the tools available to complete the task. Do what has been asked; nothing more, nothing less. When you complete the task, respond with a concise report covering what was done and any key findings — the caller will relay this to the user, so it only needs the essentials.

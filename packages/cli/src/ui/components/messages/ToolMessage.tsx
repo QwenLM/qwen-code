@@ -22,16 +22,22 @@ import type {
   AnsiOutputDisplay,
   Config,
   McpToolProgressData,
+  FileDiff,
 } from '@qwen-code/qwen-code-core';
-import { AgentExecutionDisplay } from '../subagents/index.js';
+import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { useCompactMode } from '../../contexts/CompactModeContext.js';
-import { getCachedStringWidth, toCodePoints } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  getCachedStringWidth,
+  toCodePoints,
+} from '../../utils/textUtils.js';
 
 import {
   ToolStatusIndicator,
@@ -48,6 +54,14 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
 export type TextEmphasis = 'high' | 'medium' | 'low';
+type DiffResultDisplay = Pick<
+  FileDiff,
+  | 'fileDiff'
+  | 'fileName'
+  | 'truncatedForSession'
+  | 'fileDiffLength'
+  | 'fileDiffTruncated'
+>;
 
 function sliceTextForMaxHeight(
   text: string,
@@ -174,7 +188,7 @@ const useResultDisplayRenderer = (
     ) {
       return {
         type: 'diff',
-        data: resultDisplay as { fileDiff: string; fileName: string },
+        data: resultDisplay as DiffResultDisplay,
       };
     }
 
@@ -238,7 +252,31 @@ const PlanResultRenderer: React.FC<{
 );
 
 /**
- * Component to render subagent execution results
+ * Component to render subagent execution results.
+ *
+ * The verbose inline frame has been retired. Three surfaces remain:
+ *
+ * - **Running**: nothing inline — `LiveAgentPanel` (the always-on
+ *   bottom roster) and `BackgroundTasksDialog` (Down-arrow detail
+ *   view) own progress reporting. `ToolGroupMessage` filters
+ *   running task entries out of the live phase entirely so the
+ *   group container doesn't even attempt to render this renderer.
+ * - **Approval prompt (focus-locked)**: full inline approval banner
+ *   so the user can answer without context-switching into the dialog;
+ *   sibling subagents render a queued marker.
+ * - **Terminal (completed / failed / cancelled)**: a single-line
+ *   scrollback summary so the conversation history retains a
+ *   permanent record after the panel evicts. Fires regardless of
+ *   `isPending` — `unregisterForeground`'s post-delete emit drops
+ *   the panel snapshot row immediately, so the inline summary is
+ *   the only surface that bridges the moment a foreground subagent
+ *   finishes mid-parent-turn until the parent commits.
+ *   Format: `<icon> <type>: <description> · N tools · Xs · Yk tokens`.
+ *
+ * `isPending` is no longer used as a render gate here; the live-phase
+ * filter in `ToolGroupMessage` handles the running case before this
+ * renderer is reached. The prop is kept on the signature for future
+ * needs and parity with sibling renderers.
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -246,24 +284,137 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth: number;
   config: Config;
   isFocused?: boolean;
-  isWaitingForOtherApproval?: boolean;
-}> = ({
-  data,
-  availableHeight,
-  childWidth,
-  config,
-  isFocused,
-  isWaitingForOtherApproval,
-}) => (
-  <AgentExecutionDisplay
-    data={data}
-    availableHeight={availableHeight}
-    childWidth={childWidth}
-    config={config}
-    isFocused={isFocused}
-    isWaitingForOtherApproval={isWaitingForOtherApproval}
-  />
-);
+  isPending?: boolean;
+  // `isPending` stays on the prop signature for parity with sibling
+  // renderers and possible future gating, but isn't read here — the
+  // live-phase filter in `ToolGroupMessage` already keeps running
+  // entries from reaching this renderer (so the terminal-summary path
+  // is the only thing left to gate, and it should fire in both phases).
+}> = ({ data, availableHeight, childWidth, config, isFocused }) => {
+  if (data.pendingConfirmation && isFocused) {
+    // `subagentName` is user-authored / model-chosen and may carry
+    // ANSI control sequences; escape before rendering into Ink Text
+    // (matches LiveAgentPanel + SubagentScrollbackSummary).
+    const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
+    return (
+      <Box flexDirection="column" paddingLeft={1}>
+        <Box>
+          <Text color={theme.text.secondary}>Approval requested by </Text>
+          <Text bold color={theme.text.accent}>
+            {agentLabel}
+          </Text>
+          <Text color={theme.text.secondary}>:</Text>
+        </Box>
+        <ToolConfirmationMessage
+          confirmationDetails={data.pendingConfirmation}
+          isFocused={isFocused}
+          availableTerminalHeight={availableHeight}
+          contentWidth={childWidth - 2}
+          compactMode={true}
+          config={config}
+        />
+      </Box>
+    );
+  }
+  if (data.pendingConfirmation) {
+    // `subagentName` is user-authored / model-chosen and may carry
+    // ANSI control sequences; escape before rendering into Ink Text
+    // (matches LiveAgentPanel + SubagentScrollbackSummary).
+    const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
+    return (
+      <Box paddingLeft={1}>
+        <Text color={theme.text.secondary} dimColor>
+          ⏳ Queued approval:{' '}
+        </Text>
+        <Text dimColor>{agentLabel}</Text>
+      </Box>
+    );
+  }
+  // Terminal phase: render a single-line scrollback summary so the
+  // conversation history keeps a permanent record. Fires in BOTH
+  // live and committed phases — `unregisterForeground`'s post-delete
+  // emit drops the panel snapshot row immediately, so without an
+  // inline render here a foreground subagent that finishes
+  // mid-parent-turn would simply disappear from screen until commit.
+  // No duplication risk because the panel never re-resurrects a
+  // dropped foreground entry. Skip `running` / `background` since the
+  // panel + dialog cover those.
+  if (
+    data.status === 'completed' ||
+    data.status === 'failed' ||
+    data.status === 'cancelled'
+  ) {
+    return <SubagentScrollbackSummary data={data} />;
+  }
+  return null;
+};
+
+/**
+ * One-line summary that lands in scrollback when a subagent reaches a
+ * terminal state. The verbose 15-row frame is retired (it caused
+ * scrollback flicker); this single line preserves the persistent
+ * record without re-introducing the flicker.
+ *
+ *   ✔ researcher: investigate import order · 5 tools · 12s · 2.4k tokens
+ */
+const SubagentScrollbackSummary: React.FC<{
+  data: AgentResultDisplay;
+}> = ({ data }) => {
+  const { glyph, color } = (() => {
+    switch (data.status) {
+      case 'completed':
+        return { glyph: '✔', color: theme.status.success };
+      case 'failed':
+        return { glyph: '✖', color: theme.status.error };
+      case 'cancelled':
+        return { glyph: '✖', color: theme.status.warning };
+      default:
+        return { glyph: '·', color: theme.text.secondary };
+    }
+  })();
+  const stats = data.executionSummary;
+  const parts: string[] = [];
+  if (stats?.totalToolCalls !== undefined) {
+    parts.push(
+      `${stats.totalToolCalls} tool${stats.totalToolCalls === 1 ? '' : 's'}`,
+    );
+  }
+  if (stats?.totalDurationMs !== undefined) {
+    parts.push(
+      formatDuration(stats.totalDurationMs, { hideTrailingZeros: true }),
+    );
+  }
+  if (stats?.totalTokens && stats.totalTokens > 0) {
+    parts.push(`${formatTokenCount(stats.totalTokens)} tokens`);
+  }
+  // Sanitize every user/LLM-controlled string before it reaches Ink.
+  // `subagentName` is subagent config (user-authored or model-chosen),
+  // `taskDescription` is LLM-generated, `terminateReason` is whatever
+  // the agent emitted on failure. All can carry terminal control
+  // sequences that would otherwise bleed through Ink's `<Text>` and
+  // corrupt scrollback chrome — same threat model as the panel rows
+  // and HistoryItemDisplay's user-facing content.
+  const tail = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
+  const typePrefix = data.subagentName
+    ? `${escapeAnsiCtrlCodes(data.subagentName)}: `
+    : '';
+  const safeDescription = escapeAnsiCtrlCodes(data.taskDescription ?? '');
+  const reason =
+    data.status !== 'completed' && data.terminateReason
+      ? ` · ${escapeAnsiCtrlCodes(data.terminateReason)}`
+      : '';
+  return (
+    <Box paddingLeft={1}>
+      <Text wrap="truncate-end">
+        <Text color={color}>{`${glyph} `}</Text>
+        <Text bold>{typePrefix}</Text>
+        <Text color={theme.text.secondary}>{safeDescription}</Text>
+        <Text color={theme.text.secondary}>{tail}</Text>
+        <Text color={theme.text.secondary}>{reason}</Text>
+      </Text>
+    </Box>
+  );
+};
 
 /**
  * Component to render string results (markdown or plain text)
@@ -319,19 +470,38 @@ const StringResultRenderer: React.FC<{
  * Component to render diff results
  */
 const DiffResultRenderer: React.FC<{
-  data: { fileDiff: string; fileName: string };
+  data: DiffResultDisplay;
   availableHeight?: number;
   childWidth: number;
   settings?: LoadedSettings;
-}> = ({ data, availableHeight, childWidth, settings }) => (
-  <DiffRenderer
-    diffContent={data.fileDiff}
-    filename={data.fileName}
-    availableTerminalHeight={availableHeight}
-    contentWidth={childWidth}
-    settings={settings}
-  />
-);
+}> = ({ data, availableHeight, childWidth, settings }) => {
+  const diffHeight =
+    data.truncatedForSession && availableHeight !== undefined
+      ? Math.max(1, availableHeight - 1)
+      : availableHeight;
+
+  return (
+    <Box flexDirection="column">
+      {data.truncatedForSession && (
+        <Text color={theme.status.warning} wrap="wrap">
+          {data.fileDiffTruncated
+            ? 'Saved session preview only; full diff omitted from JSONL'
+            : 'Saved session preview only; full file contents truncated in JSONL'}
+          {data.fileDiffTruncated && typeof data.fileDiffLength === 'number'
+            ? ` (${data.fileDiffLength} chars).`
+            : '.'}
+        </Text>
+      )}
+      <DiffRenderer
+        diffContent={data.fileDiff}
+        filename={data.fileName}
+        availableTerminalHeight={diffHeight}
+        contentWidth={childWidth}
+        settings={settings}
+      />
+    </Box>
+  );
+};
 
 export interface ToolMessageProps extends IndividualToolCallDisplay {
   availableTerminalHeight?: number;
@@ -343,12 +513,24 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   config?: Config;
   forceShowResult?: boolean;
   /**
-   * Whether this subagent owns keyboard input for confirmations and
-   * Ctrl+E/Ctrl+F display shortcuts.
+   * Whether this subagent owns keyboard input for the inline approval
+   * surface — when true the focus-holder banner renders and the
+   * underlying ToolConfirmationMessage receives keystrokes; when false
+   * sibling subagents render a dim "Queued approval" marker instead.
    */
   isFocused?: boolean;
-  /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
-  isWaitingForOtherApproval?: boolean;
+  /**
+   * True while the tool message is rendered inside `pendingHistoryItems`
+   * (live area), false (or omitted — undefined is treated as false)
+   * once committed to `<Static>`. Forwarded for parity with sibling
+   * renderers and possible future gating; currently inert inside this
+   * component. The live-phase filter for panel-owned subagent entries
+   * lives in `ToolGroupMessage` (the only call site), and the terminal
+   * `SubagentScrollbackSummary` fires regardless of `isPending` so the
+   * inline path can bridge the gap between `unregisterForeground`'s
+   * post-delete panel-snapshot drop and the parent turn committing.
+   */
+  isPending?: boolean;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -366,7 +548,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   isFocused,
-  isWaitingForOtherApproval,
+  isPending,
   executionStartTime,
 }) => {
   const settings = useSettings();
@@ -521,7 +703,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={innerWidth}
                 config={config}
                 isFocused={isFocused}
-                isWaitingForOtherApproval={isWaitingForOtherApproval}
+                isPending={isPending}
               />
             )}
             {effectiveDisplayRenderer.type === 'diff' && (

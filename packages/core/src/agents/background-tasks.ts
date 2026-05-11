@@ -5,15 +5,25 @@
  */
 
 /**
- * @fileoverview BackgroundTaskRegistry — tracks background (async) sub-agents.
+ * @fileoverview BackgroundTaskRegistry — tracks background (async) sub-agents
+ * and, with `flavor: 'foreground'`, the currently-running synchronous
+ * sub-agents whose UI is routed through the same pill+dialog while the
+ * parent turn waits on them. The two flavors share the registry (and the
+ * dialog wiring) but differ in lifecycle:
  *
- * When the Agent tool is called with `run_in_background: true`, the sub-agent
- * runs asynchronously. This registry tracks the lifecycle of each background
- * agent so the parent can be notified on completion.
+ * - `background` entries persist across turns, emit a `<task-notification>`
+ *   on terminal status (the parent's only return channel), and contribute to
+ *   `hasUnfinalizedTasks()` so headless callers keep their loop alive.
+ * - `foreground` entries live for the duration of the parent's tool-call,
+ *   are unregistered as soon as `execute()` returns, deliver their result
+ *   through the normal tool-result channel (no XML envelope), and don't
+ *   participate in the headless holdback.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
+import type { AgentExternalInput } from './runtime/agent-types.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
@@ -59,18 +69,11 @@ export function buildBackgroundEntryLabel(
     : truncated;
 }
 
-// Escape text so it is safe to interpolate into an XML element body.
 // Subagent-produced strings (description, result, error) can contain `<`,
 // `>`, or literal `</task-notification>` — without escaping, a subagent
 // summarizing HTML or another agent's notification could close the
 // envelope early and forge sibling tags (e.g. a faked <status>) that the
-// parent model would treat as trusted metadata.
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
+// parent model would treat as trusted metadata. Use the shared helper.
 
 export type BackgroundTaskStatus =
   | 'running'
@@ -100,10 +103,19 @@ export interface BackgroundActivity {
   at: number;
 }
 
+export type BackgroundTaskFlavor = 'foreground' | 'background';
+
 export interface BackgroundTaskEntry {
   agentId: string;
   description: string;
   subagentType?: string;
+  /**
+   * `'background'` — async, persists across turns, emits XML notification.
+   * `'foreground'` — synchronous, unregistered when the tool-call returns,
+   * delivers results via the normal tool-result channel.
+   * Defaults to `'background'` when absent (older callers).
+   */
+  flavor?: BackgroundTaskFlavor;
   status: BackgroundTaskStatus;
   startTime: number;
   endTime?: number;
@@ -136,8 +148,12 @@ export interface BackgroundTaskEntry {
   outputFile?: string;
   /** Absolute path to the agent's sidecar metadata file. */
   metaPath?: string;
-  /** Messages queued by SendMessage, drained between tool rounds. */
-  pendingMessages?: string[];
+  /**
+   * Inputs queued for delivery between tool rounds.
+   * Strings are parent `send_message` payloads; notification objects are
+   * owner-routed Monitor notifications.
+   */
+  pendingMessages?: AgentExternalInput[];
   /**
    * True once a terminal task-notification has been emitted for this entry.
    * Prevents duplicate notifications when cancel races with the natural
@@ -177,10 +193,25 @@ interface BackgroundTaskCancelOptions {
 }
 
 /**
- * Fires on entry status transitions — register, complete, fail, cancel.
- * Intentionally does NOT fire on `appendActivity` so consumers that only
- * care about the pill / roster (Footer, AppContainer) don't re-render
- * on every tool call a background agent makes.
+ * Fires on entry status transitions: `register`, `complete`, `fail`,
+ * `cancel`, `finalizeCancelled`, `finalizeCancellationIfPending`,
+ * `abandon`, `unregisterForeground`, and `reset`. Intentionally does
+ * NOT fire on `appendActivity` so consumers that only care about the
+ * roster don't re-render on every tool call a background agent makes.
+ *
+ * Ordering relative to the registry mutation falls into two camps:
+ *   - **Keeps the entry around** (`register` / `complete` / `fail` /
+ *     `cancel` / `finalizeCancelled` /
+ *     `finalizeCancellationIfPending` / `abandon`): emit while the
+ *     entry is still in the Map (the status field has been mutated
+ *     in place to its terminal value), so a callback that re-reads
+ *     `registry.get(entry.agentId)` sees the entry. Snapshot-style
+ *     consumers calling `getAll()` see the new status too.
+ *   - **Removes the entry** (`unregisterForeground`, `reset`):
+ *     deletes from the Map BEFORE emitting so snapshot-style
+ *     consumers drop the row. The `entry` arg carries the agent's
+ *     last live state for log / display consumers; `registry.get`
+ *     and `getAll` already reflect the deletion.
  */
 export type BackgroundStatusChangeCallback = (
   entry?: BackgroundTaskEntry,
@@ -191,8 +222,11 @@ export type BackgroundActivityChangeCallback = (
   entry: BackgroundTaskEntry,
 ) => void;
 
+type MessageWaiter = () => void;
+
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, BackgroundTaskEntry>();
+  private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
@@ -203,7 +237,12 @@ export class BackgroundTaskRegistry {
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
 
-    if (this.registerCallback) {
+    // Foreground entries are paired with a synchronous tool-call result on
+    // the parent's response and never emit a terminal `task_notification`
+    // (see emitNotification's flavor gate). Letting them fire the register
+    // callback would emit a `task_started` SDK event without a matching
+    // completion event, breaking the lifecycle contract for SDK consumers.
+    if (entry.flavor !== 'foreground' && this.registerCallback) {
       try {
         this.registerCallback(entry);
       } catch (error) {
@@ -239,6 +278,38 @@ export class BackgroundTaskRegistry {
 
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+  }
+
+  /**
+   * Remove a foreground entry from the registry without emitting any
+   * terminal notification. Called by the foreground tool-call's `finally`
+   * path, which has already delivered the result through the tool-result
+   * channel — the registry entry has served its UI-surfacing purpose.
+   * Background entries must go through complete/fail/finalizeCancelled
+   * instead, so this throws if asked to remove one.
+   */
+  unregisterForeground(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry) return;
+    if (entry.flavor !== 'foreground') {
+      throw new Error(
+        `unregisterForeground called on non-foreground entry ${agentId} ` +
+          `(flavor=${entry.flavor ?? 'undefined'}). ` +
+          `Background entries must terminate via complete/fail/finalizeCancelled.`,
+      );
+    }
+    // Delete BEFORE emitting so snapshot-style consumers (those that
+    // re-pull `getAll()` from inside the callback) no longer include
+    // this entry. The reverse order (emit-then-delete) caused the
+    // foreground agent to linger as `status='running'` in the footer
+    // pill / dialog: the callback's `getAll()` still saw it, and no
+    // second status-change fired after the deletion. Diverges from
+    // complete/fail/cancel/finalize ordering on purpose — those
+    // keep the entry around (terminal state) so callbacks can inspect
+    // it on re-read; unregister removes it outright.
+    this.agents.delete(agentId);
+    this.emitStatusChange(entry);
+    debugLogger.info(`Unregistered foreground agent: ${agentId}`);
   }
 
   // See complete() for the cancelled → terminal path rationale.
@@ -284,6 +355,11 @@ export class BackgroundTaskRegistry {
     }
     debugLogger.info(`Background agent cancelled: ${agentId}`);
     this.emitStatusChange(entry);
+
+    // Foreground entries don't emit XML notifications and unregister
+    // themselves in the tool-call's finally path, so the grace timer
+    // would only ever no-op for them.
+    if (entry.flavor === 'foreground') return;
 
     if (options.notify === false) {
       // Session reset paths intentionally suppress the old task's terminal
@@ -392,6 +468,11 @@ export class BackgroundTaskRegistry {
    */
   hasUnfinalizedTasks(): boolean {
     for (const entry of this.agents.values()) {
+      // Foreground entries block the parent tool-call synchronously, so the
+      // headless event loop is already pinned by the `await` on the caller's
+      // promise — counting them here would be redundant and would also keep
+      // the loop alive for entries that don't even emit a notification.
+      if (entry.flavor === 'foreground') continue;
       if (entry.status === 'running') return true;
       if (entry.status === 'cancelled' && !entry.notified) return true;
     }
@@ -411,6 +492,9 @@ export class BackgroundTaskRegistry {
       | BackgroundTaskEntry
       | undefined;
     if (!firstEntry) return;
+    for (const agentId of this.agents.keys()) {
+      this.wakeMessageWaiters(agentId);
+    }
     this.agents.clear();
     this.emitStatusChange(firstEntry);
   }
@@ -420,13 +504,23 @@ export class BackgroundTaskRegistry {
    * The agent drains this queue between tool rounds.
    */
   queueMessage(agentId: string, message: string): boolean {
+    return this.queueExternalInput(agentId, message);
+  }
+
+  /**
+   * Enqueue generalized external input for an agent. Use queueMessage for the
+   * parent send_message text path; this lower-level API also accepts
+   * structured inputs such as owner-routed Monitor notifications.
+   */
+  queueExternalInput(agentId: string, input: AgentExternalInput): boolean {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return false;
     const queue = entry.pendingMessages!;
-    queue.push(message);
+    queue.push(input);
     debugLogger.info(
       `Queued message for background agent ${agentId} (${queue.length} pending)`,
     );
+    this.wakeMessageWaiters(agentId);
     return true;
   }
 
@@ -434,7 +528,7 @@ export class BackgroundTaskRegistry {
    * Drain all pending messages for an agent. Returns the messages
    * and clears the queue. Called by the agent's reasoning loop.
    */
-  drainMessages(agentId: string): string[] {
+  drainMessages(agentId: string): AgentExternalInput[] {
     const entry = this.agents.get(agentId);
     if (!entry || !entry.pendingMessages!.length) return [];
     const messages = entry.pendingMessages!.splice(0);
@@ -442,6 +536,55 @@ export class BackgroundTaskRegistry {
       `Drained ${messages.length} message(s) for background agent ${agentId}`,
     );
     return messages;
+  }
+
+  async waitForMessages(
+    agentId: string,
+    signal: AbortSignal,
+  ): Promise<AgentExternalInput[]> {
+    const immediate = this.drainMessages(agentId);
+    if (immediate.length > 0) return immediate;
+
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'running' || signal.aborted) return [];
+
+    return new Promise<AgentExternalInput[]>((resolve) => {
+      const cleanup = () => {
+        signal.removeEventListener('abort', onAbort);
+        const waiters = this.messageWaiters.get(agentId);
+        if (!waiters) return;
+        waiters.delete(onWake);
+        if (waiters.size === 0) {
+          this.messageWaiters.delete(agentId);
+        }
+      };
+      const resolveWithDrain = () => {
+        cleanup();
+        resolve(this.drainMessages(agentId));
+      };
+      const onWake = () => resolveWithDrain();
+      const onAbort = () => {
+        cleanup();
+        resolve([]);
+      };
+
+      let waiters = this.messageWaiters.get(agentId);
+      if (!waiters) {
+        waiters = new Set<MessageWaiter>();
+        this.messageWaiters.set(agentId, waiters);
+      }
+      waiters.add(onWake);
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) {
+        cleanup();
+        resolve([]);
+        return;
+      }
+    });
+  }
+
+  wakeExternalInputWaiters(agentId: string): void {
+    this.wakeMessageWaiters(agentId);
   }
 
   setNotificationCallback(
@@ -498,6 +641,12 @@ export class BackgroundTaskRegistry {
     // sees the flag and short-circuits, rather than firing twice.
     if (entry.notified) return;
     entry.notified = true;
+
+    // Foreground entries return their result through the parent's normal
+    // tool-result channel (the `returnDisplay` field on the synchronous
+    // tool-call). Emitting the XML envelope on top would feed the parent
+    // model the same payload twice.
+    if (entry.flavor === 'foreground') return;
 
     if (!this.notificationCallback) return;
 
@@ -564,6 +713,15 @@ export class BackgroundTaskRegistry {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('Failed to emit background status change:', error);
+    }
+  }
+
+  private wakeMessageWaiters(agentId: string): void {
+    const waiters = this.messageWaiters.get(agentId);
+    if (!waiters) return;
+    this.messageWaiters.delete(agentId);
+    for (const waiter of waiters) {
+      waiter();
     }
   }
 

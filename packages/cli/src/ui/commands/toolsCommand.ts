@@ -15,10 +15,9 @@ import { t } from '../../i18n/index.js';
 export const toolsCommand: SlashCommand = {
   name: 'tools',
   get description() {
-    return t('list available Qwen Code tools. Usage: /tools [desc]');
+    return t('List available Qwen Code tools. Usage: /tools [desc]');
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
   action: async (context: CommandContext, args?: string): Promise<void> => {
     const subCommand = args?.trim();
 

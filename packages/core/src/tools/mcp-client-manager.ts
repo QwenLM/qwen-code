@@ -12,6 +12,7 @@ import {
   MCPDiscoveryState,
   MCPServerStatus,
   populateMcpServerCommand,
+  removeMCPServerStatus,
 } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -58,6 +59,7 @@ export class McpClientManager {
   private healthCheckTimers: Map<string, NodeJS.Timeout> = new Map();
   private consecutiveFailures: Map<string, number> = new Map();
   private isReconnecting: Map<string, boolean> = new Map();
+  private serverDiscoveryPromises: Map<string, Promise<void>> = new Map();
 
   constructor(
     config: Config,
@@ -148,6 +150,31 @@ export class McpClientManager {
     serverName: string,
     cliConfig: Config,
   ): Promise<void> {
+    const inProgressDiscovery = this.serverDiscoveryPromises.get(serverName);
+    if (inProgressDiscovery) {
+      await inProgressDiscovery;
+      return;
+    }
+
+    const discoveryPromise = this.discoverMcpToolsForServerInternal(
+      serverName,
+      cliConfig,
+    );
+    this.serverDiscoveryPromises.set(serverName, discoveryPromise);
+
+    try {
+      await discoveryPromise;
+    } finally {
+      if (this.serverDiscoveryPromises.get(serverName) === discoveryPromise) {
+        this.serverDiscoveryPromises.delete(serverName);
+      }
+    }
+  }
+
+  private async discoverMcpToolsForServerInternal(
+    serverName: string,
+    cliConfig: Config,
+  ): Promise<void> {
     const servers = populateMcpServerCommand(
       this.cliConfig.getMcpServers() || {},
       this.cliConfig.getMcpServerCommand(),
@@ -156,6 +183,8 @@ export class McpClientManager {
     if (!serverConfig) {
       return;
     }
+
+    this.stopHealthCheck(serverName);
 
     // Ensure we don't leak an existing connection for this server.
     const existingClient = this.clients.get(serverName);
@@ -193,8 +222,6 @@ export class McpClientManager {
     try {
       await client.connect();
       await client.discover(cliConfig);
-      // Start health check for this server after successful discovery
-      this.startHealthCheck(serverName);
     } catch (error) {
       // Log the error but don't throw: callers expect best-effort discovery.
       debugLogger.error(
@@ -203,6 +230,7 @@ export class McpClientManager {
         )}`,
       );
     } finally {
+      this.startHealthCheck(serverName);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
   }
@@ -231,6 +259,7 @@ export class McpClientManager {
     this.clients.clear();
     this.consecutiveFailures.clear();
     this.isReconnecting.clear();
+    this.serverDiscoveryPromises.clear();
   }
 
   /**
@@ -253,6 +282,7 @@ export class McpClientManager {
         this.clients.delete(serverName);
         this.consecutiveFailures.delete(serverName);
         this.isReconnecting.delete(serverName);
+        this.serverDiscoveryPromises.delete(serverName);
         this.eventEmitter?.emit('mcp-client-update', this.clients);
       }
     }
@@ -486,6 +516,10 @@ export class McpClientManager {
 
     // Remove tools for this server from registry
     this.toolRegistry.removeMcpToolsByServer(serverName);
+
+    // The server has been removed from configuration, so drop it from the
+    // global status registry too — the health pill should no longer count it.
+    removeMCPServerStatus(serverName);
 
     this.eventEmitter?.emit('mcp-client-update', this.clients);
   }

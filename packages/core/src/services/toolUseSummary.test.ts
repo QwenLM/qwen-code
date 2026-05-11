@@ -183,12 +183,16 @@ describe('generateToolUseSummary', () => {
     fastModel: string | undefined,
     generateContentFn?: ReturnType<typeof vi.fn>,
   ): Config => {
-    const mockClient = generateContentFn
-      ? { generateContent: generateContentFn }
+    const baseLlm = generateContentFn
+      ? { generateText: generateContentFn }
       : undefined;
     return {
       getFastModel: () => fastModel,
-      getGeminiClient: () => mockClient,
+      // The chat-client check inside generateToolUseSummary is a gating
+      // sanity check that runs before any LLM call; only its presence matters.
+      getGeminiClient: () => (baseLlm ? {} : undefined),
+      getBaseLlmClient: () => baseLlm,
+      getModel: () => fastModel ?? 'main-model',
     } as unknown as Config;
   };
 
@@ -232,11 +236,8 @@ describe('generateToolUseSummary', () => {
 
   it('calls model with fast model id and system prompt', async () => {
     const generateContentFn = vi.fn().mockResolvedValue({
-      candidates: [
-        {
-          content: { parts: [{ text: 'Searched in auth/' }] },
-        },
-      ],
+      text: 'Searched in auth/',
+      usage: undefined,
     });
     const config = makeMockConfig('qwen-fast', generateContentFn);
 
@@ -251,17 +252,13 @@ describe('generateToolUseSummary', () => {
     expect(result).toBe('Searched in auth/');
     expect(generateContentFn).toHaveBeenCalledTimes(1);
 
-    const args = generateContentFn.mock.calls[0];
-    const [contents, generationConfig, , model, promptId] = args;
+    const options = generateContentFn.mock.calls[0][0];
 
-    expect(model).toBe('qwen-fast');
-    expect(promptId).toBe('tool_use_summary_generation');
-    expect(generationConfig.systemInstruction).toBe(
-      TOOL_USE_SUMMARY_SYSTEM_PROMPT,
-    );
-    expect(generationConfig.tools).toEqual([]);
+    expect(options.model).toBe('qwen-fast');
+    expect(options.promptId).toBe('side-query:tool-use-summary');
+    expect(options.systemInstruction).toBe(TOOL_USE_SUMMARY_SYSTEM_PROMPT);
 
-    const userText = contents[0].parts[0].text as string;
+    const userText = options.contents[0].parts[0].text as string;
     expect(userText).toContain('Tool: Grep');
     expect(userText).toContain('"pattern":"login"');
     expect(userText).toContain('3 matches');
@@ -270,7 +267,8 @@ describe('generateToolUseSummary', () => {
 
   it('includes lastAssistantText as intent prefix', async () => {
     const generateContentFn = vi.fn().mockResolvedValue({
-      candidates: [{ content: { parts: [{ text: 'Fixed auth bug' }] } }],
+      text: 'Fixed auth bug',
+      usage: undefined,
     });
     const config = makeMockConfig('qwen-fast', generateContentFn);
 
@@ -282,7 +280,7 @@ describe('generateToolUseSummary', () => {
         'I will now fix the authentication bug in the login flow.',
     });
 
-    const userText = generateContentFn.mock.calls[0][0][0].parts[0]
+    const userText = generateContentFn.mock.calls[0][0].contents[0].parts[0]
       .text as string;
     expect(userText).toContain(
       "User's intent (from assistant's last message):",
@@ -292,7 +290,8 @@ describe('generateToolUseSummary', () => {
 
   it('truncates lastAssistantText to 200 chars', async () => {
     const generateContentFn = vi.fn().mockResolvedValue({
-      candidates: [{ content: { parts: [{ text: 'Done' }] } }],
+      text: 'Done',
+      usage: undefined,
     });
     const config = makeMockConfig('qwen-fast', generateContentFn);
 
@@ -304,7 +303,7 @@ describe('generateToolUseSummary', () => {
       lastAssistantText: longText,
     });
 
-    const userText = generateContentFn.mock.calls[0][0][0].parts[0]
+    const userText = generateContentFn.mock.calls[0][0].contents[0].parts[0]
       .text as string;
     // 200 As + some wrapper text, but no 500 As
     expect(userText).toContain('A'.repeat(200));
@@ -313,7 +312,8 @@ describe('generateToolUseSummary', () => {
 
   it('uses explicit model parameter over config fast model', async () => {
     const generateContentFn = vi.fn().mockResolvedValue({
-      candidates: [{ content: { parts: [{ text: 'Done' }] } }],
+      text: 'Done',
+      usage: undefined,
     });
     const config = makeMockConfig('qwen-fast', generateContentFn);
 
@@ -324,12 +324,15 @@ describe('generateToolUseSummary', () => {
       model: 'qwen-turbo-explicit',
     });
 
-    expect(generateContentFn.mock.calls[0][3]).toBe('qwen-turbo-explicit');
+    expect(generateContentFn.mock.calls[0][0].model).toBe(
+      'qwen-turbo-explicit',
+    );
   });
 
   it('returns null when model returns empty text', async () => {
     const generateContentFn = vi.fn().mockResolvedValue({
-      candidates: [{ content: { parts: [{ text: '' }] } }],
+      text: '',
+      usage: undefined,
     });
     const config = makeMockConfig('qwen-fast', generateContentFn);
 
@@ -371,7 +374,8 @@ describe('generateToolUseSummary', () => {
 
   it('truncates tool input/output to 300 chars', async () => {
     const generateContentFn = vi.fn().mockResolvedValue({
-      candidates: [{ content: { parts: [{ text: 'Read file' }] } }],
+      text: 'Read file',
+      usage: undefined,
     });
     const config = makeMockConfig('qwen-fast', generateContentFn);
 
@@ -384,7 +388,7 @@ describe('generateToolUseSummary', () => {
       signal: abortController().signal,
     });
 
-    const userText = generateContentFn.mock.calls[0][0][0].parts[0]
+    const userText = generateContentFn.mock.calls[0][0].contents[0].parts[0]
       .text as string;
     // Each field capped at 300, so overall prompt shouldn't contain the
     // full 10K repetition.
@@ -395,7 +399,8 @@ describe('generateToolUseSummary', () => {
 
   it('cleans markdown bullets / quotes from model output', async () => {
     const generateContentFn = vi.fn().mockResolvedValue({
-      candidates: [{ content: { parts: [{ text: '- "Searched auth/"' }] } }],
+      text: '- "Searched auth/"',
+      usage: undefined,
     });
     const config = makeMockConfig('qwen-fast', generateContentFn);
 

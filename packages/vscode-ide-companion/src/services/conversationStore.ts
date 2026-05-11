@@ -63,6 +63,70 @@ export class ConversationStore {
     }
   }
 
+  async replaceMessages(
+    conversationId: string,
+    messages: ChatMessage[],
+  ): Promise<boolean> {
+    const conversations = await this.getAllConversations();
+    const conversation = conversations.find((c) => c.id === conversationId);
+
+    if (!conversation) {
+      console.warn(
+        '[ConversationStore] replaceMessages: conversation not found:',
+        conversationId,
+      );
+      return false;
+    }
+
+    conversation.messages = messages.map((message) => ({ ...message }));
+    conversation.updatedAt = Date.now();
+    await this.context.globalState.update('conversations', conversations);
+    return true;
+  }
+
+  async truncateFromUserTurn(
+    conversationId: string,
+    targetTurnIndex: number,
+  ): Promise<boolean> {
+    const conversations = await this.getAllConversations();
+    const conversation = conversations.find((c) => c.id === conversationId);
+
+    if (!conversation) {
+      console.warn(
+        '[ConversationStore] truncateFromUserTurn: conversation not found:',
+        conversationId,
+      );
+      return false;
+    }
+
+    let userTurnIndex = 0;
+    let truncateAt = -1;
+    for (let i = 0; i < conversation.messages.length; i++) {
+      if (conversation.messages[i]?.role !== 'user') {
+        continue;
+      }
+
+      if (userTurnIndex === targetTurnIndex) {
+        truncateAt = i;
+        break;
+      }
+      userTurnIndex += 1;
+    }
+
+    if (truncateAt < 0) {
+      console.warn(
+        '[ConversationStore] truncateFromUserTurn: target turn not found:',
+        targetTurnIndex,
+      );
+      return false;
+    }
+
+    conversation.messages = conversation.messages.slice(0, truncateAt);
+    conversation.updatedAt = Date.now();
+    await this.context.globalState.update('conversations', conversations);
+    return true;
+  }
+
   async deleteConversation(id: string): Promise<void> {
     const conversations = await this.getAllConversations();
     const filtered = conversations.filter((c) => c.id !== id);

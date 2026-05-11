@@ -52,6 +52,15 @@ export enum Command {
   SHOW_MORE_LINES = 'showMoreLines',
   RETRY_LAST = 'retryLast',
   TOGGLE_COMPACT_MODE = 'toggleCompactMode',
+  TOGGLE_RENDER_MODE = 'toggleRenderMode',
+  /**
+   * Promote the running foreground shell command to a background task.
+   * The child process keeps running and the agent's turn unblocks; the
+   * shell becomes a regular `BackgroundShellEntry` visible in `/tasks`,
+   * the Background tasks dialog, and stoppable via `task_stop`.
+   * No-op when no foreground shell is currently executing.
+   */
+  PROMOTE_SHELL_TO_BACKGROUND = 'promoteShellToBackground',
 
   // Shell commands
   REVERSE_SEARCH = 'reverseSearch',
@@ -174,6 +183,8 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
   [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
+  [Command.TOGGLE_RENDER_MODE]: [{ key: 'm', meta: true }],
+  [Command.PROMOTE_SHELL_TO_BACKGROUND]: [{ key: 'b', ctrl: true }],
 
   // Shell commands
   [Command.REVERSE_SEARCH]: [{ key: 'r', ctrl: true }],

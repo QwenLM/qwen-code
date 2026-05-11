@@ -618,6 +618,75 @@ describe('useCommandCompletion', () => {
       });
     });
 
+    it('shows mid-input ghost text for model-invocable commands', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'review',
+          description: 'Review changed code',
+          kind: CommandKind.SKILL,
+          modelInvocable: true,
+        },
+        {
+          name: 'rewind',
+          description: 'Rewind conversation',
+          kind: CommandKind.BUILT_IN,
+          modelInvocable: false,
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /rev');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      expect(result.current.midInputGhostText).toEqual({
+        text: 'iew',
+        insertPosition: 'please /rev'.length,
+        acceptText: 'iew',
+        showCursorBeforeText: false,
+      });
+    });
+
+    it('shows argumentHint for a complete mid-input model-invocable command', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'review',
+          description: 'Review changed code',
+          kind: CommandKind.SKILL,
+          modelInvocable: true,
+          argumentHint: '[pr-number]',
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /review');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      expect(result.current.midInputGhostText).toEqual({
+        text: '[pr-number]',
+        insertPosition: 'please /review'.length,
+        acceptText: undefined,
+        showCursorBeforeText: true,
+      });
+    });
+
     it('does not show argumentHint after arguments have started', () => {
       const slashCommands: SlashCommand[] = [
         {
@@ -641,6 +710,39 @@ describe('useCommandCompletion', () => {
         return completion;
       });
 
+      expect(result.current.midInputGhostText).toBeNull();
+    });
+
+    it('returns null midInputGhostText when only non-modelInvocable commands match', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'clear',
+          description: 'Clear conversation',
+          kind: CommandKind.BUILT_IN,
+          modelInvocable: false,
+        },
+        {
+          name: 'compress',
+          description: 'Compress context',
+          kind: CommandKind.BUILT_IN,
+          modelInvocable: false,
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /cl');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      // '/cl' matches 'clear' but it is not modelInvocable, so no ghost text
       expect(result.current.midInputGhostText).toBeNull();
     });
   });

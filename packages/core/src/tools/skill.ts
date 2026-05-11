@@ -13,6 +13,7 @@ import type { SkillConfig } from '../skills/types.js';
 import { logSkillLaunch, SkillLaunchEvent } from '../telemetry/index.js';
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 
 const debugLogger = createDebugLogger('SKILL');
@@ -35,11 +36,24 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
   private skillManager: SkillManager;
   private availableSkills: SkillConfig[] = [];
+  // Conditional skills (with `paths:`) that exist on disk but have not yet
+  // been activated by a matching tool invocation. Tracked separately so
+  // validateToolParams can give a distinct error message when the model
+  // names one of these: "gated by paths:, access a matching file first"
+  // instead of the generic "not found".
+  private pendingConditionalSkillNames: Set<string> = new Set();
   private modelInvocableCommands: ReadonlyArray<{
     name: string;
     description: string;
   }> = [];
   private loadedSkillNames: Set<string> = new Set();
+  // Cleanup function returned by `addChangeListener`. Stored so per-agent
+  // SkillTool instances (subagents share the parent's SkillManager) can
+  // detach their listener at teardown — without this the SkillManager
+  // accumulates listeners across subagent lifetimes, and each path
+  // activation would serialize through every stale listener's
+  // refreshSkills / setTools round-trip.
+  private removeChangeListener: () => void;
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -71,9 +85,14 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       throw new Error('SkillManager not available');
     }
     this.skillManager = skillManager;
-    this.skillManager.addChangeListener(() => {
-      void this.refreshSkills();
-    });
+    // Return the refresh promise so SkillManager.notifyChangeListeners can
+    // await it. Without this, matchAndActivateByPath returns before the
+    // tool description picks up the newly activated skill, and the
+    // <system-reminder> announcing the activation can land in the same
+    // turn as a still-stale <available_skills> listing.
+    this.removeChangeListener = this.skillManager.addChangeListener(() =>
+      this.refreshSkills(),
+    );
 
     // Initialize the tool asynchronously
     this.refreshSkills();
@@ -85,22 +104,51 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    */
   async refreshSkills(): Promise<void> {
     try {
-      this.availableSkills = (await this.skillManager.listSkills()).filter(
-        (s) => !s.disableModelInvocation,
+      // Include a skill in the tool description only when (a) it is not
+      // hidden from the model (`disable-model-invocation`), and (b) it is
+      // either unconditional or already activated by a matching file path
+      // in this session. This keeps the tool description small in large
+      // monorepos where most conditional skills are not yet relevant.
+      const allSkills = await this.skillManager.listSkills();
+      this.availableSkills = allSkills.filter(
+        (s) => !s.disableModelInvocation && this.skillManager.isSkillActive(s),
       );
-      // Merge in model-invocable commands from CommandService (injected via Config),
-      // but exclude any whose names already appear as file-based skills to avoid
-      // showing the same skill in both <available_skills> and <available_commands>.
+      // Track still-pending conditional skills so validateToolParams can
+      // distinguish "not found" from "registered but not yet activated".
+      this.pendingConditionalSkillNames = new Set(
+        allSkills
+          .filter(
+            (s) =>
+              !s.disableModelInvocation &&
+              s.paths &&
+              s.paths.length > 0 &&
+              !this.skillManager.isSkillActive(s),
+          )
+          .map((s) => s.name),
+      );
+      // Merge in model-invocable commands from CommandService (injected via
+      // Config), but exclude any whose names appear as a model-invocable
+      // file-based skill — including pending conditional skills. Using
+      // `availableSkills` (active only) here would let a path-gated skill
+      // leak through the <available_commands> listing and bypass
+      // validateToolParams's pendingConditionalSkillNames check, breaking
+      // the activation contract. Conversely, a skill marked
+      // `disable-model-invocation: true` is intentionally hidden from the
+      // model and must not block an unrelated command/MCP prompt that
+      // happens to share its name; exclude those from the dedup set too.
       const provider = this.config.getModelInvocableCommandsProvider();
       const allCommands = provider ? provider() : [];
-      const skillNames = new Set(this.availableSkills.map((s) => s.name));
+      const fileBasedSkillNames = new Set(
+        allSkills.filter((s) => !s.disableModelInvocation).map((s) => s.name),
+      );
       this.modelInvocableCommands = allCommands.filter(
-        (cmd) => !skillNames.has(cmd.name),
+        (cmd) => !fileBasedSkillNames.has(cmd.name),
       );
       this.updateDescriptionAndSchema();
     } catch (error) {
       debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
+      this.pendingConditionalSkillNames = new Set();
       this.modelInvocableCommands = [];
       this.updateDescriptionAndSchema();
     } finally {
@@ -122,12 +170,19 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     const allSkillEntries: string[] = [];
 
     for (const skill of this.availableSkills) {
+      const descText = `${escapeXml(skill.description)}${skill.whenToUse ? ` — ${escapeXml(skill.whenToUse)}` : ''} (${skill.level})`;
+      // Escape `skill.name` defensively. File-based skills loaded
+      // through `parseSkillContent` go through `validateSkillName` (a
+      // charset whitelist that already excludes `<>&`), but extension
+      // skills come in via `extension.skills` (skill-manager.ts:827)
+      // and bypass that validator entirely. A crafted extension name
+      // would otherwise inject raw tags into <available_skills>.
       allSkillEntries.push(`<skill>
 <name>
-${skill.name}
+${escapeXml(skill.name)}
 </name>
 <description>
-${skill.description}${skill.whenToUse ? ` — ${skill.whenToUse}` : ''} (${skill.level})
+${descText}
 </description>
 <location>
 ${skill.level}
@@ -136,12 +191,18 @@ ${skill.level}
     }
 
     for (const cmd of this.modelInvocableCommands) {
+      // Escape `cmd.name` too — file-based skill names go through
+      // `validateSkillName` (charset whitelist), but command names come
+      // from externally-injected sources (MCP servers, extensions) and
+      // bypass that validator. A command shipped with an XML-special
+      // name (`<`, `>`, `&`) would otherwise inject raw tags into the
+      // model-facing `<available_skills>` block.
       allSkillEntries.push(`<skill>
 <name>
-${cmd.name}
+${escapeXml(cmd.name)}
 </name>
 <description>
-${cmd.description}
+${escapeXml(cmd.description)}
 </description>
 </skill>`);
     }
@@ -208,6 +269,15 @@ ${skillDescriptions}
     );
     if (commandExists) return null;
 
+    // Distinct error for a conditional skill (registered via `paths:`
+    // frontmatter) that has not yet been activated by a matching tool call.
+    // Without this branch the model can't tell the difference between "no
+    // such skill exists" and "exists but you need to access a matching file
+    // to unlock it."
+    if (this.pendingConditionalSkillNames.has(params.skill)) {
+      return `Skill "${params.skill}" is gated by path-based activation (paths: frontmatter) and is not yet available. Access a file matching its paths patterns first to activate it.`;
+    }
+
     const availableNames = [
       ...this.availableSkills.map((s) => s.name),
       ...this.modelInvocableCommands.map((c) => c.name),
@@ -247,6 +317,20 @@ ${skillDescriptions}
    */
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
+  }
+
+  /**
+   * Detach the change listener from SkillManager. Tool registries call
+   * this on teardown (mirroring AgentTool's pattern). Per-subagent
+   * SkillTool instances share the parent's SkillManager via
+   * `InProcessBackend.createPerAgentConfig`, so without dispose the
+   * SkillManager would accumulate one stale listener per subagent
+   * lifetime — and `notifyChangeListeners` is now `await`-ed
+   * sequentially, so each path activation would serialize through every
+   * accumulated listener's refreshSkills + setTools round-trip.
+   */
+  dispose(): void {
+    this.removeChangeListener();
   }
 }
 

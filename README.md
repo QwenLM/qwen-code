@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 [![License](https://img.shields.io/github/license/QwenLM/qwen-code.svg)](./LICENSE)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Downloads](https://img.shields.io/npm/dm/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 
 <a href="https://trendshift.io/repositories/15287" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15287" alt="QwenLM%2Fqwen-code | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
@@ -63,7 +63,7 @@ powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou
 
 #### Prerequisites
 
-Make sure you have Node.js 20 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
+Make sure you have Node.js 22 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
 
 #### NPM
 
@@ -353,6 +353,9 @@ Use the `/model` command at any time to switch between all configured models.
 
 You can also run models locally — no API key or cloud account needed. This is not an authentication method; instead, configure your local model endpoint in `~/.qwen/settings.json` using the `modelProviders` field.
 
+Set `generationConfig.contextWindowSize` inside the matching provider entry
+and adjust it to the context length configured on your local server.
+
 <details>
 <summary>Ollama setup</summary>
 
@@ -368,7 +371,10 @@ You can also run models locally — no API key or cloud account needed. This is 
         "id": "qwen3:32b",
         "name": "Qwen3 32B (Ollama)",
         "baseUrl": "http://localhost:11434/v1",
-        "description": "Qwen3 32B running locally via Ollama"
+        "description": "Qwen3 32B running locally via Ollama",
+        "generationConfig": {
+          "contextWindowSize": 131072
+        }
       }
     ]
   },
@@ -400,7 +406,10 @@ You can also run models locally — no API key or cloud account needed. This is 
         "id": "Qwen/Qwen3-32B",
         "name": "Qwen3 32B (vLLM)",
         "baseUrl": "http://localhost:8000/v1",
-        "description": "Qwen3 32B running locally via vLLM"
+        "description": "Qwen3 32B running locally via vLLM",
+        "generationConfig": {
+          "contextWindowSize": 131072
+        }
       }
     ]
   },

@@ -82,6 +82,21 @@ describe('ReadFileTool', () => {
       );
     });
 
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped spaces in file_path',
+      () => {
+        const escapedPath = path.join(tempRootDir, 'my\\ file.txt');
+        const params: ReadFileToolParams = {
+          file_path: escapedPath,
+        };
+        const invocation = tool.build(params);
+        expect(invocation).toBeDefined();
+        expect(invocation.params.file_path).toBe(
+          path.join(tempRootDir, 'my file.txt'),
+        );
+      },
+    );
+
     it('should allow path outside root (external path support)', () => {
       const params: ReadFileToolParams = {
         file_path: '/outside/root.txt',
@@ -267,6 +282,29 @@ describe('ReadFileTool', () => {
         returnDisplay: '',
       });
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should read a file with spaces in its name when given an escaped path',
+      async () => {
+        const realFileName = 'my spaced read.txt';
+        const realPath = path.join(tempRootDir, realFileName);
+        const fileContent = 'Content with spaces in filename.';
+        await fsp.writeFile(realPath, fileContent, 'utf-8');
+
+        // Pass an ESCAPED path (as the LLM might from at-completion)
+        const escapedPath = path.join(tempRootDir, 'my\\ spaced\\ read.txt');
+        const params: ReadFileToolParams = { file_path: escapedPath };
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+
+        expect(await invocation.execute(abortSignal)).toEqual({
+          llmContent: fileContent,
+          returnDisplay: '',
+        });
+      },
+    );
 
     it('should return error if path is a directory', async () => {
       const dirPath = path.join(tempRootDir, 'directory');
@@ -707,6 +745,178 @@ describe('ReadFileTool', () => {
         const second = await read({ file_path: binPath });
         expect(second.llmContent).not.toMatch(/unchanged since/);
         expect(second.llmContent).toMatch(/Cannot display content of binary/);
+      });
+
+      it('records an auto-memory read in the cache so a follow-up Edit can pass enforcement', async () => {
+        // Auto-memory files skip the file_unchanged fast-path (they
+        // own a per-read freshness `<system-reminder>` that must be
+        // re-emitted) but they MUST still be recorded in the cache
+        // — otherwise the prior-read enforcement on Edit / WriteFile
+        // would refuse to mutate a file the model legitimately just
+        // read. Put a file under .qwen/<auto-memory>/ via
+        // QWEN_CODE_MEMORY_LOCAL=1 and assert recordRead happened.
+        const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+        try {
+          const { getAutoMemoryRoot, clearAutoMemoryRootCache } = await import(
+            '../memory/paths.js'
+          );
+          clearAutoMemoryRootCache();
+          const memRoot = getAutoMemoryRoot(tempRootDir);
+          await fsp.mkdir(memRoot, { recursive: true });
+          const memFile = path.join(memRoot, 'AGENTS.md');
+          await fsp.writeFile(memFile, '# memory', 'utf-8');
+
+          const result = await read({ file_path: memFile });
+          // Slow path returned the actual content (not a placeholder).
+          expect(typeof result.llmContent).toBe('string');
+          expect(result.llmContent).not.toMatch(/unchanged since/);
+          // The cache must contain the auto-memory file's entry, AND
+          // the entry must be in a shape that satisfies prior-read
+          // enforcement on Edit / WriteFile (fresh + lastReadAt set +
+          // full + cacheable). Asserting only `fresh` would let a
+          // future regression that records auto-memory reads as
+          // partial/non-cacheable slip through silently — those reads
+          // would still report fresh but enforcement would reject
+          // every follow-up Edit.
+          const status = fileReadCache.check(fs.statSync(memFile));
+          expect(status.state).toBe('fresh');
+          if (status.state === 'fresh') {
+            expect(status.entry.lastReadAt).toBeDefined();
+            expect(status.entry.lastReadWasFull).toBe(true);
+            expect(status.entry.lastReadCacheable).toBe(true);
+          }
+        } finally {
+          if (previousLocal === undefined) {
+            delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+          } else {
+            process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+          }
+        }
+      });
+
+      it('records SVG-as-text reads with cacheable=true so a follow-up Edit passes enforcement', async () => {
+        // Pre-fix the SVG branch in fileUtils.ts returned content
+        // without `originalLineCount`, which collapsed
+        // ReadFileToolInvocation's `cacheable` derivation to
+        // false. EditTool's prior-read enforcement then mistook
+        // the just-read SVG for a "non-text payload" and rejected
+        // a subsequent in-place edit.
+        const svgPath = path.join(tempRootDir, 'icon.svg');
+        await fsp.writeFile(
+          svgPath,
+          '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n',
+          'utf-8',
+        );
+
+        const result = await read({ file_path: svgPath });
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.returnDisplay).toMatch(/^Read SVG as text:/);
+
+        // The cache must record this as a full, cacheable read so
+        // that prior-read enforcement on Edit / WriteFile would
+        // recognise it as the model having seen the bytes.
+        const status = fileReadCache.check(fs.statSync(svgPath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
+          expect(status.entry.lastReadAt).toBeDefined();
+          expect(status.entry.lastReadWasFull).toBe(true);
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
+      });
+
+      it('records partial text reads with lastReadCacheable=true so a follow-up Edit passes enforcement (issue #3964)', async () => {
+        // Pre-fix, ReadFileToolInvocation derived `cacheable` as
+        // `string && originalLineCount && !isTruncated`. A partial
+        // read of a regular text file (offset/limit) sets
+        // `isTruncated = true`, which collapsed `cacheable` to false
+        // and recorded the entry as `lastReadCacheable: false`.
+        // priorReadEnforcement.ts then mistook this for "binary
+        // payload" on the next Edit and rejected the call with the
+        // misleading "binary / image / audio / video / PDF /
+        // notebook payload" error. Decoupling the truncation check
+        // from `cacheable` (truncation now lives on
+        // `lastReadWasFull`) means partial text reads correctly
+        // record as text-cacheable.
+        const filePath = path.join(tempRootDir, 'partial.kt');
+        const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`);
+        await fsp.writeFile(filePath, lines.join('\n'), 'utf-8');
+
+        await read({ file_path: filePath, offset: 10, limit: 5 });
+
+        const status = fileReadCache.check(fs.statSync(filePath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
+          expect(status.entry.lastReadAt).toBeDefined();
+          // The truncation check moved to `lastReadWasFull`: a
+          // ranged read leaves the model without sight of every
+          // byte, so this stays false.
+          expect(status.entry.lastReadWasFull).toBe(false);
+          // The bytes the model saw were text — Edit must accept
+          // this read.
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
+      });
+
+      it('records truncated full reads with lastReadCacheable=true (issue #3964)', async () => {
+        // Symmetric regression for the other arm of issue #3964:
+        // `read_file(file_path)` without offset/limit but on a file
+        // larger than the truncate-tool-output limit. Pre-fix the
+        // truncated content collapsed `cacheable` to false; post-fix
+        // it stays true (the bytes were text), and only
+        // `lastReadWasFull` is false (the model only saw the head).
+        const filePath = path.join(tempRootDir, 'long.cpp');
+        // Mock Config caps truncate-tool-output-lines at 500.
+        const bigContent = Array.from(
+          { length: 700 },
+          (_, i) => `line ${i + 1}`,
+        ).join('\n');
+        await fsp.writeFile(filePath, bigContent, 'utf-8');
+
+        const result = await read({ file_path: filePath });
+        expect(result.returnDisplay).toMatch(/Read lines .* of 700/);
+
+        const status = fileReadCache.check(fs.statSync(filePath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
+          // Truncated → model has not seen every byte.
+          expect(status.entry.lastReadWasFull).toBe(false);
+          // But the bytes are text, so Edit (which accepts partial
+          // reads) must not be rejected as "binary payload".
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
+      });
+
+      it('reads source-code files with binary-looking content as text (encrypted FS, issue #3964)', async () => {
+        // Frank-Shaw-FS reports `.cpp` source files on Windows
+        // encrypted / DRM-protected file systems being misclassified
+        // as binary. The OS surfaces encrypted bytes to `fs.open()`
+        // random-access reads, so the 4 KB `isBinaryFile` heuristic
+        // sees nulls / non-printables and concludes binary even
+        // though the user-visible content is plain text. The
+        // extension-based override in detectFileType skips the
+        // content sample for known text extensions; verify that
+        // routes through `processSingleFileContent` correctly and
+        // records the read as text-cacheable so a follow-up Edit
+        // passes prior-read enforcement.
+        //
+        // We can't easily simulate a real encrypted volume in a
+        // unit test, so we approximate by writing nominally text
+        // content to a `.cpp` file. The test relies on the
+        // extension override winning over any future content-side
+        // heuristic — there is no isBinaryFile mocking in scope.
+        const filePath = path.join(tempRootDir, 'src.cpp');
+        await fsp.writeFile(filePath, '#include <iostream>\nint main() {}\n');
+
+        const result = await read({ file_path: filePath });
+        expect(typeof result.llmContent).toBe('string');
+        expect(result.llmContent).toContain('#include');
+
+        const status = fileReadCache.check(fs.statSync(filePath));
+        expect(status.state).toBe('fresh');
+        if (status.state === 'fresh') {
+          expect(status.entry.lastReadCacheable).toBe(true);
+        }
       });
 
       it('does not return the placeholder for image files', async () => {

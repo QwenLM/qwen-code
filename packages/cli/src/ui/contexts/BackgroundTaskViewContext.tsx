@@ -19,11 +19,13 @@ import {
   useMemo,
   useState,
 } from 'react';
-import { type Config } from '@qwen-code/qwen-code-core';
+import { type Config, createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
   type DialogEntry,
   useBackgroundTaskView,
 } from '../hooks/useBackgroundTaskView.js';
+
+const debugLogger = createDebugLogger('BG_TASK_VIEW');
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -194,6 +196,28 @@ export function BackgroundTaskViewProvider({
       case 'monitor':
         config.getMonitorRegistry().cancel(target.monitorId);
         break;
+      case 'dream': {
+        // Aborts the dream fork-agent via MemoryManager.cancelTask;
+        // the manager flips status to 'cancelled' before aborting, and
+        // the runDream finally block releases the consolidation lock as
+        // the agent unwinds. Same one-shot fire-and-forget shape as
+        // shell.requestCancel above.
+        //
+        // cancelTask returns false in the contract-violation path
+        // (running record without an AbortController). Today this is
+        // unreachable because the controller is registered before
+        // storeWith fires the notify, but if a future refactor
+        // breaks the invariant a silent ignore here would let the
+        // user think the cancel took. Log + leave the dialog open.
+        const ok = config.getMemoryManager().cancelTask(target.dreamId);
+        if (!ok) {
+          debugLogger.warn(
+            `cancelSelected: dream task ${target.dreamId} could not be cancelled ` +
+              `(internal state inconsistency — see MemoryManager.cancelTask warn).`,
+          );
+        }
+        break;
+      }
       default: {
         const _exhaustive: never = target;
         throw new Error(

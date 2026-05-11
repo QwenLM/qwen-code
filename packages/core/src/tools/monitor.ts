@@ -49,6 +49,7 @@ import {
   extractCommandRules,
   isShellCommandReadOnlyAST,
 } from '../utils/shellAstParser.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -286,6 +287,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     const monitorId = `mon_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const registry = this.config.getMonitorRegistry();
+    const ownerAgentId = getCurrentAgentId() ?? undefined;
 
     // Check concurrent monitor limit before spawning
     const running = registry.getRunning();
@@ -313,6 +315,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       maxEvents,
       idleTimeoutMs,
       droppedLines: 0,
+      ...(ownerAgentId ? { ownerAgentId } : {}),
     };
 
     // Spawn the process
@@ -610,7 +613,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
         `max_events: ${maxEvents}\n` +
         `idle_timeout: ${idleTimeoutMs}ms\n` +
         `Events will be delivered as notifications. ` +
-        `The monitor auto-stops after ${maxEvents} events or ${idleTimeoutMs}ms of silence.`,
+        `The monitor auto-stops after ${maxEvents} events or ${idleTimeoutMs}ms of silence.\n` +
+        `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates).`,
       returnDisplay: `Monitor started: ${displayDescription} (${monitorId})`,
     };
   }
@@ -673,6 +677,11 @@ export class MonitorTool extends BaseDeclarativeTool<
         required: ['command'],
         additionalProperties: false,
       },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — monitoring is infrequent
+      false, // alwaysLoad
+      'monitor watch tail log stream background',
     );
   }
 
