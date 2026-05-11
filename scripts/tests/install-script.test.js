@@ -47,6 +47,7 @@ const releaseScriptUtilsUrl = pathToFileURL(
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
+// Windows CI can spend several seconds inside PowerShell zip operations.
 const WINDOWS_INSTALLER_TEST_TIMEOUT = 15_000;
 
 describe('installation scripts', () => {
@@ -923,39 +924,43 @@ describe('standalone release packaging', () => {
     ).rejects.toThrow(/--base-url must use https/);
   });
 
-  it('rejects a runtime archive without a Node executable', () => {
-    const restoreDist = ensureMinimalDist();
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+  it(
+    'rejects a runtime archive without a Node executable',
+    () => {
+      const restoreDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
-    try {
-      const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
-      const fakeRuntimeArchive =
-        process.platform === 'win32'
-          ? createBadWindowsNodeArchive(tmpDir)
-          : createBadUnixNodeArchive(tmpDir);
+      try {
+        const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+        const fakeRuntimeArchive =
+          process.platform === 'win32'
+            ? createBadWindowsNodeArchive(tmpDir)
+            : createBadUnixNodeArchive(tmpDir);
 
-      expect(() =>
-        execFileSync(
-          'node',
-          [
-            'scripts/create-standalone-package.js',
-            '--target',
-            target,
-            '--node-archive',
-            fakeRuntimeArchive,
-            '--out-dir',
-            path.join(tmpDir, 'out'),
-            '--version',
-            '0.0.0-test',
-          ],
-          { stdio: 'pipe' },
-        ),
-      ).toThrow(/Node\.js runtime for .* must contain/);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-      restoreDist();
-    }
-  });
+        expect(() =>
+          execFileSync(
+            'node',
+            [
+              'scripts/create-standalone-package.js',
+              '--target',
+              target,
+              '--node-archive',
+              fakeRuntimeArchive,
+              '--out-dir',
+              path.join(tmpDir, 'out'),
+              '--version',
+              '0.0.0-test',
+            ],
+            { stdio: 'pipe' },
+          ),
+        ).toThrow(/Node\.js runtime for .* must contain/);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreDist();
+      }
+    },
+    WINDOWS_INSTALLER_TEST_TIMEOUT,
+  );
 
   it('packages a win-x64 standalone archive', () => {
     const restoreDist = ensureMinimalDist();
