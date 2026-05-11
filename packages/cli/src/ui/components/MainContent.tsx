@@ -87,6 +87,14 @@ function initialReplayCount(length: number): number {
 // stable completed items when unrelated UIState fields change during streaming.
 const VirtualHistoryItem = memo(HistoryItemDisplay);
 
+// Stable empty Set used by `absorbedCallIds` when compact mode is off so the
+// memo returns a referentially-stable value across renders. Without this, every
+// re-render where compactMode is false produced a brand-new empty Set, which
+// invalidated `isSummaryAbsorbed`, then `renderVirtualItem`, then forced
+// `VirtualizedList.renderedItems` to recompute and call renderItem for every
+// item — defeating the static-item memo.
+const EMPTY_ABSORBED_CALL_IDS = new Set<string>();
+
 // Pure functions with no closure deps — defined outside the component so they
 // are stable references and never trigger useMemo/useCallback invalidation.
 const virtualEstimatedItemHeight = () => 3;
@@ -122,8 +130,8 @@ export const MainContent = () => {
   // standalone `● <label>` line in HistoryItemDisplay is the label's only
   // path to the screen.
   const absorbedCallIds = useMemo(() => {
+    if (!compactMode) return EMPTY_ABSORBED_CALL_IDS;
     const absorbed = new Set<string>();
-    if (!compactMode) return absorbed;
     for (const item of uiState.history) {
       if (item.type !== 'tool_group') continue;
       if (
