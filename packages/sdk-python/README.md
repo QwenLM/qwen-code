@@ -209,7 +209,9 @@ call.
 ## Permission Callback
 
 ```python
-from qwen_code_sdk import query
+import asyncio
+
+from qwen_code_sdk import is_sdk_result_message, query
 
 
 async def can_use_tool(tool_name, tool_input, context):
@@ -225,14 +227,26 @@ async def can_use_tool(tool_name, tool_input, context):
     }
 
 
-result = query(
-    "Update README.md with a one paragraph summary.",
-    {
-        "cwd": "/path/to/project",
-        "path_to_qwen_executable": "qwen",
-        "can_use_tool": can_use_tool,
-    },
-)
+async def main():
+    result = query(
+        "Update README.md with a one paragraph summary.",
+        {
+            "cwd": "/path/to/project",
+            "path_to_qwen_executable": "qwen",
+            "can_use_tool": can_use_tool,
+        },
+    )
+
+    async for message in result:
+        if is_sdk_result_message(message):
+            if message.get("is_error"):
+                error = message.get("error") or {}
+                print(f"Error: {error.get('message', 'Unknown error')}")
+            else:
+                print(message.get("result", ""))
+
+
+asyncio.run(main())
 ```
 
 The callback defaults to deny. If it does not return within
@@ -299,7 +313,11 @@ async def main():
 
     async for message in result:
         if is_sdk_result_message(message):
-            print(message.get("result", ""))
+            if message.get("is_error"):
+                error = message.get("error") or {}
+                print(f"Error: {error.get('message', 'Unknown error')}")
+            else:
+                print(message.get("result", ""))
 
 
 asyncio.run(main())
@@ -324,7 +342,11 @@ async def main():
 
     async for message in latest:
         if is_sdk_result_message(message):
-            print(message.get("result", ""))
+            if message.get("is_error"):
+                error = message.get("error") or {}
+                print(f"Error: {error.get('message', 'Unknown error')}")
+            else:
+                print(message.get("result", ""))
 
 
 asyncio.run(main())
