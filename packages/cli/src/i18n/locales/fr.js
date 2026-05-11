@@ -784,10 +784,10 @@ export default {
     "L'entrée de la commande est du JSON avec les détails de compaction.",
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     "L'entrée de la commande est du JSON avec tool_name, tool_input et tool_use_id. Sortie JSON avec hookSpecificOutput contenant la décision d'autoriser ou de refuser.",
-  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    "L'entrée de la commande est du JSON avec todo_id, todo_content, todo_status et all_todos. Sortie JSON avec decision (allow/block) et reason.",
-  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    "L'entrée de la commande est du JSON avec todo_id, todo_content, previous_status et all_todos. Sortie JSON avec decision (allow/block) et reason.",
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    "L'entrée de la commande est du JSON avec todo_id, todo_content, todo_status, all_todos et phase. Dans validation, sortie JSON avec decision (allow/block/deny) et reason. Dans postWrite, block/deny est ignoré.",
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    "L'entrée de la commande est du JSON avec todo_id, todo_content, previous_status, all_todos et phase. Dans validation, sortie JSON avec decision (allow/block/deny) et reason. Dans postWrite, block/deny est ignoré.",
   'stdout/stderr not shown': 'stdout/stderr non affiché',
   'show stderr to model and continue conversation':
     'afficher stderr au modèle et continuer la conversation',

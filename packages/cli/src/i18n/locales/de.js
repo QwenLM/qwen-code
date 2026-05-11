@@ -700,10 +700,10 @@ export default {
     'Die Eingabe an den Befehl ist JSON mit Komprimierungsdetails.',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input und tool_use_id. Ausgabe ist JSON mit hookSpecificOutput, das die Entscheidung zum Zulassen oder Ablehnen enthält.',
-  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    'Die Eingabe an den Befehl ist JSON mit todo_id, todo_content, todo_status und all_todos. Ausgabe ist JSON mit decision (allow/block) und reason.',
-  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    'Die Eingabe an den Befehl ist JSON mit todo_id, todo_content, previous_status und all_todos. Ausgabe ist JSON mit decision (allow/block) und reason.',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Die Eingabe an den Befehl ist JSON mit todo_id, todo_content, todo_status, all_todos und phase. In validation ist die Ausgabe JSON mit decision (allow/block/deny) und reason. In postWrite wird block/deny ignoriert.',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Die Eingabe an den Befehl ist JSON mit todo_id, todo_content, previous_status, all_todos und phase. In validation ist die Ausgabe JSON mit decision (allow/block/deny) und reason. In postWrite wird block/deny ignoriert.',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr nicht angezeigt',
   'show stderr to model and continue conversation':

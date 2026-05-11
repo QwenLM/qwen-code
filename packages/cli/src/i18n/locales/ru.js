@@ -710,10 +710,10 @@ export default {
     'Ввод в команду — это JSON с деталями сжатия.',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'Ввод в команду — это JSON с tool_name, tool_input и tool_use_id. Вывод — JSON с hookSpecificOutput, содержащим решение о разрешении или отказе.',
-  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    'Ввод в команду — это JSON с todo_id, todo_content, todo_status и all_todos. Вывод — JSON с decision (allow/block) и reason.',
-  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    'Ввод в команду — это JSON с todo_id, todo_content, previous_status и all_todos. Вывод — JSON с decision (allow/block) и reason.',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Ввод в команду — это JSON с todo_id, todo_content, todo_status, all_todos и phase. В validation вывод — JSON с decision (allow/block/deny) и reason. В postWrite block/deny игнорируется.',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Ввод в команду — это JSON с todo_id, todo_content, previous_status, all_todos и phase. В validation вывод — JSON с decision (allow/block/deny) и reason. В postWrite block/deny игнорируется.',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr не отображаются',
   'show stderr to model and continue conversation':

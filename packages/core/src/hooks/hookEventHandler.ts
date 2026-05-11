@@ -42,7 +42,8 @@ import type {
   TodoCompletedInput,
   TodoItem,
   TodoStatus,
- HookPhase } from './types.js';
+  HookPhase,
+} from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';

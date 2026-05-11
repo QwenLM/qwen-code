@@ -12,7 +12,7 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DefaultHookOutput , HookPhase } from './types.js';
+import type { DefaultHookOutput, HookPhase } from './types.js';
 import { createHookOutput } from './types.js';
 import type {
   SessionStartSource,

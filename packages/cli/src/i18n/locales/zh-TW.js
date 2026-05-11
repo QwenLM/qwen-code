@@ -1680,10 +1680,10 @@ export default {
   "Set up Qwen Code's status line UI": '配置 Qwen Code 的狀態欄',
   'When a new todo item is created': '建立新待辦事項時',
   'When a todo item is marked as completed': '待辦事項標記為完成時',
-  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    '命令輸入為包含 todo_id、todo_content、todo_status 和 all_todos 的 JSON。輸出為包含 decision（allow/block）和 reason 的 JSON。',
-  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    '命令輸入為包含 todo_id、todo_content、previous_status 和 all_todos 的 JSON。輸出為包含 decision（allow/block）和 reason 的 JSON。',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    '命令輸入為包含 todo_id、todo_content、todo_status、all_todos 和 phase 的 JSON。在 validation 中，輸出為包含 decision（allow/block/deny）和 reason 的 JSON。在 postWrite 中，block/deny 會被忽略。',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    '命令輸入為包含 todo_id、todo_content、previous_status、all_todos 和 phase 的 JSON。在 validation 中，輸出為包含 decision（allow/block/deny）和 reason 的 JSON。在 postWrite 中，block/deny 會被忽略。',
   'allow todo creation': '允許建立待辦事項',
   'block todo creation and show reason to model':
     '阻止建立待辦事項並向模型顯示原因',

@@ -733,10 +733,10 @@ export default {
     '命令输入为包含压缩详情的 JSON。',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     '命令输入为包含 tool_name、tool_input 和 tool_use_id 的 JSON。输出包含 hookSpecificOutput 的 JSON，其中包含允许或拒绝的决定。',
-  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    '命令输入为包含 todo_id、todo_content、todo_status 和 all_todos 的 JSON。输出包含 decision（allow/block）和 reason 的 JSON。',
-  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    '命令输入为包含 todo_id、todo_content、previous_status 和 all_todos 的 JSON。输出包含 decision（allow/block）和 reason 的 JSON。',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    '命令输入为包含 todo_id、todo_content、todo_status、all_todos 和 phase 的 JSON。在 validation 中，输出包含 decision（allow/block/deny）和 reason 的 JSON。在 postWrite 中，block/deny 会被忽略。',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    '命令输入为包含 todo_id、todo_content、previous_status、all_todos 和 phase 的 JSON。在 validation 中，输出包含 decision（allow/block/deny）和 reason 的 JSON。在 postWrite 中，block/deny 会被忽略。',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr 不显示',
   'show stderr to model and continue conversation':

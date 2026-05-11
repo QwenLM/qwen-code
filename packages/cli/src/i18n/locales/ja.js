@@ -482,10 +482,10 @@ export default {
     'コマンドへの入力は圧縮詳細を持つ JSON です。',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'コマンドへの入力は tool_name、tool_input、tool_use_id を持つ JSON です。許可または拒否の決定を含む hookSpecificOutput を持つ JSON を出力します。',
-  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    'コマンドへの入力は todo_id、todo_content、todo_status、all_todos を持つ JSON です。decision（allow/block）と reason を持つ JSON を出力します。',
-  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
-    'コマンドへの入力は todo_id、todo_content、previous_status、all_todos を持つ JSON です。decision（allow/block）と reason を持つ JSON を出力します。',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'コマンドへの入力は todo_id、todo_content、todo_status、all_todos、phase を持つ JSON です。validation では decision（allow/block/deny）と reason を持つ JSON を出力します。postWrite では block/deny は無視されます。',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'コマンドへの入力は todo_id、todo_content、previous_status、all_todos、phase を持つ JSON です。validation では decision（allow/block/deny）と reason を持つ JSON を出力します。postWrite では block/deny は無視されます。',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr は表示されません',
   'show stderr to model and continue conversation':
