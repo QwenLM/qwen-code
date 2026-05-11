@@ -125,13 +125,14 @@ function makeEnv(): NodeJS.ProcessEnv {
       await session.send(
         'Call cron_list and tell me how many jobs exist. Say "COUNT: N"',
       );
-      await session.idle(8000);
-      const screen = await session.screen();
-      expect(
-        screen.includes('COUNT: 1') ||
+      await session.waitForScreen(
+        (screen) =>
+          screen.includes('COUNT: 1') ||
           screen.includes('1 job') ||
           screen.includes('Active cron jobs (1)'),
-      ).toBe(true);
+        'cron list showing one active job',
+        60_000,
+      );
     },
   );
 });

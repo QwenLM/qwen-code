@@ -12,6 +12,7 @@ import {
   MCPDiscoveryState,
   MCPServerStatus,
   populateMcpServerCommand,
+  removeMCPServerStatus,
 } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -515,6 +516,10 @@ export class McpClientManager {
 
     // Remove tools for this server from registry
     this.toolRegistry.removeMcpToolsByServer(serverName);
+
+    // The server has been removed from configuration, so drop it from the
+    // global status registry too — the health pill should no longer count it.
+    removeMCPServerStatus(serverName);
 
     this.eventEmitter?.emit('mcp-client-update', this.clients);
   }

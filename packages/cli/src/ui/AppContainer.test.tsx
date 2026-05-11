@@ -90,6 +90,12 @@ vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');
 vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
+vi.mock('./hooks/useProviderUpdates.js', () => ({
+  useProviderUpdates: vi.fn(() => ({
+    providerUpdateRequest: undefined,
+    dismissProviderUpdate: vi.fn(),
+  })),
+}));
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
 vi.mock('./contexts/AgentViewContext.js', () => ({
@@ -213,12 +219,36 @@ describe('AppContainer State Management', () => {
         authStatus: 'idle',
         authMessage: null,
       },
+      state: {
+        authError: null,
+        isAuthDialogOpen: false,
+        isAuthenticating: false,
+        pendingAuthType: undefined,
+        externalAuthState: null,
+        qwenAuthState: {
+          deviceAuth: null,
+          authStatus: 'idle',
+          authMessage: null,
+        },
+      },
       handleAuthSelect: vi.fn(),
+      handleSubscriptionPlanSubmit: vi.fn(),
       handleCodingPlanSubmit: vi.fn(),
-      handleAlibabaStandardSubmit: vi.fn(),
+      handleTokenPlanSubmit: vi.fn(),
+      handleApiKeyProviderSubmit: vi.fn(),
       handleOpenRouterSubmit: vi.fn(),
+      handleCustomApiKeySubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
+      actions: {
+        setAuthState: vi.fn(),
+        onAuthError: vi.fn(),
+        handleAuthSelect: vi.fn(),
+        handleProviderSubmit: vi.fn(),
+        handleOpenRouterSubmit: vi.fn(),
+        openAuthDialog: vi.fn(),
+        cancelAuthentication: vi.fn(),
+      },
     });
     mockedUseEditorSettings.mockReturnValue({
       isEditorDialogOpen: false,
@@ -330,6 +360,7 @@ describe('AppContainer State Management', () => {
           hideWindowTitle: false,
         },
       },
+      setValue: vi.fn(),
     } as unknown as LoadedSettings;
 
     // Mock InitializationResult
@@ -1628,12 +1659,36 @@ describe('AppContainer State Management', () => {
           authStatus: 'idle',
           authMessage: null,
         },
+        state: {
+          authError: null,
+          isAuthDialogOpen: false,
+          isAuthenticating: true,
+          pendingAuthType: undefined,
+          externalAuthState: null,
+          qwenAuthState: {
+            deviceAuth: null,
+            authStatus: 'idle',
+            authMessage: null,
+          },
+        },
         handleAuthSelect: vi.fn(),
+        handleSubscriptionPlanSubmit: vi.fn(),
         handleCodingPlanSubmit: vi.fn(),
-        handleAlibabaStandardSubmit: vi.fn(),
+        handleTokenPlanSubmit: vi.fn(),
+        handleApiKeyProviderSubmit: vi.fn(),
         handleOpenRouterSubmit: vi.fn(),
+        handleCustomApiKeySubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
+        actions: {
+          setAuthState: vi.fn(),
+          onAuthError: vi.fn(),
+          handleAuthSelect: vi.fn(),
+          handleProviderSubmit: vi.fn(),
+          handleOpenRouterSubmit: vi.fn(),
+          openAuthDialog: vi.fn(),
+          cancelAuthentication: vi.fn(),
+        },
       });
 
       const mockHandleSlashCommand = vi.fn();
@@ -1785,6 +1840,278 @@ describe('AppContainer State Management', () => {
       expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/quit');
 
       vi.useRealTimers();
+    });
+
+    it('Ctrl+B promotes the running foreground shell tool call (#3831 PR-3)', () => {
+      // E2E for the keybind layer: Ctrl+B during an executing shell
+      // tool call must call abort({ kind: 'background' }) on the
+      // tool call's promoteAbortController. ShellExecutionService +
+      // shell.ts (covered by PR-1 / PR-2 unit tests) translate the
+      // abort reason into a registry-registered BackgroundShellEntry.
+      const promoteAc = new AbortController();
+      const abortSpy = vi.spyOn(promoteAc, 'abort');
+      const executingShell = {
+        status: 'executing',
+        request: { callId: 'call-shell-1', name: 'run_shell_command' },
+        promoteAbortController: promoteAc,
+      };
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        pendingToolCalls: [executingShell],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Find the global keypress handler. AppContainer registers
+      // multiple via useKeypress (text buffer, dialogs, etc.); the
+      // global one is identifiable by its body — it references the
+      // PROMOTE_SHELL_TO_BACKGROUND command we just added.
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('PROMOTE_SHELL_TO_BACKGROUND'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      // Fire Ctrl+B.
+      const ctrlBKey: Key = {
+        name: 'b',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x02',
+      };
+      handleKeypress!(ctrlBKey);
+
+      expect(abortSpy).toHaveBeenCalledTimes(1);
+      const reason = abortSpy.mock.calls[0][0];
+      expect(reason).toEqual({ kind: 'background' });
+    });
+
+    it('Ctrl+B is a no-op when no foreground shell is currently executing', () => {
+      // Pin the safety contract: pressing Ctrl+B mid-prompt with no
+      // pending tool calls must NOT throw — falls through to the input
+      // layer's own Ctrl+B (cursor-left).
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        pendingToolCalls: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('PROMOTE_SHELL_TO_BACKGROUND'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      const ctrlBKey: Key = {
+        name: 'b',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x02',
+      };
+      // No-op: no throw.
+      expect(() => handleKeypress!(ctrlBKey)).not.toThrow();
+    });
+
+    it('Ctrl+B does NOT promote when only a non-shell tool is executing (defense-in-depth)', () => {
+      // Pin the per-tool-name guard: a non-shell executing tool that
+      // somehow gained a `promoteAbortController` (copy-paste in a
+      // future tool, type confusion) must NOT be promoted by Ctrl+B.
+      // Without `tc.request.name === ToolNames.SHELL` in the find
+      // predicate, the property check alone would mistakenly fire
+      // abort({kind:'background'}) on a tool whose service has no
+      // promote-handoff handler.
+      const fakeNonShellAc = new AbortController();
+      const abortSpy = vi.spyOn(fakeNonShellAc, 'abort');
+      const executingNonShell = {
+        status: 'executing',
+        request: { callId: 'call-other-1', name: 'read_file' },
+        // Hostile shape: non-shell tool carries the controller — must
+        // be filtered out by the tool-name guard.
+        promoteAbortController: fakeNonShellAc,
+      };
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        pendingToolCalls: [executingNonShell],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('PROMOTE_SHELL_TO_BACKGROUND'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      const ctrlBKey: Key = {
+        name: 'b',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x02',
+      };
+      handleKeypress!(ctrlBKey);
+
+      // The guard MUST suppress the abort even though the AC is
+      // structurally present.
+      expect(abortSpy).not.toHaveBeenCalled();
+    });
+    describe('Ctrl+O compact mode toggle (issue #3899)', () => {
+      const ctrlOKey: Key = {
+        name: 'o',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+      };
+
+      // The global handler is the one that calls compactToggleHasVisualEffect.
+      // Mirrors the discriminator pattern used by the renderMode test above.
+      const findGlobalKeypressHandler = () =>
+        mockedUseKeypress.mock.calls
+          .map((call) => call[0])
+          .reverse()
+          .find(
+            (handler): handler is (key: Key) => void =>
+              typeof handler === 'function' &&
+              handler.toString().includes('compactToggleHasVisualEffect'),
+          );
+
+      it('skips refreshStatic on Ctrl+O when history has no tool_group/thought items', () => {
+        mockedUseHistory.mockReturnValue({
+          history: [
+            { type: 'user', id: 1, text: 'hi' },
+            { type: 'gemini', id: 2, text: 'hello' },
+          ],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        mockStdout.write.mockClear();
+
+        const handler = findGlobalKeypressHandler();
+        expect(handler).toBeDefined();
+        handler!(ctrlOKey);
+
+        // refreshStatic writes ansiEscapes.clearTerminal — its absence
+        // proves we took the no-op short-circuit.
+        expect(mockStdout.write).not.toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+      });
+
+      it('calls refreshStatic on Ctrl+O when history contains a tool_group', () => {
+        mockedUseHistory.mockReturnValue({
+          history: [
+            { type: 'user', id: 1, text: 'run ls' },
+            {
+              type: 'tool_group',
+              id: 2,
+              tools: [
+                {
+                  callId: 'c1',
+                  name: 'shell',
+                  description: 'shell description',
+                  status: ToolCallStatus.Success,
+                  resultDisplay: undefined,
+                  confirmationDetails: undefined,
+                },
+              ],
+            },
+          ],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        mockStdout.write.mockClear();
+
+        const handler = findGlobalKeypressHandler();
+        expect(handler).toBeDefined();
+        handler!(ctrlOKey);
+
+        expect(mockStdout.write).toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+      });
     });
   });
 

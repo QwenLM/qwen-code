@@ -12,7 +12,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   getAllGeminiMdFilenames,
-  QWEN_DIR,
+  Storage,
   getAutoMemoryRoot,
   getAutoMemoryProjectStateDir,
 } from '@qwen-code/qwen-code-core';
@@ -124,8 +124,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   const globalMemoryPath = useMemo(
     () =>
       path.join(
-        os.homedir(),
-        QWEN_DIR,
+        Storage.getGlobalQwenDir(),
         getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
       ),
     [],
@@ -215,7 +214,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
           );
         case 'global':
           return resolvePreferredMemoryFile(
-            path.join(os.homedir(), QWEN_DIR),
+            Storage.getGlobalQwenDir(),
             getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
           );
         case 'managed':

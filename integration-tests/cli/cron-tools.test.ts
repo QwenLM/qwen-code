@@ -64,11 +64,15 @@ describe('cron-tools', () => {
     await rig.setup('cron-tools-disabled-by-default');
 
     const result = await rig.run(
-      'Do you have access to a tool called cron_create? Reply with just "yes" or "no".',
+      'Try to create a cron job with cron_create using cron "*/5 * * * *", prompt "disabled test", and recurring true. If you cannot call that tool, say so briefly.',
     );
 
     validateModelOutput(result, null, 'cron disabled by default');
-    expect(result.toLowerCase()).toContain('no');
+    const toolLogs = rig.readToolLogs();
+    expect(
+      toolLogs.some((log) => log.toolRequest.name === 'cron_create'),
+      'cron_create should not be callable when cron is disabled',
+    ).toBe(false);
   });
 
   it('should create, list, and delete a cron job in a single turn', async () => {

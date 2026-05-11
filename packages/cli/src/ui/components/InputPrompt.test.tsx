@@ -248,6 +248,23 @@ describe('InputPrompt', () => {
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
   describe('prompt suggestions', () => {
+    it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} promptSuggestion="commit this" />,
+      );
+      await wait(350);
+
+      stdin.write('\r');
+      await wait();
+
+      expect(props.onSubmit).toHaveBeenCalledWith('commit this');
+      // Enter path must NOT call buffer.insert — it passes text directly to
+      // handleSubmitAndClear. Calling insert would re-fill the buffer after
+      // it was already cleared (the microtask race bug).
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('does not accept the prompt suggestion on shift+tab', async () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
@@ -1625,6 +1642,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1653,6 +1671,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1681,6 +1700,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1709,6 +1729,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1737,6 +1758,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1766,6 +1788,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1794,6 +1817,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1823,6 +1847,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1852,6 +1877,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1881,6 +1907,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1910,6 +1937,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1941,6 +1969,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1970,6 +1999,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -2001,6 +2031,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();

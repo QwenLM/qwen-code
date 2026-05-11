@@ -30,13 +30,14 @@ import {
   NativeLspService,
   isBareMode,
   isToolEnabled,
+  SchemaValidator,
+  type ConfigParameters,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
 import type { Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
-import { authCommand } from '../commands/auth.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -54,6 +55,7 @@ import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
+import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 
 // UUID v4 regex pattern for validation
@@ -164,7 +166,306 @@ export interface CliArgs {
   channel: string | undefined;
   jsonFd?: number | undefined;
   jsonFile?: string | undefined;
+  jsonSchema?: string | undefined;
   inputFile?: string | undefined;
+}
+
+/**
+ * Returns true if the root of the given schema can accept a JSON object.
+ *
+ * JSON Schema applies sibling keywords conjunctively, so `type`, `anyOf`,
+ * `oneOf`, and `allOf` at the same level must EACH allow an object — they
+ * can't rescue one another. For example, `{type:"object", anyOf:[{type:"string"}]}`
+ * is unsatisfiable for any value because `type` requires object while
+ * `anyOf` requires string. Walk all four rather than returning on the
+ * first hit.
+ *
+ * For `anyOf` / `oneOf`, at least one branch must admit object (a value
+ * only has to match one branch). For `allOf`, every branch must admit
+ * object (a value has to match all of them). Root `$ref` is rejected
+ * unconditionally — Ajv applies `$ref` conjunctively with sibling
+ * keywords, so even `{type:"object", $ref:"#/$defs/Foo"}` is
+ * unsatisfiable when `Foo` resolves to a non-object schema. We don't
+ * follow refs ourselves (local-only resolution would still need to
+ * handle remote / recursive refs) so users wanting composition should
+ * inline the schema at the root or use `allOf`.
+ *
+ * The `$ref` rejection is **root-only**. Sub-schemas inside `anyOf` /
+ * `oneOf` / `allOf` recurse with `isRoot=false`, where a `$ref` is
+ * treated as opaque (assume-object-compatible) and deferred to Ajv at
+ * runtime — otherwise common composition shapes like
+ * `{anyOf:[{$ref:"#/$defs/Foo"}, {type:"string"}]}` would be wrongly
+ * rejected at parse time even though Ajv can resolve them.
+ */
+function schemaRootAcceptsObject(
+  schema: Record<string, unknown>,
+  isRoot = true,
+): boolean {
+  if (isRoot && typeof schema['$ref'] === 'string') {
+    // Reject any root `$ref`. The previous "accept when sibling
+    // `type:"object"` is present" carve-out was unsound: Ajv applies
+    // both keywords, so `{type:"object", $ref:"#/$defs/Foo",
+    // $defs:{Foo:{type:"array"}}}` parses fine but no object argument
+    // can satisfy both at runtime — the model would loop forever on
+    // validation failures.
+    return false;
+  }
+
+  const rawType = schema['type'];
+  const typeIncludesObject =
+    rawType !== undefined &&
+    (Array.isArray(rawType) ? rawType : [rawType]).includes('object');
+
+  if (rawType !== undefined && !typeIncludesObject) {
+    return false;
+  }
+
+  // Root `const` / `enum` pin the value to specific literals. If those
+  // literals can never be a JSON object (e.g. `{const: 1}` or
+  // `{enum: ["a", "b"]}`), no object satisfies the schema — reject.
+  if ('const' in schema) {
+    const constVal = schema['const'];
+    if (
+      typeof constVal !== 'object' ||
+      constVal === null ||
+      Array.isArray(constVal)
+    ) {
+      return false;
+    }
+  }
+  const enumVal = schema['enum'];
+  if (Array.isArray(enumVal)) {
+    const anyObjectMember = enumVal.some(
+      (v) => typeof v === 'object' && v !== null && !Array.isArray(v),
+    );
+    if (!anyObjectMember) return false;
+  }
+
+  // JSON Schema (draft-06+) treats `true` and `false` as valid subschemas
+  // for any keyword that accepts a schema: `true` matches every value,
+  // `false` matches nothing. Honour those alongside object subschemas so
+  // shapes like `{anyOf:[true]}` or `{allOf:[true,{type:"object"}]}` pass
+  // and `{anyOf:[false]}` is rejected.
+  const variantAcceptsObject = (v: unknown): boolean => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      // isRoot=false: nested branches don't trigger the root-only `$ref`
+      // rejection — the parent's keyword scope already pins the
+      // sub-schema's role to "candidate value type", and Ajv will
+      // resolve the ref at runtime.
+      return schemaRootAcceptsObject(v as Record<string, unknown>, false);
+    }
+    return false;
+  };
+
+  for (const key of ['anyOf', 'oneOf'] as const) {
+    const variants = schema[key];
+    if (Array.isArray(variants)) {
+      // Empty anyOf/oneOf is unsatisfiable per JSON Schema — no value can
+      // match a member of an empty union. Reject rather than treating it
+      // as "no constraint".
+      if (variants.length === 0) return false;
+      if (!variants.some(variantAcceptsObject)) return false;
+    }
+  }
+
+  const allOf = schema['allOf'];
+  if (Array.isArray(allOf) && allOf.length > 0) {
+    // allOf is conjunctive — `false` in any branch makes the schema
+    // unsatisfiable, `true` is neutral.
+    if (!allOf.every(variantAcceptsObject)) return false;
+  }
+
+  // Best-effort `not` handling: when `not` directly forbids object via its
+  // own `type` keyword (e.g. `{not:{type:"object"}}` or
+  // `{not:{type:["object","null"]}}`), the schema can never be satisfied
+  // by an object — reject. We don't try to do full satisfiability analysis
+  // for arbitrary `not` schemas (e.g. `not:{const:"foo"}` is fine, but
+  // `not:{anyOf:[{type:"object"},…]}` would also reject objects); those
+  // fall through to Ajv at runtime.
+  const notSchema = schema['not'];
+  if (
+    typeof notSchema === 'object' &&
+    notSchema !== null &&
+    !Array.isArray(notSchema)
+  ) {
+    const notRecord = notSchema as Record<string, unknown>;
+    const notType = notRecord['type'];
+    if (notType !== undefined) {
+      const types = Array.isArray(notType) ? notType : [notType];
+      // If `not` is JUST `{type: "object"[…]}` (no additional keywords),
+      // every object value matches the `not` subschema and so gets
+      // excluded — schema is unsatisfiable for objects, reject.
+      //
+      // If `not` has additional constraints alongside `type` (e.g.
+      // `{not:{type:"object",required:["error"]}}`), those constraints
+      // NARROW what `not` excludes: only objects matching ALL of `not`'s
+      // keywords are rejected, so objects that fail any of the
+      // narrowing constraints survive. Example: `{}` satisfies
+      // `{not:{type:"object",required:["error"]}}` because the value
+      // lacks the `error` key. Rejecting at parse time would be a
+      // false positive — defer to Ajv at runtime.
+      if (types.includes('object') && Object.keys(notRecord).length === 1) {
+        return false;
+      }
+    }
+  }
+
+  // Best-effort `if/then/else` handling for the decidable cases. The
+  // semantics: if the value matches `if`, it must match `then`; otherwise
+  // it must match `else` (defaults to `true`). For root-acceptance we can
+  // only decide statically when `if` is itself a constant boolean
+  // subschema:
+  //   `if: true`  → every object matches `if`, so it MUST match `then`.
+  //   `if: false` → no value matches `if`, so it must match `else`.
+  // Other shapes for `if` (object schemas) depend on the candidate value
+  // and fall through to Ajv at runtime — we can't decide acceptance
+  // without seeing the value.
+  if ('if' in schema) {
+    const ifSchema = schema['if'];
+    if (ifSchema === true) {
+      // Object MUST match `then` (if absent, defaults to `true`, no
+      // constraint on root acceptance).
+      const thenSchema = schema['then'];
+      if (thenSchema !== undefined && !variantAcceptsObject(thenSchema)) {
+        return false;
+      }
+    } else if (ifSchema === false) {
+      // Object MUST match `else` (if absent, defaults to `true`).
+      const elseSchema = schema['else'];
+      if (elseSchema !== undefined && !variantAcceptsObject(elseSchema)) {
+        return false;
+      }
+    }
+    // ifSchema is an object schema — runtime Ajv decides; do nothing.
+  }
+
+  // No narrowing at the root — lenient default, treated as object-compatible.
+  return true;
+}
+
+/** 4 MiB — well above any real schema, well below an accidental
+ * gigabyte-sized file that would OOM `fs.readFileSync` + `JSON.parse`.
+ */
+const MAX_JSON_SCHEMA_FILE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Resolves the `--json-schema` argument into a parsed JSON Schema object.
+ *
+ * Accepts either a JSON literal or `@path/to/schema.json`. Fails fast with a
+ * FatalConfigError if the input can't be read/parsed/compiled — invalid
+ * schemas should not silently skip validation at runtime.
+ */
+export function resolveJsonSchemaArg(
+  raw: string | undefined,
+): Record<string, unknown> | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new FatalConfigError('--json-schema cannot be empty.');
+  }
+
+  let payload: string;
+  let payloadSource: 'inline' | 'file' = 'inline';
+  let payloadSourcePath: string | undefined;
+  if (trimmed.startsWith('@')) {
+    const resolvedPath = resolvePath(trimmed.slice(1));
+    payloadSource = 'file';
+    payloadSourcePath = resolvedPath;
+    try {
+      // Stat first so we can refuse non-regular files (directories,
+      // character devices like `/dev/zero`, FIFOs that would block
+      // synchronously) and cap by size before pulling bytes into memory.
+      // The cap (`MAX_JSON_SCHEMA_FILE_BYTES`) is set well above any real
+      // schema and well below an accidental gigabyte-sized file that
+      // would OOM `fs.readFileSync` + `JSON.parse`.
+      const stat = fs.statSync(resolvedPath);
+      if (!stat.isFile()) {
+        throw new FatalConfigError(
+          `--json-schema "@${resolvedPath}" must be a regular file.`,
+        );
+      }
+      if (stat.size > MAX_JSON_SCHEMA_FILE_BYTES) {
+        throw new FatalConfigError(
+          `--json-schema file "${resolvedPath}" is ${stat.size} bytes ` +
+            `(>${MAX_JSON_SCHEMA_FILE_BYTES}). Refusing to read; this is ` +
+            'almost certainly a wrong-path argument. Schemas should be ' +
+            'small enough to fit in a few KiB; decompose with `$ref` if ' +
+            'you need a large family of types.',
+        );
+      }
+      payload = fs.readFileSync(resolvedPath, 'utf8');
+    } catch (err) {
+      if (err instanceof FatalConfigError) throw err;
+      throw new FatalConfigError(
+        `--json-schema could not read "${resolvedPath}": ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  } else {
+    payload = trimmed;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch (err) {
+    // For inline JSON the user IS the source — echoing the SyntaxError
+    // (which on Node ≥18 embeds a 10-char input snippet) is fine. For
+    // @path, the error message would leak a prefix of the file's bytes
+    // through stderr to whatever wrapping process surfaces it; emit a
+    // generic message instead.
+    if (payloadSource === 'file') {
+      throw new FatalConfigError(
+        `--json-schema content of "${payloadSourcePath}" is not valid JSON.`,
+      );
+    }
+    throw new FatalConfigError(
+      `--json-schema is not valid JSON: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new FatalConfigError(
+      '--json-schema must be a JSON object describing a schema.',
+    );
+  }
+
+  // The schema will be installed as a TOOL PARAMETER schema. All function-
+  // calling APIs (Gemini/OpenAI/Anthropic) require tool arguments to be a
+  // JSON object, so a schema that cannot accept objects registers an
+  // unusable synthetic tool the model could never satisfy. `schemaRootAcceptsObject`
+  // walks `type`/`const`/`enum`/`anyOf`/`oneOf`/`allOf`/`not`/`if` (with
+  // best-effort decidable cases for the harder shapes); the strict Ajv
+  // compile below catches structural validity. The two together cover both
+  // "schema can be parsed" and "schema can be satisfied by an object value".
+  if (!schemaRootAcceptsObject(parsed as Record<string, unknown>)) {
+    throw new FatalConfigError(
+      '--json-schema root must accept object-typed values (tool parameters ' +
+        'are always JSON objects). At least one branch of a root anyOf/oneOf ' +
+        'must be satisfiable by an object, and a root `type` (when present) ' +
+        'must include "object".',
+    );
+  }
+
+  // Ajv compile-time validation. SchemaValidator.validate is deliberately
+  // lenient at runtime (falls back to no-op on compile failure to support
+  // exotic MCP schemas) — but `--json-schema` is explicit user intent, so
+  // surface a bad schema here rather than letting it silently no-op later.
+  const compileError = SchemaValidator.compileStrict(parsed);
+  if (compileError) {
+    throw new FatalConfigError(
+      `--json-schema is not a valid JSON Schema: ${compileError}`,
+    );
+  }
+
+  return parsed as Record<string, unknown>;
 }
 
 function normalizeOutputFormat(
@@ -470,6 +771,14 @@ export async function parseArguments(): Promise<CliArgs> {
             'File path for structured JSON event output (dual output mode). ' +
             'Can be a regular file, FIFO (named pipe), or /dev/fd/N.',
         })
+        .option('json-schema', {
+          type: 'string',
+          description:
+            "JSON Schema that the model's final output must conform to " +
+            '(headless mode only). Accepts a JSON literal or "@path/to/schema.json". ' +
+            'Registers a synthetic `structured_output` tool; the session ends on ' +
+            'the first valid call.',
+        })
         .option('input-file', {
           type: 'string',
           description:
@@ -603,6 +912,46 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
             return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
           }
+          if (argv['jsonSchema']) {
+            if (argv['promptInteractive']) {
+              return '--json-schema cannot be used with --prompt-interactive (-i); structured output only terminates the non-interactive flow.';
+            }
+            if (argv['inputFormat'] === 'stream-json') {
+              // The "first valid structured_output call ends the session"
+              // contract assumes a single one-shot prompt. Stream-json
+              // input keeps the process open waiting for more protocol
+              // messages, so terminating on the first call would silently
+              // drop subsequent prompts. Refuse the combination here
+              // rather than letting the run race to whichever message
+              // wins.
+              return '--json-schema cannot be used with --input-format stream-json; the "first structured_output call ends the session" contract is incompatible with the long-lived stream-json input protocol.';
+            }
+            if (argv['acp'] || argv['experimentalAcp']) {
+              // ACP runs an external IDE/Zed protocol on its own turn loop
+              // (runAcpAgent), which doesn't honour the synthetic
+              // structured_output contract. Without this check the tool
+              // would register but its "session ends now" llmContent would
+              // just be relayed back into the ACP chat, leaving the run
+              // open and silently ignoring --json-schema.
+              return '--json-schema cannot be used with --acp; structured output is only honoured by the headless non-interactive flow.';
+            }
+            const hasPrompt = !!argv['prompt'];
+            const query = argv['query'] as string | string[] | undefined;
+            const hasPositionalQuery = Array.isArray(query)
+              ? query.length > 0
+              : !!query;
+            // Allow stdin piping (`echo "..." | qwen --json-schema ...`):
+            // when stdin is not a TTY, the prompt is supplied via the pipe
+            // and headless mode runs normally. Only reject true interactive
+            // invocations with neither flag nor positional nor pipe — the
+            // synthetic tool's "session ends now" llmContent has no
+            // termination handler in the TUI loop, so silently launching
+            // the TUI would strand the run.
+            const stdinIsPiped = !process.stdin.isTTY;
+            if (!hasPrompt && !hasPositionalQuery && !stdinIsPiped) {
+              return '--json-schema only applies to non-interactive mode; pass a prompt via -p, as a positional argument, or piped via stdin.';
+            }
+          }
           return true;
         }),
     )
@@ -610,7 +959,6 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(mcpCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
-    // Register Auth subcommands
     .command(authCommand)
     // Register Hooks subcommands
     .command(hooksCommand)
@@ -638,11 +986,12 @@ export async function parseArguments(): Promise<CliArgs> {
     result._.length > 0 &&
     (result._[0] === 'mcp' ||
       result._[0] === 'extensions' ||
+      result._[0] === 'auth' ||
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review')
   ) {
-    // MCP/Extensions/Hooks/Channel/Review commands handle their own
+    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
@@ -1171,7 +1520,7 @@ export async function loadCliConfig(
 
   const modelProvidersConfig = settings.modelProviders;
 
-  const config = new Config({
+  const configParams: ConfigParameters = {
     sessionId,
     sessionData,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -1301,6 +1650,9 @@ export async function loadCliConfig(
       ? false
       : (settings.memory?.enableManagedAutoMemory ?? true),
     enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    enableAutoSkill: bareMode
+      ? false
+      : (settings.memory?.enableAutoSkill ?? false),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
@@ -1316,6 +1668,7 @@ export async function loadCliConfig(
     // absent.
     jsonFd: argv.jsonFd,
     jsonFile: argv.jsonFile ?? settings.dualOutput?.jsonFile,
+    jsonSchema: resolveJsonSchemaArg(argv.jsonSchema),
     inputFile: argv.inputFile ?? settings.dualOutput?.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
@@ -1338,7 +1691,9 @@ export async function loadCliConfig(
             : undefined,
         }
       : undefined,
-  });
+  };
+
+  const config = new Config(configParams);
 
   if (lspEnabled) {
     try {

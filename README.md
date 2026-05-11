@@ -43,13 +43,18 @@ Qwen Code is an open-source AI agent for the terminal, optimized for Qwen series
 
 ### Quick Install (Recommended)
 
+The installer uses a standalone Qwen Code archive when one is available for
+your platform, so the default path does not require a preinstalled Node.js
+runtime. If a standalone archive is not available, it falls back to npm and then
+requires Node.js 20 or later with npm on PATH.
+
 #### Linux / macOS
 
 ```bash
 bash -c "$(curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh)"
 ```
 
-#### Windows (Run as Administrator)
+#### Windows
 
 Works in both Command Prompt and PowerShell:
 
@@ -57,13 +62,18 @@ Works in both Command Prompt and PowerShell:
 powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
 ```
 
-> **Note**: It's recommended to restart your terminal after installation to ensure environment variables take effect.
+> **Note**: It's recommended to restart your terminal after installation if
+> `qwen` is not immediately available on PATH. For offline installation, download
+> a release archive such as `qwen-code-linux-x64.tar.gz` or
+> `qwen-code-win-x64.zip` plus `SHA256SUMS`, then run the installer with
+> `--archive PATH`.
 
 ### Manual Installation
 
 #### Prerequisites
 
-Make sure you have Node.js 20 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
+Manual npm installation requires Node.js 20 or later. Download it from
+[nodejs.org](https://nodejs.org/en/download).
 
 #### NPM
 

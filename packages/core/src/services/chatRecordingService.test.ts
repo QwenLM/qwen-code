@@ -594,6 +594,138 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordAttributionSnapshot', () => {
+    const baseSnapshot = {
+      type: 'attribution-snapshot' as const,
+      version: 1,
+      surface: 'cli',
+      fileStates: {},
+      promptCount: 0,
+      promptCountAtLastCommit: 0,
+    };
+
+    it('should write each distinct snapshot', async () => {
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      chatRecordingService.recordAttributionSnapshot({
+        ...baseSnapshot,
+        promptCount: 1,
+      });
+      chatRecordingService.recordAttributionSnapshot({
+        ...baseSnapshot,
+        promptCount: 2,
+      });
+      await chatRecordingService.flush();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+    });
+
+    // Sessions that touch many files emit a non-retry turn snapshot
+    // every prompt cycle. Without dedup, repeated identical snapshots
+    // (no edits, no prompt-counter change) would re-serialize the entire
+    // attribution state into the JSONL on every turn, inflating session
+    // size and slowing /resume.
+    it('should skip a snapshot identical to the previous write', async () => {
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
+    // After rewindRecording, the previous attribution snapshot lives on
+    // the abandoned branch, so the dedup key has to clear — otherwise
+    // the post-rewind identical snapshot would be silently skipped and
+    // /resume on the rewound session would lose all attribution state.
+    it('should re-write an identical snapshot after rewindRecording', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'turn 1' }]);
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      const beforeRewind = vi.mocked(jsonl.writeLine).mock.calls.length;
+
+      chatRecordingService.rewindRecording(0, { truncatedCount: 0 });
+      // Same snapshot bytes — without the rewind reset this would dedup.
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      // 1 rewind record + 1 fresh snapshot = 2 more writes after rewind.
+      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
+        beforeRewind + 2,
+      );
+    });
+
+    // A transient write failure must NOT permanently suppress future
+    // identical snapshots: if the dedup key were committed before the
+    // write, the next identical snapshot would dedup and the session
+    // would have no attribution snapshot at all.
+    it('should retry an identical snapshot after a write failure', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      // Wait for the queued (failing) write to settle so the rollback runs.
+      await chatRecordingService.flush();
+      const afterFailure = vi.mocked(jsonl.writeLine).mock.calls.length;
+
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      // Retry should fire, so we get a new write call.
+      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
+        afterFailure + 1,
+      );
+    });
+
+    // appendRecord is fire-and-forget for non-snapshot callers
+    // (recordUserMessage / recordAssistantTurn / recordAtCommand /
+    // ...). When jsonl.writeLine rejects, the rejection MUST be
+    // swallowed inside the service — otherwise it surfaces as an
+    // unhandled-promise-rejection in production (and as a flaky
+    // failure under vitest's --reporter=default).
+    it('should swallow async writeLine rejection for fire-and-forget callers', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      // Track unhandled rejections during this test.
+      const unhandled: unknown[] = [];
+      const handler = (err: unknown) => unhandled.push(err);
+      process.on('unhandledRejection', handler);
+      try {
+        chatRecordingService.recordUserMessage([{ text: 'hi' }]);
+        await chatRecordingService.flush();
+        // Microtask drain to give any unhandled rejections a chance
+        // to surface before we assert.
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', handler);
+      }
+    });
+
+    // appendRecord can throw SYNCHRONOUSLY before returning a promise
+    // (e.g. ensureConversationFile fails because the conversation
+    // file can't be created). Without rollback in the outer catch,
+    // the dedup key stays set on a write that never happened, so
+    // all future identical snapshots get suppressed.
+    it('should retry an identical snapshot after a synchronous failure', async () => {
+      // First call: force writeFileSync (used by ensureConversationFile
+      // to wx-create the JSONL file) to throw a non-EEXIST error.
+      // ensureConversationFile rethrows that, which propagates through
+      // appendRecord SYNCHRONOUSLY before any promise is returned.
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        const e = new Error(
+          'EACCES: permission denied',
+        ) as NodeJS.ErrnoException;
+        e.code = 'EACCES';
+        throw e;
+      });
+
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      // Sync failure: writeLine never reached.
+      expect(vi.mocked(jsonl.writeLine)).not.toHaveBeenCalled();
+
+      // Identical snapshot on retry: dedup key should have been
+      // rolled back so this fires a fresh write.
+      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
+      await chatRecordingService.flush();
+      expect(vi.mocked(jsonl.writeLine)).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock

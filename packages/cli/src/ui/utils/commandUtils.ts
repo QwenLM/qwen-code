@@ -8,6 +8,7 @@ import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -259,21 +260,118 @@ export function findMidInputSlashCommand(
 export function getBestSlashCommandMatch(
   partialCommand: string,
   commands: readonly SlashCommand[],
-): { suffix: string; fullCommand: string } | null {
+  recentCommands?: RecentSlashCommands,
+): {
+  suffix: string;
+  fullCommand: string;
+  command: SlashCommand;
+  argumentHint?: string;
+} | null {
   if (!partialCommand) return null;
   const query = partialCommand.toLowerCase();
-  let best: { suffix: string; fullCommand: string } | null = null;
+
+  const matches = commands
+    .filter((cmd) => {
+      // Only suggest model-invocable commands for mid-input completion,
+      // since built-in commands typed in the middle of text won't be executed.
+      if (!cmd.modelInvocable) return false;
+      const name = cmd.name.toLowerCase();
+      return name.startsWith(query) && (name !== query || !!cmd.argumentHint);
+    })
+    .sort((left, right) => {
+      const leftRecent = recentCommands?.get(left.name);
+      const rightRecent = recentCommands?.get(right.name);
+      const recentOrder =
+        (rightRecent?.usedAt ?? 0) - (leftRecent?.usedAt ?? 0);
+      return (
+        (right.completionPriority ?? 0) - (left.completionPriority ?? 0) ||
+        recentOrder ||
+        left.name.localeCompare(right.name)
+      );
+    });
+
+  const best = matches[0];
+  if (!best) return null;
+  return {
+    suffix: best.name.slice(partialCommand.length),
+    fullCommand: best.name,
+    command: best,
+    argumentHint: best.argumentHint,
+  };
+}
+
+/**
+ * Represents a slash command token found in input text (potentially mid-input).
+ */
+export type SlashCommandToken = {
+  /** Start index (character position) of the token in the text */
+  start: number;
+  /** End index (exclusive) of the token in the text */
+  end: number;
+  /** The matched command name (without the leading slash) */
+  commandName: string;
+  /**
+   * Whether the token corresponds to a known command.
+   * Mid-input tokens are only valid when they match a model-invocable command.
+   * Line-start tokens are valid for all interactive commands.
+   */
+  valid: boolean;
+};
+
+const SLASH_TOKEN_RE = /(?:^|(?<=\s))\/([a-zA-Z][a-zA-Z0-9:_-]*)/g;
+
+/**
+ * Finds slash command tokens in input text and marks them as valid/invalid
+ * based on the provided command list.
+ *
+ * - Tokens at position 0 are valid if they match any command.
+ * - Mid-input tokens (preceded by whitespace) are valid only if they match a
+ *   `modelInvocable` command, since built-in commands typed mid-text won't be
+ *   executed.
+ */
+export function findSlashCommandTokens(
+  text: string,
+  commands: readonly SlashCommand[],
+): SlashCommandToken[] {
+  if (!text) return [];
+
+  const commandMapEntries: Array<[string, SlashCommand]> = [];
   for (const cmd of commands) {
-    // Only suggest model-invocable commands for mid-input completion,
-    // since built-in commands typed in the middle of text won't be executed.
-    if (!cmd.modelInvocable) continue;
-    const name = cmd.name.toLowerCase();
-    if (name.startsWith(query) && name !== query) {
-      const suffix = cmd.name.slice(partialCommand.length);
-      if (!best || cmd.name < best.fullCommand) {
-        best = { suffix, fullCommand: cmd.name };
-      }
+    commandMapEntries.push([cmd.name.toLowerCase(), cmd]);
+    for (const altName of cmd.altNames ?? []) {
+      commandMapEntries.push([altName.toLowerCase(), cmd]);
     }
   }
-  return best;
+  const commandMap = new Map<string, SlashCommand>(commandMapEntries);
+
+  const tokens: SlashCommandToken[] = [];
+  let match: RegExpExecArray | null;
+  SLASH_TOKEN_RE.lastIndex = 0;
+
+  while ((match = SLASH_TOKEN_RE.exec(text)) !== null) {
+    const fullMatch = match[0];
+    const commandName = match[1];
+    const start = match.index;
+    const end = start + fullMatch.length;
+
+    // Determine if this is a line-start token (position 0 or preceded by newline)
+    const precedingChar = start > 0 ? text[start - 1] : null;
+    const isLineStart = start === 0 || precedingChar === '\n';
+
+    const cmd = commandMap.get(commandName.toLowerCase());
+    let valid = false;
+    if (cmd) {
+      if (isLineStart) {
+        // Line-start: valid if command is user-invocable (interactive)
+        valid = cmd.userInvocable !== false && !cmd.hidden;
+      } else {
+        // Mid-input: only valid if model-invocable
+        valid = cmd.modelInvocable === true;
+      }
+    }
+
+    tokens.push({ start, end, commandName, valid });
+  }
+
+  return tokens;
 }

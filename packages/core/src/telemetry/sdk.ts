@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DiagConsoleLogger, DiagLogLevel, diag } from '@opentelemetry/api';
+import { DiagLogLevel, diag } from '@opentelemetry/api';
+import type { DiagLogger } from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
@@ -29,9 +30,24 @@ import {
 } from './file-exporters.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
+import { createSessionRootContext } from './tracer.js';
+import { setSessionContext } from './session-context.js';
 
-// For troubleshooting, set the log level to DiagLogLevel.DEBUG
-diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.WARN);
+function createTelemetryDiagLogger(): DiagLogger {
+  const debugLogger = createDebugLogger('OTEL');
+  return {
+    error: (message, ...args) => debugLogger.error(message, ...args),
+    warn: (message, ...args) => debugLogger.warn(message, ...args),
+    info: (message, ...args) => debugLogger.info(message, ...args),
+    debug: (message, ...args) => debugLogger.debug(message, ...args),
+    verbose: (message, ...args) => debugLogger.debug(message, ...args),
+  };
+}
+
+// For troubleshooting, set the log level to DiagLogLevel.DEBUG.
+// OTel SDK diagnostics must not write to console because console output can be
+// surfaced in user-visible UI. Keep diagnostics in the debug log instead.
+diag.setLogger(createTelemetryDiagLogger(), DiagLogLevel.WARN);
 
 /**
  * Standard OTLP HTTP signal-specific paths per the OpenTelemetry specification.
@@ -203,6 +219,10 @@ export function initializeTelemetry(config: Config): void {
         // bridge owns its own forceFlush/shutdown lifecycle.
         logToSpanProcessor = new LogToSpanProcessor(
           new OTLPTraceExporterHttp({ url: tracesUrl }),
+          {
+            includeSensitiveSpanAttributes:
+              config.getTelemetryIncludeSensitiveSpanAttributes(),
+          },
         );
       }
       if (metricsUrl) {
@@ -269,9 +289,24 @@ export function initializeTelemetry(config: Config): void {
     sdk.start();
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
+    setSessionContext(createSessionRootContext(config.getSessionId()));
     initializeMetrics(config);
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
+  }
+}
+
+/**
+ * Refresh the session root context with a new session ID.
+ * Must be called whenever the session changes (e.g. /clear, /resume)
+ * so that new spans inherit the correct traceId.
+ */
+export function refreshSessionContext(sessionId: string): void {
+  if (!telemetryInitialized) return;
+  try {
+    setSessionContext(createSessionRootContext(sessionId));
+  } catch (error) {
+    createDebugLogger('OTEL').warn('Failed to refresh session context:', error);
   }
 }
 
@@ -329,6 +364,7 @@ export async function shutdownTelemetry(): Promise<void> {
       telemetryInitialized = false;
       sdk = undefined;
       telemetryShutdownPromise = undefined;
+      setSessionContext(undefined);
     }
   })();
   return telemetryShutdownPromise;

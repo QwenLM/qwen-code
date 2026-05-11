@@ -79,6 +79,27 @@ export interface SettingDefinition {
   /** Schema for array items when type is 'array' */
   items?: SettingItemDefinition;
   /**
+   * Primitive shapes a field accepted before it was expanded to its current
+   * type. The exported JSON Schema wraps the field in `anyOf` so values from
+   * those older shapes don't trip the IDE validator while the runtime
+   * migration is still pending. Has no runtime effect — it's purely a
+   * compatibility hint for editors.
+   *
+   * Narrowed to the subset our generator can faithfully emit as a
+   * one-liner `{ type: <legacyType> }` schema fragment. `'enum'` is
+   * not a valid JSON Schema `type` value at all (enum constraints
+   * use the `enum` keyword, not `type: 'enum'`), so allowing it here
+   * would silently produce an invalid `settings.schema.json`.
+   * `'object'` IS a valid JSON Schema type, but a bare
+   * `{ type: 'object' }` legacy entry would accept ANY object value
+   * — most likely not what the field's pre-expansion shape actually
+   * permitted. Future legacy shapes that need `enum` / structured-
+   * object compatibility should land their own branch in
+   * `convertSettingToJsonSchema` (with proper `enum:` / `properties:`
+   * companions) instead of widening this set.
+   */
+  legacyTypes?: ReadonlyArray<'boolean' | 'string' | 'number' | 'array'>;
+  /**
    * Escape hatch for the JSON Schema generator: when set, this object is
    * emitted verbatim under the setting's properties entry instead of the
    * shape derived from `type`/`properties`/etc. The `description` is still
@@ -278,29 +299,6 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.REPLACE,
   },
 
-  // Coding Plan configuration
-  codingPlan: {
-    type: 'object',
-    label: 'Coding Plan',
-    category: 'Model',
-    requiresRestart: false,
-    default: {},
-    description: 'Coding Plan template version tracking and configuration.',
-    showInDialog: false,
-    properties: {
-      version: {
-        type: 'string',
-        label: 'Coding Plan Template Version',
-        category: 'Model',
-        requiresRestart: false,
-        default: undefined as string | undefined,
-        description:
-          'SHA256 hash of the Coding Plan template. Used to detect template updates.',
-        showInDialog: false,
-      },
-    },
-  },
-
   // Environment variables fallback
   env: {
     type: 'object',
@@ -387,14 +385,47 @@ const SETTINGS_SCHEMA = {
         showInDialog: true,
       },
       gitCoAuthor: {
-        type: 'boolean',
-        label: 'Attribution: commit',
+        type: 'object',
+        label: 'Attribution',
         category: 'General',
         requiresRestart: false,
-        default: true,
+        // Match `normalizeGitCoAuthor`'s runtime defaults so the IDE
+        // schema publishes the same "enabled by default" hint users see
+        // at runtime. The empty-object form here would silently lose
+        // editor-surfaced defaults.
+        default: { commit: true, pr: true },
         description:
-          'Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.',
-        showInDialog: true,
+          'Attribution added to git commits and pull requests created through Qwen Code.',
+        showInDialog: false,
+        // Pre-V4 settings stored this as a single boolean. The V3→V4
+        // migration rewrites those on first launch, but the IDE schema
+        // validator runs before that — accept the boolean shape so users
+        // editing settings.json in VS Code don't see a spurious warning
+        // until they run qwen once. Config.normalizeGitCoAuthor handles
+        // the boolean at runtime.
+        legacyTypes: ['boolean'],
+        properties: {
+          commit: {
+            type: 'boolean',
+            label: 'Attribution: commit',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both.',
+            showInDialog: true,
+          },
+          pr: {
+            type: 'boolean',
+            label: 'Attribution: PR',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Append a Qwen Code attribution line to PR descriptions when running `gh pr create`.',
+            showInDialog: true,
+          },
+        },
       },
       checkpointing: {
         type: 'object',
@@ -447,6 +478,17 @@ const SETTINGS_SCHEMA = {
         description:
           'The language for LLM output. Use "auto" to detect from system settings, ' +
           'or set a specific language.',
+        showInDialog: true,
+      },
+      dynamicCommandTranslation: {
+        type: 'boolean',
+        label: 'Language: Dynamic Command Translation',
+        category: 'General',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable AI translation for dynamic slash command descriptions. ' +
+          'When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.',
         showInDialog: true,
       },
       terminalBell: {
@@ -922,6 +964,18 @@ const SETTINGS_SCHEMA = {
     default: undefined as TelemetrySettings | undefined,
     description: 'Telemetry configuration.',
     showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'object',
+      properties: {
+        includeSensitiveSpanAttributes: {
+          description:
+            'Include prompt, function_args, and response_text in spans created by the log-to-span bridge. Only controls bridge spans; OTel logs and other telemetry sinks may still receive response_text.',
+          type: 'boolean',
+          default: false,
+        },
+      },
+      additionalProperties: true,
+    },
   },
 
   fastModel: {
@@ -1284,6 +1338,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Enable automatic consolidation (dream) of collected memories.',
+        showInDialog: false,
+      },
+      enableAutoSkill: {
+        type: 'boolean',
+        label: 'Enable Auto Skill',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable background review for reusable project skills after tool-heavy sessions.',
         showInDialog: false,
       },
     },
@@ -1750,7 +1814,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as string | undefined,
         description:
           'Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). ' +
-          'Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.',
+          'Config files remain at ~/.qwen (or QWEN_HOME if set). Env var QWEN_RUNTIME_DIR takes priority.',
         showInDialog: false,
       },
     },

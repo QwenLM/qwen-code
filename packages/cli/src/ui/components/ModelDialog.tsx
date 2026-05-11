@@ -36,6 +36,45 @@ function formatModalities(modalities?: InputModalities): string {
   return `${t('text')} · ${parts.join(' · ')}`;
 }
 
+/**
+ * Build a unique selection key for a model entry in the model dialog.
+ * When baseUrl is present, it's appended after a \0 separator to ensure
+ * entries with the same model id but different baseUrls get distinct keys.
+ */
+function buildModelSelectionKey(
+  authType: string,
+  modelId: string,
+  baseUrl?: string,
+): string {
+  const base = `${authType}::${modelId}`;
+  return baseUrl ? `${base}\0${baseUrl}` : base;
+}
+
+/**
+ * Parse a model selection key back into its components.
+ */
+function parseModelSelectionKey(key: string): {
+  authType: string;
+  modelId: string;
+  baseUrl?: string;
+} {
+  const sep = '::';
+  const idx = key.indexOf(sep);
+  if (idx < 0) return { authType: '', modelId: key };
+
+  const authType = key.slice(0, idx);
+  const rest = key.slice(idx + sep.length);
+  const nullIdx = rest.indexOf('\0');
+  if (nullIdx >= 0) {
+    return {
+      authType,
+      modelId: rest.slice(0, nullIdx),
+      baseUrl: rest.slice(nullIdx + 1),
+    };
+  }
+  return { authType, modelId: rest };
+}
+
 interface ModelDialogProps {
   onClose: () => void;
   isFastModelMode?: boolean;
@@ -209,9 +248,10 @@ export function ModelDialog({
     () =>
       availableModelEntries.map(
         ({ authType: t2, model, isRuntime, snapshotId }) => {
-          // Runtime models use snapshotId directly (format: $runtime|${authType}|${modelId})
           const value =
-            isRuntime && snapshotId ? snapshotId : `${t2}::${model.id}`;
+            isRuntime && snapshotId
+              ? snapshotId
+              : buildModelSelectionKey(t2, model.id, model.baseUrl);
 
           const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
 
@@ -272,10 +312,13 @@ export function ModelDialog({
   const activeRuntimeSnapshot = isFastModelMode
     ? undefined // fast model is never a runtime model
     : config?.getActiveRuntimeModelSnapshot?.();
+  const currentBaseUrl = config
+    ?.getModelsConfig()
+    .getGenerationConfig()?.baseUrl;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : authType
-      ? `${authType}::${preferredModelId}`
+      ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
       : '';
 
   useKeypress(
@@ -302,7 +345,10 @@ export function ModelDialog({
     const key = highlightedValue ?? preferredKey;
     return availableModelEntries.find(
       ({ authType: t2, model, isRuntime, snapshotId }) => {
-        const v = isRuntime && snapshotId ? snapshotId : `${t2}::${model.id}`;
+        const v =
+          isRuntime && snapshotId
+            ? snapshotId
+            : buildModelSelectionKey(t2, model.id, model.baseUrl);
         return v === key;
       },
     );
@@ -312,12 +358,13 @@ export function ModelDialog({
     async (selected: string) => {
       setErrorMessage(null);
 
-      // Fast model mode: just save the model ID and close
+      // Fast model mode: save the model ID only (baseUrl is intentionally
+      // discarded — getFastModel resolves via the first registry match).
       if (isFastModelMode) {
-        // Extract model ID from selection key (format: "authType::modelId" or "$runtime|authType|modelId")
         let modelId: string;
         if (selected.includes('::')) {
-          modelId = selected.split('::').slice(1).join('::');
+          const parsed = parseModelSelectionKey(selected);
+          modelId = parsed.modelId;
         } else if (selected.startsWith('$runtime|')) {
           const parts = selected.split('|');
           modelId = parts[2] ?? selected;
@@ -376,6 +423,7 @@ export function ModelDialog({
         let selectedAuthType: AuthType;
         let modelId: string;
 
+        let selectedBaseUrl: string | undefined;
         if (isRuntime) {
           // For runtime models, extract authType from the snapshot ID
           // Format: $runtime|${authType}|${modelId}
@@ -387,22 +435,19 @@ export function ModelDialog({
           }
           modelId = selected; // Pass the full snapshot ID to switchModel
         } else {
-          const sep = '::';
-          const idx = selected.indexOf(sep);
-          selectedAuthType = (
-            idx >= 0 ? selected.slice(0, idx) : authType
-          ) as AuthType;
-          modelId = idx >= 0 ? selected.slice(idx + sep.length) : selected;
+          const parsed = parseModelSelectionKey(selected);
+          selectedAuthType = (parsed.authType || authType) as AuthType;
+          modelId = parsed.modelId;
+          selectedBaseUrl = parsed.baseUrl;
         }
 
-        await config.switchModel(
-          selectedAuthType,
-          modelId,
-          selectedAuthType !== authType &&
-            selectedAuthType === AuthType.QWEN_OAUTH
+        await config.switchModel(selectedAuthType, modelId, {
+          ...(selectedAuthType !== authType &&
+          selectedAuthType === AuthType.QWEN_OAUTH
             ? { requireCachedCredentials: true }
-            : undefined,
-        );
+            : {}),
+          baseUrl: selectedBaseUrl,
+        });
 
         if (!isRuntime) {
           const event = new ModelSlashCommandEvent(modelId);

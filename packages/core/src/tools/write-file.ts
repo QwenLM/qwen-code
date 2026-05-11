@@ -49,6 +49,7 @@ import {
   fileExists as isFilefileExists,
 } from '../utils/fileUtils.js';
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
@@ -135,6 +136,20 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     // here, a race window the pre-fix gating left wide open) means
     // the model is about to clobber bytes it never read → reject.
     if (!this.config.getFileReadCacheDisabled()) {
+      // No `requireFullRead`-style option is passed — by design,
+      // and applies to all 5 checkPriorRead call sites in this file.
+      // PR #3932 added that option to require a full read before
+      // overwrite; PR #4002 removed it because the truncate-tool-
+      // output limit makes "fully read" an impossible precondition
+      // on large files (issue #3945 deadlock). WriteFile and Edit
+      // now share the same contract — any prior read clears
+      // enforcement and mtime/size drift is the safety net. The
+      // `fileReadCacheDisabled: true` config check above goes the
+      // OTHER way (skipping `checkPriorRead` entirely so application-
+      // level locking can take over), it is not an opt-in to
+      // stricter behaviour. See the docstring on `checkPriorRead`
+      // for the full rationale and the residual #2499 risk this
+      // stance accepts.
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         this.params.file_path,
@@ -425,6 +440,17 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           lineEnding: detectedLineEnding,
         },
       });
+
+      // Track AI contribution for commit attribution.
+      // Pass null only when the file truly did not exist before this write;
+      // an empty string means the file existed but was empty.
+      if (!modified_by_user) {
+        CommitAttributionService.getInstance().recordEdit(
+          file_path,
+          fileExists ? originalContent : null,
+          content,
+        );
+      }
 
       // Mark the cache entry written, capturing the post-write stats
       // so a follow-up Read sees `lastReadAt < lastWriteAt` and falls
