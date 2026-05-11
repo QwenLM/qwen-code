@@ -56,6 +56,5 @@ MATCH (c:Commit) RETURN count(c) AS total_commits
 - Boolean: `AND`, `OR`, `NOT`
 
 **Limitations:**
-- `OPTIONAL MATCH` is not available in the pip package
 - Chained `MATCH` after `WITH` may be limited — prefer single `MATCH` clauses with multiple patterns separated by commas
 - No `CREATE`, `SET`, `DELETE` via Cypher — graph mutations go through the Python API

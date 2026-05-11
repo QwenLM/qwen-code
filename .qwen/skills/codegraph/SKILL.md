@@ -1,6 +1,6 @@
 ---
-name: codegraph-qa
-description: Analyze indexed codebases via graph database (neug) and vector index (zvec). Covers call graphs, dependencies, dead code, hotspots, module coupling, architecture reports, semantic search, impact analysis, bug root cause from GitHub issues, class diagrams (UML), and PR review (risk scoring, conflict detection, auto-merge candidates, labeling). Use for: code structure, who calls what, why something changed, similar functions, module boundaries, bug tracing, class relationships, PR risk/conflicts, or any question benefiting from a code knowledge graph. Applies when a `.codegraph` index exists in the workspace.
+name: codegraph
+description: Analyze indexed codebases via graph database (neug) and vector index (zvec). Covers call graphs, dependencies, dead code, hotspots, module coupling, architecture reports, semantic search, impact analysis, bug root cause from GitHub issues, class diagrams (UML), and PR review (risk scoring, conflict detection, auto-merge candidates, labeling). Also covers creating, inspecting, and repairing a CodeScope index. Use for: code structure, who calls what, why something changed, similar functions, module boundaries, bug tracing, class relationships, PR risk/conflicts, or any question benefiting from a code knowledge graph. Applies when a `.codegraph` index exists in the workspace, or when the user wants to create one.
 ---
 
 # CodeScope Q&A
@@ -72,6 +72,13 @@ codegraph init --repo . --lang auto --commits 500
 Supported languages: `python`, `c`, `javascript`, `typescript`, `java`, or `auto` (auto-detects from file extensions).
 
 The `--commits` flag ingests git history (for evolution queries). Without it, only structural analysis is available. Add `--backfill-limit 200` to also compute function-level `MODIFIES` edges (slower but enables `change_attribution` and `co_change`).
+
+To add git history to an existing index (without re-indexing structure):
+
+```bash
+codegraph ingest --repo . --db $CODESCOPE_DB_DIR --commits 500
+codegraph ingest --repo . --db $CODESCOPE_DB_DIR --backfill-limit 200   # add MODIFIES edges only
+```
 
 ## Two Interfaces: CLI vs Python
 
@@ -446,12 +453,48 @@ with PRReview(db=".codegraph") as pr:
 
     # All PRs in DB
     pr.all_prs()                        # → [{"number": "100", ...}, ...]
+
+    # Functions changed by a specific PR (added / modified / deleted)
+    import json
+    cs = pr._open_cs()
+    rows = list(cs.conn.execute(
+        f"MATCH (pr:PR {{id: {json.dumps('439')}}})-[c:CHANGES]->(f:Function) "
+        f"RETURN c.info AS change_type, f.name, f.file_path "
+        f"ORDER BY c.info, f.name"
+    ))
+    for change_type, name, path in rows:
+        print(f"  [{change_type}] {name} ({path})")
+    # change_type: 'hunk' (modified), 'new' (added), 'deleted', 'related' (newly calls)
 ```
 
 All query methods return structured Python objects — no text parsing
 required.  The CLI and Python API share the same underlying implementation
 (`run_prepare` / `run_label` / graph DB), so you can ``prepare`` via CLI
 and query via Python, or vice versa.
+
+For lower-level components (PRScorer, CrossPRAnalyzer, etc.), see:
+
+```python
+from codegraph.pr_analysis import GitHubClient, GraphAnalyzer, PRScorer, CrossPRAnalyzer
+gh = GitHubClient(repo='owner/repo')
+scorer = PRScorer(GraphAnalyzer(cs, repo_dir), repo_dir, gh)
+result = scorer.analyze(gh.pr_to_entry(pr), output_dir='/tmp')  # risk_score, risk_level, peak_blast...
+
+cross = CrossPRAnalyzer(cs, repo_dir, gh)
+cross.prepare(pr_ids)  # index PR nodes into graph
+cross.connected_components()  # {root: [pr_ids]} — detects conflicts
+cross.update_pr_labels(assignments)  # persist labels to graph DB
+
+# Load PR results from graph DB (no GitHub API needed)
+all_results, components = cross.load_from_graph()
+
+# Build and apply labels from analysis results
+from codegraph.pr_labeler import build_label_assignments, apply_labels
+assignments = build_label_assignments(all_results, components)
+apply_labels(assignments, repo='owner/repo', create_labels=True)
+```
+
+For detailed workflows, Cypher patterns, and CrossPRAnalyzer query dimensions, see [pr-analysis.md](./pr-analysis.md).
 
 ### Report Structure (3 sections)
 
@@ -488,7 +531,7 @@ Label scheme:
 
 ### Follow-up Exploration
 
-PR-specific follow-up questions are automatically included in `codegraph explore` when PR nodes exist in the graph DB (i.e., after `codegraph pr-review prepare`). PR exploration is a question template set integrated into `explore`. To query a specific PR's conflicts, use `codegraph query` with Cypher.
+PR-specific follow-up questions are automatically included in `codegraph explore` when PR nodes exist in the graph DB (i.e., after `codegraph pr-review prepare`). PR exploration is a question template set integrated into `explore`. To query a specific PR's details (conflicts, changed functions), use the `PRReview` Python API.
 
 ```bash
 # After pr-review prepare, explore includes PR questions automatically:
@@ -508,9 +551,6 @@ codegraph explore --db .codegraph --type risk
 
 # Filter to only PR review questions:
 codegraph explore --db .codegraph --type pr-review --role reviewer
-
-# Query a specific PR's conflicts via Cypher:
-codegraph query "MATCH (pr1:PR {id: '439'})-[c1:CHANGES {info: 'hunk'}]->(f:Function)<-[c2:CHANGES {info: 'hunk'}]-(pr2:PR) WHERE pr1.id <> pr2.id RETURN pr2.id, f.name, f.file_path"
 ```
 
 The `--type` filter controls which question categories appear:
@@ -522,30 +562,6 @@ The `--type` filter controls which question categories appear:
 - `pr-review`: PR-specific questions (impact, conflicts, test coverage)
 
 When `--type pr-review` is specified, only PR-related questions are shown.
-
-### Python API
-
-```python
-from codegraph.pr_analysis import GitHubClient, GraphAnalyzer, PRScorer, CrossPRAnalyzer
-gh = GitHubClient(repo='owner/repo')
-scorer = PRScorer(GraphAnalyzer(cs, repo_dir), repo_dir, gh)
-result = scorer.analyze(gh.pr_to_entry(pr), output_dir='/tmp')  # risk_score, risk_level, peak_blast...
-
-cross = CrossPRAnalyzer(cs, repo_dir, gh)
-cross.prepare(pr_ids)  # index PR nodes into graph
-cross.connected_components()  # {root: [pr_ids]} — detects conflicts
-cross.update_pr_labels(assignments)  # persist labels to graph DB
-
-# Load PR results from graph DB (no GitHub API needed)
-all_results, components = cross.load_from_graph()
-
-# Build and apply labels from analysis results
-from codegraph.pr_labeler import build_label_assignments, apply_labels
-assignments = build_label_assignments(all_results, components)
-apply_labels(assignments, repo='owner/repo', create_labels=True)
-```
-
-For detailed workflows, Cypher patterns, and CrossPRAnalyzer query dimensions, see [pr-analysis.md](./pr-analysis.md).
 
 ## How to Route Questions
 
@@ -586,8 +602,9 @@ The key decision is: **does the user want an exact structural answer, a fuzzy se
 | "Post conflict comments on PRs" | `codegraph pr-review label --db ...` (automatic for conflicting PRs) |
 | "Preview labels/comments without applying" | `codegraph pr-review label --db ... --dry-run` |
 | "Explore PR follow-up questions interactively" | `codegraph explore --db .codegraph` (auto-includes PR patterns if `prepare` was run) |
-| "Query a specific PR's conflicts" | Cypher: `MATCH (pr1:PR {id: '439'})-[c1:CHANGES {info: 'hunk'}]->(f:Function)<-[c2:CHANGES {info: 'hunk'}]-(pr2:PR) WHERE pr1.id <> pr2.id RETURN pr2.id, f.name, f.file_path` |
-| "Compare two PRs for overlap" | Cypher: `MATCH (pr1:PR {id: '439'})-[c1:CHANGES {info: 'hunk'}]->(f:Function)<-[c2:CHANGES {info: 'hunk'}]-(pr2:PR {id: '440'}) RETURN f.name AS shared_function, f.file_path` |
+| "Query a specific PR's conflicts" | `PRReview.conflict_prs_of("42")` — returns list of conflicting PR numbers |
+| "Query a specific PR's changed functions" | Cypher: `MATCH (pr:PR {id: '42'})-[c:CHANGES]->(f:Function) RETURN c.info, f.name, f.file_path` |
+| "Compare two PRs for overlap" | Cypher: `MATCH (pr1:PR {id: '42'})-[c1:CHANGES]->(f:Function)<-[c2:CHANGES]-(pr2:PR {id: '43'}) RETURN f.name, f.file_path` |
 | "Show only architecture questions" | `codegraph explore --db .codegraph --type architecture` |
 | "Show only PR review questions" | `codegraph explore --db .codegraph --type pr-review --role reviewer` |
 | "Show top PR risk questions" | `codegraph explore --db .codegraph --top 15 --role reviewer` |
@@ -626,6 +643,7 @@ If no commits exist, evolution methods will return empty results — guide the u
 | `Can't open lock file` | zvec LOCK file deleted | `touch <db>/vectors/LOCK` |
 | `Can't lock read-write collection` | Another process holds lock | Kill the other process |
 | `recovery idmap failed` | Stale WAL files | Remove empty `.log` files from `<db>/vectors/idmap.0/` |
+| HuggingFace model download fails | Network/firewall blocks huggingface.co | Use `HF_ENDPOINT="https://hf-mirror.com"` or ModelScope (see Getting Started tip) |
 
 The CLI auto-cleans lock issues on startup when possible.
 

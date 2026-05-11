@@ -1,10 +1,8 @@
 # Analyzing PR Impact with CodeGraph
 
-A reusable workflow for analyzing the structural impact of all open PRs in a GitHub repository using [codegraph-ai](https://github.com/neug/codegraph).
+A reusable workflow for analyzing the structural impact of all open PRs in a GitHub repository using [codegraph-ai](https://pypi.org/project/codegraph-ai/).
 
 The workflow covers: fetching all open PRs via GitHub API → fetching branches → building the code graph index → computing multi-dimensional risk signals per PR → writing a prioritized report to a file.
-
-For the decision framework on how to interpret results and prioritize PRs, see `PRReview.md` in the project root.
 
 ---
 
@@ -293,7 +291,6 @@ with open(OUTPUT_FILE, 'w') as fout:
         def flush(self):
             original_stdout.flush()
             fout.flush()
-@
     sys.stdout = Tee()
     try:
         run_all_analyses()
@@ -306,6 +303,16 @@ with open(OUTPUT_FILE, 'w') as fout:
 ## Graph-Based Cross-PR Analysis (`CrossPRAnalyzer`)
 
 `pr_review.py` is the authoritative unified pipeline. For graph-native cross-PR queries alone, use `CrossPRAnalyzer` from `pr_analysis.py`: it **writes PR function sets directly into the CG graph** as `PR` nodes (with flat properties: `id`, `title`, `author`, `risk_level`, `label`) and `CHANGES` edges, then uses Cypher to query cross-PR relationships.
+
+### Conflict Detection Dimensions
+
+Cross-PR conflicts are detected at three levels of granularity:
+
+| Level | What it detects | How it's detected |
+|-------|----------------|-------------------|
+| **File-level overlap** | Two PRs modify the same file | Set intersection of `gh pr diff --name-only` results |
+| **Function-level overlap** | Two PRs modify the same function (even different lines) | `CHANGES {info: 'hunk'}` edges to the same `Function` node — this powers the automated connected-components detection |
+| **Dependency chain overlap** | PR A modifies function X, PR B modifies function Y, and Y calls X — git reports no conflict but merging A may break B's assumptions | Cypher: `MATCH (pr1:PR)-[c1:CHANGES]->(f:Function)-[:CALLS]->(g:Function)<-[c2:CHANGES]-(pr2:PR)` — see usecase3 (manual) queries below |
 
 ### When to Use
 
@@ -324,8 +331,9 @@ from codegraph.core import CodeScope
 from codegraph.pr_analysis import CrossPRAnalyzer
 
 DB_DIR = '/path/to/repo/.codegraph'  # adjust to your repo
+REPO_DIR = '/path/to/repo'           # local git repo path
 cs = CodeScope(DB_DIR)
-cross = CrossPRAnalyzer(cs)
+cross = CrossPRAnalyzer(cs, repo_dir=REPO_DIR)
 
 prs = ['2585', '2584', '2583', '2582', '2581', '2580']  # PR numbers to analyze
 cross.prepare(prs)
@@ -334,18 +342,19 @@ cs.close()
 
 Internally, `prepare()` calls `_write_pr_graph_nodes(pr_id)` for each PR, which:
 
-1. Runs `summary_pr` (from `locate_pr.py`) to get `Hunk Function` / `Related Functions` per file
-2. For `Hunk Function`: verifies existence in CG graph by exact `name + file_path` match before inserting
-3. Writes `(PR)-[:CHANGES {info:'hunk'}]->(Function)` edges for hunk functions
-4. Writes `(PR)-[:CHANGES {info:'related'}]->(Function)` edges for related functions (callers in diff context)
+1. Runs `resolve_pr_functions` (from `pr_locator.py`) to categorize PR functions against the graph DB
+2. **Hunk**: PR modified this function — confirmed in graph DB by `name + file_path` match → `(PR)-[:CHANGES {info:'hunk'}]->(Function)`
+3. **Deleted**: PR deleted this function — confirmed in graph DB by `name + file_path` match → `(PR)-[:CHANGES {info:'deleted'}]->(Function)`
+4. **Related**: PR newly calls this function — confirmed in graph DB by `name` match → `(PR)-[:CHANGES {info:'related'}]->(Function)`
+5. **New**: PR added this function — not yet in graph DB (no pre-confirmation needed) → `(PR)-[:CHANGES {info:'new'}]->(Function)`
 
-This CG-graph-verified insertion is what distinguishes cross-PR analysis from `PRScorer`'s blast-radius scoring — only functions confirmed in the index are included.
+This graph-DB-verified insertion is what distinguishes cross-PR analysis from `PRScorer`'s blast-radius scoring — only functions confirmed in the index are included for hunk/deleted/related; new functions are recorded even if not yet indexed.
 
 ### Three Query Dimensions
 
 ```python
 from codegraph.pr_analysis import CrossPRAnalyzer
-cross = CrossPRAnalyzer(cs)
+cross = CrossPRAnalyzer(cs, repo_dir=REPO_DIR)
 rows1, rows2, components = cross.analyze_all(out_dir='/tmp')
 ```
 
