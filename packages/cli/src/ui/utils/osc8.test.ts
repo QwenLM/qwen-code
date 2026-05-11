@@ -6,24 +6,40 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  HYPERLINK_ENV_KEYS,
+  isSafeOscScheme,
   osc8Close,
   osc8Hyperlink,
   osc8Open,
-  resetSupportsHyperlinksCache,
   sanitizeForOsc,
   supportsHyperlinks,
-  wrapForMultiplexer,
+  trimTrailingUrlPunctuation,
 } from './osc8.js';
 
 const ESC = '\x1b';
 const BEL = '\x07';
 
+function clearHyperlinkEnv() {
+  for (const key of HYPERLINK_ENV_KEYS) {
+    delete process.env[key];
+  }
+}
+
 describe('osc8 helpers', () => {
   const savedEnv = { ...process.env };
   const savedIsTTY = process.stdout.isTTY;
+  const savedPlatform = process.platform;
 
   beforeEach(() => {
-    resetSupportsHyperlinksCache();
+    // Start every test from a known baseline. supportsHyperlinks() has no
+    // memoization so a fresh env is enough.
+    process.env = { ...savedEnv };
+    clearHyperlinkEnv();
+    // Reset platform too so a prior test that flipped to win32 can't leak.
+    Object.defineProperty(process, 'platform', {
+      configurable: true,
+      value: savedPlatform,
+    });
   });
 
   afterEach(() => {
@@ -32,7 +48,10 @@ describe('osc8 helpers', () => {
       configurable: true,
       value: savedIsTTY,
     });
-    resetSupportsHyperlinksCache();
+    Object.defineProperty(process, 'platform', {
+      configurable: true,
+      value: savedPlatform,
+    });
   });
 
   describe('sanitizeForOsc', () => {
@@ -63,17 +82,11 @@ describe('osc8 helpers', () => {
     it('strips embedded escapes so they cannot break out of the envelope', () => {
       const malicious = `https://example.com${BEL}${ESC}]8;;evil${BEL}`;
       const out = osc8Hyperlink(malicious, `lbl${ESC}[31m`);
-      // The only ESC bytes in the output must be the two that introduce the
-      // OSC 8 open and close sequences — no user-supplied ESC leaks through.
+      // Exactly two ESC and two BEL bytes — the envelope's own terminators.
       // eslint-disable-next-line no-control-regex
-      const escCount = (out.match(/\x1b/g) ?? []).length;
-      expect(escCount).toBe(2);
-      // Same idea for BEL — exactly two terminators, no extras from the
-      // sanitized user input.
+      expect((out.match(/\x1b/g) ?? []).length).toBe(2);
       // eslint-disable-next-line no-control-regex
-      const belCount = (out.match(/\x07/g) ?? []).length;
-      expect(belCount).toBe(2);
-      // After sanitization the surviving textual fragments stay inline.
+      expect((out.match(/\x07/g) ?? []).length).toBe(2);
       expect(out).toContain('https://example.com]8;;evil');
       expect(out).toContain('lbl[31m');
     });
@@ -85,29 +98,65 @@ describe('osc8 helpers', () => {
     });
   });
 
-  describe('wrapForMultiplexer', () => {
-    it('returns the OSC unchanged when not inside tmux or screen', () => {
-      delete process.env['TMUX'];
-      delete process.env['STY'];
-      const seq = `${ESC}]8;;https://x${BEL}`;
-      expect(wrapForMultiplexer(seq)).toBe(seq);
+  describe('isSafeOscScheme', () => {
+    it.each([
+      'http://example.com',
+      'https://example.com/path',
+      'HTTPS://example.com', // case-insensitive scheme
+      'mailto:user@example.com',
+      'ftp://example.com/file',
+      'ftps://example.com',
+      'sftp://host/path',
+      'ssh://host',
+    ])('allows %s', (url) => {
+      expect(isSafeOscScheme(url)).toBe(true);
     });
 
-    it('wraps in a tmux DCS passthrough envelope with doubled ESCs', () => {
-      process.env['TMUX'] = '/tmp/tmux-1000/default,1234,0';
-      delete process.env['STY'];
-      const seq = `${ESC}]8;;https://x${BEL}`;
-      expect(wrapForMultiplexer(seq)).toBe(
-        `${ESC}Ptmux;${ESC}${ESC}]8;;https://x${BEL}${ESC}\\`,
+    it.each([
+      'javascript:alert(1)',
+      'JavaScript:alert(1)',
+      'data:text/html;base64,PHNjcmlwdD4=',
+      'vbscript:msgbox(1)',
+      'file:///etc/passwd',
+      'chrome://settings',
+      'about:blank',
+      // Relative / fragment / empty — no scheme at all.
+      '',
+      '#anchor',
+      '/relative/path',
+      './doc.html',
+      'just text',
+    ])('rejects %s', (url) => {
+      expect(isSafeOscScheme(url)).toBe(false);
+    });
+  });
+
+  describe('trimTrailingUrlPunctuation', () => {
+    it.each([
+      ['https://example.com.', 'https://example.com'],
+      ['https://example.com,', 'https://example.com'],
+      ['https://example.com!', 'https://example.com'],
+      ['https://example.com?q=1)', 'https://example.com?q=1'],
+      ['https://example.com:::', 'https://example.com'],
+      ['https://example.com).', 'https://example.com'],
+    ])('trims sentence punctuation: %s -> %s', (input, expected) => {
+      expect(trimTrailingUrlPunctuation(input)).toBe(expected);
+    });
+
+    it('preserves a trailing close-paren when balanced inside the URL', () => {
+      const url = 'https://en.wikipedia.org/wiki/Foo_(bar)';
+      expect(trimTrailingUrlPunctuation(url)).toBe(url);
+    });
+
+    it('trims an unbalanced trailing close-paren', () => {
+      expect(trimTrailingUrlPunctuation('https://example.com/x)')).toBe(
+        'https://example.com/x',
       );
     });
 
-    it('wraps in a plain screen DCS envelope', () => {
-      delete process.env['TMUX'];
-      process.env['STY'] = '1234.host';
-      const seq = `${ESC}]8;;https://x${BEL}`;
-      expect(wrapForMultiplexer(seq)).toBe(
-        `${ESC}P${ESC}]8;;https://x${BEL}${ESC}\\`,
+    it('returns the input unchanged when there is no trailing punctuation', () => {
+      expect(trimTrailingUrlPunctuation('https://example.com/x')).toBe(
+        'https://example.com/x',
       );
     });
   });
@@ -119,95 +168,189 @@ describe('osc8 helpers', () => {
         value,
       });
     }
-
-    function clearTerminalHints() {
-      for (const key of [
-        'TERM_PROGRAM',
-        'WT_SESSION',
-        'KITTY_WINDOW_ID',
-        'VTE_VERSION',
-        'DOMTERM',
-        'JEDITERM_SOURCE_ARGS',
-        'TERMINAL_EMULATOR',
-        'COLORTERM',
-        'TERM',
-        'FORCE_HYPERLINK',
-        'FORCE_COLOR',
-        'NO_COLOR',
-        'CI',
-        'TMUX',
-        'STY',
-        'QWEN_DISABLE_HYPERLINKS',
-      ]) {
-        delete process.env[key];
-      }
+    function setPlatform(value: NodeJS.Platform) {
+      Object.defineProperty(process, 'platform', {
+        configurable: true,
+        value,
+      });
     }
 
     it('returns false when stdout is not a TTY', () => {
-      clearTerminalHints();
       setTTY(false);
       process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
       expect(supportsHyperlinks()).toBe(false);
     });
 
     it('returns false when NO_COLOR is set', () => {
-      clearTerminalHints();
       setTTY(true);
       process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
       process.env['NO_COLOR'] = '1';
       expect(supportsHyperlinks()).toBe(false);
     });
 
     it('returns false when FORCE_COLOR=0', () => {
-      clearTerminalHints();
       setTTY(true);
       process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
       process.env['FORCE_COLOR'] = '0';
       expect(supportsHyperlinks()).toBe(false);
     });
 
-    it('returns false in CI by default', () => {
-      clearTerminalHints();
+    it('returns false in CI', () => {
       setTTY(true);
       process.env['CI'] = 'true';
       process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
       expect(supportsHyperlinks()).toBe(false);
     });
 
-    it('returns true for iTerm2 on a TTY', () => {
-      clearTerminalHints();
+    it('returns false inside tmux even on a capable terminal', () => {
       setTTY(true);
+      process.env['TMUX'] = '/tmp/tmux-1000/default,1,0';
       process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+      expect(supportsHyperlinks()).toBe(false);
+    });
+
+    it('returns false inside GNU screen', () => {
+      setTTY(true);
+      process.env['STY'] = '1234.host';
+      process.env['WT_SESSION'] = '00000000-0000-0000-0000-000000000000';
+      expect(supportsHyperlinks()).toBe(false);
+    });
+
+    it('lets a detected TERM_PROGRAM win even on win32', () => {
+      setTTY(true);
+      setPlatform('win32');
+      process.env['TERM_PROGRAM'] = 'vscode';
+      process.env['TERM_PROGRAM_VERSION'] = '1.80.0';
       expect(supportsHyperlinks()).toBe(true);
     });
 
-    it('returns true for Windows Terminal via WT_SESSION', () => {
-      clearTerminalHints();
+    it('returns false on bare win32 (no detected terminal)', () => {
       setTTY(true);
+      setPlatform('win32');
+      delete process.env['TERM_PROGRAM'];
+      expect(supportsHyperlinks()).toBe(false);
+    });
+
+    it('returns true for Windows Terminal even on win32', () => {
+      setTTY(true);
+      setPlatform('win32');
       process.env['WT_SESSION'] = '00000000-0000-0000-0000-000000000000';
       expect(supportsHyperlinks()).toBe(true);
     });
 
-    it('honors FORCE_HYPERLINK=1 even without TTY heuristics matching', () => {
-      clearTerminalHints();
+    describe('version-gated TERM_PROGRAMs', () => {
+      it('iTerm.app >= 3.1 is enabled, < 3.1 is not', () => {
+        setTTY(true);
+        process.env['TERM_PROGRAM'] = 'iTerm.app';
+        process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+        expect(supportsHyperlinks()).toBe(true);
+        process.env['TERM_PROGRAM_VERSION'] = '3.1.0';
+        expect(supportsHyperlinks()).toBe(true);
+        process.env['TERM_PROGRAM_VERSION'] = '3.0.15';
+        expect(supportsHyperlinks()).toBe(false);
+        process.env['TERM_PROGRAM_VERSION'] = '2.9.20140903';
+        expect(supportsHyperlinks()).toBe(false);
+      });
+
+      it('vscode >= 1.72 is enabled, < 1.72 is not', () => {
+        setTTY(true);
+        process.env['TERM_PROGRAM'] = 'vscode';
+        process.env['TERM_PROGRAM_VERSION'] = '1.72.0';
+        expect(supportsHyperlinks()).toBe(true);
+        process.env['TERM_PROGRAM_VERSION'] = '1.71.2';
+        expect(supportsHyperlinks()).toBe(false);
+      });
+
+      it('WezTerm requires the dated build >= 20200620', () => {
+        setTTY(true);
+        process.env['TERM_PROGRAM'] = 'WezTerm';
+        process.env['TERM_PROGRAM_VERSION'] = '20200620-000000';
+        expect(supportsHyperlinks()).toBe(true);
+        process.env['TERM_PROGRAM_VERSION'] = '20191123-000000';
+        expect(supportsHyperlinks()).toBe(false);
+      });
+    });
+
+    it('VTE 0.50.0 is blocked due to known segfault; >= 0.50 otherwise enabled', () => {
       setTTY(true);
+      process.env['VTE_VERSION'] = '0.50.0';
+      expect(supportsHyperlinks()).toBe(false);
+      process.env['VTE_VERSION'] = '0.52.0';
+      expect(supportsHyperlinks()).toBe(true);
+      process.env['VTE_VERSION'] = '0.48.0';
+      expect(supportsHyperlinks()).toBe(false);
+    });
+
+    it('VTE 0.50.0 reported in packed form (5000) is also blocked', () => {
+      // VTE historically reports VTE_VERSION as a packed integer; the
+      // string-compare path would miss this case and let the segfault fire.
+      setTTY(true);
+      process.env['VTE_VERSION'] = '5000';
+      expect(supportsHyperlinks()).toBe(false);
+      process.env['VTE_VERSION'] = '5002';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('Kitty is enabled via KITTY_WINDOW_ID or TERM=xterm-kitty', () => {
+      setTTY(true);
+      process.env['KITTY_WINDOW_ID'] = '1';
+      expect(supportsHyperlinks()).toBe(true);
+      delete process.env['KITTY_WINDOW_ID'];
+      process.env['TERM'] = 'xterm-kitty';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('Ghostty is enabled via GHOSTTY_RESOURCES_DIR or TERM=xterm-ghostty', () => {
+      setTTY(true);
+      process.env['GHOSTTY_RESOURCES_DIR'] = '/path';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('honors FORCE_HYPERLINK=1 even inside tmux and even when isTTY=false', () => {
+      setTTY(false);
+      process.env['TMUX'] = '/tmp/x,1,0';
       process.env['FORCE_HYPERLINK'] = '1';
       expect(supportsHyperlinks()).toBe(true);
     });
 
-    it('respects QWEN_DISABLE_HYPERLINKS=1 as a hard opt-out', () => {
-      clearTerminalHints();
+    it('FORCE_HYPERLINK=0 disables even on capable terminals', () => {
       setTTY(true);
       process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+      process.env['FORCE_HYPERLINK'] = '0';
+      expect(supportsHyperlinks()).toBe(false);
+    });
+
+    it('hard opt-outs (NO_COLOR/QWEN_DISABLE_HYPERLINKS) win over FORCE_HYPERLINK', () => {
+      setTTY(true);
+      process.env['FORCE_HYPERLINK'] = '1';
+      process.env['NO_COLOR'] = '1';
+      expect(supportsHyperlinks()).toBe(false);
+      delete process.env['NO_COLOR'];
       process.env['QWEN_DISABLE_HYPERLINKS'] = '1';
       expect(supportsHyperlinks()).toBe(false);
     });
 
     it('returns false for an unknown terminal even on a TTY', () => {
-      clearTerminalHints();
       setTTY(true);
       process.env['TERM'] = 'dumb';
       expect(supportsHyperlinks()).toBe(false);
+    });
+
+    it('accepts a stream argument so non-stdout writers can be probed', () => {
+      const fakeStream = { isTTY: true } as NodeJS.WriteStream;
+      process.env['WT_SESSION'] = '00000000-0000-0000-0000-000000000000';
+      Object.defineProperty(process.stdout, 'isTTY', {
+        configurable: true,
+        value: false,
+      });
+      expect(supportsHyperlinks(fakeStream)).toBe(true);
+      expect(supportsHyperlinks(process.stdout)).toBe(false);
     });
   });
 });

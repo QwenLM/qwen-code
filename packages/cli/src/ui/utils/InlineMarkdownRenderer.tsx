@@ -10,7 +10,16 @@ import { theme } from '../semantic-colors.js';
 import stringWidth from 'string-width';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { renderInlineLatex } from './latexRenderer.js';
-import { osc8Close, osc8Open, supportsHyperlinks } from './osc8.js';
+import {
+  MD_LINK_CAPTURE,
+  MD_LINK_PATTERN,
+  isSafeOscScheme,
+  osc8Close,
+  osc8Open,
+  shouldWrapMarkdownLink,
+  supportsHyperlinks,
+  trimTrailingUrlPunctuation,
+} from './osc8.js';
 
 // Constants for Markdown parsing
 const BOLD_MARKER_LENGTH = 2; // For "**"
@@ -25,10 +34,13 @@ const INLINE_MATH_PATTERN = new RegExp(
   String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
   'g',
 );
-const INLINE_MARKDOWN_REGEX =
-  /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+const INLINE_MARKDOWN_REGEX = new RegExp(
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
+  'g',
+);
 const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|` +
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
     String.raw`\`+.+?\`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)`,
   'g',
 );
@@ -56,6 +68,9 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
 
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
+  // Capability is stable for the duration of a single render — read it once
+  // here so each matched link/URL doesn't re-walk the env-var table.
+  const canHyperlink = supportsHyperlinks();
   const inlineRegex = enableInlineMath
     ? INLINE_MARKDOWN_WITH_MATH_REGEX
     : INLINE_MARKDOWN_REGEX;
@@ -135,26 +150,24 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         fullMatch.includes('](') &&
         fullMatch.endsWith(')')
       ) {
-        const linkMatch = fullMatch.match(/\[(.*?)\]\((.*?)\)/);
+        const linkMatch = fullMatch.match(MD_LINK_CAPTURE);
         if (linkMatch) {
-          const linkText = linkMatch[1];
-          const url = linkMatch[2];
-          // When the host terminal supports OSC 8, wrap just the label so the
-          // entire visible region is one clickable target even if the URL is
-          // long enough to wrap across lines. The visible URL suffix is
-          // dropped because clicking the label resolves to the same target.
-          // Otherwise fall back to the legacy `label (url)` rendering so
-          // output remains byte-identical for terminals without support.
-          renderedNode = supportsHyperlinks() ? (
+          const linkText = linkMatch[1] ?? '';
+          const url = linkMatch[2] ?? '';
+          // The visible bytes (`label (url)`) stay identical to the legacy
+          // rendering so unsupported terminals see exactly today's output
+          // and copy-paste of the URL still works on supported terminals.
+          // OSC 8 wrapping is purely additive — gated on the shared
+          // `shouldWrapMarkdownLink` predicate (capability + safe scheme +
+          // no whitespace) so the React renderer and the ANSI table
+          // renderer stay in lockstep.
+          const wrapOsc8 = shouldWrapMarkdownLink(url, canHyperlink);
+          renderedNode = (
             <Text key={key}>
-              {osc8Open(url)}
-              <Text color={theme.text.link}>{linkText}</Text>
-              {osc8Close()}
-            </Text>
-          ) : (
-            <Text key={key}>
+              {wrapOsc8 ? osc8Open(url) : null}
               {linkText}
               <Text color={theme.text.link}> ({url})</Text>
+              {wrapOsc8 ? osc8Close() : null}
             </Text>
           );
         }
@@ -189,15 +202,21 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
           </Text>
         );
       } else if (fullMatch.match(/^https?:\/\//)) {
-        renderedNode = supportsHyperlinks() ? (
+        // The bare-URL regex greedily eats trailing punctuation (`.`, `)`,
+        // `,`, …). Trim that off the OSC 8 *target* so the clickable link
+        // resolves correctly, while leaving the visible bytes unchanged so
+        // unsupported terminals see today's output exactly. The bare-URL
+        // alternative is anchored on `https?://`, so `isSafeOscScheme` is
+        // redundant but kept as a cheap defense-in-depth assertion.
+        const trimmedUrl = canHyperlink
+          ? trimTrailingUrlPunctuation(fullMatch)
+          : fullMatch;
+        const wrapOsc8 = canHyperlink && isSafeOscScheme(trimmedUrl);
+        renderedNode = (
           <Text key={key} color={theme.text.link}>
-            {osc8Open(fullMatch)}
+            {wrapOsc8 ? osc8Open(trimmedUrl) : null}
             {fullMatch}
-            {osc8Close()}
-          </Text>
-        ) : (
-          <Text key={key} color={theme.text.link}>
-            {fullMatch}
+            {wrapOsc8 ? osc8Close() : null}
           </Text>
         );
       }

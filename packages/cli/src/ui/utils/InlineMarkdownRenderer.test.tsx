@@ -7,9 +7,39 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
-import { resetSupportsHyperlinksCache } from './osc8.js';
+import { HYPERLINK_ENV_KEYS } from './osc8.js';
 
 describe('<RenderInline />', () => {
+  const savedEnv = { ...process.env };
+  const savedIsTTY = process.stdout.isTTY;
+  const savedPlatform = process.platform;
+
+  beforeEach(() => {
+    process.env = { ...savedEnv };
+    // Force unsupported by default so the pre-existing assertions in this
+    // file (math, dollar variables, plain-text fast path) don't accidentally
+    // pick up OSC 8 bytes from a developer's iTerm2 session.
+    for (const key of HYPERLINK_ENV_KEYS) {
+      delete process.env[key];
+    }
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: false,
+    });
+  });
+
+  afterEach(() => {
+    process.env = { ...savedEnv };
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: savedIsTTY,
+    });
+    Object.defineProperty(process, 'platform', {
+      configurable: true,
+      value: savedPlatform,
+    });
+  });
+
   it('leaves shell-style dollar variables untouched by default', () => {
     const { lastFrame } = renderWithProviders(
       <RenderInline text="echo $HOME && echo $PATH" />,
@@ -36,72 +66,53 @@ describe('<RenderInline />', () => {
   });
 
   describe('markdown link OSC 8 wrapping', () => {
-    const savedEnv = { ...process.env };
-    const savedIsTTY = process.stdout.isTTY;
-
-    beforeEach(() => {
-      resetSupportsHyperlinksCache();
-    });
-
-    afterEach(() => {
-      process.env = { ...savedEnv };
+    function enableHyperlinks() {
       Object.defineProperty(process.stdout, 'isTTY', {
         configurable: true,
-        value: savedIsTTY,
+        value: true,
       });
-      resetSupportsHyperlinksCache();
-    });
-
-    function setEnvForHyperlinkSupport(supported: boolean) {
-      for (const key of [
-        'NO_COLOR',
-        'FORCE_COLOR',
-        'CI',
-        'TMUX',
-        'STY',
-        'TERM_PROGRAM',
-        'WT_SESSION',
-        'KITTY_WINDOW_ID',
-        'VTE_VERSION',
-        'DOMTERM',
-        'JEDITERM_SOURCE_ARGS',
-        'TERMINAL_EMULATOR',
-        'COLORTERM',
-        'TERM',
-        'FORCE_HYPERLINK',
-        'QWEN_DISABLE_HYPERLINKS',
-      ]) {
-        delete process.env[key];
-      }
-      Object.defineProperty(process.stdout, 'isTTY', {
-        configurable: true,
-        value: supported,
-      });
-      if (supported) {
-        process.env['TERM_PROGRAM'] = 'iTerm.app';
-      } else {
-        process.env['NO_COLOR'] = '1';
-      }
+      process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
     }
 
-    it('emits an OSC 8 envelope around the label when supported', () => {
-      setEnvForHyperlinkSupport(true);
+    it('wraps a safe http(s) URL in an OSC 8 envelope and keeps the visible (url) suffix', () => {
+      enableHyperlinks();
       const url = 'https://very.long.example.com/path/to/thing?with=params';
       const { lastFrame } = renderWithProviders(
         <RenderInline text={`click [here](${url}) please`} />,
       );
 
       const out = lastFrame() ?? '';
+      // Envelope is present and frames the visible region.
       expect(out).toContain(`\x1b]8;;${url}\x07`);
-      expect(out).toContain('here');
       expect(out).toContain('\x1b]8;;\x07');
-      // The legacy `(url)` suffix should not be shown when the terminal
-      // supports OSC 8 — the clickable label is the visible affordance.
-      expect(out).not.toContain(`(${url})`);
+      // Visible bytes are unchanged from legacy rendering — both label and
+      // the parenthesized URL remain on screen for copy-paste fallback.
+      expect(out).toContain('here');
+      expect(out).toContain(`(${url})`);
     });
 
-    it('falls back to legacy "label (url)" rendering when unsupported', () => {
-      setEnvForHyperlinkSupport(false);
+    it('does not wrap dangerous schemes (javascript:, data:, file:, …)', () => {
+      enableHyperlinks();
+      for (const url of [
+        'javascript:alert',
+        'data:text/html',
+        'file:///etc/passwd',
+        'vbscript:msgbox',
+      ]) {
+        const { lastFrame } = renderWithProviders(
+          <RenderInline text={`click [bad](${url}) end`} />,
+        );
+        const out = lastFrame() ?? '';
+        expect(out, `scheme should not wrap: ${url}`).not.toContain('\x1b]8;;');
+        // The URL stays visible so the user can read what they would click.
+        // Strip any Ink-inserted soft wraps before checking for the URL.
+        expect(out.replace(/\s+/g, ' ')).toContain(url);
+      }
+    });
+
+    it('falls back to plain "label (url)" rendering on unsupported terminals', () => {
+      // Default: hyperlinks disabled (isTTY=false from beforeEach).
       const url = 'https://example.com/page';
       const { lastFrame } = renderWithProviders(
         <RenderInline text={`see [docs](${url})`} />,
@@ -114,7 +125,7 @@ describe('<RenderInline />', () => {
     });
 
     it('wraps bare URLs in an OSC 8 envelope when supported', () => {
-      setEnvForHyperlinkSupport(true);
+      enableHyperlinks();
       const url = 'https://example.com/very/long/url';
       const { lastFrame } = renderWithProviders(
         <RenderInline text={`go to ${url} now`} />,
@@ -126,8 +137,22 @@ describe('<RenderInline />', () => {
       expect(out).toContain('\x1b]8;;\x07');
     });
 
+    it('trims trailing sentence punctuation from the OSC 8 target only', () => {
+      enableHyperlinks();
+      const url = 'https://example.com/page';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`see ${url}.`} />,
+      );
+
+      const out = lastFrame() ?? '';
+      // Visible bytes retain the period (no regression).
+      expect(out).toContain(`${url}.`);
+      // OSC 8 target is the URL without the trailing period.
+      expect(out).toContain(`\x1b]8;;${url}\x07`);
+      expect(out).not.toContain(`\x1b]8;;${url}.\x07`);
+    });
+
     it('leaves bare URLs unwrapped when unsupported', () => {
-      setEnvForHyperlinkSupport(false);
       const url = 'https://example.com/plain';
       const { lastFrame } = renderWithProviders(
         <RenderInline text={`visit ${url}`} />,
@@ -136,6 +161,76 @@ describe('<RenderInline />', () => {
       const out = lastFrame() ?? '';
       expect(out).not.toContain('\x1b]8;;');
       expect(out).toContain(url);
+    });
+
+    it('refuses to emit OSC 8 inside tmux without FORCE_HYPERLINK', () => {
+      enableHyperlinks();
+      process.env['TMUX'] = '/tmp/tmux-1000/default,1,0';
+      const url = 'https://example.com/page';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`[ref](${url})`} />,
+      );
+      const out = lastFrame() ?? '';
+      expect(out).not.toContain('\x1b]8;;');
+    });
+
+    it('preserves balanced parens inside the link URL (Wikipedia-style)', () => {
+      enableHyperlinks();
+      const url = 'https://en.wikipedia.org/wiki/Foo_(bar)';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`see [wiki](${url}) ok`} />,
+      );
+      const out = lastFrame() ?? '';
+      // Envelope target must be the full URL including the inner `)`.
+      expect(out).toContain(`\x1b]8;;${url}\x07`);
+      // Visible bytes show the full URL too — no truncation at the inner `)`.
+      expect(out).toContain(`(${url})`);
+    });
+
+    it('does not wrap a URL that contains whitespace', () => {
+      // The link regex accepts `[^()]*` inside the URL group, which includes
+      // whitespace. Every terminal rejects/truncates an OSC 8 target with
+      // embedded whitespace, so we must NOT wrap — falling through preserves
+      // the legacy "broken URL is at least visible" behavior.
+      enableHyperlinks();
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text="see [doc](https://x.com path with space) end" />,
+      );
+      const out = lastFrame() ?? '';
+      expect(out).not.toContain('\x1b]8;;');
+      expect(out.replace(/\s+/g, ' ')).toContain('https://x.com path');
+    });
+
+    it('mid-stream unclosed-link state emits a well-formed envelope, not a half-envelope', () => {
+      // Streaming chunks arrive faster than the human eye; MarkdownDisplay
+      // re-renders the whole line on each tick. While a chunk is in flight
+      // and the closing `)` hasn't arrived, the link branch can't match, so
+      // the bare-URL alternative wraps the partial URL. That's acceptable:
+      // the next tick produces the full link. What we MUST guarantee is
+      // that the envelope is always balanced — never a half-open OSC 8.
+      enableHyperlinks();
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text="partial [foo](https://example.com/page" />,
+      );
+      const out = lastFrame() ?? '';
+      // Same count of opens (`\x1b]8;;…\x07`) and closes (`\x1b]8;;\x07`).
+      // eslint-disable-next-line no-control-regex
+      const opens = (out.match(/\x1b\]8;;[^\x07]+\x07/g) ?? []).length;
+      // eslint-disable-next-line no-control-regex
+      const closes = (out.match(/\x1b\]8;;\x07/g) ?? []).length;
+      expect(opens).toBe(closes);
+    });
+
+    it('chunked stream finalizes to a single full link envelope', () => {
+      enableHyperlinks();
+      const url = 'https://example.com/page';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`done [foo](${url}) ok`} />,
+      );
+      const out = lastFrame() ?? '';
+      // Final-state assertion: exactly one envelope, pointing at the URL.
+      expect(out).toContain(`\x1b]8;;${url}\x07`);
+      expect(out).toContain(`(${url})`);
     });
   });
 });
