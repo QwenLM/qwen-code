@@ -657,7 +657,7 @@ describe('HookRunner', () => {
       expect(result.output?.systemMessage).toBe('plain text response');
     });
 
-    it('should convert non-zero exit code to deny output', async () => {
+    it('should treat non-blocking non-zero exit codes as non-blocking warnings', async () => {
       const mockProcess = createMockProcess(3, '', 'error message');
       mockSpawn.mockImplementation(() => mockProcess);
 
@@ -675,8 +675,8 @@ describe('HookRunner', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.output?.decision).toBe('deny');
-      expect(result.output?.reason).toBe('error message');
+      expect(result.output?.decision).toBe('allow');
+      expect(result.output?.systemMessage).toBe('Warning: error message');
     });
 
     it('should use stderr when stdout is empty on success', async () => {

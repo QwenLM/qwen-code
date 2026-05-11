@@ -27,7 +27,9 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
-import { runWithAgentContext } from '../tools/agent/agent-context.js';
+import { runWithAgentContext } from './runtime/agent-context.js';
+import { createApprovalModeOverride } from '../tools/agent/agent.js';
+import type { ApprovalMode } from '../config/config.js';
 import {
   FORK_AGENT,
   FORK_SUBAGENT_TYPE,
@@ -137,16 +139,6 @@ function reconcileResumedApprovalMode(
     return parentMode;
   }
   return 'default';
-}
-
-function createApprovalModeOverride(
-  base: Config,
-  mode: ApprovalModeValue,
-): Config {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const override = Object.create(base) as any;
-  override.getApprovalMode = () => mode;
-  return override as Config;
 }
 
 function persistBackgroundCancellation(
@@ -503,6 +495,9 @@ export class BackgroundAgentResumeService {
       notified: false,
     });
 
+    let cleanupOwnedMonitorNotifications: (() => void) | undefined;
+    let cleanupJsonl: (() => void) | undefined;
+
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
       const target = await this.resolveResumeTarget(subagentName);
@@ -527,10 +522,18 @@ export class BackgroundAgentResumeService {
         parentApprovalMode,
         this.config.isTrustedFolder(),
       );
-      const agentConfig =
-        resolvedApprovalMode !== this.config.getApprovalMode()
-          ? createApprovalModeOverride(this.config, resolvedApprovalMode)
-          : this.config;
+      // Always wrap, even when the resolved approval mode matches the
+      // parent's. The wrapper rebuilds the tool registry on the
+      // override Config so bound `EditTool` / `WriteFileTool` /
+      // `ReadFileTool` instances resolve `this.config` to the resumed
+      // agent and use the resumed agent's `FileReadCache`, instead of
+      // continuing to read the parent's. Reusing `this.config`
+      // directly here would short-circuit that isolation. See the
+      // matching wrapper in `agent.ts:createApprovalModeOverride`.
+      const agentConfig = await createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode as ApprovalMode,
+      );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bgConfig = Object.create(agentConfig) as any;
       bgConfig.getShouldAvoidPermissionPrompts = () => true;
@@ -605,22 +608,18 @@ export class BackgroundAgentResumeService {
             });
 
       const projectRoot = this.config.getProjectRoot();
-      const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
-        bgEventEmitter,
-        outputFile,
-        {
-          agentId: meta.agentId,
-          agentName: target.agentName,
-          agentColor: target.subagentConfig?.color ?? meta.agentColor,
-          sessionId: meta.parentSessionId,
-          cwd: projectRoot,
-          version: this.config.getCliVersion() || 'unknown',
-          gitBranch: getGitBranch(projectRoot),
-          initialUserPrompt: writerInitialPrompt,
-          appendToExisting: true,
-          initialParentUuid: recovery.lastStableUuid,
-        },
-      );
+      cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
+        agentId: meta.agentId,
+        agentName: target.agentName,
+        agentColor: target.subagentConfig?.color ?? meta.agentColor,
+        sessionId: meta.parentSessionId,
+        cwd: projectRoot,
+        version: this.config.getCliVersion() || 'unknown',
+        gitBranch: getGitBranch(projectRoot),
+        initialUserPrompt: writerInitialPrompt,
+        appendToExisting: true,
+        initialParentUuid: recovery.lastStableUuid,
+      }).cleanup;
 
       const nextResumeCount = (meta.resumeCount ?? 0) + 1;
       patchAgentMeta(metaPath, {
@@ -662,6 +661,34 @@ export class BackgroundAgentResumeService {
       subagent.setExternalMessageProvider(() =>
         registry.drainMessages(meta.agentId),
       );
+      subagent.setExternalMessageWaiter?.((waitSignal) =>
+        registry.waitForMessages(meta.agentId, waitSignal),
+      );
+      const monitorRegistry = this.config.getMonitorRegistry();
+      subagent.setExternalMessageWaitPredicate?.(() =>
+        monitorRegistry.hasRunningForOwner(meta.agentId),
+      );
+      monitorRegistry.setAgentNotificationCallback(
+        meta.agentId,
+        (_displayText, modelText) =>
+          void registry.queueExternalInput(meta.agentId, {
+            kind: 'notification',
+            text: modelText,
+          }),
+      );
+      monitorRegistry.setAgentLifecycleCallback(meta.agentId, () =>
+        registry.wakeExternalInputWaiters(meta.agentId),
+      );
+      let cleanedUpOwnedMonitorNotifications = false;
+      cleanupOwnedMonitorNotifications = () => {
+        if (cleanedUpOwnedMonitorNotifications) return;
+        cleanedUpOwnedMonitorNotifications = true;
+        monitorRegistry.cancelRunningForOwner(meta.agentId, {
+          notify: false,
+        });
+        monitorRegistry.setAgentNotificationCallback(meta.agentId, undefined);
+        monitorRegistry.setAgentLifecycleCallback(meta.agentId, undefined);
+      };
 
       const hookSystem = this.config.getHookSystem();
       const contextState = new ContextState();
@@ -770,15 +797,27 @@ export class BackgroundAgentResumeService {
         } finally {
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+          cleanupOwnedMonitorNotifications?.();
           cleanupJsonl?.();
+          // Release the per-subagent ToolRegistry the resumed agent's
+          // wrapper Config built in `createApprovalModeOverride` so any
+          // AgentTool / SkillTool the model instantiated during this
+          // run disposes its change-listeners on shared
+          // SubagentManager / SkillManager. Without this, every resume
+          // accumulates listeners for the rest of the session.
+          void agentConfig
+            .getToolRegistry()
+            .stop()
+            .catch(() => {});
         }
       };
 
-      const framedRunBody = () =>
-        runWithAgentContext({ agentId: meta.agentId }, runBody);
+      const framedRunBody = () => runWithAgentContext(meta.agentId, runBody);
       void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
       return entry;
     } catch (error) {
+      cleanupOwnedMonitorNotifications?.();
+      cleanupJsonl?.();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.warn(

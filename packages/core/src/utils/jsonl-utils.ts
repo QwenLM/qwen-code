@@ -24,6 +24,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
 import { createDebugLogger } from './debugLogger.js';
 
@@ -106,14 +107,29 @@ export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
 }
 
 /**
- * Parses a single physical JSONL line tolerantly. Returns the parsed objects:
+ * Parses a single physical JSONL line tolerantly. Returns the parsed records:
  * one if the line is well-formed, multiple if it is `}{`-glued from an
  * interrupted append (the #3606 corruption shape), zero if nothing can be
- * recovered. Mirrors the silent skip in `countSessionMessages`.
+ * recovered. Use this from any streaming reader that walks JSONL line-by-line
+ * and wants the same recovery semantics as `read()` / `readLines()`.
+ *
+ * Non-object JSON values (e.g. a bare `null`, `42`, or `[1,2,3]` line) are
+ * filtered out: JSONL records in this codebase are always objects, and
+ * forwarding scalars or arrays would trip property accesses in callers
+ * (`record.type`, `record.uuid`).
  */
-function parseLineTolerant<T>(line: string, filePath: string): T[] {
+export function parseLineTolerant<T>(line: string, filePath: string): T[] {
   try {
-    return [JSON.parse(line) as T];
+    const parsed = JSON.parse(line);
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed)
+    ) {
+      return [parsed as T];
+    }
+    debugLogger.warn(`Skipping non-object JSONL value in ${filePath}`);
+    return [];
   } catch {
     const fragments = _recoverObjectsFromLine<T>(line);
     if (fragments.length === 0) {
@@ -127,6 +143,22 @@ function parseLineTolerant<T>(line: string, filePath: string): T[] {
   }
 }
 
+async function closeLineReader(
+  rl: readline.Interface | undefined,
+  fileStream: fs.ReadStream | undefined,
+): Promise<void> {
+  rl?.close();
+  if (!fileStream || fileStream.closed) {
+    return;
+  }
+
+  const closed = finished(fileStream, { cleanup: true }).catch(() => undefined);
+  if (!fileStream.destroyed) {
+    fileStream.destroy();
+  }
+  await closed;
+}
+
 /**
  * Reads the first N lines from a JSONL file efficiently.
  * Returns an array of parsed objects.
@@ -135,9 +167,11 @@ export async function readLines<T = unknown>(
   filePath: string,
   count: number,
 ): Promise<T[]> {
+  let fileStream: fs.ReadStream | undefined;
+  let rl: readline.Interface | undefined;
   try {
-    const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
+    fileStream = fs.createReadStream(filePath);
+    rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
     });
@@ -162,6 +196,8 @@ export async function readLines<T = unknown>(
       );
     }
     return [];
+  } finally {
+    await closeLineReader(rl, fileStream);
   }
 }
 
@@ -170,9 +206,11 @@ export async function readLines<T = unknown>(
  * Returns an array of parsed objects.
  */
 export async function read<T = unknown>(filePath: string): Promise<T[]> {
+  let fileStream: fs.ReadStream | undefined;
+  let rl: readline.Interface | undefined;
   try {
-    const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
+    fileStream = fs.createReadStream(filePath);
+    rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
     });
@@ -192,6 +230,8 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
       debugLogger.error(`Error reading ${filePath}:`, error);
     }
     return [];
+  } finally {
+    await closeLineReader(rl, fileStream);
   }
 }
 
@@ -263,9 +303,11 @@ export function write(filePath: string, data: unknown[]): void {
  * Counts the number of non-empty lines in a JSONL file.
  */
 export async function countLines(filePath: string): Promise<number> {
+  let fileStream: fs.ReadStream | undefined;
+  let rl: readline.Interface | undefined;
   try {
-    const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
+    fileStream = fs.createReadStream(filePath);
+    rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
     });
@@ -282,6 +324,8 @@ export async function countLines(filePath: string): Promise<number> {
       debugLogger.error(`Error counting lines in ${filePath}:`, error);
     }
     return 0;
+  } finally {
+    await closeLineReader(rl, fileStream);
   }
 }
 

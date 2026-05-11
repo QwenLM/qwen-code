@@ -37,6 +37,7 @@ import {
   type ArenaAgentCardData,
   type HistoryItemWithoutId,
 } from '../types.js';
+import { t } from '../../i18n/index.js';
 
 /**
  * Parsed model entry with optional auth type.
@@ -104,17 +105,22 @@ function buildArenaExecutionInput(
     return {
       type: 'message',
       messageType: 'error',
-      content:
-        'Usage: /arena start --models model1,model2 <task>\n' +
-        '\n' +
-        'Options:\n' +
-        '  --models [authType:]model1,[authType:]model2\n' +
-        '                            Models to compete (required, at least 2)\n' +
-        '                            Format: authType:modelId or just modelId\n' +
-        '\n' +
-        'Examples:\n' +
-        '  /arena start --models openai:gpt-4o,anthropic:claude-3 "implement sorting"\n' +
+      content: [
+        t('Usage: /arena start --models model1,model2 <task>'),
+        '',
+        t('Options:'),
+        '  --models [authType:]model1,[authType:]model2',
+        `                            ${t(
+          'Models to compete (required, at least 2)',
+        )}`,
+        `                            ${t(
+          'Format: authType:modelId or just modelId',
+        )}`,
+        '',
+        t('Examples:'),
+        '  /arena start --models openai:gpt-4o,anthropic:claude-3 "implement sorting"',
         '  /arena start --models qwen-coder-plus,kimi-for-coding "fix the bug"',
+      ].join('\n'),
     };
   }
 
@@ -122,9 +128,12 @@ function buildArenaExecutionInput(
     return {
       type: 'message',
       messageType: 'error',
-      content:
-        'Arena requires at least 2 models. Use --models model1,model2 to specify.\n' +
-        'Format: [authType:]modelId (e.g., openai:gpt-4o or just gpt-4o)',
+      content: [
+        t(
+          'Arena requires at least 2 models. Use --models model1,model2 to specify.',
+        ),
+        t('Format: [authType:]modelId (e.g., openai:gpt-4o or just gpt-4o)'),
+      ].join('\n'),
     };
   }
 
@@ -222,7 +231,14 @@ function executeArenaCommand(
     // block already captures this item — no extra recording needed.
     addArenaMessage(
       MessageType.INFO,
-      `Arena started with ${event.models.length} agents on task: "${event.task}"\nModels:\n${modelList}`,
+      t(
+        'Arena started with {{count}} agents on task: "{{task}}"\nModels:\n{{modelList}}',
+        {
+          count: String(event.models.length),
+          task: event.task,
+          modelList,
+        },
+      ),
     );
   };
 
@@ -239,7 +255,9 @@ function executeArenaCommand(
       const command = event.message.slice(attachHintPrefix.length).trim();
       addAndRecordArenaMessage(
         MessageType.INFO,
-        `Arena panes are running in tmux. Attach with: \`${command}\``,
+        t('Arena panes are running in tmux. Attach with: `{{command}}`', {
+          command,
+        }),
       );
       return;
     }
@@ -257,7 +275,10 @@ function executeArenaCommand(
     const label = agentLabels.get(event.agentId) || event.agentId;
     addAndRecordArenaMessage(
       MessageType.ERROR,
-      `[${label}] failed: ${event.error}`,
+      t('[{{label}}] failed: {{error}}', {
+        label,
+        error: event.error,
+      }),
     );
   };
 
@@ -385,16 +406,19 @@ function executeArenaCommand(
 
 export const arenaCommand: SlashCommand = {
   name: 'arena',
-  description: 'Manage Arena sessions',
+  get description() {
+    return t('Manage Arena sessions');
+  },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
   subCommands: [
     {
       name: 'start',
-      description:
-        'Start an Arena session with multiple models competing on the same task',
+      get description() {
+        return t(
+          'Start an Arena session with multiple models competing on the same task',
+        );
+      },
       kind: CommandKind.BUILT_IN,
-      supportedModes: ['interactive'] as const,
       action: async (
         context: CommandContext,
         args: string,
@@ -404,8 +428,9 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content:
+            content: t(
               'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.',
+            ),
           };
         }
 
@@ -416,7 +441,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'Configuration not available.',
+            content: t('Configuration not available.'),
           };
         }
 
@@ -426,8 +451,9 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content:
+            content: t(
               'An Arena session exists. Use /arena stop or /arena select to end it before starting a new one.',
+            ),
           };
         }
 
@@ -449,9 +475,10 @@ export const arenaCommand: SlashCommand = {
     },
     {
       name: 'stop',
-      description: 'Stop the current Arena session',
+      get description() {
+        return t('Stop the current Arena session');
+      },
       kind: CommandKind.BUILT_IN,
-      supportedModes: ['interactive'] as const,
       action: async (
         context: CommandContext,
       ): Promise<void | SlashCommandActionReturn> => {
@@ -460,8 +487,9 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content:
+            content: t(
               'Arena is not supported in non-interactive mode. Use interactive mode to stop an Arena session.',
+            ),
           };
         }
 
@@ -470,7 +498,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'Configuration not available.',
+            content: t('Configuration not available.'),
           };
         }
 
@@ -479,7 +507,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'No running Arena session found.',
+            content: t('No running Arena session found.'),
           };
         }
 
@@ -491,9 +519,10 @@ export const arenaCommand: SlashCommand = {
     },
     {
       name: 'status',
-      description: 'Show the current Arena session status',
+      get description() {
+        return t('Show the current Arena session status');
+      },
       kind: CommandKind.BUILT_IN,
-      supportedModes: ['interactive'] as const,
       action: async (
         context: CommandContext,
       ): Promise<void | SlashCommandActionReturn> => {
@@ -502,7 +531,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'Arena is not supported in non-interactive mode.',
+            content: t('Arena is not supported in non-interactive mode.'),
           };
         }
 
@@ -511,7 +540,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'Configuration not available.',
+            content: t('Configuration not available.'),
           };
         }
 
@@ -520,7 +549,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'No Arena session found. Start one with /arena start.',
+            content: t('No Arena session found. Start one with /arena start.'),
           };
         }
 
@@ -533,10 +562,12 @@ export const arenaCommand: SlashCommand = {
     {
       name: 'select',
       altNames: ['choose'],
-      description:
-        'Select a model result and merge its diff into the current workspace',
+      get description() {
+        return t(
+          'Select a model result and merge its diff into the current workspace',
+        );
+      },
       kind: CommandKind.BUILT_IN,
-      supportedModes: ['interactive'] as const,
       action: async (
         context: CommandContext,
         args: string,
@@ -551,7 +582,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'Arena is not supported in non-interactive mode.',
+            content: t('Arena is not supported in non-interactive mode.'),
           };
         }
 
@@ -560,7 +591,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'Configuration not available.',
+            content: t('Configuration not available.'),
           };
         }
 
@@ -570,7 +601,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'No arena session found. Start one with /arena start.',
+            content: t('No Arena session found. Start one with /arena start.'),
           };
         }
 
@@ -582,8 +613,9 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content:
+            content: t(
               'Arena session is still running. Wait for it to complete or use /arena stop first.',
+            ),
           };
         }
 
@@ -594,7 +626,7 @@ export const arenaCommand: SlashCommand = {
           if (!context.overwriteConfirmed) {
             return {
               type: 'confirm_action',
-              prompt: 'Discard all Arena results and clean up worktrees?',
+              prompt: t('Discard all Arena results and clean up worktrees?'),
               originalInvocation: {
                 raw: context.invocation?.raw || '/arena select --discard',
               },
@@ -605,7 +637,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'info',
-            content: 'Arena results discarded. All worktrees cleaned up.',
+            content: t('Arena results discarded. All worktrees cleaned up.'),
           };
         }
 
@@ -616,9 +648,12 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content:
-              'No successful agent results to select from. All agents failed or were cancelled.\n' +
-              'Use /arena stop to end the session.',
+            content: [
+              t(
+                'No successful agent results to select from. All agents failed or were cancelled.',
+              ),
+              t('Use /arena stop to end the session.'),
+            ].join('\n'),
           };
         }
 
@@ -634,7 +669,9 @@ export const arenaCommand: SlashCommand = {
             return {
               type: 'message',
               messageType: 'error',
-              content: `No idle agent found matching "${trimmedArgs}".`,
+              content: t('No idle agent found matching "{{name}}".', {
+                name: trimmedArgs,
+              }),
             };
           }
 
@@ -644,7 +681,10 @@ export const arenaCommand: SlashCommand = {
             return {
               type: 'message',
               messageType: 'error',
-              content: `Failed to apply changes from ${label}: ${result.error}`,
+              content: t('Failed to apply changes from {{label}}: {{error}}', {
+                label,
+                error: result.error ?? 'Unknown error',
+              }),
             };
           }
 
@@ -652,7 +692,12 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'info',
-            content: `Applied changes from ${label} to workspace. Arena session complete.`,
+            content: t(
+              'Applied changes from {{label}} to workspace. Arena session complete.',
+              {
+                label,
+              },
+            ),
           };
         }
 

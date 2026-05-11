@@ -31,6 +31,7 @@ import type {
 } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
+import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -257,17 +258,6 @@ export interface ForkedAgentResult {
 }
 
 /**
- * Returns a shallow clone of config with ApprovalMode forced to YOLO.
- * Background agents must never block on permission prompts — there is
- * no user present to answer them.
- */
-function createYoloConfig(config: Config): Config {
-  const yoloConfig = Object.create(config) as Config;
-  yoloConfig.getApprovalMode = () => ApprovalMode.YOLO;
-  return yoloConfig;
-}
-
-/**
  * Extracts file paths from a tool call's args object.
  * Matches any arg key that contains "path", "file", or "target".
  */
@@ -376,7 +366,23 @@ export async function runForkedAgent(
   }
 
   // ── AgentHeadless path ────────────────────────────────────────────────────
-  const yoloConfig = createYoloConfig(params.config);
+  // `createApprovalModeOverride` rebuilds the tool registry on the YOLO
+  // wrapper Config so core file tools (`EditTool` / `WriteFileTool` /
+  // `ReadFileTool`) resolve `this.config` to the wrapper, not to the
+  // parent. Without that rebuild the YOLO override is silently ignored
+  // on the bound-tool path (parent's pre-bound tool instances keep
+  // reading the parent's approval mode), and the wrapper's own
+  // `FileReadCache` lazy-init is bypassed too.
+  //
+  // Consumers that pre-wrap with `createMemoryScopedAgentConfig`
+  // (memory extraction / dream agent) compose correctly: the YOLO
+  // wrapper's bound tools resolve `this.config.getPermissionManager()`
+  // through the prototype chain to the scoped wrapper's own override,
+  // while `this.config.getApprovalMode()` lands on YOLO.
+  const yoloConfig = await createApprovalModeOverride(
+    params.config,
+    ApprovalMode.YOLO,
+  );
   const filesTouched = new Set<string>();
 
   const emitter = new AgentEventEmitter();
@@ -401,47 +407,58 @@ export async function runForkedAgent(
   const toolConfig: ToolConfig | undefined =
     params.tools !== undefined ? { tools: params.tools } : undefined;
 
-  const headless = await AgentHeadless.create(
-    params.name,
-    yoloConfig,
-    promptConfig,
-    modelConfig,
-    runConfig,
-    toolConfig,
-    emitter,
-  );
+  try {
+    const headless = await AgentHeadless.create(
+      params.name,
+      yoloConfig,
+      promptConfig,
+      modelConfig,
+      runConfig,
+      toolConfig,
+      emitter,
+    );
 
-  const context = new ContextState();
-  context.set('task_prompt', params.taskPrompt);
-  await headless.execute(context, params.abortSignal);
+    const context = new ContextState();
+    context.set('task_prompt', params.taskPrompt);
+    await headless.execute(context, params.abortSignal);
 
-  const terminateReason = headless.getTerminateMode();
-  const finalText = headless.getFinalText() || undefined;
-  const touched = [...filesTouched];
+    const terminateReason = headless.getTerminateMode();
+    const finalText = headless.getFinalText() || undefined;
+    const touched = [...filesTouched];
 
-  if (terminateReason === AgentTerminateMode.CANCELLED) {
+    if (terminateReason === AgentTerminateMode.CANCELLED) {
+      return {
+        status: 'cancelled',
+        terminateReason,
+        finalText,
+        filesTouched: touched,
+      };
+    }
+    if (
+      terminateReason === AgentTerminateMode.ERROR ||
+      terminateReason === AgentTerminateMode.TIMEOUT
+    ) {
+      return {
+        status: 'failed',
+        terminateReason,
+        finalText,
+        filesTouched: touched,
+      };
+    }
     return {
-      status: 'cancelled',
+      status: 'completed',
       terminateReason,
       finalText,
       filesTouched: touched,
     };
+  } finally {
+    // Release the per-fork ToolRegistry so AgentTool / SkillTool
+    // instances dispose their change-listeners on shared
+    // SubagentManager / SkillManager. Same shape as the spawn-path
+    // finallys in `agent.ts` and `background-agent-resume.ts`.
+    void yoloConfig
+      .getToolRegistry()
+      .stop()
+      .catch(() => {});
   }
-  if (
-    terminateReason === AgentTerminateMode.ERROR ||
-    terminateReason === AgentTerminateMode.TIMEOUT
-  ) {
-    return {
-      status: 'failed',
-      terminateReason,
-      finalText,
-      filesTouched: touched,
-    };
-  }
-  return {
-    status: 'completed',
-    terminateReason,
-    finalText,
-    filesTouched: touched,
-  };
 }

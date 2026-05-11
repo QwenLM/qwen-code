@@ -101,17 +101,11 @@ vi.mock('../../utils/MarkdownDisplay.js', () => ({
     return <Text>MockMarkdown:{text}</Text>;
   },
 }));
-vi.mock('../subagents/index.js', () => ({
-  AgentExecutionDisplay: function MockAgentExecutionDisplay({
-    data,
-  }: {
-    data: { subagentName: string; taskDescription: string };
-  }) {
-    return (
-      <Text>
-        🤖 {data.subagentName} • Task: {data.taskDescription}
-      </Text>
-    );
+vi.mock('./ToolConfirmationMessage.js', () => ({
+  ToolConfirmationMessage: function MockToolConfirmationMessage() {
+    // Sentinel string lets the focus-routed approval tests assert
+    // the banner renders (instead of being suppressed).
+    return <Text>MockApprovalPrompt</Text>;
   },
 }));
 
@@ -267,6 +261,27 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
+  it('renders a saved-session preview notice for truncated diff results', () => {
+    const diffResult = {
+      fileDiff: '--- file.txt\n+++ file.txt\n@@ -1 +1 @@\n-omitted\n+preview',
+      fileName: 'file.txt',
+      originalContent: 'old preview',
+      newContent: 'new preview',
+      truncatedForSession: true,
+      fileDiffLength: 123456,
+      fileDiffTruncated: true,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} resultDisplay={diffResult} />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain(
+      'Saved session preview only; full diff omitted from JSONL (123456 chars).',
+    );
+    expect(lastFrame()).toContain('MockDiff:--- file.txt');
+  });
+
   it('renders emphasis correctly', () => {
     const { lastFrame: highEmphasisFrame } = renderWithContext(
       <ToolMessage {...baseProps} emphasis="high" />,
@@ -285,35 +300,192 @@ describe('<ToolMessage />', () => {
     expect(lowEmphasisFrame()).not.toContain('←');
   });
 
-  it('shows subagent execution display for task tool with proper result display', () => {
-    const subagentResultDisplay = {
-      type: 'task_execution' as const,
-      subagentName: 'file-search',
-      taskDescription: 'Search for files matching pattern',
-      taskPrompt: 'Search for files matching pattern',
-      status: 'running' as const,
+  describe('subagent inline rendering (approval-only surface)', () => {
+    // The verbose inline AgentExecutionDisplay frame has been retired in
+    // favour of the always-on LiveAgentPanel (live progress) and
+    // BackgroundTasksDialog (history / detail). ToolMessage's only
+    // remaining inline subagent surface is the focus-routed approval
+    // prompt — both running and committed agent states render nothing
+    // inline now.
+    const buildProps = (overrides: {
+      data: {
+        subagentName: string;
+        taskDescription: string;
+        taskPrompt: string;
+        status: 'running' | 'completed' | 'failed' | 'cancelled';
+        pendingConfirmation?: object;
+        terminateReason?: string;
+      };
+      isFocused?: boolean;
+      isPending?: boolean;
+    }): ToolMessageProps => {
+      const resultDisplay = {
+        type: 'task_execution' as const,
+        ...overrides.data,
+      } as ToolMessageProps['resultDisplay'];
+      return {
+        ...baseProps,
+        name: 'task',
+        description: 'Delegate task to subagent',
+        resultDisplay,
+        status: ToolCallStatus.Executing,
+        callId: 'gated-task-call',
+        forceShowResult: true, // mirror ToolGroupMessage's forceShowResult
+        isFocused: overrides.isFocused,
+        isPending: overrides.isPending,
+      };
     };
 
-    const props: ToolMessageProps = {
-      name: 'task',
-      description: 'Delegate task to subagent',
-      resultDisplay: subagentResultDisplay,
-      status: ToolCallStatus.Executing,
-      contentWidth: 80,
-      callId: 'test-call-id-2',
-      confirmationDetails: undefined,
-      config: mockConfig,
-    };
+    it('running subagent without confirmation → no inline frame', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Search for files',
+              taskPrompt: 'Search',
+              status: 'running',
+            },
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      // No approval surface; LiveAgentPanel + dialog handle the run.
+      expect(output).not.toContain('MockApprovalPrompt');
+      expect(output).not.toContain('Approval requested by');
+      expect(output).not.toContain('Queued approval:');
+    });
 
-    const { lastFrame } = renderWithContext(
-      <ToolMessage {...props} />,
-      StreamingState.Responding,
-    );
+    it('committed (`!isPending`) terminal subagent → renders a one-line scrollback summary', () => {
+      // The verbose 15-row inline frame is retired (it caused
+      // scrollback flicker), but the conversation history needs to
+      // keep a permanent record after the panel's 8s window expires
+      // and the dialog closes. A single line preserves the history
+      // without re-introducing the flicker.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'committed-agent',
+              taskDescription: 'Already done',
+              taskPrompt: 'Already done',
+              status: 'completed',
+            },
+            isPending: false,
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      // One-line summary: success glyph + agent name + description.
+      expect(output).toContain('✔');
+      expect(output).toContain('committed-agent');
+      expect(output).toContain('Already done');
+      // No approval prompt — completed subagents don't sit on the
+      // focus lock.
+      expect(output).not.toContain('MockApprovalPrompt');
+    });
 
-    const output = lastFrame();
-    expect(output).toContain('🤖'); // Subagent execution display should show
-    expect(output).toContain('file-search'); // Actual subagent name
-    expect(output).toContain('Search for files matching pattern'); // Actual task description
+    it('live (`isPending`) terminal subagent → renders summary inline (panel snapshot already dropped)', () => {
+      // After `unregisterForeground`'s post-delete emit (#3921 swap-
+      // order), the panel snapshot drops the foreground entry as soon
+      // as the subagent finishes — even while the parent turn is
+      // still in `pendingHistoryItems`. If the inline summary were
+      // also gated on `!isPending`, a foreground subagent that
+      // finishes mid-turn would simply disappear from screen until
+      // commit. Render the summary in BOTH live and committed phases;
+      // the live-phase filter in `ToolGroupMessage` already keeps
+      // running entries from reaching this renderer.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'live-terminal',
+              taskDescription: 'Just finished mid-turn',
+              taskPrompt: 'Mid-turn',
+              status: 'completed',
+            },
+            isPending: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('✔');
+      expect(output).toContain('Just finished mid-turn');
+    });
+
+    it('failed subagent → renders summary with terminate reason', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'failed-agent',
+              taskDescription: 'Crashed early',
+              taskPrompt: 'Crashed early',
+              status: 'failed',
+              terminateReason: 'Network timeout',
+            },
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('✖');
+      expect(output).toContain('failed-agent');
+      expect(output).toContain('Crashed early');
+      expect(output).toContain('Network timeout');
+    });
+
+    it('pendingConfirmation && isFocused → renders banner with agent label', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Search for files',
+              taskPrompt: 'Search',
+              status: 'running',
+              pendingConfirmation: {} as object,
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Approval requested by');
+      expect(output).toContain('fg-agent');
+      expect(output).toContain('MockApprovalPrompt');
+    });
+
+    it('pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {
+      // Without this marker, a subagent waiting on another subagent's
+      // approval would be invisible in the main view — the user would
+      // have no inline signal that an approval is queued and would have
+      // to open the dialog to discover it.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'queued-agent',
+              taskDescription: 'Lint',
+              taskPrompt: 'Lint',
+              status: 'running',
+              pendingConfirmation: {} as object,
+            },
+            isFocused: false,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Queued approval:');
+      expect(output).toContain('queued-agent');
+      expect(output).not.toContain('Approval requested by');
+      expect(output).not.toContain('MockApprovalPrompt');
+    });
   });
 
   it('renders AnsiOutputText for AnsiOutput results', () => {

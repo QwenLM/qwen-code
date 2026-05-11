@@ -12,6 +12,7 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
+import { SpanStatusCode } from '@opentelemetry/api';
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
@@ -42,17 +43,23 @@ import {
 
 // Services
 import {
-  ChatCompressionService,
   COMPRESSION_PRESERVE_THRESHOLD,
   COMPRESSION_TOKEN_THRESHOLD,
 } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 // Models
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
+import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import {
+  DEFAULT_AUTO_SKILL_MAX_TURNS,
+  DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+} from '../memory/skillReviewAgentPlanner.js';
+import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
@@ -97,6 +104,12 @@ import { createHookOutput } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
+import {
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+  safeSetStatus,
+  withSpan,
+} from '../telemetry/tracer.js';
 
 const MAX_TURNS = 100;
 
@@ -167,9 +180,17 @@ async function resolveAutoMemoryWithDeadline(
   }
 }
 
+/** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
+const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ToolNames.WRITE_FILE,
+  ToolNames.EDIT,
+]);
+
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
+  private toolCallCount = 0;
+  private skillsModifiedInSession = false;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
@@ -185,12 +206,6 @@ export class GeminiClient {
    * Cleared on session reset (resetChat) to pick up config changes.
    */
   private perModelGeneratorCache = new Map<string, Promise<ContentGenerator>>();
-
-  /**
-   * At any point in this conversation, was compression triggered without
-   * being forced and did it fail?
-   */
-  private hasFailedCompressionAttempt = false;
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -224,8 +239,44 @@ export class GeminiClient {
         resumedSessionData.conversation,
       );
       await this.startChat(resumedHistory);
+      this.getChat().setLastPromptTokenCount(
+        uiTelemetryService.getLastPromptTokenCount(),
+      );
+
+      // Restore attribution state from the last snapshot in the session
+      this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
       await this.startChat();
+    }
+  }
+
+  /**
+   * Restore attribution state from the last snapshot in a resumed session.
+   */
+  private restoreAttributionFromSession(conversation: {
+    messages: Array<{ subtype?: string; systemPayload?: unknown }>;
+  }): void {
+    // Find the last attribution snapshot in the session
+    let lastSnapshot: unknown = null;
+    for (const msg of conversation.messages) {
+      if (
+        msg.subtype === 'attribution_snapshot' &&
+        msg.systemPayload &&
+        typeof msg.systemPayload === 'object' &&
+        'snapshot' in msg.systemPayload
+      ) {
+        lastSnapshot = (msg.systemPayload as { snapshot: unknown }).snapshot;
+      }
+    }
+    if (lastSnapshot && typeof lastSnapshot === 'object') {
+      try {
+        CommitAttributionService.getInstance().restoreFromSnapshot(
+          lastSnapshot as import('../services/commitAttribution.js').AttributionSnapshot,
+        );
+        debugLogger.debug('Restored attribution state from session snapshot');
+      } catch {
+        debugLogger.warn('Failed to restore attribution snapshot');
+      }
     }
   }
 
@@ -329,6 +380,12 @@ export class GeminiClient {
       this.pendingRecallAbortController.abort();
       this.pendingRecallAbortController = undefined;
     }
+    // Drop any deferred tools revealed this session so /clear really gives
+    // a clean slate. We don't clear inside startChat itself because that path
+    // is also taken by compression (which preserves the session), and
+    // compression should keep previously-revealed tools so the model can
+    // continue using them without re-running ToolSearch.
+    this.config.getToolRegistry().clearRevealedDeferredTools();
     await this.startChat();
   }
 
@@ -347,7 +404,9 @@ export class GeminiClient {
     });
   }
 
-  private getMainSessionSystemInstruction(): string {
+  private getMainSessionSystemInstruction(
+    deferredTools?: Array<{ name: string; description: string }>,
+  ): string {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
@@ -357,6 +416,7 @@ export class GeminiClient {
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
+        deferredTools,
       );
     }
 
@@ -364,19 +424,75 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
+      deferredTools,
     );
   }
 
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
-    this.hasFailedCompressionAttempt = false;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
     const history = await getInitialChatHistory(this.config, extraHistory);
 
     try {
-      const systemInstruction = this.getMainSessionSystemInstruction();
+      // Warm the tool registry before building the system prompt so we know
+      // which tools are marked `shouldDefer`. The deferred list is appended to
+      // the prompt so the model knows which tools are reachable via
+      // ToolSearch. warmAll() is idempotent — setTools() below reuses the
+      // warmed state. Revealed-deferred state is NOT cleared here because
+      // startChat is also taken by the compression path (which preserves the
+      // session); `/clear` clears the revealed set via resetChat() before
+      // calling us.
+      const toolRegistry = this.config.getToolRegistry();
+      await toolRegistry.warmAll();
+      const deferredSummary = toolRegistry.getDeferredToolSummary();
+      // Resume support: when a transcript contains prior calls to a deferred
+      // tool, re-reveal that tool so `setTools()` below sends its schema in
+      // the declaration list. Without this, the model sees history like
+      // "I called foo_tool, got result" but the API rejects a follow-up
+      // call to foo_tool because the schema is absent.
+      if (history.length > 0 && deferredSummary.length > 0) {
+        const deferredNames = new Set(deferredSummary.map((t) => t.name));
+        for (const entry of history) {
+          for (const part of entry.parts ?? []) {
+            const callName = part.functionCall?.name;
+            if (callName && deferredNames.has(callName)) {
+              toolRegistry.revealDeferredTool(callName);
+            }
+          }
+        }
+      }
+      // ToolSearch availability gates two things:
+      //   (a) Whether the deferred-tools discovery section appears in the
+      //       prompt (otherwise we'd be telling the model to call a tool
+      //       that isn't registered).
+      //   (b) Whether deferral itself makes sense at all — if the model
+      //       has no way to reveal a deferred tool, the tool is effectively
+      //       hidden + uncallable. Silent disappearance is the worst
+      //       failure mode (user sees no error, just thinks the tool
+      //       doesn't exist), so when ToolSearch is filtered out (e.g. via
+      //       `--exclude-tools tool_search` or a deny rule), reveal every
+      //       deferred tool eagerly so they all land in the declaration
+      //       list. The token-saving rationale of deferral was predicated
+      //       on the discovery surface being available.
+      const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
+      if (!toolSearchAvailable && deferredSummary.length > 0) {
+        for (const t of deferredSummary) {
+          toolRegistry.revealDeferredTool(t.name);
+        }
+      }
+      // Exclude any tools revealed by the resume scan (or the no-ToolSearch
+      // eager-reveal above): their schemas are already in the declaration
+      // list, so advertising them as "reachable via ToolSearch" would
+      // invite redundant lookup calls.
+      const deferredTools = toolSearchAvailable
+        ? deferredSummary.filter(
+            (t) => !toolRegistry.isDeferredToolRevealed(t.name),
+          )
+        : undefined;
+      const systemInstruction =
+        this.getMainSessionSystemInstruction(deferredTools);
 
       this.chat = new GeminiChat(
         this.config,
@@ -597,11 +713,73 @@ export class GeminiClient {
   private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
   ): void {
-    if (messageType !== SendMessageType.UserQuery) {
-      return;
+    // autoSkill counts tool calls and can trigger on both UserQuery and
+    // ToolResult turns so the threshold can fire mid-session.
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.ToolResult
+    ) {
+      const projectRoot = this.config.getProjectRoot();
+      const sessionId = this.config.getSessionId();
+      const history = this.getHistory();
+      const mgr = this.config.getMemoryManager();
+      const autoSkillEnabled = this.config.getAutoSkillEnabled();
+
+      if (autoSkillEnabled) {
+        const skillReviewResult = mgr.scheduleSkillReview({
+          projectRoot,
+          sessionId,
+          history,
+          config: this.config,
+          toolCallCount: this.toolCallCount,
+          skillsModified: this.skillsModifiedInSession,
+          enabled: autoSkillEnabled,
+          threshold: AUTO_SKILL_THRESHOLD,
+          maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
+          timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+        });
+        if (skillReviewResult.status === 'scheduled') {
+          // Reset tool-call counter when a review is dispatched so the next
+          // review only fires after a full new threshold worth of tool calls.
+          this.toolCallCount = 0;
+          if (skillReviewResult.promise) {
+            this.pendingMemoryTaskPromises.push(
+              skillReviewResult.promise
+                .then((record) => {
+                  const touched = record.metadata?.['touchedSkillFiles'];
+                  return Array.isArray(touched) ? touched.length : 0;
+                })
+                .catch((error: unknown) => {
+                  debugLogger.warn(
+                    'Failed to run managed skill review.',
+                    error,
+                  );
+                  return 0;
+                }),
+            );
+          }
+        } else if (
+          skillReviewResult.status === 'skipped' &&
+          skillReviewResult.skippedReason === 'already_running' &&
+          this.toolCallCount >= AUTO_SKILL_THRESHOLD
+        ) {
+          // A review is already in-flight; reset the counter so that when the
+          // current review completes the next call doesn't immediately trigger
+          // another review without accumulating a fresh threshold of tool calls.
+          this.toolCallCount = 0;
+        }
+        // Always reset the skills-modified flag after the scheduleSkillReview
+        // check, regardless of whether a review was dispatched. This prevents
+        // a deadlock where skillsModifiedInSession stays true forever: when
+        // the flag is set, scheduleSkillReview returns 'skipped' immediately
+        // (never 'scheduled'), so without this reset the flag can never clear.
+        this.skillsModifiedInSession = false;
+      }
     }
 
-    if (!this.config.getManagedAutoMemoryEnabled()) {
+    // extract and dream keep the original UserQuery-only gate to preserve
+    // the existing "once per user turn" semantics and avoid redundant work.
+    if (messageType !== SendMessageType.UserQuery) {
       return;
     }
 
@@ -609,6 +787,10 @@ export class GeminiClient {
     const sessionId = this.config.getSessionId();
     const history = this.getHistory();
     const mgr = this.config.getMemoryManager();
+
+    if (!this.config.getManagedAutoMemoryEnabled()) {
+      return;
+    }
 
     const extractPromise = mgr
       .scheduleExtract({
@@ -663,6 +845,22 @@ export class GeminiClient {
     const promises = this.pendingMemoryTaskPromises;
     this.pendingMemoryTaskPromises = [];
     return promises;
+  }
+
+  recordCompletedToolCall(
+    toolName: string,
+    args?: Record<string, unknown>,
+  ): void {
+    if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
+      const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
+      if (
+        typeof filePath === 'string' &&
+        isProjectSkillPath(filePath, this.config.getProjectRoot())
+      ) {
+        this.skillsModifiedInSession = true;
+      }
+    }
+    this.toolCallCount += 1;
   }
 
   async *sendMessageStream(
@@ -787,6 +985,18 @@ export class GeminiClient {
         );
       }
 
+      // Track prompt count for commit attribution. Only the user typing a
+      // fresh prompt should bump the counter — `ToolResult` (tool-call
+      // continuation), `Retry`, `Hook`, `Cron`, and `Notification` are all
+      // model-driven or background-driven re-entries of the same logical
+      // turn. Counting them inflates the "N-shotted" label in the PR
+      // attribution trailer (one user message becomes "10-shotted" when it
+      // triggered ten tool calls).
+      const attributionService = CommitAttributionService.getInstance();
+      if (messageType === SendMessageType.UserQuery) {
+        attributionService.incrementPromptCount();
+      }
+
       // record user/cron message for session management
       if (messageType === SendMessageType.Cron) {
         this.config
@@ -825,7 +1035,18 @@ export class GeminiClient {
         );
       }
     }
+
     if (messageType !== SendMessageType.Retry) {
+      // Snapshot on every non-retry turn. ToolResult turns run right after
+      // tool execution, so their snapshot captures edits that a prior
+      // UserQuery turn scheduled. Without this, a resumed session only sees
+      // the UserQuery-time snapshot (empty) and loses tool-driven edits.
+      this.config
+        .getChatRecordingService()
+        ?.recordAttributionSnapshot(
+          CommitAttributionService.getInstance().toSnapshot(),
+        );
+
       this.sessionTurnCount++;
 
       if (
@@ -847,14 +1068,10 @@ export class GeminiClient {
       return new Turn(this.getChat(), prompt_id);
     }
 
-    const compressed = await this.tryCompressChat(prompt_id, false, signal);
-
-    if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
-      yield { type: GeminiEventType.ChatCompressed, value: compressed };
-    }
-
-    // Check session token limit after compression.
-    // `lastPromptTokenCount` is treated as authoritative for the (possibly compressed) history;
+    // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
+    // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
+    // still calls tryCompressChat directly for the full reset (env refresh +
+    // forceFullIdeContext flip).
     const sessionTokenLimit = this.config.getSessionTokenLimit();
     if (sessionTokenLimit > 0) {
       const lastPromptTokenCount = uiTelemetryService.getLastPromptTokenCount();
@@ -998,6 +1215,13 @@ export class GeminiClient {
       // automatically from uiTelemetryService by the reporter.
       if (arenaAgentClient && event.type === GeminiEventType.Finished) {
         await arenaAgentClient.updateStatus();
+      }
+
+      // Re-send a full IDE context blob on the next regular message — auto
+      // compaction inside chat.sendMessageStream may have summarized away
+      // the previous IDE-context turn.
+      if (event.type === GeminiEventType.ChatCompressed) {
+        this.forceFullIdeContext = true;
       }
 
       yield event;
@@ -1206,84 +1430,102 @@ export class GeminiClient {
     model: string,
     promptIdOverride?: string,
   ): Promise<GenerateContentResponse> {
-    let currentAttemptModel: string = model;
     const promptId =
       promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
 
-    try {
-      const userMemory = this.config.getUserMemory();
-      const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
-        : this.getMainSessionSystemInstruction();
+    return withSpan(
+      'client.generateContent',
+      { model, prompt_id: promptId },
+      async (span) => {
+        let currentAttemptModel: string = model;
 
-      const requestConfig: GenerateContentConfig = {
-        abortSignal,
-        ...generationConfig,
-        systemInstruction: finalSystemInstruction,
-      };
+        try {
+          const userMemory = this.config.getUserMemory();
+          const finalSystemInstruction = generationConfig.systemInstruction
+            ? getCustomSystemPrompt(
+                generationConfig.systemInstruction,
+                userMemory,
+              )
+            : this.getMainSessionSystemInstruction();
 
-      // When the requested model differs from the main model (e.g. fast model
-      // side queries for session recap / title / summary), resolve the target
-      // model's own ContentGeneratorConfig so that per-model settings like
-      // extra_body, samplingParams, and reasoning are not inherited from the
-      // main model's config.
-      const mainModel = this.config.getModel() ?? model;
-      const isPerModel = model !== mainModel;
+          const requestConfig: GenerateContentConfig = {
+            abortSignal,
+            ...generationConfig,
+            systemInstruction: finalSystemInstruction,
+          };
 
-      // Resolve the authType for retry logic. When using a per-model content
-      // generator (e.g. fast model side queries), the retry authType must match
-      // the target model's provider, not the main session's provider. This
-      // ensures QWEN_OAUTH quota detection checks against the right provider.
-      const retryAuthType = isPerModel
-        ? (this.createRetryAuthTypeForModel(model) ??
-          this.config.getContentGeneratorConfig()?.authType ??
-          AuthType.USE_OPENAI)
-        : this.config.getContentGeneratorConfig()?.authType;
+          // When the requested model differs from the main model (e.g. fast model
+          // side queries for session recap / title / summary), resolve the target
+          // model's own ContentGeneratorConfig so that per-model settings like
+          // extra_body, samplingParams, and reasoning are not inherited from the
+          // main model's config.
+          const mainModel = this.config.getModel() ?? model;
+          const isPerModel = model !== mainModel;
 
-      const contentGenerator = isPerModel
-        ? await this.createContentGeneratorForModel(model)
-        : this.getContentGeneratorOrFail();
-      const apiCall = () => {
-        currentAttemptModel = model;
+          // Resolve the authType for retry logic. When using a per-model content
+          // generator (e.g. fast model side queries), the retry authType must match
+          // the target model's provider, not the main session's provider. This
+          // ensures QWEN_OAUTH quota detection checks against the right provider.
+          const retryAuthType = isPerModel
+            ? (this.createRetryAuthTypeForModel(model) ??
+              this.config.getContentGeneratorConfig()?.authType ??
+              AuthType.USE_OPENAI)
+            : this.config.getContentGeneratorConfig()?.authType;
 
-        return contentGenerator.generateContent(
-          {
-            model,
-            config: requestConfig,
-            contents,
-          },
-          promptId,
-        );
-      };
-      const result = await retryWithBackoff(apiCall, {
-        authType: retryAuthType,
-        persistentMode: isUnattendedMode(),
-        signal: abortSignal,
-        heartbeatFn: (info) => {
-          process.stderr.write(
-            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          const contentGenerator = isPerModel
+            ? await this.createContentGeneratorForModel(model)
+            : this.getContentGeneratorOrFail();
+          const apiCall = () => {
+            currentAttemptModel = model;
+
+            return contentGenerator.generateContent(
+              {
+                model,
+                config: requestConfig,
+                contents,
+              },
+              promptId,
+            );
+          };
+          const result = await retryWithBackoff(apiCall, {
+            authType: retryAuthType,
+            persistentMode: isUnattendedMode(),
+            signal: abortSignal,
+            heartbeatFn: (info) => {
+              process.stderr.write(
+                `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+              );
+            },
+          });
+          return result;
+        } catch (error: unknown) {
+          if (abortSignal.aborted) {
+            safeSetStatus(span, {
+              code: SpanStatusCode.ERROR,
+              message: API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
+            });
+            throw error;
+          }
+
+          safeSetStatus(span, {
+            code: SpanStatusCode.ERROR,
+            message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+          });
+          await reportError(
+            error,
+            `Error generating content via API with model ${currentAttemptModel}.`,
+            {
+              requestContents: contents,
+              requestConfig: generationConfig,
+            },
+            'generateContent-api',
           );
-        },
-      });
-      return result;
-    } catch (error: unknown) {
-      if (abortSignal.aborted) {
-        throw error;
-      }
-
-      await reportError(
-        error,
-        `Error generating content via API with model ${currentAttemptModel}.`,
-        {
-          requestContents: contents,
-          requestConfig: generationConfig,
-        },
-        'generateContent-api',
-      );
-      throw new Error(
-        `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
-      );
-    }
+          throw new Error(
+            `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
+          );
+        }
+      },
+    );
   }
 
   /**
@@ -1391,58 +1633,36 @@ export class GeminiClient {
     return generatorPromise;
   }
 
+  /**
+   * Wrapper around {@link GeminiChat.tryCompress} that restores main-session
+   * startup context after successful compaction and flips the IDE full-context
+   * flag for the next regular message.
+   */
   async tryCompressChat(
     prompt_id: string,
     force: boolean = false,
     signal?: AbortSignal,
   ): Promise<ChatCompressionInfo> {
-    const compressionService = new ChatCompressionService();
-
-    const { newHistory, info } = await compressionService.compress(
-      this.getChat(),
+    const info = await this.getChat().tryCompress(
       prompt_id,
-      force,
       this.config.getModel(),
-      this.config,
-      this.hasFailedCompressionAttempt,
+      force,
       signal,
     );
-
-    // Handle compression result
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      // Success: update chat with new compressed history
-      if (newHistory) {
-        const chatRecordingService = this.config.getChatRecordingService();
-        chatRecordingService?.recordChatCompression({
-          info,
-          compressedHistory: newHistory,
-        });
-
-        await this.startChat(newHistory);
-        // Compaction rewrites the prompt history: prior full-Read tool
-        // results may have been summarised away, but the FileReadCache
-        // still believes those reads are "in this conversation". A
-        // follow-up Read could then return the file_unchanged
-        // placeholder pointing at content the model can no longer
-        // retrieve from its own context. Clear the cache so post-
-        // compaction Reads re-emit the bytes.
-        debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
-        this.config.getFileReadCache().clear();
-        uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
-        this.forceFullIdeContext = true;
-      }
-    } else if (
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-      info.compressionStatus ===
-        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY
-    ) {
-      // Track failed attempts (only mark as failed if not forced)
-      if (!force) {
-        this.hasFailedCompressionAttempt = true;
-      }
+      const compressedHistory = this.getChat().getHistory();
+      await this.startChat(compressedHistory);
+      // startChat() creates a new GeminiChat without touching FileReadCache,
+      // so prior read_file results that were summarised away would still
+      // resolve to the file_unchanged placeholder. Clear so post-compaction
+      // Reads re-emit bytes the model can no longer see in history.
+      debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
+      this.config.getFileReadCache().clear();
+      this.getChat().setLastPromptTokenCount(info.newTokenCount);
+      // Re-send a full IDE context blob on the next regular message —
+      // compression dropped the previous context turn from history.
+      this.forceFullIdeContext = true;
     }
-
     return info;
   }
 }

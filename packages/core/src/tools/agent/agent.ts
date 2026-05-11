@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -30,6 +31,7 @@ import {
   AgentHeadless,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
+import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
 import type { Content, FunctionDeclaration } from '@google/genai';
 import {
   FORK_AGENT,
@@ -39,7 +41,10 @@ import {
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
-import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
+import {
+  getCurrentAgentId,
+  runWithAgentContext,
+} from '../../agents/runtime/agent-context.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -75,6 +80,64 @@ function persistBackgroundCancellation(
     lastUpdatedAt: new Date().toISOString(),
     lastError: undefined,
   });
+}
+
+function createLocalExternalInputQueue(): {
+  enqueue: (input: AgentExternalInput) => boolean;
+  drain: () => AgentExternalInput[];
+  wait: (signal: AbortSignal) => Promise<AgentExternalInput[]>;
+  wake: () => void;
+} {
+  const inputs: AgentExternalInput[] = [];
+  const waiters = new Set<() => void>();
+
+  const drain = () => inputs.splice(0);
+  const wakeWaiters = () => {
+    const pending = Array.from(waiters);
+    for (const waiter of pending) {
+      waiter();
+    }
+  };
+
+  return {
+    enqueue(input: AgentExternalInput): boolean {
+      inputs.push(input);
+      wakeWaiters();
+      return true;
+    },
+    drain,
+    wake(): void {
+      wakeWaiters();
+    },
+    wait(signal: AbortSignal): Promise<AgentExternalInput[]> {
+      const immediate = drain();
+      if (immediate.length > 0 || signal.aborted) {
+        return Promise.resolve(immediate);
+      }
+
+      return new Promise<AgentExternalInput[]>((resolve) => {
+        const cleanup = () => {
+          waiters.delete(onWake);
+          signal.removeEventListener('abort', onAbort);
+        };
+        const onWake = () => {
+          cleanup();
+          resolve(drain());
+        };
+        const onAbort = () => {
+          cleanup();
+          resolve([]);
+        };
+        waiters.add(onWake);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) {
+          cleanup();
+          resolve([]);
+          return;
+        }
+      });
+    },
+  };
 }
 
 export interface AgentParams {
@@ -168,13 +231,82 @@ function permissionModeToApprovalMode(mode: PermissionMode): ApprovalMode {
 }
 
 /**
- * Creates a Config override with a different approval mode.
- * Uses prototype delegation to avoid mutating the parent config.
+ * Marker that signals "this Config wrapper has rebuilt its own tool
+ * registry so bound EditTool / WriteFileTool / ReadFileTool resolve to
+ * the wrapper instead of the parent". Stored as a Symbol-keyed property
+ * so that JavaScript's normal property lookup (which walks the
+ * prototype chain) lets a downstream wrapper detect a rebuild that
+ * happened on any ancestor without manually walking the chain.
+ *
+ * `Symbol.for` is used so the marker survives bundle-deduping; two
+ * independent imports of this module observe the same Symbol identity.
  */
-function createApprovalModeOverride(base: Config, mode: ApprovalMode): Config {
+export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
+  'qwen-code:tool-registry-rebuilt',
+);
+
+/**
+ * `true` if any Config in this wrapper's prototype chain has already
+ * rebuilt its tool registry via {@link rebuildToolRegistryOnOverride}.
+ *
+ * Used by spawn sites that may be called with a wrapper-on-wrapper
+ * argument (e.g. `subagent-manager.ts:buildSubagentContextOverride`
+ * receiving `bgConfig = Object.create(agentConfig)` from the
+ * background-agent path) to skip a redundant rebuild.
+ */
+export function hasRebuiltToolRegistry(config: Config): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (config as any)[TOOL_REGISTRY_REBUILT] === true;
+}
+
+/**
+ * Rebuilds the tool registry on `override` so core tools resolve
+ * `this.config` to `override` instead of `base`. Used by both
+ * {@link createApprovalModeOverride} and
+ * `subagent-manager.ts:buildSubagentContextOverride` to avoid
+ * duplicated rebuild logic.
+ *
+ * - `override.createToolRegistry(...)` runs on the override (so the
+ *   lazy factories close over `this = override`).
+ * - Discovered tools (MCP / command-discovered) are copied from `base`
+ *   rather than re-discovered, since discovery is expensive.
+ * - The {@link TOOL_REGISTRY_REBUILT} marker is set so wrapper-of-wrapper
+ *   layers downstream skip the rebuild via {@link hasRebuiltToolRegistry}.
+ */
+export async function rebuildToolRegistryOnOverride(
+  override: Config,
+  base: Config,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ov = override as any;
+  const agentRegistry = await ov.createToolRegistry(undefined, {
+    skipDiscovery: true,
+    forSubAgent: true,
+  });
+  agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
+  ov.getToolRegistry = () => agentRegistry;
+  ov[TOOL_REGISTRY_REBUILT] = true;
+}
+
+/**
+ * Creates a Config override with a different approval mode.
+ *
+ * Uses prototype delegation (Object.create) to avoid mutating the parent
+ * config, then delegates to {@link rebuildToolRegistryOnOverride} so the
+ * override's tool registry has core tools bound to the override rather
+ * than to the parent. Without that rebuild, the parent's cached tool
+ * instances continue to resolve `this.config` to the parent, defeating
+ * per-Config isolation of FileReadCache / approval mode for any code
+ * path that goes through the bound tool.
+ */
+export async function createApprovalModeOverride(
+  base: Config,
+  mode: ApprovalMode,
+): Promise<Config> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   override.getApprovalMode = (): ApprovalMode => mode;
+  await rebuildToolRegistryOnOverride(override as Config, base);
   return override as Config;
 }
 
@@ -445,6 +577,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     if (updateOutput) {
       updateOutput(this.currentDisplay);
     }
+  }
+
+  private registerOwnedMonitorNotifications(
+    agentId: string,
+    enqueue: (input: AgentExternalInput) => boolean,
+    wake: () => void,
+  ): () => void {
+    const monitorRegistry = this.config.getMonitorRegistry();
+    monitorRegistry.setAgentNotificationCallback(
+      agentId,
+      (_displayText, modelText) =>
+        void enqueue({ kind: 'notification', text: modelText }),
+    );
+    monitorRegistry.setAgentLifecycleCallback(agentId, wake);
+
+    return () => {
+      monitorRegistry.cancelRunningForOwner(agentId, { notify: false });
+      monitorRegistry.setAgentNotificationCallback(agentId, undefined);
+      monitorRegistry.setAgentLifecycleCallback(agentId, undefined);
+    };
   }
 
   /**
@@ -720,12 +872,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // the parent, not an isolated subagent, so the general subagent
       // exclusion list does not apply. Recursive forks are blocked by the
       // ALS-based `isInForkExecution()` guard.
+      // However, we still exclude tools that must never be available to
+      // any subagent (agent, cron tools).
       const parentToolDecls: FunctionDeclaration[] =
         (
           generationConfig.tools as Array<{
             functionDeclarations?: FunctionDeclaration[];
           }>
-        )?.flatMap((t) => t.functionDeclarations ?? []) ?? [];
+        )
+          ?.flatMap((t) => t.functionDeclarations ?? [])
+          .filter(
+            (d) => !(d.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(d.name)),
+          ) ?? [];
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
@@ -987,10 +1145,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.config.isTrustedFolder(),
       );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
-      const agentConfig =
-        resolvedApprovalMode !== this.config.getApprovalMode()
-          ? createApprovalModeOverride(this.config, resolvedApprovalMode)
-          : this.config;
+      // ALWAYS produce a child Config via Object.create, even when the
+      // approval mode is identical to the parent. Subagents must run
+      // against an isolated FileReadCache so a parent's prior_read
+      // entries cannot satisfy enforcement on a path the subagent's
+      // transcript never contained — see the per-Config own-property
+      // machinery in `Config.getFileReadCache()`. Reusing
+      // `this.config` directly here would short-circuit that
+      // isolation for the same-mode path, which is the common case.
+      //
+      // The override also rebuilds its own tool registry so core
+      // tools (`EditTool` / `WriteFileTool` / `ReadFileTool`) are
+      // bound to the override Config rather than the parent. Without
+      // that rebuild, the parent's cached tool instances continue to
+      // resolve `this.config` to the parent, reaching the parent's
+      // FileReadCache rather than the subagent's. See
+      // `createApprovalModeOverride` above for details.
+      const agentConfig = await createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode,
+      );
 
       // Create the subagent. Fork bypasses SubagentManager because its
       // runtime configs are synthesized from the parent's cache-safe params.
@@ -1156,6 +1330,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentId: hookOpts.agentId,
           description: this.params.description,
           subagentType: subagentConfig.name,
+          flavor: 'background',
           status: 'running',
           startTime: Date.now(),
           abortController: bgAbortController,
@@ -1203,10 +1378,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
         bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
 
-        // Wire external message drain so SendMessage can inject messages
-        // into this agent's reasoning loop between tool rounds.
+        const cleanupOwnedMonitorNotifications =
+          this.registerOwnedMonitorNotifications(
+            hookOpts.agentId,
+            (input) => registry.queueExternalInput(hookOpts.agentId, input),
+            () => registry.wakeExternalInputWaiters(hookOpts.agentId),
+          );
+
+        // Wire external message drain so SendMessage and owned Monitor
+        // notifications can inject inputs between tool rounds.
         bgSubagent.setExternalMessageProvider(() =>
           registry.drainMessages(hookOpts.agentId),
+        );
+        bgSubagent.setExternalMessageWaiter?.((waitSignal) =>
+          registry.waitForMessages(hookOpts.agentId, waitSignal),
+        );
+        bgSubagent.setExternalMessageWaitPredicate?.(() =>
+          this.config.getMonitorRegistry().hasRunningForOwner(hookOpts.agentId),
         );
 
         const getCompletionStats = () => {
@@ -1307,14 +1495,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           } finally {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
             bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+            cleanupOwnedMonitorNotifications();
             cleanupJsonl?.();
+            // Release the per-subagent ToolRegistry now that the
+            // background agent has finished — see the matching call in
+            // the foreground finally for why. Stopping here, after
+            // bgSubagent.execute resolves, is safe: by this point the
+            // detached body cannot invoke any more tool factories on
+            // this registry.
+            void agentConfig
+              .getToolRegistry()
+              .stop()
+              .catch(() => {});
           }
         };
         // Wrap in the agent-identity frame so nested `agent` tool calls
         // from this subagent's model record this agent's id as their
         // `parentAgentId` in the sidecar meta.
         const framedBgBody = () =>
-          runWithAgentContext({ agentId: hookOpts.agentId }, bgBody);
+          runWithAgentContext(hookOpts.agentId, bgBody);
         void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
@@ -1334,20 +1533,143 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Same agent-identity frame as the background path: a foreground
       // subagent can also launch nested agents, and those nested launches
       // need to see this subagent's id as their `parentAgentId`.
-      const runFramed = () =>
-        runWithAgentContext({ agentId: hookOpts.agentId }, () =>
-          this.runSubagentWithHooks(subagent, contextState, hookOpts),
-        );
 
       if (isFork) {
+        const forkMonitorInputs = createLocalExternalInputQueue();
+        subagent.setExternalMessageProvider?.(() => forkMonitorInputs.drain());
+        subagent.setExternalMessageWaiter?.((waitSignal) =>
+          forkMonitorInputs.wait(waitSignal),
+        );
+        subagent.setExternalMessageWaitPredicate?.(() =>
+          this.config.getMonitorRegistry().hasRunningForOwner(hookOpts.agentId),
+        );
+        const cleanupOwnedMonitorNotifications =
+          this.registerOwnedMonitorNotifications(
+            hookOpts.agentId,
+            forkMonitorInputs.enqueue,
+            forkMonitorInputs.wake,
+          );
+
         // Background fork execution. Run under an AsyncLocalStorage frame so
         // nested `agent` tool calls by the fork's model can be detected.
-        void runInForkContext(runFramed);
+        // Forks run async (return a placeholder); skip foreground registration.
+        // Wrap the fork body in try/finally so the per-subagent ToolRegistry
+        // is stopped after the fork finishes — the other three spawn paths
+        // (foreground non-fork, background fork, background non-fork) already
+        // do this in their finally blocks. Without it, every AgentTool /
+        // SkillTool the fork's model instantiates from this registry leaks
+        // its change-listener on shared SubagentManager / SkillManager.
+        const runFramedFork = () =>
+          runWithAgentContext(hookOpts.agentId, async () => {
+            try {
+              await this.runSubagentWithHooks(subagent, contextState, hookOpts);
+            } finally {
+              cleanupOwnedMonitorNotifications();
+              void agentConfig
+                .getToolRegistry()
+                .stop()
+                .catch(() => {});
+            }
+          });
+        void runInForkContext(runFramedFork);
         return {
           llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
           returnDisplay: this.currentDisplay!,
         };
+      }
+
+      // ── Foreground (synchronous) execution path ────────────────
+      // Compose a child AbortController so the dialog's per-agent cancel
+      // can abort just this subagent without aborting the parent turn.
+      // Parent abort still propagates down (so ESC at the parent kills
+      // the subagent), but child abort does NOT propagate up.
+      const fgAbortController = new AbortController();
+      const onParentAbort = () => fgAbortController.abort();
+      if (signal?.aborted) {
+        fgAbortController.abort();
       } else {
+        signal?.addEventListener('abort', onParentAbort, { once: true });
+      }
+
+      const fgHookOpts = { ...hookOpts, signal: fgAbortController.signal };
+      const runFramed = () =>
+        runWithAgentContext(hookOpts.agentId, () =>
+          this.runSubagentWithHooks(subagent, contextState, fgHookOpts),
+        );
+
+      // Register in BackgroundTaskRegistry with flavor:'foreground' so the
+      // pill counts the run and the dialog can drill in. Foreground entries
+      // skip XML notification and headless-holdback (see the registry for
+      // the gating logic).
+      const registry = this.config.getBackgroundTaskRegistry();
+      registry.register({
+        agentId: hookOpts.agentId,
+        description: this.params.description,
+        subagentType: hookOpts.agentType,
+        flavor: 'foreground',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: fgAbortController,
+        prompt: this.params.prompt,
+        toolUseId: this.callId,
+      });
+
+      const cleanupOwnedMonitorNotifications =
+        this.registerOwnedMonitorNotifications(
+          hookOpts.agentId,
+          (input) => registry.queueExternalInput(hookOpts.agentId, input),
+          () => registry.wakeExternalInputWaiters(hookOpts.agentId),
+        );
+      subagent.setExternalMessageProvider?.(() =>
+        registry.drainMessages(hookOpts.agentId),
+      );
+      subagent.setExternalMessageWaiter?.((waitSignal) =>
+        registry.waitForMessages(hookOpts.agentId, waitSignal),
+      );
+      subagent.setExternalMessageWaitPredicate?.(() =>
+        this.config.getMonitorRegistry().hasRunningForOwner(hookOpts.agentId),
+      );
+
+      // Mirror the background path's progress wiring so the dialog detail
+      // body has live tool-call activity AND a current `entry.stats`
+      // subtitle (`N tools · X tokens · Ys`). Without this, foreground
+      // entries collapse to elapsed-only in the dialog while background
+      // entries show full stats — strictly less information for the same
+      // runtime events.
+      //
+      // This is a separate listener from setupEventListeners' TOOL_CALL
+      // handler (which feeds `currentDisplay.toolCalls` for the committed
+      // inline frame). They consume different state — committed inline UI
+      // vs. live registry stats — and setupEventListeners runs before we
+      // know the flavor or the registry id, so folding them is awkward.
+      let fgLiveToolCallCount = 0;
+      const refreshFgLiveStats = () => {
+        const entry = registry.get(hookOpts.agentId);
+        if (!entry || entry.status !== 'running') return;
+        const summary = subagent.getExecutionSummary();
+        entry.stats = {
+          totalTokens: summary.totalTokens,
+          toolUses: fgLiveToolCallCount,
+          durationMs: summary.totalDurationMs,
+        };
+      };
+      const onFgToolCall = (...args: unknown[]) => {
+        const event = args[0] as AgentToolCallEvent;
+        fgLiveToolCallCount += 1;
+        refreshFgLiveStats();
+        registry.appendActivity(hookOpts.agentId, {
+          name: event.name,
+          description: event.description,
+          at: event.timestamp,
+        });
+      };
+      const onFgUsageMetadata = () => {
+        refreshFgLiveStats();
+      };
+      this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
+      this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+
+      try {
         await runFramed();
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
@@ -1357,10 +1679,51 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             returnDisplay: this.currentDisplay!,
           };
         }
+        if (terminateMode === AgentTerminateMode.CANCELLED) {
+          // Distinguish a user-cancelled run from a successful complete in
+          // the parent model's tool result. Without this prefix, a cancel
+          // collapses into the same `{ llmContent: [{ text: finalText }] }`
+          // shape as a successful run — the parent can't tell that the
+          // partial result is incomplete and may act on it as if the agent
+          // had finished. The background path surfaces this via the
+          // `<status>cancelled</status>` XML envelope; the foreground path
+          // has no equivalent envelope, so the marker has to ride the
+          // llmContent payload itself.
+          const partial = finalText || '(no partial result captured)';
+          return {
+            llmContent: [
+              {
+                text: `Agent was cancelled by the user. Partial result follows:\n\n${partial}`,
+              },
+            ],
+            returnDisplay: this.currentDisplay!,
+          };
+        }
         return {
           llmContent: [{ text: finalText }],
           returnDisplay: this.currentDisplay!,
         };
+      } finally {
+        this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
+        this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+        signal?.removeEventListener('abort', onParentAbort);
+        cleanupOwnedMonitorNotifications();
+        // Foreground entries leave the registry as soon as the tool-call
+        // returns — the parent's tool-result is the durable record. Doing
+        // this in finally guarantees we clean up on success, failure,
+        // cancel, AND any unexpected throw inside runFramed.
+        registry.unregisterForeground(hookOpts.agentId);
+        // Release the per-subagent ToolRegistry so any AgentTool /
+        // SkillTool the model instantiated during execution disposes
+        // its change-listeners on shared SubagentManager / SkillManager.
+        // Without this, repeated foreground subagent runs accumulate
+        // listeners for the rest of the session. Fire-and-forget; the
+        // subagent has already returned its result, and stop() logs its
+        // own errors.
+        void agentConfig
+          .getToolRegistry()
+          .stop()
+          .catch(() => {});
       }
     } catch (error) {
       const errorMessage =

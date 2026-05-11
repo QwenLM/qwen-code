@@ -69,7 +69,7 @@ ${directoryContext}
   return [{ text: context }];
 }
 
-const STARTUP_CONTEXT_MODEL_ACK = 'Got it. Thanks for the context!';
+export const STARTUP_CONTEXT_MODEL_ACK = 'Got it. Thanks for the context!';
 
 export async function getInitialChatHistory(
   config: Config,

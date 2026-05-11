@@ -13,6 +13,7 @@ import { agentsCommand } from '../ui/commands/agentsCommand.js';
 import { arenaCommand } from '../ui/commands/arenaCommand.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
 import { authCommand } from '../ui/commands/authCommand.js';
+import { branchCommand } from '../ui/commands/branchCommand.js';
 import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
@@ -22,6 +23,7 @@ import { contextCommand } from '../ui/commands/contextCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
 import { doctorCommand } from '../ui/commands/doctorCommand.js';
+import { diffCommand } from '../ui/commands/diffCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
@@ -97,12 +99,14 @@ export class BuiltinCommandLoader implements ICommandLoader {
       arenaCommand,
       approvalModeCommand,
       authCommand,
+      branchCommand,
       btwCommand,
       bugCommand,
       clearCommand,
       compressCommand,
       contextCommand,
       copyCommand,
+      diffCommand,
       deleteCommand,
       docsCommand,
       doctorCommand,

@@ -19,6 +19,7 @@ import type { FileOperation } from './metrics.js';
 export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { AgentTool } from '../tools/agent/agent.js';
 
@@ -189,7 +190,21 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
     this.function_name = call.request.name;
-    this.function_args = call.request.args;
+    // structured_output args ARE the user's final structured payload (the
+    // command's actual answer, already emitted in stdout `result` /
+    // `structured_result`). Recording them again as ordinary tool-call
+    // function_args duplicates that data into telemetry surfaces (OTLP
+    // exports, QwenLogger, ui-telemetry stream, the chat-recording UI
+    // event mirror) where it can leak off-device. Replace with a shared
+    // placeholder constant so consumers still see the call happened —
+    // duration, success, decision metrics are preserved — but the
+    // payload itself doesn't ride along. The same constant is used by
+    // `redactStructuredOutputArgsForRecording` in `core/geminiChat.ts`
+    // for the on-disk JSONL surface so neither side can silently drift.
+    this.function_args =
+      call.request.name === ToolNames.STRUCTURED_OUTPUT
+        ? { ...STRUCTURED_OUTPUT_REDACTED_ARGS }
+        : call.request.args;
     this.duration_ms = call.durationMs ?? 0;
     this.status = call.status;
     this.success = call.status === 'success'; // Keep for backward compatibility

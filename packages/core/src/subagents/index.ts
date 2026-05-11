@@ -26,7 +26,10 @@ export type {
 export { SubagentError } from './types.js';
 
 // Built-in agents registry
-export { BuiltinAgentRegistry } from './builtin-agents.js';
+export {
+  BuiltinAgentRegistry,
+  DEFAULT_BUILTIN_SUBAGENT_TYPE,
+} from './builtin-agents.js';
 
 // Validation system
 export { SubagentValidator } from './validation.js';

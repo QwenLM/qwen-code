@@ -17,6 +17,7 @@ import {
   QwenLogger,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
+  refreshSessionContext,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -152,7 +153,6 @@ vi.mock('../memory/const.js', () => ({
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
-  QWEN_CONFIG_DIR: '.qwen',
 }));
 vi.mock('../tools/memory-config', () => ({
   setGeminiMdFilename: vi.fn(),
@@ -160,7 +160,6 @@ vi.mock('../tools/memory-config', () => ({
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
   AGENT_CONTEXT_FILENAME: 'AGENTS.md',
-  QWEN_CONFIG_DIR: '.qwen',
   MEMORY_SECTION_HEADER: '## Qwen Added Memories',
 }));
 
@@ -181,6 +180,7 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     initializeTelemetry: vi.fn(),
     isTelemetrySdkInitialized: vi.fn(() => false),
     shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
+    refreshSessionContext: vi.fn(),
     uiTelemetryService: {
       getLastPromptTokenCount: vi.fn(),
     },
@@ -395,6 +395,15 @@ describe('Server Config (config.ts)', () => {
 
       config.startNewSession();
       expect(cache.size()).toBe(0);
+    });
+
+    it('refreshes the telemetry session context with the new session ID', () => {
+      const config = new Config(baseParams);
+      vi.mocked(refreshSessionContext).mockClear();
+
+      const newSessionId = config.startNewSession();
+
+      expect(refreshSessionContext).toHaveBeenCalledWith(newSessionId);
     });
   });
 
@@ -1030,6 +1039,95 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('GitCoAuthor Settings', () => {
+    it('defaults both commit and pr to true when not specified', () => {
+      const config = new Config({ ...baseParams, gitCoAuthor: undefined });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(true);
+    });
+
+    it('accepts an object with independent commit and pr toggles', () => {
+      const config = new Config({
+        ...baseParams,
+        gitCoAuthor: { commit: true, pr: false },
+      });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(false);
+    });
+
+    // Legacy shape: before commit and PR attribution were split, this
+    // setting was a single boolean. Treat it as governing both toggles so
+    // existing users' preferences carry over.
+    it.each([true, false])(
+      'coerces legacy boolean %s to { commit, pr } with the same value',
+      (value) => {
+        const config = new Config({ ...baseParams, gitCoAuthor: value });
+        const settings = config.getGitCoAuthor();
+        expect(settings.commit).toBe(value);
+        expect(settings.pr).toBe(value);
+      },
+    );
+
+    // settings.json is hand-editable; without intent-aware string
+    // parsing a hand-edited `{ commit: "false" }` would silently
+    // inflate to `commit: true` (the previous "default-to-true on
+    // mismatch" policy). Honor common string disable-intent forms
+    // and fall through to disabled on genuinely unrecognisable
+    // input — safer-by-default than turning attribution on against
+    // the user's clear opt-out.
+    it.each([
+      // Disable-intent strings.
+      ['string "false"', 'false', false],
+      ['string "FALSE"', 'FALSE', false],
+      ['string "no"', 'no', false],
+      ['string "off"', 'off', false],
+      ['string "0"', '0', false],
+      ['empty string', '', false],
+      // Enable-intent strings.
+      ['string "true"', 'true', true],
+      ['string "yes"', 'yes', true],
+      ['string "on"', 'on', true],
+      ['string "1"', '1', true],
+      // Numbers.
+      ['number 1', 1, true],
+      ['number 0', 0, false],
+      ['number 42', 42, false],
+      // Other types fall through to disabled.
+      ['null', null, false],
+      ['object', {}, false],
+      ['array', [], false],
+      // Unknown strings → disabled (don't quietly enable).
+      ['unknown string', 'maybe', false],
+    ])(
+      'parses %s as %s for both commit and pr',
+      (_label, badValue, expected) => {
+        const config = new Config({
+          ...baseParams,
+          gitCoAuthor: {
+            commit: badValue as unknown as boolean,
+            pr: badValue as unknown as boolean,
+          },
+        });
+        const settings = config.getGitCoAuthor();
+        expect(settings.commit).toBe(expected);
+        expect(settings.pr).toBe(expected);
+      },
+    );
+
+    // A genuinely-absent sub-field still defaults to true (schema default).
+    it('defaults absent commit/pr to true', () => {
+      const config = new Config({
+        ...baseParams,
+        gitCoAuthor: {} as { commit?: boolean; pr?: boolean },
+      });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(true);
+    });
+  });
+
   describe('Telemetry Settings', () => {
     it('should return default telemetry target if not provided', () => {
       const params: ConfigParameters = {
@@ -1082,6 +1180,32 @@ describe('Server Config (config.ts)', () => {
       delete paramsWithoutTelemetry.telemetry;
       const config = new Config(paramsWithoutTelemetry);
       expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
+    });
+
+    it('should return provided includeSensitiveSpanAttributes setting', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: { enabled: true, includeSensitiveSpanAttributes: true },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+    });
+
+    it('should default includeSensitiveSpanAttributes to false', () => {
+      const configWithTelemetry = new Config({
+        ...baseParams,
+        telemetry: { enabled: true },
+      });
+      expect(
+        configWithTelemetry.getTelemetryIncludeSensitiveSpanAttributes(),
+      ).toBe(false);
+
+      const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
+      delete paramsWithoutTelemetry.telemetry;
+      const configWithoutTelemetry = new Config(paramsWithoutTelemetry);
+      expect(
+        configWithoutTelemetry.getTelemetryIncludeSensitiveSpanAttributes(),
+      ).toBe(false);
     });
 
     it('should return default telemetry target if telemetry object is not provided', () => {
@@ -1250,6 +1374,82 @@ describe('Server Config (config.ts)', () => {
       expect(
         (registerToolMock as Mock).mock.calls.map((call) => call[0]),
       ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+    });
+
+    it('registers structured_output in bare mode when jsonSchema is set', async () => {
+      // Bare mode strips the toolset to READ_FILE/EDIT/SHELL, but the
+      // synthetic structured_output tool is the terminal contract for
+      // --json-schema runs. Without it the model loops until
+      // maxSessionTurns and exits via the "plain text" failure path —
+      // expensive in tokens for what's almost always a CI use case. The
+      // synthetic tool must be registered alongside the bare three.
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.SHELL,
+        ToolNames.STRUCTURED_OUTPUT,
+      ]);
+    });
+
+    it('does NOT register structured_output when createToolRegistry is called with forSubAgent=true', async () => {
+      // Subagent overrides reuse the parent Config via prototype
+      // delegation (createApprovalModeOverride / buildSubagentContextOverride
+      // → Object.create(base)) and rebuild the tool registry with
+      // `forSubAgent: true`. Even though `this.jsonSchema` propagates
+      // through the prototype chain, the synthetic tool MUST NOT register
+      // in the subagent registry: only runNonInteractive's main / drain
+      // loops detect a successful structured_output call as terminal, so
+      // a subagent calling the tool would receive "Session will end now"
+      // and then keep running because its own loop has no terminator —
+      // wasted tokens and no structured payload on stdout.
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      // Initial bare init registers READ_FILE / EDIT / SHELL /
+      // STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
+      // observe ONLY the forSubAgent rebuild's calls.
+      (registerToolMock as Mock).mockClear();
+
+      // Rebuild registry as if for a subagent override.
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(registeredNames).not.toContain(ToolNames.STRUCTURED_OUTPUT);
+      // The bare three still register so the subagent has its toolset.
+      expect(registeredNames).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
@@ -2080,6 +2280,104 @@ describe('Model Switching and Config Updates', () => {
 
       expect(config.hasHooksForEvent('Stop')).toBe(false);
       expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
+    });
+  });
+
+  describe('runtime ContentGenerator view (AsyncLocalStorage)', () => {
+    // The Config getters consult the per-run ALS view published by the
+    // agent runtime when a sub-agent runs on a different model than the
+    // parent. These tests pin that integration: tools that captured the
+    // parent Config at construction must still resolve to the agent's
+    // values when called inside the agent's runtime frame.
+    function setInstanceFields(
+      config: Config,
+      contentGenerator: ContentGenerator,
+      generatorConfig: ContentGeneratorConfig,
+    ): void {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (config as any).contentGenerator = contentGenerator;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (config as any).contentGeneratorConfig = generatorConfig;
+    }
+
+    it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const config = new Config(baseParams);
+      const parentGenerator = {
+        generateContentStream: vi.fn(),
+      } as unknown as ContentGenerator;
+      const parentGeneratorConfig: ContentGeneratorConfig = {
+        model: 'parent-model',
+        authType: AuthType.QWEN_OAUTH,
+        apiKey: 'parent-key',
+      };
+      setInstanceFields(config, parentGenerator, parentGeneratorConfig);
+
+      const agentGenerator = {
+        generateContentStream: vi.fn(),
+      } as unknown as ContentGenerator;
+      const agentGeneratorConfig: ContentGeneratorConfig = {
+        model: 'agent-model',
+        authType: AuthType.USE_OPENAI,
+        apiKey: 'agent-key',
+      };
+
+      // Outside the frame, getters resolve to the parent's instance fields.
+      expect(config.getContentGenerator()).toBe(parentGenerator);
+      expect(config.getContentGeneratorConfig()).toBe(parentGeneratorConfig);
+      expect(config.getModel()).toBe('parent-model');
+      expect(config.getAuthType()).toBe(AuthType.QWEN_OAUTH);
+
+      // Inside the frame, every getter resolves to the agent's view.
+      await runWithRuntimeContentGenerator(
+        {
+          contentGenerator: agentGenerator,
+          contentGeneratorConfig: agentGeneratorConfig,
+        },
+        async () => {
+          expect(config.getContentGenerator()).toBe(agentGenerator);
+          expect(config.getContentGeneratorConfig()).toBe(agentGeneratorConfig);
+          expect(config.getModel()).toBe('agent-model');
+          expect(config.getAuthType()).toBe(AuthType.USE_OPENAI);
+        },
+      );
+
+      // Frame exit restores resolution to the parent's instance fields.
+      expect(config.getContentGenerator()).toBe(parentGenerator);
+      expect(config.getModel()).toBe('parent-model');
+    });
+
+    it('falls back to the parent model id when the runtime view config has no model', async () => {
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const config = new Config(baseParams);
+      setInstanceFields(
+        config,
+        { generateContentStream: vi.fn() } as unknown as ContentGenerator,
+        {
+          model: 'parent-model',
+          authType: AuthType.QWEN_OAUTH,
+        } as ContentGeneratorConfig,
+      );
+
+      await runWithRuntimeContentGenerator(
+        {
+          contentGenerator: {
+            generateContentStream: vi.fn(),
+          } as unknown as ContentGenerator,
+          contentGeneratorConfig: {
+            model: '',
+            authType: AuthType.USE_OPENAI,
+          } as ContentGeneratorConfig,
+        },
+        async () => {
+          // Empty model on the runtime view falls through to modelsConfig.
+          expect(config.getModel()).toBe(baseParams.model);
+        },
+      );
     });
   });
 });
