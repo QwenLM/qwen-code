@@ -93,6 +93,7 @@ vi.mock('./utils/stdioHelpers.js', () => ({
 
 vi.mock('./utils/relaunch.js', () => ({
   relaunchAppInChildProcess: vi.fn(),
+  relaunchOnExitCode: vi.fn((fn: () => Promise<number>) => fn()),
 }));
 
 vi.mock('./config/sandboxConfig.js', () => ({
@@ -304,6 +305,67 @@ describe('gemini.tsx main function', () => {
         projectHooks: undefined,
       },
     );
+  });
+
+  it('passes the outer session ID into the sandbox child process', async () => {
+    const originalArgv = process.argv;
+    process.argv = ['node', 'script.js', '--debug', '-p', 'hello'];
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { start_sandbox } = await import('./utils/sandbox.js');
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      debug: true,
+      prompt: 'hello',
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadSandboxConfig).mockResolvedValue({
+      command: 'sandbox-exec',
+      image: '',
+    });
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => sessionId,
+    } as unknown as Config);
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      process.argv = originalArgv;
+      processExitSpy.mockRestore();
+    }
+
+    expect(start_sandbox).toHaveBeenCalledOnce();
+    const sandboxArgs = vi.mocked(start_sandbox).mock.calls[0][3];
+    expect(sandboxArgs).toContain('--session-id');
+    expect(sandboxArgs).toContain(sessionId);
   });
 
   it('should log unhandled promise rejections and open debug console on first error', async () => {
