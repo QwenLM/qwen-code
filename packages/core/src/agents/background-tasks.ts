@@ -23,6 +23,7 @@
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
+import type { AgentExternalInput } from './runtime/agent-types.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
@@ -147,8 +148,12 @@ export interface BackgroundTaskEntry {
   outputFile?: string;
   /** Absolute path to the agent's sidecar metadata file. */
   metaPath?: string;
-  /** Messages queued by SendMessage, drained between tool rounds. */
-  pendingMessages?: string[];
+  /**
+   * Inputs queued for delivery between tool rounds.
+   * Strings are parent `send_message` payloads; notification objects are
+   * owner-routed Monitor notifications.
+   */
+  pendingMessages?: AgentExternalInput[];
   /**
    * True once a terminal task-notification has been emitted for this entry.
    * Prevents duplicate notifications when cancel races with the natural
@@ -217,8 +222,11 @@ export type BackgroundActivityChangeCallback = (
   entry: BackgroundTaskEntry,
 ) => void;
 
+type MessageWaiter = () => void;
+
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, BackgroundTaskEntry>();
+  private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
@@ -484,6 +492,9 @@ export class BackgroundTaskRegistry {
       | BackgroundTaskEntry
       | undefined;
     if (!firstEntry) return;
+    for (const agentId of this.agents.keys()) {
+      this.wakeMessageWaiters(agentId);
+    }
     this.agents.clear();
     this.emitStatusChange(firstEntry);
   }
@@ -493,13 +504,23 @@ export class BackgroundTaskRegistry {
    * The agent drains this queue between tool rounds.
    */
   queueMessage(agentId: string, message: string): boolean {
+    return this.queueExternalInput(agentId, message);
+  }
+
+  /**
+   * Enqueue generalized external input for an agent. Use queueMessage for the
+   * parent send_message text path; this lower-level API also accepts
+   * structured inputs such as owner-routed Monitor notifications.
+   */
+  queueExternalInput(agentId: string, input: AgentExternalInput): boolean {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return false;
     const queue = entry.pendingMessages!;
-    queue.push(message);
+    queue.push(input);
     debugLogger.info(
       `Queued message for background agent ${agentId} (${queue.length} pending)`,
     );
+    this.wakeMessageWaiters(agentId);
     return true;
   }
 
@@ -507,7 +528,7 @@ export class BackgroundTaskRegistry {
    * Drain all pending messages for an agent. Returns the messages
    * and clears the queue. Called by the agent's reasoning loop.
    */
-  drainMessages(agentId: string): string[] {
+  drainMessages(agentId: string): AgentExternalInput[] {
     const entry = this.agents.get(agentId);
     if (!entry || !entry.pendingMessages!.length) return [];
     const messages = entry.pendingMessages!.splice(0);
@@ -515,6 +536,55 @@ export class BackgroundTaskRegistry {
       `Drained ${messages.length} message(s) for background agent ${agentId}`,
     );
     return messages;
+  }
+
+  async waitForMessages(
+    agentId: string,
+    signal: AbortSignal,
+  ): Promise<AgentExternalInput[]> {
+    const immediate = this.drainMessages(agentId);
+    if (immediate.length > 0) return immediate;
+
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'running' || signal.aborted) return [];
+
+    return new Promise<AgentExternalInput[]>((resolve) => {
+      const cleanup = () => {
+        signal.removeEventListener('abort', onAbort);
+        const waiters = this.messageWaiters.get(agentId);
+        if (!waiters) return;
+        waiters.delete(onWake);
+        if (waiters.size === 0) {
+          this.messageWaiters.delete(agentId);
+        }
+      };
+      const resolveWithDrain = () => {
+        cleanup();
+        resolve(this.drainMessages(agentId));
+      };
+      const onWake = () => resolveWithDrain();
+      const onAbort = () => {
+        cleanup();
+        resolve([]);
+      };
+
+      let waiters = this.messageWaiters.get(agentId);
+      if (!waiters) {
+        waiters = new Set<MessageWaiter>();
+        this.messageWaiters.set(agentId, waiters);
+      }
+      waiters.add(onWake);
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) {
+        cleanup();
+        resolve([]);
+        return;
+      }
+    });
+  }
+
+  wakeExternalInputWaiters(agentId: string): void {
+    this.wakeMessageWaiters(agentId);
   }
 
   setNotificationCallback(
@@ -643,6 +713,15 @@ export class BackgroundTaskRegistry {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('Failed to emit background status change:', error);
+    }
+  }
+
+  private wakeMessageWaiters(agentId: string): void {
+    const waiters = this.messageWaiters.get(agentId);
+    if (!waiters) return;
+    this.messageWaiters.delete(agentId);
+    for (const waiter of waiters) {
+      waiter();
     }
   }
 

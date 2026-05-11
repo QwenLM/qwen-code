@@ -49,6 +49,7 @@ import {
   extractCommandRules,
   isShellCommandReadOnlyAST,
 } from '../utils/shellAstParser.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -286,6 +287,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     const monitorId = `mon_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const registry = this.config.getMonitorRegistry();
+    const ownerAgentId = getCurrentAgentId() ?? undefined;
 
     // Check concurrent monitor limit before spawning
     const running = registry.getRunning();
@@ -313,6 +315,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       maxEvents,
       idleTimeoutMs,
       droppedLines: 0,
+      ...(ownerAgentId ? { ownerAgentId } : {}),
     };
 
     // Spawn the process

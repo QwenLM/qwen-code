@@ -1121,16 +1121,16 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should apply updatedInput from canUseTool callback',
       async () => {
-        // Don't pre-create test.txt: prior-read enforcement requires
-        // existing files to have been read via read_file first, but
-        // this test restricts coreTools to write_file only.
+        const scenarioDirName = `updated-input-allow-${crypto.randomUUID()}`;
+        const scenarioDir = await helper.mkdir(scenarioDirName);
         let capturedInput: Record<string, unknown> = {};
 
         const q = query({
-          prompt: 'Write "new content" to test.txt.',
+          prompt:
+            'Create a new file named test.txt with exactly this content: new content. Use the write_file tool.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            cwd: testDir,
+            cwd: scenarioDir,
             permissionMode: 'default',
             coreTools: ['write_file'],
             canUseTool: async (_toolName, input) => {
@@ -1160,7 +1160,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(Object.keys(capturedInput).length).toBeGreaterThan(0);
 
           // The file should be modified
-          const content = await helper.readFile('test.txt');
+          const content = await helper.readFile(`${scenarioDirName}/test.txt`);
           expect(content).toBe('new content');
         } finally {
           await q.close();
@@ -1172,16 +1172,16 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'canUseTool should not be called for allowedTools even if it would modify input',
       async () => {
-        // Don't pre-create test.txt: prior-read enforcement requires
-        // existing files to have been read via read_file first, but
-        // this test restricts coreTools to write_file only.
+        const scenarioDirName = `updated-input-allowed-tool-${crypto.randomUUID()}`;
+        const scenarioDir = await helper.mkdir(scenarioDirName);
         let canUseToolCalled = false;
 
         const q = query({
-          prompt: 'Write "modified" to test.txt.',
+          prompt:
+            'Create a new file named test.txt with exactly this content: modified. Use the write_file tool.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            cwd: testDir,
+            cwd: scenarioDir,
             permissionMode: 'default',
             coreTools: ['write_file'],
             // write_file is in allowedTools, so canUseTool should not be called
@@ -1208,7 +1208,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(canUseToolCalled).toBe(false);
 
           // File should be modified (not redirected to /some/other/path.txt)
-          const content = await helper.readFile('test.txt');
+          const content = await helper.readFile(`${scenarioDirName}/test.txt`);
           expect(content).toBe('modified');
         } finally {
           await q.close();

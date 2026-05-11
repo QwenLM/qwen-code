@@ -324,6 +324,7 @@ export const exportCommand: SlashCommand = {
   get description() {
     return t('Export current session message history to a file');
   },
+  argumentHint: 'md|html|json|jsonl [path]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: exportHtmlAction,

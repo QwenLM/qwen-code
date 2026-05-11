@@ -136,15 +136,24 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     // here, a race window the pre-fix gating left wide open) means
     // the model is about to clobber bytes it never read → reject.
     if (!this.config.getFileReadCacheDisabled()) {
+      // No `requireFullRead`-style option is passed — by design,
+      // and applies to all 5 checkPriorRead call sites in this file.
+      // PR #3932 added that option to require a full read before
+      // overwrite; PR #4002 removed it because the truncate-tool-
+      // output limit makes "fully read" an impossible precondition
+      // on large files (issue #3945 deadlock). WriteFile and Edit
+      // now share the same contract — any prior read clears
+      // enforcement and mtime/size drift is the safety net. The
+      // `fileReadCacheDisabled: true` config check above goes the
+      // OTHER way (skipping `checkPriorRead` entirely so application-
+      // level locking can take over), it is not an opt-in to
+      // stricter behaviour. See the docstring on `checkPriorRead`
+      // for the full rationale and the residual #2499 risk this
+      // stance accepts.
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         this.params.file_path,
         'overwriting',
-        // WriteFile replaces the entire file: a partial read is not
-        // enough evidence. Edit's `old_string` matching covers the
-        // "fabricated content" case for in-place edits, but there is
-        // no equivalent guard on the overwrite path.
-        { requireFullRead: true },
       );
       if (!decision.ok) {
         // Surface the structured ToolErrorType through scheduler.
@@ -189,7 +198,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         this.params.file_path,
         'overwriting',
-        { expectExisting: true, requireFullRead: true },
+        { expectExisting: true },
       );
       if (!postDecision.ok) {
         debugLogger.warn('post-read TOCTOU rejection (confirmation)', {
@@ -263,7 +272,6 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         file_path,
         'overwriting',
-        { requireFullRead: true },
       );
       if (!decision.ok) {
         return {
@@ -327,7 +335,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         this.config.getFileReadCache(),
         file_path,
         'overwriting',
-        { expectExisting: true, requireFullRead: true },
+        { expectExisting: true },
       );
       if (!postDecision.ok) {
         debugLogger.warn('post-read TOCTOU rejection (execute)', {
@@ -395,12 +403,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         // file from stale bytes. For new-file creation
         // (`fileExists === false`), ENOENT is the expected pre-write
         // state (ok:true → writeTextFile creates).
-        //
-        // `requireFullRead: true` only matters when stat succeeds
-        // (file currently exists). On the new-file path the helper
-        // returns ok:true via ENOENT before consulting this flag, so
-        // creation is still exempt regardless.
-        { expectExisting: fileExists, requireFullRead: true },
+        { expectExisting: fileExists },
       );
       if (!writeDecision.ok) {
         debugLogger.warn('pre-write TOCTOU rejection', {

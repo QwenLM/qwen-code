@@ -128,6 +128,38 @@ function isHiddenInCompactMode(item: HistoryItem): boolean {
 }
 
 /**
+ * Cheap O(N) scan: does any item in `history` render differently between
+ * compact and detailed modes? When this returns false, toggling compactMode
+ * is a pixel-identical no-op for already-rendered output, so the caller can
+ * skip the expensive `clearTerminal + Static remount` path. This unfreezes
+ * Ctrl+O for plain-chat sessions that have neither tool calls nor thinking
+ * blocks regardless of conversation length.
+ *
+ * Conservative: returns true for any `tool_group`, even though a history of
+ * only force-expanded groups would technically render the same way in both
+ * modes (force-expand groups bypass the compact-rendering path and their
+ * adjacent `tool_use_summary` items are not absorbed). Distinguishing
+ * force-expand from regular groups requires `embeddedShellFocused` and
+ * `activePtyId`, which are not cheaply available at the keypress handler
+ * call site — we accept the false-positive in exchange for keeping this
+ * predicate self-contained and O(N).
+ */
+export function compactToggleHasVisualEffect(
+  history: readonly HistoryItem[],
+): boolean {
+  for (const item of history) {
+    if (
+      item.type === 'tool_group' ||
+      item.type === 'gemini_thought' ||
+      item.type === 'gemini_thought_content'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Merge consecutive tool_group history items for compact mode display.
  *
  * Tool_groups separated only by items hidden in compact mode (`gemini_thought`,

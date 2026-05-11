@@ -87,6 +87,11 @@ describe('SubagentManager', () => {
   let mockConfig: Config;
 
   beforeEach(() => {
+    // Mock os.homedir before makeFakeConfig, since Config constructor
+    // calls Storage.getGlobalQwenDir() which needs os.homedir()
+    vi.mocked(os.homedir).mockReturnValue('/home/user');
+    vi.mocked(os.tmpdir).mockReturnValue('/tmp');
+
     mockToolRegistry = {
       warmAll: vi.fn().mockResolvedValue(undefined),
       getAllTools: vi.fn().mockReturnValue([
@@ -107,9 +112,6 @@ describe('SubagentManager', () => {
     // Mock the tool registry and project root methods
     vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue(mockToolRegistry);
     vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValue('/test/project');
-
-    // Mock os.homedir
-    vi.mocked(os.homedir).mockReturnValue('/home/user');
 
     // Reset and setup mocks
     vi.clearAllMocks();
