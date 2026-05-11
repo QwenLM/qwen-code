@@ -87,6 +87,18 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * the live config directly) can disagree.
    */
   enableCacheControl?: boolean;
+  /**
+   * When `true`, emit `cache_control: { type: 'ephemeral', scope: 'global' }`
+   * on the system text and last tool entry so prefixes cache across
+   * sessions; when `false` (or omitted), emit the SDK-standard per-session
+   * shape `{ type: 'ephemeral' }`. Must be a strict subset of
+   * `enableCacheControl` (no scope without a cache_control entry to
+   * attach it to) and should mirror the generator's
+   * `prompt-caching-scope-2026-01-05` beta-header gate — both ship
+   * together or neither, so anthropic-compatible backends without
+   * cross-session caching support don't see an unrecognized scope field.
+   */
+  useGlobalCacheScope?: boolean;
 }
 
 export class AnthropicContentConverter {
@@ -136,10 +148,15 @@ export class AnthropicContentConverter {
     // one — that path latches the live config value alongside the
     // per-request beta-header decision so the two stay in sync after
     // `Config.setModel()` mutates `enableCacheControl` mid-session.
+    // `useGlobalCacheScope` is independent of (and a strict subset of)
+    // `enableCacheControl`: it only controls whether the emitted
+    // cache_control carries `scope: 'global'`, not whether the
+    // cache_control itself is emitted.
     const enableCacheControl =
       options.enableCacheControl ?? this.enableCacheControl;
+    const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
     const system = enableCacheControl
-      ? this.buildSystemWithCacheControl(systemText)
+      ? this.buildSystemWithCacheControl(systemText, useGlobalCacheScope)
       : systemText;
     if (enableCacheControl) {
       this.addCacheControlToMessages(messages);
@@ -153,7 +170,10 @@ export class AnthropicContentConverter {
 
   async convertGeminiToolsToAnthropic(
     geminiTools: ToolListUnion,
-    options: { enableCacheControl?: boolean } = {},
+    options: {
+      enableCacheControl?: boolean;
+      useGlobalCacheScope?: boolean;
+    } = {},
   ): Promise<AnthropicToolParam[]> {
     const tools: AnthropicToolParam[] = [];
 
@@ -201,21 +221,27 @@ export class AnthropicContentConverter {
     }
 
     // Add cache_control to the last tool for prompt caching (if enabled).
-    // Use `scope: 'global'` so identical tool prefixes are cached across
-    // sessions — tools tend to be the largest, slowest-changing prefix
-    // (often 5K+ tokens), so cross-session reuse is where most of the
-    // hit-rate improvement under `prompt-caching-scope-2026-01-05` shows up.
-    // Per-call override mirrors the request-shape gate in
+    // When `useGlobalCacheScope` is set, attach `scope: 'global'` so
+    // identical tool prefixes are cached across sessions — tools tend to
+    // be the largest, slowest-changing prefix (often 5K+ tokens), so
+    // cross-session reuse is where most of the hit-rate improvement under
+    // `prompt-caching-scope-2026-01-05` shows up. Non-Anthropic baseURLs
+    // ship the standard per-session shape so they don't see a scope
+    // extension they may not recognize.
+    // Per-call overrides mirror the request-shape gates in
     // `convertGeminiRequestToAnthropic` so a hot `Config.setModel()` flip of
-    // `enableCacheControl` doesn't leave the tool body and the beta header
-    // out of sync.
+    // `enableCacheControl` / `baseUrl` doesn't leave the tool body and the
+    // beta header out of sync.
     const enableCacheControl =
       options.enableCacheControl ?? this.enableCacheControl;
+    const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
     if (enableCacheControl && tools.length > 0) {
       const lastToolIndex = tools.length - 1;
       tools[lastToolIndex] = {
         ...tools[lastToolIndex],
-        cache_control: { type: 'ephemeral', scope: 'global' },
+        cache_control: useGlobalCacheScope
+          ? { type: 'ephemeral', scope: 'global' }
+          : { type: 'ephemeral' },
       };
     }
 
@@ -617,11 +643,15 @@ export class AnthropicContentConverter {
   /**
    * Build system content blocks with cache_control.
    * Anthropic prompt caching requires cache_control on system content.
-   * Uses `scope: 'global'` so the system prefix participates in
-   * cross-session caching under the `prompt-caching-scope-2026-01-05` beta.
+   * When `useGlobalCacheScope` is set, attach `scope: 'global'` so the
+   * system prefix participates in cross-session caching under the
+   * `prompt-caching-scope-2026-01-05` beta. Otherwise emit the standard
+   * per-session shape so non-Anthropic baseURLs aren't sent a scope
+   * extension they may not recognize.
    */
   private buildSystemWithCacheControl(
     systemText: string,
+    useGlobalCacheScope: boolean,
   ): AnthropicTextBlockParam[] | string {
     if (!systemText) {
       return systemText;
@@ -631,7 +661,9 @@ export class AnthropicContentConverter {
       {
         type: 'text',
         text: systemText,
-        cache_control: { type: 'ephemeral', scope: 'global' },
+        cache_control: useGlobalCacheScope
+          ? { type: 'ephemeral', scope: 'global' }
+          : { type: 'ephemeral' },
       },
     ];
   }
@@ -762,6 +794,14 @@ export class AnthropicContentConverter {
   /**
    * Add cache_control to the last user message's content.
    * This enables prompt caching for the conversation context.
+   *
+   * Deliberately emits the per-session `{ type: 'ephemeral' }` shape only —
+   * no `scope: 'global'`. The last user message changes every turn (it's
+   * the live prompt and any tool_result blocks from the immediately prior
+   * round), so cross-session reuse here has effectively zero hit rate and
+   * paying the global-scope overhead would just churn cache. System text
+   * and tool prefixes (which DO repeat across sessions) carry
+   * `scope: 'global'` instead.
    */
   private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {
     // Find the last user message to add cache_control

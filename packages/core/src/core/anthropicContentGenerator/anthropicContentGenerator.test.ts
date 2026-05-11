@@ -234,6 +234,36 @@ describe('AnthropicContentGenerator', () => {
     expect(anthropicState.constructorOptions?.['apiKey']).toBeUndefined();
   });
 
+  it('pins DeepSeek anthropic-compatible baseURL onto the proxy auth/identity path', async () => {
+    // The auth/identity gate uses an Anthropic-native allow-list rather
+    // than an IdeaLab-only allow-list, so `api.deepseek.com/anthropic`
+    // gets the same Bearer + claude-cli + x-app bundle that proxies get.
+    // This documents the assumption — if DeepSeek's anthropic-compatible
+    // endpoint ever rejects `Authorization: Bearer`, this test pins the
+    // shape we'd need to flip back, and any future change here surfaces
+    // the auth contract decision instead of silently flipping behavior.
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'deepseek-v4-pro',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
+    expect(headers['x-app']).toBe('cli');
+    expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
+    expect(anthropicState.constructorOptions?.['apiKey']).toBeUndefined();
+  });
+
   it('does not match spoofed anthropic.com.evil.com hostnames', async () => {
     // Mirror of the DeepSeek hostname-spoof test: a suffix like
     // `anthropic.com.evil.com` must NOT be classified as Anthropic-native —
@@ -297,10 +327,16 @@ describe('AnthropicContentGenerator', () => {
   // so the wire shape stays consistent when a per-request opt-out drops
   // `thinking` / `output_config`. See PR #3788 review feedback.
   describe('per-request anthropic-beta header', () => {
+    // baseURL points at api.anthropic.com so cache-scope (beta +
+    // body-side `scope: 'global'`) participates by default. The
+    // `prompt-caching-scope-2026-01-05` beta is now gated jointly on
+    // `enableCacheControl` AND `isAnthropicNativeBaseUrl`, so tests that
+    // want to observe the beta need a native baseURL. Proxy-baseURL
+    // behavior is covered separately below.
     const baseConfig: ContentGeneratorConfig = {
       model: 'claude-test',
       apiKey: 'test-key',
-      baseUrl: 'https://example.invalid',
+      baseUrl: 'https://api.anthropic.com',
       timeout: 10_000,
       maxRetries: 2,
       samplingParams: { max_tokens: 100 },
@@ -393,8 +429,9 @@ describe('AnthropicContentGenerator', () => {
       // `Config.setModel()` mutates `contentGeneratorConfig.enableCacheControl`
       // in place. A constructor-time cache on the converter would let the
       // body-side `cache_control` and the per-request `prompt-caching-scope`
-      // beta header drift apart on a hot flip. Verify both reads sample the
-      // same live value so the wire shape stays coherent.
+      // beta header drift apart on a hot flip. Verify all three downstream
+      // surfaces — system block, last user message, and last tool entry —
+      // sample the same live value so the wire shape stays coherent.
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({
         id: 'msg-1',
@@ -408,13 +445,24 @@ describe('AnthropicContentGenerator', () => {
       };
       const generator = new AnthropicContentGenerator(config, mockConfig);
 
-      // 1st request: cache on (default). Beta header AND body cache_control
-      // both present.
-      await generator.generateContent({
+      const requestWithTool = {
         model: 'models/ignored',
         contents: 'Hi',
-        config: { systemInstruction: 'sys' },
-      } as unknown as GenerateContentParameters);
+        config: {
+          systemInstruction: 'sys',
+          tools: [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+        },
+      } as unknown as GenerateContentParameters;
+
+      // 1st request: cache on (default). Beta header AND body cache_control
+      // both present on system + last user msg + last tool.
+      await generator.generateContent(requestWithTool);
       let [req, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
       let reqHeaders = ((options as { headers?: Record<string, string> })
         ?.headers || {}) as Record<string, string>;
@@ -428,23 +476,99 @@ describe('AnthropicContentGenerator', () => {
           cache_control: { type: 'ephemeral', scope: 'global' },
         },
       ]);
+      const reqTools = (req as { tools?: Array<{ cache_control?: unknown }> })
+        .tools;
+      expect(reqTools).toHaveLength(1);
+      expect(reqTools?.[0]?.cache_control).toEqual({
+        type: 'ephemeral',
+        scope: 'global',
+      });
+      const reqMessages = (req as { messages?: Array<{ content?: unknown }> })
+        .messages;
+      const userBlocks = reqMessages?.[0]?.content as Array<{
+        cache_control?: unknown;
+      }>;
+      expect(userBlocks[0].cache_control).toEqual({ type: 'ephemeral' });
 
       // Hot-flip enableCacheControl off (Config.setModel mutates in place).
       config.enableCacheControl = false;
 
-      // 2nd request: beta header dropped AND body cache_control gone, in
-      // lockstep — the converter must not be reading a stale constructor
-      // value.
-      await generator.generateContent({
-        model: 'models/ignored',
-        contents: 'Hi',
-        config: { systemInstruction: 'sys' },
-      } as unknown as GenerateContentParameters);
+      // 2nd request: beta header dropped AND body cache_control gone on
+      // every surface, in lockstep — the converter must not be reading a
+      // stale constructor value.
+      await generator.generateContent(requestWithTool);
       [req, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
       reqHeaders = ((options as { headers?: Record<string, string> })
         ?.headers || {}) as Record<string, string>;
       expect(reqHeaders['anthropic-beta']).toBeUndefined();
       expect((req as { system?: unknown }).system).toBe('sys');
+      const reqTools2 = (req as { tools?: Array<{ cache_control?: unknown }> })
+        .tools;
+      expect(reqTools2?.[0]).not.toHaveProperty('cache_control');
+      const reqMessages2 = (req as { messages?: Array<{ content?: unknown }> })
+        .messages;
+      const userBlocks2 = reqMessages2?.[0]?.content as Array<
+        Record<string, unknown>
+      >;
+      expect(userBlocks2[0]).not.toHaveProperty('cache_control');
+    });
+
+    it('strips the cache-scope beta and scope:"global" field on non-Anthropic baseURLs', async () => {
+      // Symmetry with the auth/identity gate: the
+      // `prompt-caching-scope-2026-01-05` beta and the body-side
+      // `scope: 'global'` field are Anthropic-only wire-shape extensions.
+      // DeepSeek / IdeaLab proxies should still get per-session
+      // `cache_control: { type: 'ephemeral' }` so existing prompt-caching
+      // behavior is preserved, but without the new beta or scope field
+      // (their server side likely doesn't understand them, and silently
+      // ignoring them isn't guaranteed across proxies).
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          ...baseConfig,
+          baseUrl: 'https://api.deepseek.com/anthropic',
+          reasoning: false,
+        },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: {
+          systemInstruction: 'sys',
+          tools: [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [req, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      // Beta header must not be sent to non-Anthropic baseURL.
+      expect(reqHeaders['anthropic-beta']).toBeUndefined();
+      // Body still carries per-session cache_control (pre-PR behavior).
+      expect((req as { system?: unknown }).system).toEqual([
+        {
+          type: 'text',
+          text: 'sys',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+      const reqTools = (req as { tools?: Array<{ cache_control?: unknown }> })
+        .tools;
+      expect(reqTools?.[0]?.cache_control).toEqual({ type: 'ephemeral' });
     });
 
     it('merges user-supplied customHeaders[anthropic-beta] with computed flags (no overwrite)', async () => {
@@ -584,10 +708,13 @@ describe('AnthropicContentGenerator', () => {
       } as unknown as GenerateContentParameters);
 
       // defaultHeaders carries User-Agent and customHeaders (not beta).
+      // baseConfig now targets api.anthropic.com, so this asserts the
+      // Anthropic-native UA (QwenCode) — the claude-cli identity bundle
+      // is covered by the proxy-baseURL tests at the top of the suite.
       const defaultHeaders = (anthropicState.constructorOptions?.[
         'defaultHeaders'
       ] || {}) as Record<string, string>;
-      expect(defaultHeaders['User-Agent']).toContain('claude-cli/1.2.3');
+      expect(defaultHeaders['User-Agent']).toContain('QwenCode/1.2.3');
       expect(defaultHeaders['X-Custom']).toBe('v1');
       expect(defaultHeaders['anthropic-beta']).toBeUndefined();
 

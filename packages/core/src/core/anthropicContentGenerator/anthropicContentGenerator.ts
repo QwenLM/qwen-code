@@ -316,23 +316,38 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     // Enable global prompt cache scope so identical system/tool prefixes
     // are cached across sessions, greatly improving cross-session cache hit
-    // rates. Gate on the same `enableCacheControl` flag the converter uses
-    // for body-side `cache_control`: when caching is opted out, neither the
-    // beta nor the body markers ship, so anthropic-compatible backends that
-    // don't recognize the beta don't 4xx on it. The flag-gate isn't a
-    // strict body-presence check (the converter may still skip
-    // `cache_control` on niche shapes like a request with no system text,
-    // no tools, and a last user block that isn't text) — Anthropic-native
-    // ignores unused betas, so the looser gate is intentional. Keeping
-    // this conditional also preserves the `betas.length === 0`
-    // early-return below for the all-disabled case.
-    if (this.contentGeneratorConfig.enableCacheControl !== false) {
+    // rates. The beta and the body-side `scope: 'global'` field always
+    // ship together — gated on `enableCacheControl !== false` AND
+    // Anthropic-native baseURL — so a DeepSeek/IdeaLab proxy stays on its
+    // pre-PR per-session caching shape rather than receiving an
+    // Anthropic-specific extension it may not understand. Symmetric with
+    // the auth/identity gate (`useProxyIdentity`) so all Anthropic-only
+    // wire-shape extensions live behind one predicate. Disabling
+    // `enableCacheControl` also disables the gate, preserving the
+    // `betas.length === 0` early-return below for the all-disabled case.
+    if (this.useGlobalCacheScope()) {
       betas.push('prompt-caching-scope-2026-01-05');
     }
 
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
     return { 'anthropic-beta': unique.join(',') };
+  }
+
+  /**
+   * Whether the global prompt cache scope (the
+   * `prompt-caching-scope-2026-01-05` beta + the body-side
+   * `scope: 'global'` field) should be active for this request.
+   * Requires both `enableCacheControl !== false` AND an Anthropic-native
+   * baseURL — these two outputs always travel together. Computed per
+   * request because `Config.setModel()` mutates `enableCacheControl` /
+   * `baseUrl` in place.
+   */
+  private useGlobalCacheScope(): boolean {
+    return (
+      this.contentGeneratorConfig.enableCacheControl !== false &&
+      isAnthropicNativeBaseUrl(this.contentGeneratorConfig)
+    );
   }
 
   /**
@@ -388,13 +403,19 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
 
-    // Sample the live cache-control flag once per request and forward it
-    // to both the converter (body-side `cache_control`) and the
-    // per-request beta-header builder. `Config.setModel()` mutates
-    // `enableCacheControl` in place, so the converter's constructor-time
-    // value can otherwise diverge from the generator's per-request read.
+    // Sample the live cache-control flags once per request and forward
+    // them to both the converter (body-side `cache_control`) and the
+    // per-request beta-header builder. `Config.setModel()` mutates both
+    // `enableCacheControl` and `baseUrl` in place, so the converter's
+    // constructor-time value would otherwise diverge from the generator's
+    // per-request reads. `useGlobalCacheScope` is a strict subset of
+    // `enableCacheControl` — only true when caching is on AND the resolved
+    // baseURL is Anthropic-native — and governs whether the body
+    // `cache_control` entries carry `scope: 'global'`, paired with the
+    // `prompt-caching-scope-2026-01-05` beta in `buildPerRequestHeaders`.
     const enableCacheControl =
       this.contentGeneratorConfig.enableCacheControl !== false;
+    const useGlobalCacheScope = this.useGlobalCacheScope();
 
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
@@ -406,13 +427,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         stripAssistantThinking,
         enableCacheControl,
+        useGlobalCacheScope,
       },
     );
 
     const tools = request.config?.tools
       ? await this.converter.convertGeminiToolsToAnthropic(
           request.config.tools,
-          { enableCacheControl },
+          { enableCacheControl, useGlobalCacheScope },
         )
       : undefined;
 
