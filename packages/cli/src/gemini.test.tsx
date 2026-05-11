@@ -279,7 +279,7 @@ describe('gemini.tsx main function', () => {
     vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
     vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
-    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue();
+    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
 
     try {
       await main();
@@ -709,6 +709,101 @@ describe('gemini.tsx main function kitty protocol', () => {
     expect(processExitSpy).toHaveBeenCalledWith(130);
 
     processOnceSpy.mockRestore();
+    processExitSpy.mockRestore();
+  });
+
+  it('rejects --json-schema when running in interactive (TUI) mode', async () => {
+    // The synthetic structured_output tool only terminates the run inside
+    // runNonInteractive. In TUI mode it's an inert tool that prints
+    // "accepted" and leaves the chat alive — silently stranding the run.
+    // gemini.tsx must reject this combination at runtime (parse-time
+    // gating can't catch the no-prompt-on-TTY case because stdin
+    // availability isn't probed yet at parse time).
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+
+    const callOrder: string[] = [];
+    const exitCodes: Array<string | number | null | undefined> = [];
+
+    mockWriteStderrLine.mockClear();
+    mockWriteStderrLine.mockImplementation(() => {
+      callOrder.push('writeStderrLine');
+    });
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockReset();
+    runExitCleanupMock.mockImplementation(async () => {
+      callOrder.push('runExitCleanup');
+    });
+    const processExitSpy = vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      callOrder.push('processExit');
+      exitCodes.push(code);
+      throw new MockProcessExitError(code);
+    }) as unknown as typeof process.exit);
+
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getJsonSchema: () => ({ type: 'object' }),
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      initialize: vi.fn(),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      shutdown: vi.fn(),
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({} as never);
+
+    try {
+      await main();
+    } catch (e) {
+      if (!(e instanceof MockProcessExitError)) throw e;
+    }
+
+    // The headless-only message must reach stderr…
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema is a headless-only flag'),
+    );
+    // …runExitCleanup must run before exit so MCP subprocesses /
+    // telemetry exporters registered earlier get torn down…
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    // …and exit must be 1, not 0.
+    expect(processExitSpy).toHaveBeenCalledWith(1);
+    // Order: stderr → cleanup → exit. A regression that swapped any of
+    // these (cleanup before stderr; exit without cleanup; exit 0
+    // instead of 1) would silently strand TUI users.
+    expect(callOrder).toEqual([
+      'writeStderrLine',
+      'runExitCleanup',
+      'processExit',
+    ]);
+    expect(exitCodes).toEqual([1]);
+
     processExitSpy.mockRestore();
   });
 });

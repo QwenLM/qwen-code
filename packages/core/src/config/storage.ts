@@ -251,7 +251,11 @@ export class Storage {
    * the same directory used for chat history to find live sessions.
    */
   getRuntimeStatusPath(sessionId: string): string {
-    return path.join(this.getProjectDir(), 'chats', `${sessionId}.runtime.json`);
+    return path.join(
+      this.getProjectDir(),
+      'chats',
+      `${sessionId}.runtime.json`,
+    );
   }
 
   getProjectTempCheckpointsDir(): string {

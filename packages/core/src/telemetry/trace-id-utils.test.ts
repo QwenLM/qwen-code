@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { deriveTraceId, randomSpanId, randomHexString } from './trace-id-utils.js';
+import {
+  deriveTraceId,
+  randomSpanId,
+  randomHexString,
+} from './trace-id-utils.js';
 
 describe('deriveTraceId', () => {
   it('returns a 32-char hex string', () => {

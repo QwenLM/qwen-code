@@ -43,6 +43,43 @@ import {
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
+
+/**
+ * Maximum wait, in milliseconds, for in-flight background tasks to emit
+ * their terminal `task_notification` after `abortAll()` on the
+ * structured-output success path. Tasks are marked cancelled
+ * synchronously by `abortAll`, but the natural task handler emits the
+ * notification on a later microtask — without a brief holdback the
+ * structured-output run would silently drop those events. Capped so a
+ * slow agent can't block exit indefinitely.
+ */
+const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
+
+/**
+ * Body of the synthesised `tool_result` for a `tool_use` block that was
+ * suppressed because a sibling `structured_output` call took precedence
+ * as the terminal output for the same turn.
+ *
+ * Two variants — the success-path body drops the trailing "Re-issue this
+ * call in a separate turn if needed." sentence because the session
+ * terminates immediately after synthesis (no model or SDK consumer can
+ * act on the advice). The retry-path body keeps it: when the structured
+ * call failed validation, the model is about to receive these parts in
+ * the next turn and may legitimately re-issue the suppressed call.
+ *
+ * Shared between the main-turn and drain-turn synthesis sites so a
+ * future wording change can't desync them.
+ */
+const SUPPRESSED_OUTPUT_SUCCESS =
+  "Skipped: this turn's structured_output contract took precedence as the terminal output.";
+const SUPPRESSED_OUTPUT_RETRY = `${SUPPRESSED_OUTPUT_SUCCESS} Re-issue this call in a separate turn if needed.`;
+function suppressedOutputBody(structuredCaptured: boolean): string {
+  return structuredCaptured
+    ? SUPPRESSED_OUTPUT_SUCCESS
+    : SUPPRESSED_OUTPUT_RETRY;
+}
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -51,8 +88,6 @@ import {
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
-
-const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
 // Human-readable labels for the detectors that can fire mid-stream.
 // Surfaced to stderr in TEXT mode so a headless run that halts on a loop
@@ -156,8 +191,8 @@ export async function runNonInteractive(
   input: string,
   prompt_id: string,
   options: RunNonInteractiveOptions = {},
-): Promise<void> {
-  return promptIdContext.run(prompt_id, async () => {
+): Promise<number> {
+  return promptIdContext.run(prompt_id, async (): Promise<number> => {
     // Create output adapter based on format
     let adapter: JsonOutputAdapterInterface;
     const outputFormat = config.getOutputFormat();
@@ -289,7 +324,7 @@ export async function runNonInteractive(
                 config,
                 startTimeMs: startTime,
               });
-              return;
+              return slashCommandResult.messageType === 'error' ? 1 : 0;
             }
             case 'stream_messages':
               throw new FatalInputError(
@@ -303,7 +338,7 @@ export async function runNonInteractive(
                 config,
                 startTimeMs: startTime,
               });
-              return;
+              return 1;
             }
             case 'no_command':
               break;
@@ -417,12 +452,237 @@ export async function runNonInteractive(
 
       let isFirstTurn = true;
       let modelOverride: string | undefined;
+      // Session-scoped because the synthetic `structured_output` tool can
+      // be invoked from EITHER the main assistant-turn loop or from a
+      // drain-turn (queued notification / cron prompt); whichever fires
+      // first wins, and both paths need to surface the same structured
+      // result envelope.
+      let structuredSubmission: unknown = undefined;
       // Captures the first ~200 chars of model-emitted plain text across
       // turns. Used only to enrich the --json-schema "produced plain
       // text" error: the user/operator gets a hint of what the model
       // actually said instead of a static, context-free message.
       let plainTextPreview = '';
       const PLAIN_TEXT_PREVIEW_LIMIT = 200;
+
+      // Shared terminal block for the structured-output success
+      // contract. Both the main-turn loop and the drain-turn post-loop
+      // previously reproduced this block verbatim
+      // (`registry.abortAll()` → bounded holdback for in-flight
+      // background-task `task_notification` events → flush localQueue →
+      // finalize one-shot monitors → `adapter.emitResult` → return 0).
+      // `finalizeOneShotMonitors` is idempotent (the
+      // `oneShotMonitorsFinalized` guard makes the second call a
+      // no-op), so unconditional invocation is safe even when the drain
+      // path already finalized monitors before reaching here.
+      const emitStructuredSuccess = async (): Promise<0> => {
+        registry.abortAll();
+        // `abortAll()` marks each task `cancelled` synchronously, but
+        // the matching `task_notification` is emitted later by the
+        // task's natural handler. Hold back briefly (capped at
+        // STRUCTURED_SHUTDOWN_HOLDBACK_MS) so consumers see every
+        // `task_started` paired with its terminal notification, without
+        // blocking exit on a slow agent that the user has already
+        // declared done.
+        const holdbackDeadline = Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
+        while (
+          Date.now() < holdbackDeadline &&
+          registry.hasUnfinalizedTasks()
+        ) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        flushQueuedNotificationsToSdk(localQueue);
+        finalizeOneShotMonitors();
+        const metrics = uiTelemetryService.getMetrics();
+        const usage = computeUsageFromMetrics(metrics);
+        const stats =
+          outputFormat === OutputFormat.JSON
+            ? uiTelemetryService.getMetrics()
+            : undefined;
+        adapter.emitResult({
+          isError: false,
+          durationMs: Date.now() - startTime,
+          apiDurationMs: totalApiDurationMs,
+          numTurns: turnCount,
+          usage,
+          stats,
+          structuredResult: structuredSubmission,
+        });
+        return 0;
+      };
+
+      /**
+       * Shared per-turn tool-call dispatch for the main-turn loop and
+       * `drainOneItem`. Both call sites used to reproduce ~120 lines of
+       * near-identical logic that filtered `structured_output` to its
+       * own pre-scan when `--json-schema` is active, executed each
+       * request through `executeToolCall`, captured the `structured_output`
+       * args into the session-scoped `structuredSubmission`, and
+       * synthesised `tool_result` events for every suppressed sibling
+       * `tool_use`. The two blocks differed only by variable name
+       * prefixes (`requestsToExecute` vs `itemRequestsToExecute`, etc.)
+       * and which scope's `modelOverride` to update — passed in as
+       * `setModelOverride` so the caller controls binding.
+       *
+       * The helper mutates the closure-captured `structuredSubmission`
+       * directly (it's session-scoped on purpose: whichever turn
+       * captures it terminates the run). The caller is responsible for
+       * acting on a non-undefined `structuredSubmission` after the
+       * helper returns (main-turn → emitStructuredSuccess(); drain-turn
+       * → return so the post-drain code emits success).
+       */
+      const processToolCallBatch = async (
+        batchRequests: ToolCallRequestInfo[],
+        setModelOverride: (override: string | undefined) => void,
+      ): Promise<Part[]> => {
+        const toolResponseParts: Part[] = [];
+
+        // Pre-scan: when --json-schema is active and the model emitted
+        // a `structured_output` call alongside other tools in the same
+        // turn, the structured call is the terminal contract. Execute
+        // every structured_output in original order until one succeeds,
+        // suppress every non-structured sibling. See the multi-shape
+        // examples in the main loop's prior comment for the
+        // [bad/good/side-effect] permutations.
+        let requestsToExecute = batchRequests;
+        if (
+          config.getJsonSchema() &&
+          batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT)
+        ) {
+          requestsToExecute = batchRequests.filter(
+            (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+          );
+        }
+        const executedCallIds = new Set<string>();
+
+        for (const requestInfo of requestsToExecute) {
+          executedCallIds.add(requestInfo.callId);
+
+          const inputFormat =
+            typeof config.getInputFormat === 'function'
+              ? config.getInputFormat()
+              : InputFormat.TEXT;
+          const toolCallUpdateCallback =
+            inputFormat === InputFormat.STREAM_JSON && options.controlService
+              ? options.controlService.permission.getToolCallUpdateCallback()
+              : undefined;
+
+          // Build outputUpdateHandler for this tool call. Agent tool
+          // has its own complex handler (subagent messages). All other
+          // tools with canUpdateOutput=true (e.g., MCP tools) get a
+          // generic handler that emits progress via the adapter.
+          const isAgentTool = requestInfo.name === 'agent';
+          const { handler: outputUpdateHandler } = isAgentTool
+            ? createAgentToolProgressHandler(
+                config,
+                requestInfo.callId,
+                adapter,
+              )
+            : createToolProgressHandler(requestInfo, adapter);
+
+          const toolResponse = await executeToolCall(
+            config,
+            requestInfo,
+            abortController.signal,
+            {
+              outputUpdateHandler,
+              ...(toolCallUpdateCallback && {
+                onToolCallsUpdate: toolCallUpdateCallback,
+              }),
+            },
+          );
+
+          if (toolResponse.error) {
+            // In JSON/STREAM_JSON mode, tool errors are tolerated and
+            // formatted as tool_result blocks. handleToolError detects
+            // mode from config and allows the session to continue so
+            // the LLM can decide what to do next. In text mode, we
+            // still log the error.
+            handleToolError(
+              requestInfo.name,
+              toolResponse.error,
+              config,
+              toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
+              typeof toolResponse.resultDisplay === 'string'
+                ? toolResponse.resultDisplay
+                : undefined,
+            );
+          }
+
+          adapter.emitToolResult(requestInfo, toolResponse);
+          config
+            .getGeminiClient()
+            .recordCompletedToolCall(
+              requestInfo.name,
+              requestInfo.args as Record<string, unknown>,
+            );
+
+          if (toolResponse.responseParts) {
+            toolResponseParts.push(...toolResponse.responseParts);
+          }
+
+          // Capture model override from skill tool results.
+          // Use `in` so that undefined (from inherit/no-model skills)
+          // clears a prior override, while non-skill tools (field
+          // absent) leave the current override intact.
+          if ('modelOverride' in toolResponse) {
+            setModelOverride(toolResponse.modelOverride);
+          }
+
+          if (
+            requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+            !toolResponse.error
+          ) {
+            // Honour the "first valid call ends the session" contract.
+            // The break is after the responseParts/modelOverride capture
+            // above so future changes to SyntheticOutputTool can't
+            // silently drop those signals. structuredSubmission is the
+            // session-scoped binding from the enclosing scope.
+            structuredSubmission = requestInfo.args;
+            break;
+          }
+        }
+
+        // Synthesise tool_result events + retry parts for every
+        // tool_use block from the prior assistant message that we did
+        // NOT actually execute — non-structured siblings that were
+        // suppressed up front, plus any structured_output calls left
+        // unexecuted after an earlier one in the batch already
+        // succeeded. Runs for both the success and retry paths so the
+        // emitted event log pairs every tool_use with a tool_result
+        // AND the retry-turn payload (when reached) doesn't leave
+        // Anthropic / OpenAI staring at unpaired tool_use blocks.
+        const unexecutedCalls = batchRequests.filter(
+          (r) => !executedCallIds.has(r.callId),
+        );
+        if (unexecutedCalls.length > 0) {
+          const skippedOutput = suppressedOutputBody(
+            structuredSubmission !== undefined,
+          );
+          for (const call of unexecutedCalls) {
+            const responseParts: Part[] = [
+              {
+                functionResponse: {
+                  id: call.callId,
+                  name: call.name,
+                  response: { output: skippedOutput },
+                },
+              },
+            ];
+            adapter.emitToolResult(call, {
+              callId: call.callId,
+              responseParts,
+              resultDisplay: skippedOutput,
+              error: undefined,
+              errorType: undefined,
+            });
+            toolResponseParts.push(...responseParts);
+          }
+        }
+
+        return toolResponseParts;
+      };
+
       while (true) {
         turnCount++;
         if (
@@ -496,162 +756,31 @@ export async function runNonInteractive(
         totalApiDurationMs += Date.now() - apiStartTime;
 
         if (toolCallRequests.length > 0) {
-          const toolResponseParts: Part[] = [];
-          // When --json-schema is active, the first successful call to the
-          // synthetic structured_output tool terminates the session with the
-          // submitted args as the structured result. A separate boolean
-          // tracks whether a submission happened, since `args` itself may
-          // legitimately be undefined or any falsy value (an empty schema
-          // `{}` accepts any payload, including no fields at all).
-          let structuredSubmission: unknown = undefined;
-          let hasStructuredSubmission = false;
+          // Dispatch the per-turn tool-call batch through the shared
+          // helper (see processToolCallBatch above). The helper handles
+          // the `--json-schema` pre-scan, executes each request, writes
+          // the first valid `structured_output` call's args into the
+          // session-scoped `structuredSubmission`, and synthesises
+          // tool_result events for every suppressed sibling. The
+          // `modelOverride` setter is the only call-site-specific
+          // binding — the main turn updates the session-scoped
+          // `modelOverride` so the next turn's sendMessageStream sees
+          // it; the drain turn updates a per-item `itemModelOverride`
+          // scoped to that drain item.
+          const toolResponseParts = await processToolCallBatch(
+            toolCallRequests,
+            (override) => {
+              modelOverride = override;
+            },
+          );
 
-          // Pre-scan: when --json-schema is active and the model emitted
-          // structured_output alongside other tools in the same turn,
-          // execute structured_output FIRST so its terminal-flag wins
-          // before sibling tools' side effects (write_file, shell, …)
-          // get a chance to persist. If structured_output succeeds the
-          // loop breaks immediately and siblings are skipped — no
-          // tool_result is emitted for them; the session terminates via
-          // the emitResult call below so the missing function_response
-          // entries cause no API protocol issue (there is no next turn).
-          // If structured_output fails (validation), `hasStructuredSubmission`
-          // stays false and the siblings still run via the normal loop
-          // body — same behavior as a turn that didn't issue
-          // structured_output at all.
-          //
-          // Without this, [write_file, structured_output] runs write_file
-          // first (irreversible), THEN structured_output sets the flag,
-          // and the user gets back a "successful" structured result with
-          // unrelated side-effects already on disk.
-          let orderedToolCallRequests = toolCallRequests;
-          if (config.getJsonSchema()) {
-            const structIdx = orderedToolCallRequests.findIndex(
-              (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
-            );
-            if (structIdx > 0) {
-              orderedToolCallRequests = [
-                orderedToolCallRequests[structIdx],
-                ...orderedToolCallRequests.slice(0, structIdx),
-                ...orderedToolCallRequests.slice(structIdx + 1),
-              ];
-            }
-          }
-
-          for (const requestInfo of orderedToolCallRequests) {
-            const finalRequestInfo = requestInfo;
-
-            const inputFormat =
-              typeof config.getInputFormat === 'function'
-                ? config.getInputFormat()
-                : InputFormat.TEXT;
-            const toolCallUpdateCallback =
-              inputFormat === InputFormat.STREAM_JSON && options.controlService
-                ? options.controlService.permission.getToolCallUpdateCallback()
-                : undefined;
-
-            // Build outputUpdateHandler for this tool call.
-            // Agent tool has its own complex handler (subagent messages).
-            // All other tools with canUpdateOutput=true (e.g., MCP tools)
-            // get a generic handler that emits progress via the adapter.
-            const isAgentTool = finalRequestInfo.name === 'agent';
-            const { handler: outputUpdateHandler } = isAgentTool
-              ? createAgentToolProgressHandler(
-                  config,
-                  finalRequestInfo.callId,
-                  adapter,
-                )
-              : createToolProgressHandler(finalRequestInfo, adapter);
-
-            const toolResponse = await executeToolCall(
-              config,
-              finalRequestInfo,
-              abortController.signal,
-              {
-                outputUpdateHandler,
-                ...(toolCallUpdateCallback && {
-                  onToolCallsUpdate: toolCallUpdateCallback,
-                }),
-              },
-            );
-
-            if (toolResponse.error) {
-              // In JSON/STREAM_JSON mode, tool errors are tolerated and formatted
-              // as tool_result blocks. handleToolError will detect JSON/STREAM_JSON mode
-              // from config and allow the session to continue so the LLM can decide what to do next.
-              // In text mode, we still log the error.
-              handleToolError(
-                finalRequestInfo.name,
-                toolResponse.error,
-                config,
-                toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
-                typeof toolResponse.resultDisplay === 'string'
-                  ? toolResponse.resultDisplay
-                  : undefined,
-              );
-            }
-
-            adapter.emitToolResult(finalRequestInfo, toolResponse);
-            config
-              .getGeminiClient()
-              .recordCompletedToolCall(
-                finalRequestInfo.name,
-                finalRequestInfo.args as Record<string, unknown>,
-              );
-
-            if (
-              finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
-              !toolResponse.error &&
-              !hasStructuredSubmission
-            ) {
-              structuredSubmission = finalRequestInfo.args;
-              hasStructuredSubmission = true;
-            }
-
-            if (toolResponse.responseParts) {
-              toolResponseParts.push(...toolResponse.responseParts);
-            }
-
-            // Capture model override from skill tool results.
-            // Use `in` so that undefined (from inherit/no-model skills) clears a prior override,
-            // while non-skill tools (field absent) leave the current override intact.
-            if ('modelOverride' in toolResponse) {
-              modelOverride = toolResponse.modelOverride;
-            }
-
-            // Single-shot contract: structured_output is terminal.
-            // The pre-scan above hoists it to the front of the batch,
-            // so once it succeeds the remaining (now reordered)
-            // entries are guaranteed to be siblings the model
-            // intended for THIS turn — break and let the terminal
-            // emitResult fire below. Unpaired tool_use entries in
-            // the model's record are harmless because no next API
-            // call happens (the session is over).
-            if (hasStructuredSubmission) {
-              break;
-            }
-          }
-          if (hasStructuredSubmission) {
-            // Abort any in-flight background agents so they don't race the
-            // terminal emitResult; structured-output mode is a single-shot
-            // contract and the caller expects a deterministic shutdown.
-            registry.abortAll();
-            const metrics = uiTelemetryService.getMetrics();
-            const usage = computeUsageFromMetrics(metrics);
-            const stats =
-              outputFormat === OutputFormat.JSON
-                ? uiTelemetryService.getMetrics()
-                : undefined;
-            adapter.emitResult({
-              isError: false,
-              durationMs: Date.now() - startTime,
-              apiDurationMs: totalApiDurationMs,
-              numTurns: turnCount,
-              usage,
-              stats,
-              structuredResult: structuredSubmission,
-            });
-            return;
+          if (structuredSubmission !== undefined) {
+            // Single-shot terminal contract; aborts in-flight background
+            // agents, holds back briefly for their terminal
+            // task_notification events to land, then emits the
+            // structured success envelope. Same helper as the drain-turn
+            // post-loop branch — see emitStructuredSuccess above.
+            return emitStructuredSuccess();
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
@@ -671,15 +800,6 @@ export async function runNonInteractive(
             ) {
               await handleMaxTurnsExceededError(config);
             }
-
-            const inputFormat =
-              typeof config.getInputFormat === 'function'
-                ? config.getInputFormat()
-                : InputFormat.TEXT;
-            const toolCallUpdateCallback =
-              inputFormat === InputFormat.STREAM_JSON && options.controlService
-                ? options.controlService.permission.getToolCallUpdateCallback()
-                : undefined;
 
             let itemMessages: Content[] = [
               { role: 'user', parts: [{ text: item.modelText }] },
@@ -742,57 +862,23 @@ export async function runNonInteractive(
               totalApiDurationMs += Date.now() - itemApiStartTime;
 
               if (itemToolCallRequests.length > 0) {
-                const itemToolResponseParts: Part[] = [];
+                // Same shared dispatch as the main-turn loop. The only
+                // call-site difference is `itemModelOverride` is local to
+                // the drain item (so the next iteration's
+                // sendMessageStream picks up the per-item override),
+                // while the main loop binds to the session-scoped
+                // `modelOverride`.
+                const itemToolResponseParts = await processToolCallBatch(
+                  itemToolCallRequests,
+                  (override) => {
+                    itemModelOverride = override;
+                  },
+                );
 
-                for (const requestInfo of itemToolCallRequests) {
-                  const isAgentTool = requestInfo.name === 'agent';
-                  const { handler: outputUpdateHandler } = isAgentTool
-                    ? createAgentToolProgressHandler(
-                        config,
-                        requestInfo.callId,
-                        adapter,
-                      )
-                    : createToolProgressHandler(requestInfo, adapter);
-
-                  const toolResponse = await executeToolCall(
-                    config,
-                    requestInfo,
-                    abortController.signal,
-                    {
-                      outputUpdateHandler,
-                      ...(toolCallUpdateCallback && {
-                        onToolCallsUpdate: toolCallUpdateCallback,
-                      }),
-                    },
-                  );
-
-                  if (toolResponse.error) {
-                    handleToolError(
-                      requestInfo.name,
-                      toolResponse.error,
-                      config,
-                      toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
-                      typeof toolResponse.resultDisplay === 'string'
-                        ? toolResponse.resultDisplay
-                        : undefined,
-                    );
-                  }
-
-                  adapter.emitToolResult(requestInfo, toolResponse);
-                  config
-                    .getGeminiClient()
-                    .recordCompletedToolCall(
-                      requestInfo.name,
-                      requestInfo.args as Record<string, unknown>,
-                    );
-
-                  if (toolResponse.responseParts) {
-                    itemToolResponseParts.push(...toolResponse.responseParts);
-                  }
-
-                  if ('modelOverride' in toolResponse) {
-                    itemModelOverride = toolResponse.modelOverride;
-                  }
+                if (structuredSubmission !== undefined) {
+                  // Stop processing further turns for this drain item;
+                  // the post-drain code will emit the terminal result.
+                  return;
                 }
                 itemMessages = [{ role: 'user', parts: itemToolResponseParts }];
               } else {
@@ -813,6 +899,10 @@ export async function runNonInteractive(
             if (drainPromise) return drainPromise;
             const p = (async () => {
               while (localQueue.length > 0) {
+                // Stop draining once a queued item's structured_output
+                // call captured the terminal contract — no point running
+                // more queued prompts that can't influence the result.
+                if (structuredSubmission !== undefined) return;
                 await drainOneItem();
               }
             })();
@@ -846,6 +936,16 @@ export async function runNonInteractive(
               });
 
               const checkCronDone = () => {
+                // A drain-turn structured_output makes the rest of the
+                // cron schedule moot: we already have a terminal result
+                // and the post-drain emit is about to fire. Stop the
+                // scheduler so no further jobs enqueue.
+                if (structuredSubmission !== undefined) {
+                  abortController.signal.removeEventListener('abort', onAbort);
+                  scheduler.stop();
+                  resolve();
+                  return;
+                }
                 if (scheduler.size === 0 && !drainPromise) {
                   abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
@@ -897,6 +997,10 @@ export async function runNonInteractive(
             // through the model, but later monitor output is SDK-only.
             captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
+            // A drain-turn structured_output captured the terminal
+            // contract — bail out of the holdback loop early and let the
+            // post-loop code emit the success result.
+            if (structuredSubmission !== undefined) break;
             // Wait for every background task's terminal notification, not
             // just the running ones: cancel() marks status 'cancelled'
             // synchronously but the notification is emitted later by the
@@ -925,12 +1029,22 @@ export async function runNonInteractive(
               ? uiTelemetryService.getMetrics()
               : undefined;
 
+          // A drain-turn structured_output captured the terminal contract
+          // — emit the structured success envelope rather than falling
+          // through to the "Model produced plain text..." failure path.
+          // Same helper as the main-turn path; recomputes its own
+          // metrics snapshot after the holdback so any task notifications
+          // that landed during shutdown contribute to the totals.
+          if (structuredSubmission !== undefined) {
+            return emitStructuredSuccess();
+          }
+
           // --json-schema contract: the model MUST terminate via the
           // structured_output tool. Reaching this branch means it emitted
           // plain text instead — surface as an error rather than silently
           // returning whatever free-form summary the adapter collected.
-          // Setting exitCode + returning (rather than throwing) avoids the
-          // outer catch re-emitting the result a second time.
+          // Returning a non-zero exit code (rather than throwing) avoids
+          // the outer catch re-emitting the result a second time.
           if (config.getJsonSchema()) {
             // Enrich the static contract message with diagnostic context:
             // turn count (how many tries the model got) + a preview of
@@ -955,15 +1069,7 @@ export async function runNonInteractive(
               usage,
               stats,
             });
-            // Adapter handles user-visible feedback per output format:
-            //   - TEXT: writes errorMessage to stderr (JsonOutputAdapter
-            //     emitResult, line ~70).
-            //   - JSON / STREAM_JSON: emits the structured result with
-            //     is_error=true.
-            // No extra stderr write here — duplicating in TEXT mode
-            // produced two copies of the same line in headless runs.
-            process.exitCode = 1;
-            return;
+            return 1;
           }
 
           adapter.emitResult({
@@ -974,7 +1080,7 @@ export async function runNonInteractive(
             usage,
             stats,
           });
-          return;
+          return 0;
         }
       }
     } catch (error) {
@@ -1050,5 +1156,9 @@ export async function runNonInteractive(
         await shutdownTelemetry();
       }
     }
+    // Unreachable in practice: the catch block awaits handleError() which
+    // returns Promise<never> (it always exits the process or rethrows).
+    // This return exists only so TS sees the function as total.
+    return 1;
   });
 }

@@ -1376,6 +1376,82 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
     });
 
+    it('registers structured_output in bare mode when jsonSchema is set', async () => {
+      // Bare mode strips the toolset to READ_FILE/EDIT/SHELL, but the
+      // synthetic structured_output tool is the terminal contract for
+      // --json-schema runs. Without it the model loops until
+      // maxSessionTurns and exits via the "plain text" failure path —
+      // expensive in tokens for what's almost always a CI use case. The
+      // synthetic tool must be registered alongside the bare three.
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.SHELL,
+        ToolNames.STRUCTURED_OUTPUT,
+      ]);
+    });
+
+    it('does NOT register structured_output when createToolRegistry is called with forSubAgent=true', async () => {
+      // Subagent overrides reuse the parent Config via prototype
+      // delegation (createApprovalModeOverride / buildSubagentContextOverride
+      // → Object.create(base)) and rebuild the tool registry with
+      // `forSubAgent: true`. Even though `this.jsonSchema` propagates
+      // through the prototype chain, the synthetic tool MUST NOT register
+      // in the subagent registry: only runNonInteractive's main / drain
+      // loops detect a successful structured_output call as terminal, so
+      // a subagent calling the tool would receive "Session will end now"
+      // and then keep running because its own loop has no terminator —
+      // wasted tokens and no structured payload on stdout.
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      // Initial bare init registers READ_FILE / EDIT / SHELL /
+      // STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
+      // observe ONLY the forSubAgent rebuild's calls.
+      (registerToolMock as Mock).mockClear();
+
+      // Rebuild registry as if for a subagent override.
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(registeredNames).not.toContain(ToolNames.STRUCTURED_OUTPUT);
+      // The bare three still register so the subagent has its toolset.
+      expect(registeredNames).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.SHELL,
+      ]);
+    });
+
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,

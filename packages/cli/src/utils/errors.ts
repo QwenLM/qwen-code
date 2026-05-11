@@ -246,13 +246,24 @@ export async function handleCancellationError(config: Config): Promise<never> {
 
 /**
  * Handles max session turns exceeded consistently.
+ *
+ * When `--json-schema` is active the error gets an extra hint pointing at the
+ * common reasons a structured-output run never terminated: the model never
+ * called `structured_output`, the tool was denied by `permissions.deny` /
+ * `--exclude-tools`, or the schema is unsatisfiable. Without this, all three
+ * failure modes surface as the same generic "increase maxSessionTurns" line
+ * even though the fix is a permissions / schema change, not a turns bump.
  */
 export async function handleMaxTurnsExceededError(
   config: Config,
 ): Promise<never> {
-  const maxTurnsError = new FatalTurnLimitedError(
-    'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.',
-  );
+  const baseMessage =
+    'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
+  const jsonSchemaActive = config.getJsonSchema?.() !== undefined;
+  const message = jsonSchemaActive
+    ? `${baseMessage}\nNote: --json-schema is active. If the model never called structured_output, verify it isn't denied by permissions.deny / --exclude-tools and that the schema is satisfiable.`
+    : baseMessage;
+  const maxTurnsError = new FatalTurnLimitedError(message);
 
   if (config.getOutputFormat() === OutputFormat.JSON) {
     const formatter = new JsonFormatter();

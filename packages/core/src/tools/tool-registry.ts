@@ -209,11 +209,24 @@ export class ToolRegistry {
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
-    if (this.tools.has(tool.name)) {
+    // A name collision can happen against either the eager `tools` map
+    // (already-instantiated tools) or the lazy `factories` map (registered
+    // but not yet constructed — `structured_output` lives here when
+    // `--json-schema` is set, but the same is true for every other lazy
+    // built-in). Without considering factories, an MCP server registering
+    // a tool with a name that shadows a built-in factory would silently
+    // win: `tools.has(name)` returns false, no rename happens, then the
+    // first `ensureTool(name)` resolves from `tools` and the factory is
+    // discarded. For MCP tools we resolve this by appending the server-
+    // qualified suffix; for other internal callers we keep the existing
+    // overwrite-with-warning behaviour for parity with the eager-only
+    // path.
+    const collidesWithEager = this.tools.has(tool.name);
+    const collidesWithFactory = this.factories.has(tool.name);
+    if (collidesWithEager || collidesWithFactory) {
       if (tool instanceof DiscoveredMCPTool) {
         tool = tool.asFullyQualifiedTool();
       } else {
-        // Decide on behavior: throw error, log warning, or allow overwrite
         debugLogger.warn(
           `Tool with name "${tool.name}" is already registered. Overwriting.`,
         );
