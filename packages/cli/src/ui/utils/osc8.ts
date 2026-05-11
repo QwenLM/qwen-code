@@ -59,14 +59,15 @@ export function osc8Close(): string {
  * Schemes safe to embed in an OSC 8 target. Restricting to network and mail
  * schemes prevents prompt-injection attacks from producing a one-click
  * `javascript:` / `data:` / `file:` trap whose target is hidden behind the
- * link label. Anything outside this set falls back to legacy rendering so
- * the user sees the suspicious URL before any click.
+ * link label. Anything outside this set falls back to legacy `label (url)`
+ * rendering so the user sees the suspicious URL before any click.
  *
- * Note: the renderer keeps the visible `(url)` suffix on every link, even
- * on capable terminals — this is a deliberate security property. The user
- * can always read the destination before clicking, so even an allowlisted
- * `https://attacker.example.com` link that masquerades as something else
- * is still visible in the rendered output.
+ * When OSC 8 wrapping IS active the renderer drops the parenthesized URL
+ * suffix and shows only the label — long URLs would otherwise clutter the
+ * stream. Capable terminals expose the target via hover / status bar /
+ * right-click "copy link", so the URL is still inspectable without
+ * polluting the visible bytes. The scheme allowlist remains the front-line
+ * defense against the click-deception case.
  */
 const SAFE_OSC8_SCHEMES = new Set([
   'http:',

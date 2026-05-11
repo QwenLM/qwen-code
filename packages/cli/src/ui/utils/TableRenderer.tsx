@@ -295,12 +295,18 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
       if (linkMatch) {
         const labelText = linkMatch[1] ?? '';
         const url = linkMatch[2] ?? '';
-        const visible = `${labelText} ${applyColor(`(${url})`, theme.text.link)}`;
-        // Same gating as the React renderer — `shouldWrapMarkdownLink`
-        // centralizes the predicate so both renderers stay in sync.
-        rendered = shouldWrapMarkdownLink(url, canHyperlink)
-          ? `${osc8Open(url)}${visible}${osc8Close()}`
-          : visible;
+        // When OSC 8 wraps, show only the label — long URLs in narrow
+        // table cells were the worst offender for layout cluttering, so
+        // this matters especially here. Fall back to the legacy
+        // `label (url)` rendering when wrapping is off so the cell is
+        // byte-identical to today on unsupported terminals / unsafe
+        // schemes / whitespace URLs.
+        if (shouldWrapMarkdownLink(url, canHyperlink)) {
+          const visibleLabel = applyColor(labelText || url, theme.text.link);
+          rendered = `${osc8Open(url)}${visibleLabel}${osc8Close()}`;
+        } else {
+          rendered = `${labelText} ${applyColor(`(${url})`, theme.text.link)}`;
+        }
       }
     } else if (
       enableInlineMath &&

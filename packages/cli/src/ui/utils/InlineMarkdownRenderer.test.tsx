@@ -75,7 +75,7 @@ describe('<RenderInline />', () => {
       process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
     }
 
-    it('wraps a safe http(s) URL in an OSC 8 envelope and keeps the visible (url) suffix', () => {
+    it('wraps a safe http(s) link and shows only the label (no `(url)` suffix)', () => {
       enableHyperlinks();
       const url = 'https://very.long.example.com/path/to/thing?with=params';
       const { lastFrame } = renderWithProviders(
@@ -83,13 +83,26 @@ describe('<RenderInline />', () => {
       );
 
       const out = lastFrame() ?? '';
-      // Envelope is present and frames the visible region.
+      // Envelope is present, pointing at the URL.
       expect(out).toContain(`\x1b]8;;${url}\x07`);
       expect(out).toContain('\x1b]8;;\x07');
-      // Visible bytes are unchanged from legacy rendering — both label and
-      // the parenthesized URL remain on screen for copy-paste fallback.
+      // Visible label is rendered…
       expect(out).toContain('here');
-      expect(out).toContain(`(${url})`);
+      // …and the long URL is NOT repeated as plain text — capable terminals
+      // expose the target via hover / copy-link instead.
+      expect(out).not.toContain(`(${url})`);
+    });
+
+    it('falls back to showing the URL as label when [](url) has empty label', () => {
+      enableHyperlinks();
+      const url = 'https://example.com/x';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`go [](${url}) home`} />,
+      );
+      const out = lastFrame() ?? '';
+      expect(out).toContain(`\x1b]8;;${url}\x07`);
+      // Empty label would render an invisible link, so show the URL itself.
+      expect(out).toContain(url);
     });
 
     it('does not wrap dangerous schemes (javascript:, data:, file:, …)', () => {
@@ -181,10 +194,13 @@ describe('<RenderInline />', () => {
         <RenderInline text={`see [wiki](${url}) ok`} />,
       );
       const out = lastFrame() ?? '';
-      // Envelope target must be the full URL including the inner `)`.
+      // Envelope target must be the full URL including the inner `)` — even
+      // though the URL isn't shown as visible text in wrap mode, it has to
+      // be byte-correct in the envelope so clicking resolves.
       expect(out).toContain(`\x1b]8;;${url}\x07`);
-      // Visible bytes show the full URL too — no truncation at the inner `)`.
-      expect(out).toContain(`(${url})`);
+      // Visible bytes are just the label.
+      expect(out).toContain('wiki');
+      expect(out).not.toContain(`(${url})`);
     });
 
     it('does not wrap a URL that contains whitespace', () => {
@@ -254,9 +270,11 @@ describe('<RenderInline />', () => {
         <RenderInline text={`done [foo](${url}) ok`} />,
       );
       const out = lastFrame() ?? '';
-      // Final-state assertion: exactly one envelope, pointing at the URL.
+      // Final-state assertion: one envelope pointing at the URL, label only
+      // in the visible bytes.
       expect(out).toContain(`\x1b]8;;${url}\x07`);
-      expect(out).toContain(`(${url})`);
+      expect(out).toContain('foo');
+      expect(out).not.toContain(`(${url})`);
     });
   });
 });

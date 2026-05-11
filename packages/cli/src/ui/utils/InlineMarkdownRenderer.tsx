@@ -154,20 +154,26 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         if (linkMatch) {
           const linkText = linkMatch[1] ?? '';
           const url = linkMatch[2] ?? '';
-          // The visible bytes (`label (url)`) stay identical to the legacy
-          // rendering so unsupported terminals see exactly today's output
-          // and copy-paste of the URL still works on supported terminals.
-          // OSC 8 wrapping is purely additive — gated on the shared
-          // `shouldWrapMarkdownLink` predicate (capability + safe scheme +
-          // no whitespace) so the React renderer and the ANSI table
-          // renderer stay in lockstep.
           const wrapOsc8 = shouldWrapMarkdownLink(url, canHyperlink);
-          renderedNode = (
+          // When OSC 8 is active, render ONLY the markdown label — the
+          // clickable target lives in the envelope, so repeating a long URL
+          // in plain text would just clutter the output. Empty labels
+          // (`[](url)`) fall back to showing the URL so the link stays
+          // discoverable.
+          //
+          // When OSC 8 is NOT active (unsupported terminal, unsafe scheme,
+          // whitespace in URL) we emit byte-identical legacy `label (url)`
+          // rendering so the user can still read and copy the target.
+          renderedNode = wrapOsc8 ? (
+            <Text key={key} color={theme.text.link}>
+              {osc8Open(url)}
+              {linkText || url}
+              {osc8Close()}
+            </Text>
+          ) : (
             <Text key={key}>
-              {wrapOsc8 ? osc8Open(url) : null}
               {linkText}
               <Text color={theme.text.link}> ({url})</Text>
-              {wrapOsc8 ? osc8Close() : null}
             </Text>
           );
         }
