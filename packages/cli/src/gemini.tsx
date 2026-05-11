@@ -711,6 +711,24 @@ export async function main() {
     finalizeStartupProfile(config.getSessionId());
 
     if (config.isInteractive()) {
+      // --json-schema is a headless-only contract: the synthetic
+      // structured_output tool only terminates the run inside
+      // runNonInteractive's main/drain loops. In TUI mode the same call
+      // would just emit "Structured output accepted." and keep the chat
+      // alive, which silently strands the user's run. Parse-time gating
+      // can't catch this case (`qwen --json-schema '...'` on a TTY with
+      // no prompt routes to interactive only after stdin TTY detection),
+      // so reject here before the UI launches.
+      if (config.getJsonSchema?.()) {
+        writeStderrLine(
+          'Error: --json-schema is a headless-only flag. Provide a one-shot prompt via -p / --prompt or pipe one in via stdin.',
+        );
+        // Run cleanup so MCP subprocesses + telemetry exporters that the
+        // earlier initializeApp() / loadCliConfig() registered get shut
+        // down — process.exit() doesn't drain them on its own.
+        await runExitCleanup();
+        process.exit(1);
+      }
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
       // Drain the auto-theme probe before render so the OSC 11 response is
@@ -773,9 +791,15 @@ export async function main() {
         settings,
       );
       await runExitCleanup();
-      // Honor any exitCode set by the run (e.g. --json-schema plain-text
-      // path sets it to 1). Hardcoding 0 here would silently mask non-zero
-      // shell exits so the caller can't detect failures.
+      // `runNonInteractiveStreamJson` doesn't return an explicit exit
+      // code yet, so a cleanup task that mutates `process.exitCode`
+      // could clobber a non-zero failure signal. This is currently safe
+      // because `--json-schema` is rejected at parse time when combined
+      // with `--input-format stream-json` (see the yargs `.check` in
+      // resolveCliGenerationConfig), so structured-output failures
+      // never reach this branch. If a future stream-json equivalent of
+      // structured output is added, plumb the exit code through the
+      // function's return value the way `runNonInteractive` below does.
       process.exit(process.exitCode ?? 0);
     }
 
@@ -797,13 +821,19 @@ export async function main() {
 
     debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
-    await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
-    // Call cleanup before process.exit, which causes cleanup to not run
+    const exitCode = await runNonInteractive(
+      nonInteractiveConfig,
+      settings,
+      input,
+      prompt_id,
+    );
+    // Call cleanup before process.exit, which causes cleanup to not run.
+    // Capture the exit code BEFORE cleanup so any cleanup task that
+    // mutates process.exitCode can't silently turn a structured-output
+    // failure (or other explicit non-zero return from runNonInteractive)
+    // into a zero exit.
     await runExitCleanup();
-    // Honor any exitCode set by the run (e.g. --json-schema plain-text
-    // path sets it to 1). Hardcoding 0 here would silently mask non-zero
-    // shell exits so the caller can't detect failures.
-    process.exit(process.exitCode ?? 0);
+    process.exit(exitCode);
   }
 }
 

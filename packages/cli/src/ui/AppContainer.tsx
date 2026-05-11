@@ -58,6 +58,7 @@ import {
   type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import {
@@ -102,6 +103,7 @@ import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
+import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
@@ -2279,6 +2281,60 @@ export const AppContainer = (props: AppContainerProps) => {
         if (compactToggleHasVisualEffect(historyRef.current)) {
           refreshStatic();
         }
+      } else if (keyMatchers[Command.PROMOTE_SHELL_TO_BACKGROUND](key)) {
+        // Ctrl+B: promote a running foreground shell command to a
+        // background task (#3831). The child keeps running, the
+        // agent's turn unblocks, and the shell becomes a regular
+        // BackgroundShellEntry visible in `/tasks` + the dialog and
+        // stoppable via `task_stop`.
+        //
+        // Read from the ref (NOT the destructured `pendingToolCalls`)
+        // so we don't have to put `pendingToolCalls` in the deps
+        // array — that would re-bind the keypress handler on every
+        // tool-call status update, which is noisy.
+        //
+        // No-op when no foreground shell is currently executing OR
+        // the executing tool call is non-shell (no
+        // `promoteAbortController` projected). Falling through in
+        // the no-op case is intentional: while the agent is idle the
+        // input layer's own Ctrl+B handler (cursor-left in the
+        // prompt) should still fire as before.
+        //
+        // Broadcast caveat: `KeypressContext.broadcast()` has no
+        // consumed-flag mechanism today, so even after we `return`
+        // here the same Ctrl+B keypress is also dispatched to other
+        // useKeypress consumers (text buffer cursor-left,
+        // DebugProfiler, etc.). Visible side effect during a
+        // successful promote: the input cursor will move one
+        // character left if the prompt has focus. Cosmetic; tracked
+        // for a follow-up that introduces a `consumed` return value
+        // on KeypressHandler so global handlers can swallow keys.
+        const executingShell = pendingToolCallsRef.current.find(
+          (tc) =>
+            tc.status === 'executing' &&
+            // Defense-in-depth: also gate on the tool name. Today only
+            // the shell tool's invocation wires `promoteAbortController`,
+            // but a future copy-paste / type-confusion that adds the
+            // property to a non-shell tool would otherwise let Ctrl+B
+            // mistakenly fire `abort({kind:'background'})` on a tool
+            // whose service has no promote-handoff handler.
+            tc.request.name === ToolNames.SHELL &&
+            tc.promoteAbortController !== undefined,
+        ) as TrackedExecutingToolCall | undefined;
+        if (executingShell?.promoteAbortController) {
+          debugLogger.debug(
+            `Ctrl+B promote: matched executing shell tool call ${executingShell.request.callId}`,
+          );
+          executingShell.promoteAbortController.abort({
+            kind: 'background',
+          });
+          return;
+        }
+        debugLogger.debug(
+          `Ctrl+B promote: no executing shell tool call; falling through ` +
+            `(streamingState=${streamingState}, ` +
+            `pendingToolCalls=${pendingToolCallsRef.current.length})`,
+        );
       }
     },
     [

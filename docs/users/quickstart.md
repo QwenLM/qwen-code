@@ -12,10 +12,6 @@ Make sure you have:
 - A code project to work with
 - An API key from Alibaba Cloud Model Studio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)), or an Alibaba Cloud Coding Plan ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) / [intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)) subscription
 
-The recommended installer uses a standalone archive when one is available for
-your platform. If it falls back to npm, you will need Node.js 20 or later with
-npm available on PATH.
-
 ## Step 1: Install Qwen Code
 
 To install Qwen Code, use one of the following methods:
@@ -28,7 +24,7 @@ To install Qwen Code, use one of the following methods:
 curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
 ```
 
-**Windows**
+**Windows (Run as Administrator)**
 
 ```cmd
 powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
@@ -36,17 +32,13 @@ powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou
 
 > [!note]
 >
-> It's recommended to restart your terminal after installation if `qwen` is not
-> immediately available on PATH. For offline installation, download a release
-> archive such as `qwen-code-linux-x64.tar.gz` or `qwen-code-win-x64.zip` plus
-> `SHA256SUMS`, then run the installer with `--archive PATH`.
+> It's recommended to restart your terminal after installation to ensure environment variables take effect.
 
 ### Manual Installation
 
 **Prerequisites**
 
-Manual npm installation requires Node.js 20 or later. Download it from
-[nodejs.org](https://nodejs.org/en/download).
+Make sure you have Node.js 22 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
 
 **NPM**
 
@@ -87,7 +79,7 @@ Choose your preferred authentication method:
 
 > [!tip]
 >
-> You can also configure authentication directly from the terminal without starting a session by running `qwen auth`. Use `qwen auth status` to check your current configuration at any time. See the [Authentication](./configuration/auth) page for details.
+> To configure authentication, start Qwen Code and run `/auth`. Use `/doctor` to check your current configuration at any time. See the [Authentication](./configuration/auth) page for details.
 
 ## Step 3: Start your first session
 
@@ -230,9 +222,7 @@ Here are the most important commands for daily use:
 | --------------------- | ------------------------------------------------ | ----------------------------- |
 | `qwen`                | start Qwen Code                                  | `qwen`                        |
 | `/auth`               | Change authentication method (in session)        | `/auth`                       |
-| `qwen auth`           | Configure authentication from the terminal       | `qwen auth`                   |
-| `qwen auth api-key`   | Configure API key authentication                 | `qwen auth api-key`           |
-| `qwen auth status`    | Check current authentication status              | `qwen auth status`            |
+| `/doctor`             | Check current authentication and environment     | `/doctor`                     |
 | `/help`               | Display help information for available commands  | `/help` or `/?`               |
 | `/compress`           | Replace chat history with summary to save Tokens | `/compress`                   |
 | `/clear`              | Clear terminal screen content                    | `/clear` (shortcut: `Ctrl+L`) |

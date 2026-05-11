@@ -1592,6 +1592,20 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('ask_user_question')).toBe(true);
     });
 
+    it('structured_output tool bypasses coreTools allowlist check', async () => {
+      // structured_output is a synthetic tool that only exists when the
+      // user opts into --json-schema. Treating it like agent/skill/
+      // exit_plan_mode (bypass the coreTools allowlist) is the right
+      // default: a run that combines `--json-schema X --core-tools read_file`
+      // intends "restrict the model's pluggable toolbelt to read_file"
+      // while still receiving the structured payload — silently dropping
+      // structured_output here would leave --json-schema with no terminal
+      // contract, so the run would loop until maxTurns.
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('structured_output')).toBe(true);
+    });
+
     it('Non-core tools still respect deny rules', async () => {
       pm = new PermissionManager(
         makeConfig({

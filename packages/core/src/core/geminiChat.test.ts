@@ -15,6 +15,7 @@ import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
 import {
   GeminiChat,
   InvalidStreamError,
+  redactStructuredOutputArgsForRecording,
   StreamEventType,
   type StreamEvent,
 } from './geminiChat.js';
@@ -3319,6 +3320,75 @@ describe('GeminiChat', async () => {
         .map((p) => ('text' in p ? ((p as { text?: string }).text ?? '') : ''))
         .join('');
       expect(mergedText).toBe('BCD');
+    });
+  });
+
+  describe('redactStructuredOutputArgsForRecording', () => {
+    // The chat-recording JSONL persists assistant turns to disk and re-feeds
+    // them on `--continue` / `--resume`. For `--json-schema` runs the
+    // structured_output args ARE the user's structured payload, already
+    // emitted on stdout; recording them verbatim here would silently
+    // contradict the redaction the ToolCallEvent telemetry path applies.
+    // These tests pin the helper that scrubs them.
+
+    it('replaces args on a structured_output functionCall with the placeholder', () => {
+      const result = redactStructuredOutputArgsForRecording({
+        functionCall: {
+          id: 'call-1',
+          name: 'structured_output',
+          args: {
+            extracted: 'sensitive answer',
+            score: 0.9,
+            details: { token: 'shhhh' },
+          },
+        },
+      });
+      expect(result).not.toBeNull();
+      expect(result!.functionCall.name).toBe('structured_output');
+      expect(result!.functionCall.id).toBe('call-1');
+      expect(result!.functionCall.args).toEqual({
+        __redacted: 'structured_output payload (see stdout result)',
+      });
+      // The original payload must NOT survive in any field of the output.
+      expect(JSON.stringify(result)).not.toContain('sensitive answer');
+      expect(JSON.stringify(result)).not.toContain('shhhh');
+    });
+
+    it('passes non-structured_output functionCalls through untouched', () => {
+      const original = {
+        id: 'call-2',
+        name: 'write_file',
+        args: { path: '/tmp/x', content: 'hello' },
+      };
+      const result = redactStructuredOutputArgsForRecording({
+        functionCall: original,
+      });
+      expect(result).not.toBeNull();
+      expect(result!.functionCall).toEqual(original);
+      // Reference identity not required, but the args object must equal
+      // the input (no redaction applied).
+      expect(result!.functionCall.args).toEqual({
+        path: '/tmp/x',
+        content: 'hello',
+      });
+    });
+
+    it('returns null for parts with no functionCall', () => {
+      expect(redactStructuredOutputArgsForRecording({ text: 'hi' })).toBeNull();
+      expect(redactStructuredOutputArgsForRecording({})).toBeNull();
+    });
+
+    it('does not mutate the input part', () => {
+      const original = {
+        functionCall: {
+          id: 'call-3',
+          name: 'structured_output',
+          args: { ok: true, data: [1, 2, 3] },
+        },
+      };
+      const snapshot = JSON.parse(JSON.stringify(original));
+      redactStructuredOutputArgsForRecording(original);
+      expect(original).toEqual(snapshot);
     });
   });
 

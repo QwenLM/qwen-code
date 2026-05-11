@@ -526,6 +526,10 @@ describe('BackgroundAgentResumeService', () => {
     });
   });
 
+  // Windows-24 GitHub Actions runners can take 10s+ on this fs-heavy
+  // setup (writeAgentMeta + fs.writeFileSync + Promise resolution chain),
+  // exceeding vitest's 5s default. Raise the per-test timeout so the
+  // legitimate slow-runner case doesn't fail the suite.
   it('downgrades persisted privileged approval modes when folder trust is revoked', async () => {
     const sessionId = 'session-untrusted';
     const agentId = 'agent-untrusted';
@@ -596,7 +600,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(createAgentHeadless).toHaveBeenCalledTimes(1);
     const [, overriddenConfig] = createAgentHeadless.mock.calls[0]!;
     expect(overriddenConfig.getApprovalMode()).toBe('default');
-  });
+  }, 20000);
 
   it('coalesces concurrent resume calls into a single running agent', async () => {
     const sessionId = 'session-double';
