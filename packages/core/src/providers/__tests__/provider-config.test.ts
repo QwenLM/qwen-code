@@ -5,8 +5,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
 import {
+  AuthType,
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
@@ -15,7 +15,7 @@ import {
   shouldShowStep,
   providerMatchesCredentials,
   type ProviderConfig,
-} from './providerConfig.js';
+} from '@qwen-code/qwen-code-core';
 
 function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {

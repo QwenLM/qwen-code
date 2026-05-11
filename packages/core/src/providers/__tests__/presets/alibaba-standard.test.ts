@@ -5,13 +5,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
-import { alibabaStandardProvider } from './alibabaStandard.js';
 import {
+  AuthType,
+  alibabaStandardProvider,
   buildInstallPlan,
   resolveBaseUrl,
   providerMatchesCredentials,
-} from '../../providerConfig.js';
+} from '@qwen-code/qwen-code-core';
 
 describe('alibabaStandardProvider', () => {
   it('has correct provider config', () => {

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '@qwen-code/qwen-code-core';
-import type { ProviderConfig, ModelSpec } from '../../providerConfig.js';
+import { AuthType } from '../../core/contentGenerator.js';
+import type { ProviderConfig, ModelSpec } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -28,7 +28,7 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Provider config (unified ProviderConfig)
+// Provider config
 // ---------------------------------------------------------------------------
 
 export const tokenPlanProvider: ProviderConfig = {

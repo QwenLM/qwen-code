@@ -7,19 +7,17 @@
  * lookup tables used by the UI and CLI commands.
  */
 
-import {
-  providerMatchesCredentials,
-  type ProviderConfig,
-} from './providerConfig.js';
-import { codingPlanProvider } from './providers/alibaba/codingPlan.js';
-import { tokenPlanProvider } from './providers/alibaba/tokenPlan.js';
-import { alibabaStandardProvider } from './providers/alibaba/alibabaStandard.js';
-import { openRouterProvider } from './providers/oauth/openrouter.js';
-import { deepseekProvider } from './providers/thirdParty/deepseek.js';
-import { minimaxProvider } from './providers/thirdParty/minimax.js';
-import { zaiProvider } from './providers/thirdParty/zai.js';
-import { idealabProvider } from './providers/thirdParty/idealab.js';
-import { customProvider } from './providers/custom/customProvider.js';
+import { providerMatchesCredentials } from './provider-config.js';
+import type { ProviderConfig } from './types.js';
+import { codingPlanProvider } from './presets/coding-plan.js';
+import { tokenPlanProvider } from './presets/token-plan.js';
+import { alibabaStandardProvider } from './presets/alibaba-standard.js';
+import { openRouterProvider } from './presets/openrouter.js';
+import { deepseekProvider } from './presets/deepseek.js';
+import { minimaxProvider } from './presets/minimax.js';
+import { zaiProvider } from './presets/zai.js';
+import { idealabProvider } from './presets/idealab.js';
+import { customProvider } from './presets/custom-provider.js';
 
 // Re-export all providers
 export {
@@ -36,7 +34,7 @@ export {
 export {
   CUSTOM_API_KEY_ENV_PREFIX,
   generateCustomEnvKey,
-} from './providers/custom/customProvider.js';
+} from './presets/custom-provider.js';
 
 // ---------------------------------------------------------------------------
 // Provider Registry
@@ -84,16 +82,8 @@ export function findProviderByCredentials(
 export function getAllProviderBaseUrls(): string[] {
   return ALL_PROVIDERS.flatMap((p) => {
     if (typeof p.baseUrl === 'string') return [p.baseUrl];
-    if (Array.isArray(p.baseUrl)) return p.baseUrl.map((o) => o.url);
+    if (Array.isArray(p.baseUrl))
+      return p.baseUrl.map((o: { url: string }) => o.url);
     return [];
   });
 }
-
-// Re-export providerConfig utilities for convenience
-export {
-  buildInstallPlan,
-  resolveBaseUrl,
-  getDefaultModelIds,
-  shouldShowStep,
-  computeModelListVersion,
-} from './providerConfig.js';

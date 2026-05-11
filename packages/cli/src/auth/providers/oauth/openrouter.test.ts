@@ -6,10 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import {
-  createOpenRouterProviderInstallPlan,
-  openRouterProvider,
-} from './openrouter.js';
+import { createOpenRouterProviderInstallPlan } from './openrouter.js';
 
 vi.mock('./openrouterOAuth.js', () => ({
   getOpenRouterModelsWithFallback: vi.fn(),
@@ -19,7 +16,7 @@ vi.mock('./openrouterOAuth.js', () => ({
   selectRecommendedOpenRouterModels: vi.fn((models) => models.slice(0, 1)),
 }));
 
-describe('openRouterProvider', () => {
+describe('createOpenRouterProviderInstallPlan', () => {
   it('creates an install plan for recommended OpenRouter models', async () => {
     const plan = await createOpenRouterProviderInstallPlan({
       apiKey: 'or-key',
@@ -64,20 +61,5 @@ describe('openRouterProvider', () => {
         },
       ],
     });
-  });
-
-  it('owns models by OpenRouter base URL', () => {
-    expect(
-      openRouterProvider.ownsModel?.({
-        id: 'openrouter-model',
-        baseUrl: 'https://openrouter.ai/api/v1',
-      }),
-    ).toBe(true);
-    expect(
-      openRouterProvider.ownsModel?.({
-        id: 'other-model',
-        baseUrl: 'https://api.example.com/v1',
-      }),
-    ).toBe(false);
   });
 });

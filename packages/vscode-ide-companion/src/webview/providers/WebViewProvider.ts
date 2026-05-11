@@ -29,7 +29,6 @@ import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   writeCodingPlanConfig,
-  writeModelProvidersConfig,
   readQwenSettingsForVSCode,
   clearPersistedAuth,
 } from '../../services/settingsWriter.js';
@@ -151,15 +150,8 @@ export class WebViewProvider {
 
     // Set auth interactive handler — interactive auth flow (QuickPick → InputBox → write settings → reconnect)
     this.messageHandler.setAuthInteractiveHandler(
-      async (provider, region, apiKey, baseUrl, model, modelIds) => {
-        await this.handleAuthInteractive(
-          provider,
-          region,
-          apiKey,
-          baseUrl,
-          model,
-          modelIds,
-        );
+      async (providerConfig, inputs) => {
+        await this.handleAuthInteractive(providerConfig, inputs);
       },
     );
 
@@ -1305,14 +1297,10 @@ export class WebViewProvider {
    * Mirrors the CLI's `qwen auth coding-plan` / `qwen auth` flow.
    */
   private async handleAuthInteractive(
-    provider: string,
-    region?: string,
-    apiKey?: string,
-    baseUrl?: string,
-    model?: string,
-    modelIds?: string,
+    providerConfig: import('@qwen-code/qwen-code-core').ProviderConfig,
+    inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
   ): Promise<void> {
-    if (!apiKey) {
+    if (!inputs.apiKey && providerConfig.authMethod !== 'oauth') {
       this.sendMessageToWebView({
         type: 'authError',
         data: { message: 'API key is required.' },
@@ -1321,39 +1309,18 @@ export class WebViewProvider {
     }
 
     console.log(
-      `[WebViewProvider] authInteractive: provider=${provider}, region=${region}, model=${model}`,
+      `[WebViewProvider] authInteractive: provider=${providerConfig.id}, baseUrl=${inputs.baseUrl}`,
     );
 
     try {
-      if (provider === 'coding-plan') {
-        writeCodingPlanConfig(region === 'global' ? 'global' : 'china', apiKey);
-      } else if (provider === 'alibaba-standard') {
-        // Alibaba Standard — multiple models sharing the same base URL
-        const modelBaseUrl =
-          baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-        const ids = (modelIds || model || 'qwen3.5-plus')
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean);
-        const providers: Record<string, string> = {};
-        for (const id of ids) {
-          providers[id] = modelBaseUrl;
-        }
-        writeModelProvidersConfig({
-          apiKey,
-          modelProviders: providers,
-          activeModel: ids[0] || 'qwen3.5-plus',
-        });
-      } else {
-        // Custom API Key — single model entry
-        const modelId = model || 'default';
-        const modelBaseUrl = baseUrl || 'https://api.openai.com/v1';
-        writeModelProvidersConfig({
-          apiKey,
-          modelProviders: { [modelId]: modelBaseUrl },
-          activeModel: modelId,
-        });
-      }
+      // Use core's buildInstallPlan to create a standardized install plan,
+      // then apply it via the VSCode settings adapter.
+      const { buildInstallPlan } = await import('@qwen-code/qwen-code-core');
+      const { applyProviderInstallPlanToFile } = await import(
+        '../../services/settingsWriter.js'
+      );
+      const plan = buildInstallPlan(providerConfig, inputs);
+      applyProviderInstallPlanToFile(plan);
 
       // Disconnect + reconnect
       if (this.agentInitialized) {
@@ -1369,9 +1336,6 @@ export class WebViewProvider {
       await this.doInitializeAgentConnection({ autoAuthenticate: false });
 
       // Only emit authSuccess when the reconnection actually authenticated.
-      // doInitializeAgentConnection updates this.authState via sendMessageToWebView;
-      // if credentials were rejected, authState will be false and we should not
-      // claim success (which would briefly show a success toast then re-open auth).
       if (this.authState === true) {
         this.sendMessageToWebView({
           type: 'authSuccess',

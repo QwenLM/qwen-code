@@ -5,8 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
-import { minimaxProvider, buildInstallPlan } from '../../allProviders.js';
+import {
+  AuthType,
+  minimaxProvider,
+  buildInstallPlan,
+} from '@qwen-code/qwen-code-core';
 
 describe('minimaxProvider', () => {
   it('offers international and China endpoints', () => {

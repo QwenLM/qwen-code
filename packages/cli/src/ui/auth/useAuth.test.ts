@@ -6,13 +6,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType , generateCustomEnvKey as generateCustomApiKeyEnvKey } from '@qwen-code/qwen-code-core';
 import {
   useAuthCommand,
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
-import { generateCustomEnvKey as generateCustomApiKeyEnvKey } from '../../auth/allProviders.js';
 import {
   OPENROUTER_OAUTH_CALLBACK_URL,
   createOpenRouterOAuthSession,

@@ -5,13 +5,14 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
 import {
+  AuthType,
   customProvider,
   generateCustomEnvKey,
   CUSTOM_API_KEY_ENV_PREFIX,
-} from './customProvider.js';
-import { buildInstallPlan, shouldShowStep } from '../../providerConfig.js';
+  buildInstallPlan,
+  shouldShowStep,
+} from '@qwen-code/qwen-code-core';
 
 describe('generateCustomEnvKey', () => {
   it('produces a deterministic URL-based key', () => {

@@ -5,11 +5,13 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ProviderModelConfig, Config } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
-import { t } from '../../i18n/index.js';
-import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
+import type {
+  ProviderModelConfig,
+  Config,
+  ProviderConfig,
+} from '@qwen-code/qwen-code-core';
 import {
+  ALL_PROVIDERS,
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
@@ -18,9 +20,10 @@ import {
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
-  type ProviderConfig,
-} from '../../auth/providerConfig.js';
-import { ALL_PROVIDERS } from '../../auth/allProviders.js';
+} from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
+import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
 // ---------------------------------------------------------------------------

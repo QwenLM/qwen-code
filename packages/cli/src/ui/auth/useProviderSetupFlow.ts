@@ -5,8 +5,17 @@
  */
 
 import { useState, useCallback } from 'react';
-import { AuthType } from '@qwen-code/qwen-code-core';
-import type { InputModalities } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  shouldShowStep,
+  resolveBaseUrl,
+  getDefaultModelIds,
+} from '@qwen-code/qwen-code-core';
+import type {
+  InputModalities,
+  ProviderConfig,
+  ProviderSetupInputs,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
 const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
@@ -14,13 +23,6 @@ const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
   [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
   [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
 };
-import {
-  shouldShowStep,
-  resolveBaseUrl,
-  getDefaultModelIds,
-  type ProviderConfig,
-  type ProviderSetupInputs,
-} from '../../auth/providerConfig.js';
 import { normalizeModelIds, maskApiKey } from './useAuth.js';
 
 // ---------------------------------------------------------------------------

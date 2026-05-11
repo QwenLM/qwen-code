@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import { applyProviderInstallPlan } from './applyProviderInstallPlan.js';
-import type { ProviderInstallPlan } from '../types.js';
+import type { ProviderInstallPlan } from '@qwen-code/qwen-code-core';
 
 vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),

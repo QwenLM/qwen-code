@@ -5,8 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
-import { zaiProvider, buildInstallPlan } from '../../allProviders.js';
+import {
+  AuthType,
+  zaiProvider,
+  buildInstallPlan,
+} from '@qwen-code/qwen-code-core';
 
 describe('zaiProvider', () => {
   it('offers standard API key and Coding Plan endpoints', () => {

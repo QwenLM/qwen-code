@@ -5,19 +5,17 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
 import {
+  AuthType,
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
   codingPlanProvider,
-} from './codingPlan.js';
-import {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
   getDefaultModelIds,
   resolveBaseUrl,
-} from '../../providerConfig.js';
+} from '@qwen-code/qwen-code-core';
 
 describe('coding plan provider', () => {
   it('creates a Coding Plan install plan', () => {

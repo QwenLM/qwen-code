@@ -11,7 +11,16 @@ import {
   logAuth,
   type Config,
   type ModelProvidersConfig,
-} from '@qwen-code/qwen-code-core';
+
+  buildInstallPlan,
+  getDefaultModelIds,
+  resolveBaseUrl,
+  codingPlanProvider,
+  tokenPlanProvider,
+  openRouterProvider,
+  findProviderById,
+  type ProviderConfig,
+  type ProviderSetupInputs} from '@qwen-code/qwen-code-core';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
@@ -21,19 +30,6 @@ import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
-import {
-  buildInstallPlan,
-  getDefaultModelIds,
-  resolveBaseUrl,
-  type ProviderConfig,
-  type ProviderSetupInputs,
-} from '../../auth/providerConfig.js';
-import {
-  codingPlanProvider,
-  tokenPlanProvider,
-  openRouterProvider,
-  findProviderById,
-} from '../../auth/allProviders.js';
 import {
   createOpenRouterOAuthSession,
   OPENROUTER_OAUTH_CALLBACK_URL,

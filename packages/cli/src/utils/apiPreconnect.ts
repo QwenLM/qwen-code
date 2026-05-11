@@ -19,9 +19,8 @@ import {
   createDebugLogger,
   detectRuntime,
   getOrCreateSharedDispatcher,
-} from '@qwen-code/qwen-code-core';
+ getAllProviderBaseUrls } from '@qwen-code/qwen-code-core';
 
-import { getAllProviderBaseUrls } from '../auth/allProviders.js';
 
 const debugLogger = createDebugLogger('PRECONNECT');
 

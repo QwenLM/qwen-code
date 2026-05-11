@@ -7,21 +7,29 @@
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import {
+  ALL_PROVIDERS,
+  ALIBABA_PROVIDERS,
+  THIRD_PARTY_PROVIDERS,
+  OAUTH_PROVIDERS,
+  shouldShowStep,
+  resolveBaseUrl,
+  getDefaultModelIds,
+  type ProviderConfig,
+  type ProviderSetupInputs,
+  type BaseUrlOption,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Auth message handler
- * Handles all authentication-related messages
+ * Handles all authentication-related messages.
+ *
+ * Uses the shared ProviderConfig registry from core to dynamically
+ * generate setup flows instead of hardcoding provider-specific logic.
  */
 export class AuthMessageHandler extends BaseMessageHandler {
   private authInteractiveHandler:
-    | ((
-        provider: string,
-        region?: string,
-        apiKey?: string,
-        baseUrl?: string,
-        model?: string,
-        modelIds?: string,
-      ) => Promise<void>)
+    | ((config: ProviderConfig, inputs: ProviderSetupInputs) => Promise<void>)
     | null = null;
 
   canHandle(messageType: string): boolean {
@@ -48,16 +56,12 @@ export class AuthMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Set auth interactive handler — interactive auth flow.
+   * Set auth interactive handler — called with provider config and user inputs.
    */
   setAuthInteractiveHandler(
     handler: (
-      provider: string,
-      region?: string,
-      apiKey?: string,
-      baseUrl?: string,
-      model?: string,
-      modelIds?: string,
+      config: ProviderConfig,
+      inputs: ProviderSetupInputs,
     ) => Promise<void>,
   ): void {
     this.authInteractiveHandler = handler;
@@ -87,19 +91,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
       });
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // auth: Interactive auth flow (mirrors CLI's /auth)
-  // ---------------------------------------------------------------------------
-
-  // Alibaba Standard API Key region endpoints
-  private static readonly ALIBABA_STANDARD_ENDPOINTS: Record<string, string> = {
-    'cn-beijing': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    'sg-singapore': 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-    'us-virginia': 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
-    'cn-hongkong':
-      'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
-  };
 
   /**
    * Notify the webview that the interactive auth flow was dismissed.
@@ -156,44 +147,90 @@ export class AuthMessageHandler extends BaseMessageHandler {
     return value;
   }
 
+  // ---------------------------------------------------------------------------
+  // Main entry: dynamic provider selection from ALL_PROVIDERS
+  // ---------------------------------------------------------------------------
+
   /**
    * Handle auth — full interactive auth flow.
-   *
-   * Tree (mirrors CLI AuthDialog):
-   *   |- Coding Plan -> Region (China/Global) -> API Key -> done
-   *   \- API Key
-   *      |- Alibaba Standard -> Region (4 regions) -> API Key -> Model IDs -> done
-   *      \- Custom -> Base URL -> API Key -> Model -> done
+   * Dynamically generates provider choices from the shared registry.
    */
   private async handleAuthInteractive(): Promise<void> {
     try {
-      // Main menu
-      const provider = await this.pick(
-        [
-          {
-            label: 'Alibaba Cloud Coding Plan',
-            description:
-              'Paid · Up to 6,000 requests/5 hrs · All Coding Plan Models',
-            value: 'coding-plan' as const,
-          },
-          {
-            label: 'API Key',
-            description: 'Bring your own API key',
-            value: 'api-key' as const,
-          },
-        ],
-        'Qwen Code: Auth',
-        'Select authentication method',
+      // Build grouped provider menu
+      const items: Array<{
+        label: string;
+        description?: string;
+        value: string;
+        kind?: vscode.QuickPickItemKind;
+      }> = [];
+
+      const addGroup = (
+        label: string,
+        providers: readonly ProviderConfig[],
+      ) => {
+        if (providers.length === 0) return;
+        items.push({
+          label,
+          value: '',
+          kind: vscode.QuickPickItemKind.Separator,
+        });
+        for (const p of providers) {
+          items.push({
+            label: p.label,
+            description: p.description,
+            value: p.id,
+          });
+        }
+      };
+
+      addGroup('Alibaba Cloud', ALIBABA_PROVIDERS);
+      addGroup('OAuth', OAUTH_PROVIDERS);
+      addGroup('Third Party', THIRD_PARTY_PROVIDERS);
+
+      // Custom provider is always last
+      const customProviders = ALL_PROVIDERS.filter(
+        (p) => p.uiGroup === 'custom',
       );
+      if (customProviders.length > 0) {
+        addGroup('Custom', customProviders);
+      }
+
+      const selectedId = await this.pick(
+        items.filter(
+          (i) => i.kind !== vscode.QuickPickItemKind.Separator,
+        ) as Array<{
+          label: string;
+          description?: string;
+          value: string;
+        }>,
+        'Qwen Code: Select Provider',
+        'Choose how to connect',
+      );
+      if (!selectedId) return;
+
+      const provider = ALL_PROVIDERS.find((p) => p.id === selectedId);
       if (!provider) {
+        console.error('[AuthMessageHandler] Provider not found:', selectedId);
         return;
       }
 
-      if (provider === 'coding-plan') {
-        await this.authCodingPlan();
-      } else {
-        await this.authApiKey();
+      // OAuth providers need special handling (browser flow)
+      if (provider.authMethod === 'oauth') {
+        // For OAuth providers, delegate to the handler with empty inputs.
+        // The actual OAuth flow is managed by the handler implementation.
+        if (this.authInteractiveHandler) {
+          await this.authInteractiveHandler(provider, {
+            baseUrl: resolveBaseUrl(provider),
+            apiKey: '', // OAuth — key comes from browser flow
+            modelIds: getDefaultModelIds(provider),
+          });
+        }
+        return;
       }
+
+      // Run generic setup flow
+      await this.runProviderSetupFlow(provider);
     } catch (error) {
       const errorMsg = getErrorMessage(error);
       console.error('[AuthMessageHandler] auth failed:', error);
@@ -204,184 +241,122 @@ export class AuthMessageHandler extends BaseMessageHandler {
     }
   }
 
-  /**
-   * Coding Plan: region -> API key -> connect.
-   */
-  private async authCodingPlan(): Promise<void> {
-    const region = await this.pick(
-      [
-        {
-          label: '中国 (China)',
-          description: '阿里云百炼 — aliyun.com',
-          value: 'china' as const,
-        },
-        {
-          label: 'Global',
-          description: 'Alibaba Cloud — alibabacloud.com',
-          value: 'global' as const,
-        },
-      ],
-      'Qwen Code: Coding Plan Region',
-      'Select region',
-    );
-    if (!region) {
-      return;
-    }
+  // ---------------------------------------------------------------------------
+  // Generic provider setup flow — driven by ProviderConfig
+  // ---------------------------------------------------------------------------
 
-    const apiKey = await this.input({
-      title: 'Qwen Code: API Key',
-      prompt: 'Enter your Coding Plan API key',
-      placeHolder: 'sk-...',
-      password: true,
-      required: true,
-    });
-    if (!apiKey) {
-      return;
-    }
+  private async runProviderSetupFlow(provider: ProviderConfig): Promise<void> {
+    const flowTitle =
+      provider.uiLabels?.flowTitle ?? `Qwen Code: ${provider.label}`;
 
-    if (this.authInteractiveHandler) {
-      await this.authInteractiveHandler('coding-plan', region, apiKey);
-    }
-  }
-
-  /**
-   * API Key: select type -> Alibaba Standard or Custom.
-   */
-  private async authApiKey(): Promise<void> {
-    const keyType = await this.pick(
-      [
-        {
-          label: 'Standard API Key',
-          description: 'Connect with an existing ModelStudio API key',
-          value: 'alibaba-standard' as const,
-        },
-        {
-          label: 'Custom API Key',
-          description:
-            'For other OpenAI / Anthropic / Gemini-compatible providers',
-          value: 'custom' as const,
-        },
-      ],
-      'Qwen Code: Select API Key Type',
-      'Select API key type',
-    );
-    if (!keyType) {
-      return;
-    }
-
-    if (keyType === 'alibaba-standard') {
-      await this.authAlibabaStandard();
+    // Step 1: Base URL (if needed)
+    let baseUrl: string;
+    if (shouldShowStep(provider, 'baseUrl')) {
+      if (Array.isArray(provider.baseUrl)) {
+        const options = provider.baseUrl as BaseUrlOption[];
+        const stepTitle = provider.uiLabels?.baseUrlStepTitle ?? 'Endpoint';
+        const selected = await this.pick(
+          options.map((opt) => ({
+            label: opt.label,
+            description: opt.url,
+            value: opt.url,
+          })),
+          `${flowTitle}: ${stepTitle}`,
+          `Select ${stepTitle.toLowerCase()}`,
+        );
+        if (!selected) return;
+        baseUrl = selected;
+      } else {
+        // Free-form URL input
+        const urlInput = await this.input({
+          title: `${flowTitle}: Base URL`,
+          prompt: 'Enter API base URL',
+          placeHolder: 'https://api.openai.com/v1',
+          value: 'https://api.openai.com/v1',
+        });
+        if (urlInput === undefined) return;
+        baseUrl = urlInput;
+      }
     } else {
-      await this.authCustom();
-    }
-  }
-
-  /**
-   * Alibaba Standard: region -> API key -> model IDs -> connect.
-   */
-  private async authAlibabaStandard(): Promise<void> {
-    const endpoints = AuthMessageHandler.ALIBABA_STANDARD_ENDPOINTS;
-
-    const region = await this.pick(
-      Object.entries(endpoints).map(([key, endpoint]) => ({
-        label:
-          key === 'cn-beijing'
-            ? 'China (Beijing)'
-            : key === 'sg-singapore'
-              ? 'Singapore'
-              : key === 'us-virginia'
-                ? 'US (Virginia)'
-                : 'China (Hong Kong)',
-        description: `Endpoint: ${endpoint}`,
-        value: key,
-      })),
-      'Qwen Code: Select Region',
-      'Select region for Alibaba Cloud ModelStudio',
-    );
-    if (!region) {
-      return;
+      baseUrl = resolveBaseUrl(provider);
     }
 
+    // Step 2: API Key
     const apiKey = await this.input({
-      title: 'Qwen Code: API Key',
-      prompt: 'Enter your Alibaba Cloud ModelStudio API key',
-      placeHolder: 'sk-...',
-      password: true,
-      required: true,
-    });
-    if (!apiKey) {
-      return;
-    }
-
-    const modelIds = await this.input({
-      title: 'Qwen Code: Model IDs',
-      prompt: 'Enter model IDs (comma-separated)',
-      placeHolder: 'qwen3.5-plus,glm-5,kimi-k2.5',
-      value: 'qwen3.5-plus',
-      required: true,
-    });
-    if (!modelIds) {
-      return;
-    }
-
-    const baseUrl = endpoints[region] || endpoints['cn-beijing'];
-    const firstModel = modelIds.split(',')[0]?.trim() || 'qwen3.5-plus';
-
-    if (this.authInteractiveHandler) {
-      await this.authInteractiveHandler(
-        'alibaba-standard',
-        region,
-        apiKey,
-        baseUrl,
-        firstModel,
-        modelIds,
-      );
-    }
-  }
-
-  /**
-   * Custom: base URL -> API key -> model -> connect.
-   */
-  private async authCustom(): Promise<void> {
-    const baseUrl = await this.input({
-      title: 'Qwen Code: Base URL',
-      prompt: 'Enter API base URL',
-      placeHolder: 'https://api.openai.com/v1',
-      value: 'https://api.openai.com/v1',
-    });
-    if (baseUrl === undefined) {
-      return;
-    }
-
-    const apiKey = await this.input({
-      title: 'Qwen Code: API Key',
+      title: `${flowTitle}: API Key`,
       prompt: 'Enter your API key',
-      placeHolder: 'sk-...',
+      placeHolder: provider.apiKeyPlaceholder ?? 'sk-...',
       password: true,
       required: true,
     });
-    if (!apiKey) {
-      return;
+    if (!apiKey) return;
+
+    // Validate API key if provider has validation
+    if (provider.validateApiKey) {
+      const validationError = provider.validateApiKey(apiKey, baseUrl);
+      if (validationError) {
+        this.sendToWebView({
+          type: 'authError',
+          data: { message: validationError },
+        });
+        return;
+      }
     }
 
-    const model = await this.input({
-      title: 'Qwen Code: Model',
-      prompt: 'Enter model name',
-      placeHolder: 'gpt-4o',
-      required: true,
-    });
-    if (!model) {
-      return;
+    // Step 3: Model selection (if needed)
+    let modelIds: string[];
+    if (shouldShowStep(provider, 'models')) {
+      const defaults = getDefaultModelIds(provider);
+      const modelInput = await this.input({
+        title: `${flowTitle}: Models`,
+        prompt: 'Enter model IDs (comma-separated)',
+        placeHolder: defaults.join(',') || 'model-name',
+        value: defaults.join(','),
+        required: true,
+      });
+      if (!modelInput) return;
+      modelIds = modelInput
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean);
+    } else {
+      modelIds = getDefaultModelIds(provider);
     }
 
-    if (this.authInteractiveHandler) {
-      await this.authInteractiveHandler(
-        'api-key',
-        undefined,
-        apiKey,
-        baseUrl,
-        model,
+    // Step 4: Advanced config (if needed)
+    let advancedConfig: ProviderSetupInputs['advancedConfig'];
+    if (shouldShowStep(provider, 'advancedConfig')) {
+      // Simplified: just ask about thinking mode
+      const enableThinking = await this.pick(
+        [
+          {
+            label: 'Yes',
+            description: 'Enable extended thinking mode',
+            value: 'yes' as const,
+          },
+          {
+            label: 'No',
+            description: 'Standard mode',
+            value: 'no' as const,
+          },
+        ],
+        `${flowTitle}: Advanced Config`,
+        'Enable thinking mode?',
       );
+      if (!enableThinking) return;
+      advancedConfig = {
+        enableThinking: enableThinking === 'yes',
+      };
+    }
+
+    // Submit
+    if (this.authInteractiveHandler) {
+      await this.authInteractiveHandler(provider, {
+        baseUrl,
+        apiKey,
+        modelIds,
+        advancedConfig,
+      });
     }
   }
 }

@@ -5,20 +5,18 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
 import {
+  AuthType,
   TOKEN_PLAN_ENV_KEY,
   TOKEN_PLAN_BASE_URL,
   tokenPlanProvider,
-} from './tokenPlan.js';
-import {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
   getDefaultModelIds,
   resolveBaseUrl,
   providerMatchesCredentials,
-} from '../../providerConfig.js';
+} from '@qwen-code/qwen-code-core';
 
 describe('token plan provider', () => {
   it('creates a Token Plan install plan', () => {

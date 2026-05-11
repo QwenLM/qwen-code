@@ -4,19 +4,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ModelProvidersConfig } from '@qwen-code/qwen-code-core';
+import type {
+  AuthType,
+  ModelProvidersConfig,
+  ProviderInstallPlan,
+  ProviderModelProvidersPatch,
+} from '@qwen-code/qwen-code-core';
+import type { SettingScope, LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   backupSettingsFile,
   cleanupSettingsBackup,
   restoreSettingsFromBackup,
 } from '../../utils/settingsUtils.js';
-import type {
-  ApplyProviderInstallPlanOptions,
-  ApplyProviderInstallPlanResult,
-  ProviderInstallPlan,
-  ProviderModelProvidersPatch,
-} from '../types.js';
+
+export interface ApplyProviderInstallPlanOptions {
+  settings: LoadedSettings;
+  config: {
+    reloadModelProvidersConfig: (mp: ModelProvidersConfig) => void;
+    getModelsConfig: () => {
+      syncAfterAuthRefresh: (authType: AuthType, modelId: string) => void;
+    };
+    refreshAuth: (authType: AuthType) => Promise<void>;
+  };
+  scope?: SettingScope;
+  refreshAuth?: boolean;
+}
+
+export interface ApplyProviderInstallPlanResult {
+  persistScope: SettingScope;
+  updatedModelProviders: ModelProvidersConfig;
+}
 
 function isSameModelIdentity(
   a: { id: string; baseUrl?: string },

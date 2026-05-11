@@ -5,8 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
-import { idealabProvider, buildInstallPlan } from '../../allProviders.js';
+import {
+  AuthType,
+  idealabProvider,
+  buildInstallPlan,
+} from '@qwen-code/qwen-code-core';
 
 describe('idealabProvider', () => {
   it('has correct provider config', () => {

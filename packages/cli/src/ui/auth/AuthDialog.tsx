@@ -23,11 +23,9 @@ import {
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
-} from '../../auth/allProviders.js';
-import {
   resolveMetadataKey,
   type ProviderConfig,
-} from '../../auth/providerConfig.js';
+} from '@qwen-code/qwen-code-core';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 

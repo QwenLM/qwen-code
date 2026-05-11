@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '@qwen-code/qwen-code-core';
-import type { ProviderConfig } from '../../providerConfig.js';
+import { AuthType } from '../../core/contentGenerator.js';
+import type { ProviderConfig } from '../types.js';
 
 export const idealabProvider: ProviderConfig = {
   id: 'idealab',

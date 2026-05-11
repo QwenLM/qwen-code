@@ -16,6 +16,10 @@ vi.mock('vscode', () => ({
     showQuickPick: mockShowQuickPick,
     showInputBox: mockShowInputBox,
   },
+  QuickPickItemKind: {
+    Separator: -1,
+    Default: 0,
+  },
 }));
 
 import { AuthMessageHandler } from './AuthMessageHandler.js';
@@ -41,9 +45,14 @@ describe('AuthMessageHandler', () => {
   });
 
   it('sends authCancelled when the api key input is dismissed mid-flow', async () => {
+    // First pick: select provider (coding-plan)
+    // Second pick: select base URL region
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'coding-plan' })
-      .mockResolvedValueOnce({ value: 'china' });
+      .mockResolvedValueOnce({
+        value: 'https://coding.dashscope.aliyuncs.com/v1',
+      });
+    // API key input: user cancels
     mockShowInputBox.mockResolvedValue(undefined);
 
     const sendToWebView = vi.fn();

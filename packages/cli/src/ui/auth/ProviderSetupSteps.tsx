@@ -13,10 +13,7 @@ import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import type {
-  ProviderConfig,
-  BaseUrlOption,
-} from '../../auth/providerConfig.js';
+import type { ProviderConfig, BaseUrlOption } from '@qwen-code/qwen-code-core';
 import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
 
 // ---------------------------------------------------------------------------
