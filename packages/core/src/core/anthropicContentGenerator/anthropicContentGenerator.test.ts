@@ -510,6 +510,13 @@ describe('AnthropicContentGenerator', () => {
       schemaCompliance: 'auto',
     };
 
+    // Default request shape carries a systemInstruction so the converter
+    // attaches `cache_control: { …, scope: 'global' }` to the system text
+    // — that's what `buildPerRequestHeaders` scans to decide whether the
+    // `prompt-caching-scope-2026-01-05` beta ships. Without a system or
+    // tools the body has nothing to attach scope to, and the beta is
+    // correctly suppressed (covered by a separate degenerate-case test
+    // below). Tests can merge their own `requestConfig` to override.
     async function callOnce(
       config: ContentGeneratorConfig,
       requestConfig?: object,
@@ -524,7 +531,10 @@ describe('AnthropicContentGenerator', () => {
       await generator.generateContent({
         model: 'models/ignored',
         contents: 'Hi',
-        ...(requestConfig ? { config: requestConfig } : {}),
+        config: {
+          systemInstruction: 'sys',
+          ...(requestConfig ?? {}),
+        },
       } as unknown as GenerateContentParameters);
       const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
       return ((options as { headers?: Record<string, string> })?.headers ||
@@ -678,6 +688,69 @@ describe('AnthropicContentGenerator', () => {
         Record<string, unknown>
       >;
       expect(userBlocks2[0]).not.toHaveProperty('cache_control');
+    });
+
+    it('suppresses the cache-scope beta when the body has no scope field (empty system + no tools)', async () => {
+      // The beta gate is a body-scan over `req.system` / `req.tools` for
+      // any `cache_control.scope === 'global'` entry, not a re-read of
+      // the `useGlobalCacheScope()` predicate. So a request with no
+      // systemInstruction AND no tools — predicate true but no body
+      // surface to attach scope to — correctly omits the beta.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        { ...baseConfig, reasoning: false },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        // No systemInstruction, no tools.
+      } as unknown as GenerateContentParameters);
+
+      const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(reqHeaders['anthropic-beta']).toBeUndefined();
+    });
+
+    it('ships the cache-scope beta when only tools (no systemInstruction) carry scope:"global"', async () => {
+      // Mirror of the above: scope:'global' on the last tool is enough
+      // for the body-scan to fire, even with no systemInstruction.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        { ...baseConfig, reasoning: false },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(reqHeaders['anthropic-beta']).toBe(
+        'prompt-caching-scope-2026-01-05',
+      );
     });
 
     it('strips the cache-scope beta and scope:"global" field on non-Anthropic baseURLs', async () => {
@@ -872,6 +945,12 @@ describe('AnthropicContentGenerator', () => {
       await generator.generateContent({
         model: 'models/ignored',
         contents: 'Hi',
+        // Include a system instruction so the converter attaches
+        // `cache_control: { …, scope: 'global' }` on the system block —
+        // the beta-header builder body-scans for that field, so a
+        // realistic request shape is needed to observe the
+        // `prompt-caching-scope-2026-01-05` beta.
+        config: { systemInstruction: 'sys' },
       } as unknown as GenerateContentParameters);
 
       // defaultHeaders carries User-Agent and customHeaders (not beta).
@@ -917,6 +996,10 @@ describe('AnthropicContentGenerator', () => {
       const stream = await generator.generateContentStream({
         model: 'models/ignored',
         contents: 'Hi',
+        // See the systemInstruction note in the non-streaming sibling
+        // test above — the body-scan beta gate needs an actual scope:
+        // 'global' field on the wire to fire.
+        config: { systemInstruction: 'sys' },
       } as unknown as GenerateContentParameters);
       // Drain the stream so create() has been called.
       for await (const _chunk of stream) {
@@ -1308,6 +1391,11 @@ describe('AnthropicContentGenerator', () => {
         await generator.generateContent({
           model: 'models/ignored',
           contents: 'Hello',
+          // Include systemInstruction so the body carries a
+          // `cache_control: { scope: 'global' }` field — the beta gate
+          // is now a body-scan, so the test needs an actual scope field
+          // on the wire to observe the `prompt-caching-scope` flag.
+          config: { systemInstruction: 'sys' },
         } as unknown as GenerateContentParameters);
 
         const [req, options] =

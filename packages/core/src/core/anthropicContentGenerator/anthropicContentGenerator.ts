@@ -349,18 +349,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
       betas.push('effort-2025-11-24');
     }
 
-    // Enable global prompt cache scope so identical system/tool prefixes
-    // are cached across sessions, greatly improving cross-session cache hit
-    // rates. The beta and the body-side `scope: 'global'` field always
-    // ship together — gated on `enableCacheControl !== false` AND
-    // Anthropic-native baseURL — so a DeepSeek/IdeaLab proxy stays on its
-    // pre-PR per-session caching shape rather than receiving an
-    // Anthropic-specific extension it may not understand. Symmetric with
-    // the auth/identity gate (`useProxyIdentity`) so all Anthropic-only
-    // wire-shape extensions live behind one predicate. Disabling
-    // `enableCacheControl` also disables the gate, preserving the
-    // `betas.length === 0` early-return below for the all-disabled case.
-    if (this.useGlobalCacheScope()) {
+    // The `prompt-caching-scope-2026-01-05` beta is meaningful only when
+    // the body actually carries a `cache_control: { …, scope: 'global' }`
+    // entry. The converter emits those entries on the system text block
+    // and the last tool entry when `useGlobalCacheScope` is true (gated
+    // on `enableCacheControl !== false` AND Anthropic-native baseURL).
+    // Scan the assembled request body for that field rather than
+    // re-deriving the gate here, so:
+    //   1. The beta and the body-side field share a single source of
+    //      truth — there's no window between sampling the predicate and
+    //      emitting the body where the two could diverge.
+    //   2. The degenerate empty-system + no-tools case (predicate true,
+    //      body has nothing to attach scope to) doesn't ship the beta as
+    //      dead weight.
+    //   3. Anthropic-compatible proxies that disable cache stay clean —
+    //      no body-side scope field means no beta either.
+    if (this.hasGlobalCacheScopeOnWire(anthropicRequest)) {
       betas.push('prompt-caching-scope-2026-01-05');
     }
 
@@ -370,25 +374,61 @@ export class AnthropicContentGenerator implements ContentGenerator {
   }
 
   /**
-   * Whether the global prompt cache scope (the
-   * `prompt-caching-scope-2026-01-05` beta + the body-side
-   * `scope: 'global'` field) should be active for this request.
-   * Requires both `enableCacheControl !== false` AND an Anthropic-native
-   * baseURL — these two outputs always travel together. Computed per
-   * request because `Config.handleModelChange()` hot-updates
+   * Whether to ATTACH the body-side `scope: 'global'` field on
+   * `cache_control` entries this request. Requires both
+   * `enableCacheControl !== false` AND an Anthropic-native baseURL.
+   * Computed per request: `Config.handleModelChange()` hot-updates
    * `enableCacheControl` in-place on the qwen-oauth path (without
-   * recreating the ContentGenerator); for non-qwen-oauth providers a
-   * model change goes through the refresh path which DOES recreate
-   * the ContentGenerator (so `baseUrl` is captured fresh at construct
-   * time, not mutated). Either way reading both fields each request
-   * is the right defensive choice — cheap and avoids stale-cache
-   * surprises if the hot-update list ever expands.
+   * recreating the ContentGenerator); non-qwen-oauth providers refresh
+   * via generator recreation, which captures `baseUrl` fresh at
+   * construct time (not mutated). Reading both fields each request is
+   * the right defense — cheap and avoids stale-cache surprises if the
+   * hot-update list ever expands.
+   *
+   * The matching `prompt-caching-scope-2026-01-05` beta header is NOT
+   * gated on this predicate directly; instead `buildPerRequestHeaders`
+   * scans the assembled body via `hasGlobalCacheScopeOnWire` so the beta
+   * and the body field always agree even in degenerate cases (e.g.
+   * empty-system + no-tools request — predicate true, body has nothing
+   * to attach scope to, beta correctly suppressed).
    */
   private useGlobalCacheScope(): boolean {
     return (
       this.contentGeneratorConfig.enableCacheControl !== false &&
       isAnthropicNativeBaseUrl(this.contentGeneratorConfig)
     );
+  }
+
+  /**
+   * Whether the assembled request body carries any
+   * `cache_control: { …, scope: 'global' }` entry. Scans the system
+   * block (when present as TextBlockParam[]) and the tools array — these
+   * are the only two places the converter attaches scoped cache control.
+   * Used to gate the `prompt-caching-scope-2026-01-05` beta header so it
+   * never ships without a matching body field, and conversely so the
+   * field never ships without the beta declaring it.
+   */
+  private hasGlobalCacheScopeOnWire(
+    req: MessageCreateParamsWithThinking,
+  ): boolean {
+    const isGlobalScope = (block: unknown): boolean => {
+      if (!block || typeof block !== 'object') return false;
+      const cc = (block as { cache_control?: unknown }).cache_control;
+      if (!cc || typeof cc !== 'object') return false;
+      return (cc as { scope?: string }).scope === 'global';
+    };
+
+    if (Array.isArray(req.system)) {
+      for (const block of req.system) {
+        if (isGlobalScope(block)) return true;
+      }
+    }
+    if (Array.isArray(req.tools)) {
+      for (const tool of req.tools) {
+        if (isGlobalScope(tool)) return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -445,15 +485,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const stripAssistantThinking = isDeepSeek && !thinking;
 
     // Sample the live cache-control flags once per request and forward
-    // them to both the converter (body-side `cache_control`) and the
-    // per-request beta-header builder. `Config.setModel()` mutates both
-    // `enableCacheControl` and `baseUrl` in place, so the converter's
-    // constructor-time value would otherwise diverge from the generator's
-    // per-request reads. `useGlobalCacheScope` is a strict subset of
-    // `enableCacheControl` — only true when caching is on AND the resolved
-    // baseURL is Anthropic-native — and governs whether the body
-    // `cache_control` entries carry `scope: 'global'`, paired with the
-    // `prompt-caching-scope-2026-01-05` beta in `buildPerRequestHeaders`.
+    // them to the converter (body-side `cache_control`). The converter's
+    // constructor-time value would otherwise diverge from the live value
+    // on the qwen-oauth path, where `Config.handleModelChange()`
+    // hot-updates `enableCacheControl` in place without recreating the
+    // ContentGenerator. (Non-qwen-oauth providers refresh via generator
+    // recreation, so `baseUrl` is captured fresh at construct time, not
+    // mutated mid-session — defensive per-request reads on both fields
+    // cover both paths.) `useGlobalCacheScope` is a strict subset of
+    // `enableCacheControl` (true only when caching is on AND the resolved
+    // baseURL is Anthropic-native) and governs whether the body's
+    // `cache_control` entries carry `scope: 'global'`. The matching
+    // `prompt-caching-scope-2026-01-05` beta isn't passed through this
+    // sample — `buildPerRequestHeaders` instead scans the assembled body
+    // via `hasGlobalCacheScopeOnWire` so beta and body field share a
+    // single source of truth.
     const enableCacheControl =
       this.contentGeneratorConfig.enableCacheControl !== false;
     const useGlobalCacheScope = this.useGlobalCacheScope();
