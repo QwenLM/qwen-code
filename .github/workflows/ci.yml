@@ -51,7 +51,8 @@ jobs:
       - name: 'Detect release version-sync PR'
         id: 'release_sync'
         env:
-          # Repository variables can override these defaults if release naming changes.
+          # Repository variables can override these defaults if release naming
+          # or the CI bot account changes.
           HEAD_REPO: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || '' }}"
           HEAD_REF: "${{ github.event_name == 'pull_request' && github.head_ref || '' }}"
           PR_TITLE: "${{ github.event_name == 'pull_request' && github.event.pull_request.title || '' }}"
@@ -86,7 +87,7 @@ jobs:
   lint:
     name: 'Lint'
     needs: 'classify_pr'
-    if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
     runs-on: 'ubuntu-latest'
     steps:
       - name: 'Checkout'
@@ -151,7 +152,7 @@ jobs:
   test:
     name: 'Test (${{ matrix.os }}, Node ${{ matrix.node-version }})'
     needs: 'classify_pr'
-    if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
     runs-on: '${{ matrix.os }}'
     permissions:
       contents: 'read'
@@ -272,7 +273,7 @@ jobs:
   codeql:
     name: 'CodeQL'
     needs: 'classify_pr'
-    if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
     runs-on: 'ubuntu-latest'
     permissions:
       actions: 'read'
