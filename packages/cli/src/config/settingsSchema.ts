@@ -843,12 +843,12 @@ const SETTINGS_SCHEMA = {
       },
       useTerminalBuffer: {
         type: 'boolean',
-        label: 'Virtualized History',
+        label: 'Virtualized History (reduces flicker on long sessions)',
         category: 'UI',
         requiresRestart: false,
         default: false,
         description:
-          'Render conversation history in a scrollable viewport instead of the terminal scrollback buffer. Reduces flicker on long sessions. Scroll with Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom). Does NOT use the host terminal scrollback while enabled.',
         showInDialog: true,
       },
       shellOutputMaxLines: {
