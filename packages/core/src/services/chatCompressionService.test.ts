@@ -672,6 +672,52 @@ describe('ChatCompressionService', () => {
     );
   });
 
+  it('forwards model, maxAttempts, and thinkingConfig to runSideQuery', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      hasFailedCompressionAttempt: false,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    // Compression quality depends on thinkingConfig.includeThoughts being on
+    // and maxAttempts being short (best-effort); a future refactor that drops
+    // any of these would silently regress quality without this assertion.
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: mockModel,
+        maxAttempts: 1,
+        config: expect.objectContaining({
+          thinkingConfig: { includeThoughts: true },
+        }),
+      }),
+    );
+  });
+
   it('should return FAILED if new token count is inflated', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
