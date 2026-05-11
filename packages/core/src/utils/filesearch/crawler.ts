@@ -1267,19 +1267,22 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
       api.withMaxDepth(options.maxDepth);
     }
 
-    if (options.maxFiles !== undefined) {
-      api.withMaxFiles(options.maxFiles);
-    }
+    // Do not pass `maxFiles` into fdir: it caps raw walk entries (often
+    // directories first), which can yield no file paths. `crawl()` applies
+    // `applyMaxFilesLimit` after this path, matching git/rg semantics.
 
     results = await api.crawl(options.crawlDirectory).withPromise();
   } catch {
     return [];
   }
 
-  const cwdRelative = results
+  // fdir `withDirs()` already emits directory rows with trailing slashes. Do not
+  // run `buildResultsFromFileSet` here — it would duplicate every directory
+  // (it also synthesizes parents from file paths). Git/rg only list files and
+  // need that helper; fdir does not.
+  return results
     .filter((p) => p.length > 0 && p !== '.')
     .map((p) => path.posix.join(relativeToCrawlDir, p));
-  return buildResultsFromFileSet(new Set(cwdRelative));
 }
 
 export async function crawl(options: CrawlOptions): Promise<string[]> {
@@ -1368,7 +1371,14 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     console.warn('[crawler] falling back to fdir (ripgrep unavailable)');
   }
 
-  const fdirResults = await crawlWithFdir(options);
+  let fdirResults = await crawlWithFdir(options);
+  // Match git/rg list shape (`'.'` first) so `maxFiles` caps the same row count
+  // (including `.`) as the tracked-file paths.
+  if (fdirResults.length === 0) {
+    fdirResults = ['.'];
+  } else if (fdirResults[0] !== '.') {
+    fdirResults = ['.', ...fdirResults];
+  }
   const limitedResults = applyMaxFilesLimit(fdirResults, options.maxFiles);
   updateChangeState(stateKey, options.crawlDirectory, limitedResults);
   recordRebuild(stateKey);

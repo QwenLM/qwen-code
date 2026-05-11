@@ -1517,12 +1517,13 @@ describe('crawler', () => {
       };
 
       const first = await crawl(options);
-      expect(first).toHaveLength(1);
+      expect(first).toHaveLength(2);
+      expect(first).toEqual(expect.arrayContaining(['.', 'file1.js']));
 
       await fs.writeFile(path.join(tmpDir, 'file4.js'), '');
 
       const second = await crawl(options);
-      expect(second).toHaveLength(1);
+      expect(second).toHaveLength(2);
       expect(second).toEqual(first);
     });
   });
