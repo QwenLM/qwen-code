@@ -36,6 +36,49 @@ describe('renameCommand', () => {
     );
   });
 
+  it('exposes an argumentHint covering --auto and <name>', () => {
+    // The completion menu reads argumentHint when the user types
+    // `/rename` and hovers — this is the primary discoverability
+    // affordance, so pin its shape.
+    expect(renameCommand.argumentHint).toBe('[--auto] [<name>]');
+  });
+
+  describe('completion', () => {
+    const run = (partial: string) =>
+      renameCommand.completion!(mockContext, partial);
+
+    it('returns null when the partial argument is empty', async () => {
+      // Match /model's contract: don't pop the menu for free-text titles.
+      // The user opting into a name shouldn't be shadowed by the lone
+      // --auto suggestion.
+      expect(await run('')).toBeNull();
+      expect(await run('   ')).toBeNull();
+    });
+
+    it('suggests --auto when the partial argument is a prefix of it', async () => {
+      // Covers the discovery path: typing `--`, `--a`, `--au`, `--auto`
+      // all match — same shape as /model's --fast handling.
+      for (const partial of ['-', '--', '--a', '--au', '--auto']) {
+        const result = await run(partial);
+        expect(result).toEqual([
+          {
+            value: '--auto',
+            description: expect.stringContaining('fast model'),
+          },
+        ]);
+      }
+    });
+
+    it('returns null when the partial argument is a free-text name', async () => {
+      // Anything that isn't a prefix of --auto is treated as the user
+      // typing the title itself; we don't want to offer --auto in that
+      // case (would feel like noise on `/rename my-feature`).
+      expect(await run('my-feature')).toBeNull();
+      expect(await run('fix bug')).toBeNull();
+      expect(await run('-x')).toBeNull(); // not a --auto prefix
+    });
+  });
+
   it('should return error when config is not available', async () => {
     mockContext.services.config = null;
 

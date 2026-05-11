@@ -188,6 +188,26 @@ export const renameCommand: SlashCommand = {
       'Rename the current conversation. --auto lets the fast model pick a title.',
     );
   },
+  argumentHint: '[--auto] [<name>]',
+  completion: async (_context, partialArg) => {
+    // Only `--auto` is a structured option — the rest is a free-text
+    // title and shouldn't be auto-completed (we don't want the picker to
+    // try to "guess" what name the user wants). Match /model's empty-arg
+    // contract too: return null so the completion menu stays closed
+    // until the user starts typing a flag.
+    const trimmed = partialArg.trim();
+    if (trimmed && '--auto'.startsWith(trimmed)) {
+      return [
+        {
+          value: '--auto',
+          description: t(
+            'Let the fast model generate a sentence-case title from the conversation so far.',
+          ),
+        },
+      ];
+    }
+    return null;
+  },
   action: async (context, args): Promise<SlashCommandActionReturn> => {
     const { config } = context.services;
 
