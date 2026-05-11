@@ -1031,14 +1031,14 @@ export const AppContainer = (props: AppContainerProps) => {
   // When an external process writes a command to the input-file,
   // the watcher calls submitQuery as if the user typed it in the TUI.
   const remoteInput = useRemoteInput();
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!remoteInput) return;
     remoteInput.setSubmitFn((text: string) => submitQuery(text));
   }, [remoteInput, submitQuery]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!remoteInput) return;
     if (streamingState === StreamingState.Idle) {
       remoteInput.notifyIdle();
@@ -1058,7 +1058,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const confirmCallIdMap = useRef(new Map<string, string>()); // callId → requestId
   const confirmEmitted = useRef(new Set<string>());
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!dualOutput || !dualOutput.isConnected) return;
     for (const tc of pendingToolCalls) {
       if (
@@ -1105,7 +1105,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Route confirmation_response commands written to --input-file back into
   // the tool's onConfirm handler. Registered once (deps: [remoteInput]) to
   // avoid teardown/re-registration churn on every pendingToolCalls change.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!remoteInput) return;
     remoteInput.setConfirmationHandler(
       (requestId: string, allowed: boolean) => {
