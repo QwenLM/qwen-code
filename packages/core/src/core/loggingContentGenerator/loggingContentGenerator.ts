@@ -415,20 +415,44 @@ export class LoggingContentGenerator implements ContentGenerator {
     const runInSpan = <T>(fn: () => T): T =>
       spanContext ? context.with(spanContext, fn) : fn();
 
+    // Defensive timeout: if the consumer abandons the generator without
+    // calling .return() (e.g. drops the reference), the span would never
+    // end. Close it after a bounded duration so it doesn't leak forever.
+    const STREAM_SPAN_MAX_MS = 5 * 60_000; // 5 minutes
+    let spanEndTimeout: ReturnType<typeof setTimeout> | undefined;
+    if (span) {
+      spanEndTimeout = setTimeout(() => {
+        try {
+          safeSetStatus(span, {
+            code: SpanStatusCode.ERROR,
+            message: 'Stream span timed out',
+          });
+          span.end();
+        } catch {
+          // OTel errors must not interrupt the consumer.
+        }
+      }, STREAM_SPAN_MAX_MS);
+      spanEndTimeout.unref();
+    }
+
     try {
       for await (const response of stream) {
-        if (!firstResponseId && response.responseId) {
-          firstResponseId = response.responseId;
-        }
-        if (!firstModelVersion && response.modelVersion) {
-          firstModelVersion = response.modelVersion;
-        }
-        if (!isInternal) {
-          responses.push(response);
-        }
-        if (response.usageMetadata) {
-          lastUsageMetadata = response.usageMetadata;
-        }
+        // Run chunk processing inside the span context so any debug logs
+        // emitted during iteration see the stream span as active.
+        runInSpan(() => {
+          if (!firstResponseId && response.responseId) {
+            firstResponseId = response.responseId;
+          }
+          if (!firstModelVersion && response.modelVersion) {
+            firstModelVersion = response.modelVersion;
+          }
+          if (!isInternal) {
+            responses.push(response);
+          }
+          if (response.usageMetadata) {
+            lastUsageMetadata = response.usageMetadata;
+          }
+        });
         yield response;
       }
       // Only log successful API response if no error occurred
@@ -480,6 +504,9 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     } finally {
+      if (spanEndTimeout !== undefined) {
+        clearTimeout(spanEndTimeout);
+      }
       if (!terminalStatusAttempted) {
         if (span) {
           safeSetStatus(span, { code: SpanStatusCode.OK });

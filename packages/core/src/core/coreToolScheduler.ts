@@ -131,9 +131,9 @@ function setToolSpanCancelled(span: Span): void {
   } catch {
     // OTel errors must not block the cancellation status update.
   }
-  safeSetStatus(span, {
-    code: SpanStatusCode.UNSET,
-  });
+  // No explicit span status — cancellation is neither OK nor ERROR.
+  // The caller uses withSpan({ autoOkOnSuccess: false }) so withSpan
+  // will not auto-set OK, and the span ends with the default UNSET status.
 }
 
 async function safelyFirePostToolUseFailureHook(
@@ -1993,7 +1993,6 @@ export class CoreToolScheduler {
                 'User cancelled tool execution.',
               );
             }
-            // Load-bearing: prevents withSpan from auto-setting OK on normal return
             setToolSpanCancelled(span);
             return; // Both code paths should return here
           }
@@ -2160,6 +2159,7 @@ export class CoreToolScheduler {
                 : {}),
             };
             this.setStatusInternal(callId, 'success', successResponse);
+            safeSetStatus(span, { code: SpanStatusCode.OK });
           } else {
             // It is a failure
             // PostToolUseFailure Hook
@@ -2226,7 +2226,6 @@ export class CoreToolScheduler {
                 'User cancelled tool execution.',
               );
             }
-            // Load-bearing: prevents withSpan from auto-setting OK on normal return
             setToolSpanCancelled(span);
             return;
           } else {
@@ -2267,6 +2266,7 @@ export class CoreToolScheduler {
           }
         }
       },
+      { autoOkOnSuccess: false },
     );
   }
 

@@ -109,21 +109,38 @@ function wrapSpanWithStatusTracking(span: Span): {
 }
 
 /**
+ * Options for {@link withSpan}.
+ */
+export interface WithSpanOptions {
+  /**
+   * When true (default), withSpan automatically sets OK status if the
+   * callback resolves without having set a status. When false, the caller
+   * is responsible for setting a terminal status in every code path.
+   * Use false when the callback handles multiple outcomes (success, error,
+   * cancellation) and each path sets its own status.
+   */
+  autoOkOnSuccess?: boolean;
+}
+
+/**
  * Run an async function within a new OTel span.
  * The span inherits the session root traceId when no parent span is active.
  * When the OTel SDK is not initialized, the tracer is a noop.
  *
  * If the callback sets a status explicitly (e.g. ERROR on a handled failure),
  * withSpan will not overwrite it. Only when no status has been set and the
- * callback resolves without throwing will the span be marked OK. If the
- * callback throws before setting status, the span is marked ERROR with a
- * generic message so raw exception text is not exported to OTel backends.
+ * callback resolves without throwing will the span be marked OK (unless
+ * autoOkOnSuccess is false). If the callback throws before setting status,
+ * the span is marked ERROR with a generic message so raw exception text is
+ * not exported to OTel backends.
  */
 export async function withSpan<T>(
   name: string,
   attributes: Record<string, string | number | boolean>,
   fn: (span: Span) => Promise<T>,
+  options?: WithSpanOptions,
 ): Promise<T> {
+  const autoOkOnSuccess = options?.autoOkOnSuccess ?? true;
   const parentCtx = getParentContext();
   return tracer.startActiveSpan(
     name,
@@ -133,7 +150,7 @@ export async function withSpan<T>(
       const { wrappedSpan, wasStatusSet } = wrapSpanWithStatusTracking(span);
       try {
         const result = await fn(wrappedSpan);
-        if (!wasStatusSet()) {
+        if (autoOkOnSuccess && !wasStatusSet()) {
           safeSetStatus(span, { code: SpanStatusCode.OK });
         }
         return result;
@@ -195,6 +212,22 @@ export function startSpanWithContext(
 }
 
 /**
+ * Determine whether the synthetic session root should force the SAMPLED flag.
+ *
+ * With the default `parentbased_always_on` sampler, children of an unsampled
+ * parent are not recorded, so the root must carry SAMPLED for traces to
+ * appear. When a custom sampler is configured (e.g. `traceidratio:0.01`),
+ * forcing SAMPLED would bypass that sampler, making it effectively a no-op.
+ * In that case we use NONE so the sampler evaluates each span independently.
+ */
+function shouldForceSampled(): boolean {
+  const sampler = process.env['OTEL_TRACES_SAMPLER']?.toLowerCase() ?? '';
+  return (
+    !sampler || sampler === 'parentbased_always_on' || sampler === 'always_on'
+  );
+}
+
+/**
  * Create a root context with a deterministic traceId derived from sessionId.
  * All spans created within this context will share the same traceId,
  * consistent with LogToSpanProcessor.
@@ -205,7 +238,7 @@ export function createSessionRootContext(sessionId: string): Context {
   const rootSpan = trace.wrapSpanContext({
     traceId,
     spanId,
-    traceFlags: TraceFlags.SAMPLED,
+    traceFlags: shouldForceSampled() ? TraceFlags.SAMPLED : TraceFlags.NONE,
     isRemote: false,
   });
   return trace.setSpan(ROOT_CONTEXT, rootSpan);

@@ -289,7 +289,10 @@ export function initializeTelemetry(config: Config): void {
     sdk.start();
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
-    setSessionContext(createSessionRootContext(config.getSessionId()));
+    setSessionContext(
+      createSessionRootContext(config.getSessionId()),
+      config.getSessionId(),
+    );
     initializeMetrics(config);
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
@@ -304,7 +307,7 @@ export function initializeTelemetry(config: Config): void {
 export function refreshSessionContext(sessionId: string): void {
   if (!telemetryInitialized) return;
   try {
-    setSessionContext(createSessionRootContext(sessionId));
+    setSessionContext(createSessionRootContext(sessionId), sessionId);
   } catch (error) {
     createDebugLogger('OTEL').warn('Failed to refresh session context:', error);
   }

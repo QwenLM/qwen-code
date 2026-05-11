@@ -28,6 +28,7 @@ import {
   randomHexString,
   randomSpanId,
 } from './trace-id-utils.js';
+import { getCurrentSessionId } from './session-context.js';
 
 const EXPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER_SIZE = 10_000;
@@ -156,9 +157,12 @@ export class LogToSpanProcessor implements LogRecordProcessor {
 
     // Prefer a real active span context when OTel logs provide one, preserving
     // direct parentage. Otherwise derive traceId from session.id so all events
-    // in one session appear under a single trace.
+    // in one session appear under a single trace.  Fall back to
+    // getCurrentSessionId() when the OTel Resource session.id is stale after
+    // a session change (/clear, /resume).
     const parentSpanContext = getValidParentSpanContext(logRecord.spanContext);
-    const sessionId = logRecord.attributes?.['session.id'];
+    const sessionId =
+      logRecord.attributes?.['session.id'] ?? getCurrentSessionId();
     let traceId: string;
     if (parentSpanContext) {
       traceId = parentSpanContext.traceId;
