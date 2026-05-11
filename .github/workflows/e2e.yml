@@ -7,6 +7,12 @@ on:
       - 'feat/e2e/**'
   merge_group:
 
+concurrency:
+  group: |-
+    ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}
+  cancel-in-progress: |-
+    ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
 jobs:
   e2e-test-linux:
     name: 'E2E Test (Linux) - ${{ matrix.sandbox }}'
