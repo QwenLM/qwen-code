@@ -309,6 +309,55 @@ describe('<ModelStatsDisplay />', () => {
     expect(lastFrame()).toContain(`Metric                      ${modelName}`);
   });
 
+  it('keeps fixed model column widths for multiple models even when space is available', () => {
+    const { lastFrame } = renderWithMockedStats(
+      {
+        models: {
+          'model-a': mainOnly({
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+            tokens: {
+              prompt: 10,
+              candidates: 20,
+              total: 30,
+              cached: 0,
+              thoughts: 0,
+            },
+          }),
+          'model-b': mainOnly({
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+            tokens: {
+              prompt: 10,
+              candidates: 20,
+              total: 30,
+              cached: 0,
+              thoughts: 0,
+            },
+          }),
+        },
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+          byName: {},
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      },
+      undefined,
+      120,
+    );
+
+    const headerLine = lastFrame()
+      ?.split('\n')
+      .find((line) => line.includes('Metric') && line.includes('model-a'));
+
+    expect(headerLine).toBeDefined();
+    expect(
+      headerLine!.indexOf('model-b') - headerLine!.indexOf('model-a'),
+    ).toBe(24);
+  });
+
   describe('Subagent source attribution', () => {
     const baseTools: SessionMetrics['tools'] = {
       totalCalls: 0,

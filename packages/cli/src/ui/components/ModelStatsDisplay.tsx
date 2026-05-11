@@ -26,6 +26,7 @@ const METRIC_COL_WIDTH = 28;
 // Sessions with three or more sources will exceed the panel — acceptable per
 // the design doc, which accepts the crowded layout for many-subagent cases.
 const MODEL_COL_WIDTH = 24;
+// Keep this in sync with the surrounding Box borderStyle and paddingX:
 // Ink's round border consumes 2 border columns plus 2 columns of horizontal
 // padding on each side.
 const PANEL_HORIZONTAL_CHROME_WIDTH = 6;
