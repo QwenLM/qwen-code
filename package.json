@@ -1,12 +1,17 @@
 {
-  "name": "@qwen-code/qwen-code",
+  "name": "@alife/dataworks-qwen-code",
   "version": "0.15.10",
   "engines": {
     "node": ">=20.0.0"
   },
   "type": "module",
   "workspaces": [
-    "packages/*",
+    "packages/cli",
+    "packages/core",
+    "packages/sdk-typescript",
+    "packages/vscode-ide-companion",
+    "packages/web-templates",
+    "packages/webui",
     "packages/channels/base",
     "packages/channels/telegram",
     "packages/channels/weixin",
