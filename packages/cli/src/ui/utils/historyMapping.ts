@@ -6,7 +6,7 @@
 
 import type { HistoryItem } from '../types.js';
 import type { Content } from '@google/genai';
-import { STARTUP_CONTEXT_MODEL_ACK } from '@qwen-code/qwen-code-core';
+import { getStartupContextLength } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
 
 /**
@@ -37,33 +37,17 @@ function isUserTextContent(content: Content): boolean {
 }
 
 /**
- * Detects whether the API history starts with the startup context pair
- * (user env context + model acknowledgment).
- */
-function hasStartupContext(apiHistory: Content[]): boolean {
-  if (apiHistory.length < 2) return false;
-  const first = apiHistory[0];
-  const second = apiHistory[1];
-  if (first?.role !== 'user' || second?.role !== 'model') return false;
-  return (
-    second.parts?.some(
-      (part) => 'text' in part && part.text === STARTUP_CONTEXT_MODEL_ACK,
-    ) ?? false
-  );
-}
-
-/**
  * Computes the number of API Content[] entries to keep when rewinding
  * to a specific user turn in the UI history.
  *
  * The API history may include:
- * - A startup context pair: [user(env), model(ack)] at the beginning
+ * - A startup context entry at the beginning
  * - User text prompts (corresponding to UI user turns)
  * - Model responses (with optional functionCall parts)
  * - Tool result entries: user(functionResponse) + model(response)
  *
  * This function counts user text Content entries (skipping tool results
- * and the startup context pair) to find the API boundary corresponding
+ * and the startup context entry) to find the API boundary corresponding
  * to the target UI user turn.
  *
  * Note: In IDE mode, additional user Content entries may be injected for
@@ -94,7 +78,7 @@ export function computeApiTruncationIndex(
   }
 
   // Determine the starting index in the API history (skip startup context)
-  const startIndex = hasStartupContext(apiHistory) ? 2 : 0;
+  const startIndex = getStartupContextLength(apiHistory);
 
   if (uiUserTurnCount === 0) {
     // Rewinding to the first user turn: keep only startup context (if any)

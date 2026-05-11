@@ -251,9 +251,7 @@ describe('AgentCore.prepareTools', () => {
   // toolConfig entirely — must inherit DEFERRED tools too. Otherwise a
   // subagent configured with `tools: ['*']` against a registry that
   // includes MCP / lsp / cron_* tools would silently lose them once
-  // ToolSearch was introduced (the main chat sees them via the
-  // "Deferred Tools" prompt + ToolSearch flow, but subagents don't get
-  // either of those scaffolds).
+  // ToolSearch was introduced.
   function buildAgentForTools(
     toolConfig: ToolConfig | undefined,
     fnDeclarations: FunctionDeclaration[],

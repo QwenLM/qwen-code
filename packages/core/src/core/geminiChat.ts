@@ -53,6 +53,7 @@ import {
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
+import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -326,7 +327,7 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
   let i = 0;
   while (i < length) {
     if (comprehensiveHistory[i].role === 'user') {
-      curatedHistory.push(comprehensiveHistory[i]);
+      appendCuratedContent(curatedHistory, comprehensiveHistory[i]);
       i++;
     } else {
       const modelOutput: Content[] = [];
@@ -344,6 +345,24 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
     }
   }
   return curatedHistory;
+}
+
+function appendCuratedContent(
+  curatedHistory: Content[],
+  content: Content,
+): void {
+  const lastIndex = curatedHistory.length - 1;
+  const lastContent = lastIndex >= 0 ? curatedHistory[lastIndex] : undefined;
+
+  if (content.role === 'user' && lastContent?.role === 'user') {
+    curatedHistory[lastIndex] = {
+      ...lastContent,
+      parts: [...(lastContent.parts ?? []), ...(content.parts ?? [])],
+    };
+    return;
+  }
+
+  curatedHistory.push(content);
 }
 
 function stripThoughtPartsFromContent(content: Content): Content | null {
@@ -1142,6 +1161,12 @@ export class GeminiChat {
       this.history.length > 0 &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
+      if (
+        this.history.length === 1 &&
+        this.history[0]?.parts?.[0]?.text?.startsWith(SYSTEM_REMINDER_OPEN)
+      ) {
+        break;
+      }
       this.history.pop();
     }
   }

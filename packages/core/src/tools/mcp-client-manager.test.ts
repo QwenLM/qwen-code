@@ -52,6 +52,42 @@ describe('McpClientManager', () => {
     expect(mockedMcpClient.discover).toHaveBeenCalledOnce();
   });
 
+  it('returns instructions from connected clients', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      (name: string) =>
+        ({
+          connect: vi.fn(),
+          discover: vi.fn(),
+          disconnect: vi.fn(),
+          getStatus: vi.fn(),
+          getInstructions: vi
+            .fn()
+            .mockReturnValue(
+              name === 'with-instructions' ? 'Use concise replies.' : undefined,
+            ),
+        }) as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({
+        'with-instructions': {},
+        'without-instructions': {},
+      }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+
+    await manager.discoverAllMcpTools(mockConfig);
+
+    expect(manager.getServerInstructions()).toEqual(
+      new Map([['with-instructions', 'Use concise replies.']]),
+    );
+  });
+
   it('should not discover tools if folder is not trusted', async () => {
     const mockedMcpClient = {
       connect: vi.fn(),

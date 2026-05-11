@@ -54,7 +54,7 @@ import {
   getPlanModeSystemReminder,
   getSubagentSystemReminder,
   getArenaSystemReminder,
-  STARTUP_CONTEXT_MODEL_ACK,
+  getStartupContextLength,
   evaluatePermissionFlow,
   needsConfirmation,
   isPlanModeBlocked,
@@ -273,7 +273,7 @@ export class Session implements SessionContext {
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
-    const startIndex = this.#hasStartupContext(apiHistory) ? 2 : 0;
+    const startIndex = getStartupContextLength(apiHistory);
 
     if (targetTurnIndex === 0) {
       return startIndex;
@@ -293,18 +293,6 @@ export class Session implements SessionContext {
     }
 
     return -1;
-  }
-
-  #hasStartupContext(apiHistory: Content[]): boolean {
-    if (apiHistory.length < 2) return false;
-    const first = apiHistory[0];
-    const second = apiHistory[1];
-    if (first?.role !== 'user' || second?.role !== 'model') return false;
-    return (
-      second.parts?.some(
-        (part) => 'text' in part && part.text === STARTUP_CONTEXT_MODEL_ACK,
-      ) ?? false
-    );
   }
 
   #isUserTextContent(content: Content): boolean {

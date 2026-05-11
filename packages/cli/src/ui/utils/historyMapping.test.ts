@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
 import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
+import { SYSTEM_REMINDER_OPEN } from '@qwen-code/qwen-code-core';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,11 +33,8 @@ function functionResponseContent(): Content {
   };
 }
 
-function startupPair(): [Content, Content] {
-  return [
-    userContent('Environment context...'),
-    modelContent('Got it. Thanks for the context!'),
-  ];
+function startupEntry(): Content {
+  return userContent(`${SYSTEM_REMINDER_OPEN}\nEnvironment context...`);
 }
 
 function userItem(id: number, text = `prompt ${id}`): HistoryItem {
@@ -114,16 +112,16 @@ describe('computeApiTruncationIndex', () => {
     });
   });
 
-  describe('with startup context pair', () => {
+  describe('with startup context entry', () => {
     it('keeps startup context when rewinding to the first turn', () => {
       const ui: HistoryItem[] = [userItem(1), geminiItem(2)];
       const api: Content[] = [
-        ...startupPair(),
+        startupEntry(),
         userContent('prompt 1'),
         modelContent('response 1'),
       ];
-      // Rewind to turn 1 → keep startup pair (2 entries)
-      expect(computeApiTruncationIndex(ui, 1, api)).toBe(2);
+      // Rewind to turn 1 -> keep startup entry.
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(1);
     });
 
     it('keeps startup + first turn when rewinding to second turn', () => {
@@ -134,14 +132,14 @@ describe('computeApiTruncationIndex', () => {
         geminiItem(4),
       ];
       const api: Content[] = [
-        ...startupPair(),
+        startupEntry(),
         userContent('prompt 1'),
         modelContent('response 1'),
         userContent('prompt 3'),
         modelContent('response 3'),
       ];
-      // startup(2) + turn1(2) = 4 entries to keep
-      expect(computeApiTruncationIndex(ui, 3, api)).toBe(4);
+      // startup(1) + turn1(2) = 3 entries to keep.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
     });
   });
 

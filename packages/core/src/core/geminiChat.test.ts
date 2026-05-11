@@ -25,6 +25,7 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
 import { ChatCompressionService } from '../services/chatCompressionService.js';
+import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -951,6 +952,82 @@ describe('GeminiChat', async () => {
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
         1,
       );
+    });
+
+    it('coalesces startup reminders with the first user prompt for provider requests', async () => {
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+          ],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'prompt-id-startup-coalesce',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+            { text: 'hello' },
+          ],
+        },
+      ]);
+      expect(chat.getHistory()).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      expect(chat.getHistory(true)).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+            { text: 'hello' },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
     });
 
     it('should not update global telemetry when no telemetryService is provided (subagent isolation)', async () => {
@@ -3001,6 +3078,21 @@ describe('GeminiChat', async () => {
           parts: [{ functionCall: { name: 'tool', args: {} } }],
         },
       ]);
+    });
+
+    it('preserves the startup reminder when stripping a failed first prompt', () => {
+      const startupReminder: Content = {
+        role: 'user',
+        parts: [{ text: `${SYSTEM_REMINDER_OPEN}\nctx\n</system-reminder>` }],
+      };
+      chat.setHistory([
+        startupReminder,
+        { role: 'user', parts: [{ text: 'failed first prompt' }] },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([startupReminder]);
     });
 
     it('should be a no-op when last entry is a model response', () => {

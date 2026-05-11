@@ -57,6 +57,7 @@ describe('mcp-client', () => {
         getStatus: vi.fn(),
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -91,6 +92,38 @@ describe('mcp-client', () => {
       expect(mockedMcpToTool).toHaveBeenCalledOnce();
     });
 
+    it('stores server instructions returned during initialization', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn().mockReturnValue('Use concise replies.'),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'test-server',
+        {
+          command: 'test-command',
+        },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+
+      expect(client.getInstructions()).toBe('Use concise replies.');
+    });
+
     it('should not skip tools even if a parameter is missing a type', async () => {
       const mockedClient = {
         connect: vi.fn(),
@@ -100,6 +133,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         tool: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -160,6 +194,7 @@ describe('mcp-client', () => {
         setRequestHandler: vi.fn(),
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
         request: vi.fn().mockRejectedValue(new Error('Test error')),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,

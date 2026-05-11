@@ -43,6 +43,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { getInitialChatHistory } from '../utils/environmentContext.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -122,20 +123,27 @@ vi.mock('../utils/nextSpeakerChecker', () => ({
   checkNextSpeaker: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../utils/environmentContext', () => ({
+  SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi
     .fn()
     .mockResolvedValue([{ text: 'Mocked env context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
     {
       role: 'user',
-      parts: [{ text: 'Mocked env context' }],
-    },
-    {
-      role: 'model',
-      parts: [{ text: 'Got it. Thanks for the context!' }],
+      parts: [
+        { text: '<system-reminder>\nMocked env context\n</system-reminder>' },
+      ],
     },
     ...(extraHistory ?? []),
   ]),
+  getStartupContextLength: vi.fn((history) => {
+    const first = history?.[0];
+    if (first?.role !== 'user') return 0;
+    const text = first.parts?.[0]?.text;
+    return typeof text === 'string' && text.startsWith('<system-reminder>')
+      ? 1
+      : 0;
+  }),
 }));
 vi.mock('../utils/generateContentResponseUtilities', () => ({
   getResponseText: (result: GenerateContentResponse) =>
@@ -408,6 +416,7 @@ describe('Gemini Client (client.ts)', () => {
       revealDeferredTool: vi.fn(),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getTool: vi.fn().mockReturnValue(null),
+      getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
     };
     const fileService = new FileDiscoveryService('/test/dir');
     const contentGeneratorConfig: ContentGeneratorConfig = {
@@ -629,6 +638,33 @@ describe('Gemini Client (client.ts)', () => {
 
       // No history scan match, ToolSearch available → no reveal at all.
       expect(reg.revealDeferredTool).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('refreshStartupContextReminder', () => {
+    it('removes the startup entry when rebuilding produces no reminder parts', async () => {
+      const currentHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nold deferred reminder\n</system-reminder>',
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'hi' }] },
+      ];
+      const mockChat: Partial<GeminiChat> = {
+        getHistory: vi.fn().mockReturnValue(currentHistory),
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([]);
+
+      await client.refreshStartupContextReminder();
+
+      expect(mockChat.setHistory).toHaveBeenCalledWith(currentHistory.slice(1));
     });
   });
 
@@ -1037,11 +1073,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(client.getHistory()).toEqual([
         {
           role: 'user',
-          parts: [{ text: 'Mocked env context' }],
-        },
-        {
-          role: 'model',
-          parts: [{ text: 'Got it. Thanks for the context!' }],
+          parts: [
+            {
+              text: '<system-reminder>\nMocked env context\n</system-reminder>',
+            },
+          ],
         },
         ...compressedHistory,
       ]);
@@ -3269,7 +3305,6 @@ Other open files:
         'Override prompt',
         'Saved memory',
         undefined,
-        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -3301,7 +3336,6 @@ Other open files:
         '',
         'test-model',
         'Be extra concise.',
-        undefined,
       );
     });
 
@@ -3333,7 +3367,6 @@ Other open files:
         'Override prompt',
         'Saved memory',
         'Focus on findings only.',
-        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({

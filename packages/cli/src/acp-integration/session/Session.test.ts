@@ -11,7 +11,11 @@ import * as path from 'node:path';
 import { Session } from './Session.js';
 import type { Content } from '@google/genai';
 import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  AuthType,
+  SYSTEM_REMINDER_OPEN,
+} from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type {
@@ -247,8 +251,10 @@ describe('Session', () => {
 
     it('preserves startup context when rewinding to the first user turn', () => {
       const history: Content[] = [
-        { role: 'user', parts: [{ text: 'startup context' }] },
-        { role: 'model', parts: [{ text: 'Got it. Thanks for the context!' }] },
+        {
+          role: 'user',
+          parts: [{ text: `${SYSTEM_REMINDER_OPEN}\nstartup context` }],
+        },
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
       ];
@@ -256,8 +262,8 @@ describe('Session', () => {
 
       const result = session.rewindToTurn(0);
 
-      expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 2 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 1 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(1);
     });
 
     it('rejects unreachable user turns', () => {
