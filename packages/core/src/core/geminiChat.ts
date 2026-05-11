@@ -18,12 +18,21 @@ import type {
 } from '@google/genai';
 import { createUserContent, FinishReason } from '@google/genai';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
-import { getErrorStatus } from '../utils/errors.js';
+import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
-import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
+import {
+  getRateLimitErrorDetails,
+  getRateLimitRetryDelayMs,
+  isRateLimitError,
+  type RetryInfo,
+} from '../utils/rateLimit.js';
 import type { Config } from '../config/config.js';
-import { ESCALATED_MAX_TOKENS, tokenLimit } from './tokenLimits.js';
+import {
+  DEFAULT_TOKEN_LIMIT,
+  ESCALATED_MAX_TOKENS,
+  tokenLimit,
+} from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -32,12 +41,26 @@ import {
 } from '../telemetry/loggers.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
+  ChatCompressionService,
+  type CompactTrigger,
+} from '../services/chatCompressionService.js';
+import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
+import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+
+function isCompressionFailureStatus(status: CompressionStatus): boolean {
+  return (
+    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
+    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR
+  );
+}
 
 export enum StreamEventType {
   /** A regular content chunk from the API. */
@@ -45,6 +68,11 @@ export enum StreamEventType {
   /** A signal that a retry is about to happen. The UI should discard any partial
    * content from the attempt that just failed. */
   RETRY = 'retry',
+  /** Emitted once at the start of the stream when an automatic compression
+   * pass succeeded. Carries the compression result so callers (the main
+   * agent UI, subagent loop) can surface it without each call site running
+   * its own compaction step. */
+  COMPRESSED = 'compressed',
 }
 
 export type StreamEvent =
@@ -56,7 +84,8 @@ export type StreamEvent =
        *  fresh restart (escalation). The UI should keep the accumulated text
        *  buffer so the continuation appends to it. */
       isContinuation?: boolean;
-    };
+    }
+  | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo };
 
 /**
  * Options for retrying due to invalid content from the model.
@@ -66,6 +95,11 @@ interface ContentRetryOptions {
   maxAttempts: number;
   /** The base delay in milliseconds for linear backoff. */
   initialDelayMs: number;
+}
+
+interface TryCompressOptions {
+  originalTokenCountOverride?: number;
+  trigger?: CompactTrigger;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -102,12 +136,14 @@ const OUTPUT_RECOVERY_MESSAGE =
 
 /**
  * Options for retrying on rate-limit throttling errors returned as stream content.
- * Fixed 60s delay matches the DashScope per-minute quota window.
+ * Starts at 60s to match DashScope's per-minute quota window, then backs off
+ * across repeated stream-side throttling errors.
  * 10 retries aligns with Claude Code's retry behavior.
  */
 const RATE_LIMIT_RETRY_OPTIONS = {
   maxRetries: 10,
-  delayMs: 60000,
+  initialDelayMs: 60000,
+  maxDelayMs: 5 * 60 * 1000,
 };
 
 /**
@@ -273,6 +309,22 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
   return curatedHistory;
 }
 
+function stripThoughtPartsFromContent(content: Content): Content | null {
+  if (!content.parts) {
+    return content;
+  }
+
+  const parts = content.parts.filter((part) => !(part as Part).thought);
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return {
+    ...content,
+    parts,
+  };
+}
+
 /**
  * Custom error to signal that a stream completed with invalid content,
  * which should trigger a retry.
@@ -300,6 +352,22 @@ export class GeminiChat {
   private sendPromise: Promise<void> = Promise.resolve();
 
   /**
+   * Per-chat last-prompt-token-count, populated from `usageMetadata` on each
+   * model response. Used by the compaction threshold check so that subagents
+   * (which intentionally don't write to the global telemetry singleton) can
+   * still make compaction decisions based on their *own* context size.
+   */
+  private lastPromptTokenCount = 0;
+
+  /**
+   * Per-chat sticky flag. After an unforced compression attempt fails (empty
+   * summary or inflated token count), automatic compaction is suppressed
+   * for the remainder of this chat to avoid burning compression API calls
+   * in a loop. Manual `/compress` still works (it passes `force=true`).
+   */
+  private hasFailedCompressionAttempt = false;
+
+  /**
    * Creates a new GeminiChat instance.
    *
    * @param config - The configuration object.
@@ -319,6 +387,92 @@ export class GeminiChat {
     private readonly telemetryService?: UiTelemetryService,
   ) {
     validateHistory(history);
+  }
+
+  /**
+   * Most recent prompt-token count reported by the model for *this* chat,
+   * mirroring the value in {@link UiTelemetryService} for the main session.
+   * Subagent chats have no telemetry service wired but still need a per-chat
+   * count for compaction decisions, so this is always populated regardless
+   * of whether the global telemetry is updated.
+   */
+  getLastPromptTokenCount(): number {
+    return this.lastPromptTokenCount;
+  }
+
+  /**
+   * Seed the last-prompt-token-count for chats created with inherited
+   * history (forks, subagents, speculation). Without this, the auto-compress
+   * threshold check sees `0` and refuses to compress — so the first API call
+   * can 400 from oversized history. Callers pass the parent chat's
+   * `getLastPromptTokenCount()` here.
+   */
+  setLastPromptTokenCount(count: number): void {
+    this.lastPromptTokenCount = count;
+  }
+
+  /**
+   * Attempt to compress this chat's history.
+   *
+   * Returns the compression info regardless of outcome. On a successful
+   * compaction (`COMPRESSED`), this method has already mutated the chat's
+   * history, recorded the event to `chatRecordingService` (if wired), and
+   * updated both the per-chat token count and (when wired) the global
+   * telemetry singleton.
+   */
+  async tryCompress(
+    promptId: string,
+    model: string,
+    force = false,
+    signal?: AbortSignal,
+    options?: TryCompressOptions,
+  ): Promise<ChatCompressionInfo> {
+    const service = new ChatCompressionService();
+    const { newHistory, info } = await service.compress(this, {
+      promptId,
+      force,
+      model,
+      config: this.config,
+      hasFailedCompressionAttempt: this.hasFailedCompressionAttempt,
+      originalTokenCount:
+        options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      trigger: options?.trigger,
+      signal,
+    });
+
+    if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
+      this.chatRecordingService?.recordChatCompression({
+        info,
+        compressedHistory: newHistory,
+      });
+      // Auto-compaction replaces history in place — no env-context refresh
+      // here. Manual /compress goes through GeminiClient.tryCompressChat,
+      // which calls startChat() to re-prepend a fresh env snapshot. See
+      // GeminiClient.sendMessageStream for the rationale behind the split.
+      this.setHistory(newHistory);
+      // Compaction summarises away prior full-Read tool results, but the
+      // FileReadCache still treats those reads as "in this conversation".
+      // A follow-up Read could then return the file_unchanged placeholder
+      // pointing at content the model can no longer retrieve from history.
+      debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
+      this.config.getFileReadCache().clear();
+      this.lastPromptTokenCount = info.newTokenCount;
+      // Mirror to the global singleton only when wired (main session).
+      // Subagents pass `telemetryService=undefined` to keep their context
+      // usage out of the main agent's UI counters.
+      this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
+      // Re-enable auto-compaction so a forced /compress recovers a chat
+      // that an earlier auto-attempt latched off.
+      this.hasFailedCompressionAttempt = false;
+    } else if (isCompressionFailureStatus(info.compressionStatus)) {
+      // Track failed attempts (only mark as failed if not forced) so we
+      // stop spending compression-API calls on a chat that can't shrink.
+      if (!force) {
+        this.hasFailedCompressionAttempt = true;
+      }
+    }
+
+    return info;
   }
 
   setSystemInstruction(sysInstr: string) {
@@ -360,19 +514,58 @@ export class GeminiChat {
     });
     this.sendPromise = streamDonePromise;
 
-    const userContent = createUserContent(params.message);
+    let compressionInfo: ChatCompressionInfo;
+    let requestContents: Content[];
+    let userContentAdded = false;
+    try {
+      // The send-lock above is held but the generator's `finally` (which
+      // resolves it) has not run yet. Any setup error before returning the
+      // generator must release the lock or subsequent sends will block forever
+      // at `await this.sendPromise`.
+      compressionInfo = await this.tryCompress(
+        prompt_id,
+        model,
+        false,
+        params.config?.abortSignal,
+      );
 
-    // Add user content to history ONCE before any attempts.
-    this.history.push(userContent);
-    const requestContents = this.getHistory(true);
+      const userContent = createUserContent(params.message);
+
+      // Add user content to history ONCE before any attempts.
+      this.history.push(userContent);
+      userContentAdded = true;
+      requestContents = this.getHistory(true);
+    } catch (error) {
+      if (userContentAdded) {
+        this.history.pop();
+      }
+      streamDoneResolver!();
+      throw error;
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     return (async function* () {
       try {
+        // Surface a successful auto-compression to the caller as the first
+        // event in the stream. Failed/skipped compaction attempts are silent.
+        // Must be inside the try so that a consumer abandoning the stream
+        // immediately after this event still triggers the finally below;
+        // otherwise `streamDoneResolver` never fires and the next send hangs.
+        if (
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+        ) {
+          yield {
+            type: StreamEventType.COMPRESSED,
+            info: compressionInfo,
+          };
+        }
+
         let lastError: unknown = new Error('Request failed after all retries.');
         let rateLimitRetryCount = 0;
         let invalidStreamRetryCount = 0;
+        let reactiveCompressionAttempted = false;
+        let suppressNextRetryEvent = false;
 
         // Read per-config overrides; fall back to built-in defaults.
         const cgConfig = self.config.getContentGeneratorConfig();
@@ -397,7 +590,9 @@ export class GeminiChat {
           attempt++
         ) {
           try {
-            if (
+            if (suppressNextRetryEvent) {
+              suppressNextRetryEvent = false;
+            } else if (
               attempt > 0 ||
               rateLimitRetryCount > 0 ||
               invalidStreamRetryCount > 0
@@ -431,14 +626,22 @@ export class GeminiChat {
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
               rateLimitRetryCount++;
-              const delayMs = RATE_LIMIT_RETRY_OPTIONS.delayMs;
+              const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
+                ...RATE_LIMIT_RETRY_OPTIONS,
+                error,
+              });
               const message = parseAndFormatApiError(
                 error instanceof Error ? error.message : String(error),
               );
-              debugLogger.warn(
-                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${maxRateLimitRetries}). ` +
-                  `Waiting ${delayMs / 1000}s before retrying...`,
-              );
+              const details = getRateLimitErrorDetails(error);
+              debugLogger.warn('Rate limit retry scheduled', {
+                retryPath: 'stream',
+                retryDecision: 'retry',
+                attempt: rateLimitRetryCount,
+                maxRetries: maxRateLimitRetries,
+                retryDelayMs: delayMs,
+                ...details,
+              });
               const { promise: delayPromise, skip } = delay(
                 delayMs,
                 params.config?.abortSignal,
@@ -457,6 +660,91 @@ export class GeminiChat {
               attempt--;
               await delayPromise;
               continue;
+            }
+            if (isRateLimit) {
+              debugLogger.warn('Rate limit retry exhausted', {
+                retryPath: 'stream',
+                retryDecision: 'exhausted',
+                attempts: rateLimitRetryCount,
+                maxRetries: maxRateLimitRetries,
+                ...getRateLimitErrorDetails(error),
+              });
+            }
+
+            const contextOverflow = getContextLengthExceededInfo(error);
+            if (contextOverflow.isExceeded) {
+              if (!reactiveCompressionAttempted) {
+                reactiveCompressionAttempted = true;
+                const reactiveOriginalTokenCount =
+                  contextOverflow.actualTokens ??
+                  contextOverflow.limitTokens ??
+                  self.config.getContentGeneratorConfig()?.contextWindowSize ??
+                  DEFAULT_TOKEN_LIMIT;
+                debugLogger.warn(
+                  'Context length exceeded; attempting reactive compression.',
+                );
+                try {
+                  const reactiveInfo = await self.tryCompress(
+                    prompt_id,
+                    model,
+                    true,
+                    params.config?.abortSignal,
+                    {
+                      originalTokenCountOverride: reactiveOriginalTokenCount,
+                      trigger: 'auto',
+                    },
+                  );
+
+                  if (
+                    reactiveInfo.compressionStatus ===
+                    CompressionStatus.COMPRESSED
+                  ) {
+                    requestContents = self.getHistory(true);
+                    debugLogger.info(
+                      `Reactive compression succeeded: ` +
+                        `${reactiveInfo.originalTokenCount} -> ` +
+                        `${reactiveInfo.newTokenCount} tokens.`,
+                    );
+                    yield {
+                      type: StreamEventType.COMPRESSED,
+                      info: reactiveInfo,
+                    };
+                    yield { type: StreamEventType.RETRY };
+                    suppressNextRetryEvent = true;
+                    // Do not count reactive compression against the content
+                    // validation retry budget.
+                    attempt--;
+                    continue;
+                  }
+
+                  debugLogger.warn(
+                    `Reactive compression did not recover context overflow: ` +
+                      `status=${reactiveInfo.compressionStatus}.`,
+                  );
+                  if (
+                    isCompressionFailureStatus(reactiveInfo.compressionStatus)
+                  ) {
+                    self.hasFailedCompressionAttempt = true;
+                  }
+                } catch (compressionError) {
+                  if (
+                    params.config?.abortSignal?.aborted ||
+                    isAbortError(compressionError)
+                  ) {
+                    throw compressionError;
+                  }
+                  debugLogger.warn(
+                    'Reactive compression failed.',
+                    compressionError,
+                  );
+                }
+              } else {
+                debugLogger.warn(
+                  'Reactive compression already attempted; ' +
+                    'propagating the context overflow error to caller.',
+                );
+              }
+              break;
             }
 
             // Transient stream anomalies (NO_FINISH_REASON / NO_RESPONSE_TEXT):
@@ -771,6 +1059,15 @@ export class GeminiChat {
   }
 
   /**
+   * Returns the number of entries in the raw chat history. O(1) and
+   * does not clone — use this when you only need the count and would
+   * otherwise pay the {@link getHistory} `structuredClone` cost.
+   */
+  getHistoryLength(): number {
+    return this.history.length;
+  }
+
+  /**
    * Clears the chat history.
    */
   clearHistory(): void {
@@ -794,124 +1091,8 @@ export class GeminiChat {
 
   stripThoughtsFromHistory(): void {
     this.history = this.history
-      .map((content) => {
-        if (!content.parts) return content;
-
-        // Filter out thought parts entirely
-        const filteredParts = content.parts
-          .filter(
-            (part) =>
-              !(
-                part &&
-                typeof part === 'object' &&
-                'thought' in part &&
-                part.thought
-              ),
-          )
-          .map((part) => {
-            if (
-              part &&
-              typeof part === 'object' &&
-              'thoughtSignature' in part
-            ) {
-              const newPart = { ...part };
-              delete (newPart as { thoughtSignature?: string })
-                .thoughtSignature;
-              return newPart;
-            }
-            return part;
-          });
-
-        return {
-          ...content,
-          parts: filteredParts,
-        };
-      })
-      // Remove Content objects that have no parts left after filtering
-      .filter((content) => content.parts && content.parts.length > 0);
-  }
-
-  /**
-   * Strip thought parts from history, keeping the most recent `keepTurns`
-   * model turns that contain thinking blocks intact.
-   *
-   * Selection is based on thought-containing turns specifically (not all
-   * model turns) so the most recent reasoning chain is always preserved
-   * even if later model turns happen to have no thinking.
-   *
-   * Used for idle cleanup: after exceeding the configured idle threshold
-   * the old thinking blocks are no longer useful for reasoning coherence
-   * but still consume context tokens.
-   */
-  stripThoughtsFromHistoryKeepRecent(keepTurns: number): void {
-    keepTurns = Number.isFinite(keepTurns)
-      ? Math.max(0, Math.floor(keepTurns))
-      : 0;
-
-    // Find indices of model turns that contain thought parts
-    const modelTurnIndices: number[] = [];
-    for (let i = 0; i < this.history.length; i++) {
-      const content = this.history[i];
-      if (
-        content.role === 'model' &&
-        content.parts?.some(
-          (part) =>
-            part &&
-            typeof part === 'object' &&
-            'thought' in part &&
-            part.thought,
-        )
-      ) {
-        modelTurnIndices.push(i);
-      }
-    }
-
-    // Determine which model turns to keep (the most recent `keepTurns`)
-    const turnsToStrip = new Set(
-      modelTurnIndices.slice(
-        0,
-        Math.max(0, modelTurnIndices.length - keepTurns),
-      ),
-    );
-
-    if (turnsToStrip.size === 0) return;
-
-    this.history = this.history
-      .map((content, index) => {
-        if (!turnsToStrip.has(index) || !content.parts) return content;
-
-        // Strip thought parts from this turn
-        const filteredParts = content.parts
-          .filter(
-            (part) =>
-              !(
-                part &&
-                typeof part === 'object' &&
-                'thought' in part &&
-                part.thought
-              ),
-          )
-          .map((part) => {
-            if (
-              part &&
-              typeof part === 'object' &&
-              'thoughtSignature' in part
-            ) {
-              const newPart = { ...part };
-              delete (newPart as { thoughtSignature?: string })
-                .thoughtSignature;
-              return newPart;
-            }
-            return part;
-          });
-
-        return {
-          ...content,
-          parts: filteredParts,
-        };
-      })
-      // Remove Content objects that have no parts left after filtering
-      .filter((content) => content.parts && content.parts.length > 0);
+      .map(stripThoughtPartsFromContent)
+      .filter((content): content is Content => content !== null);
   }
 
   /**
@@ -1003,8 +1184,14 @@ export class GeminiChat {
         // Some providers omit total_tokens or return 0 in streaming usage chunks.
         const lastPromptTokenCount =
           usageMetadata.totalTokenCount || usageMetadata.promptTokenCount;
-        if (lastPromptTokenCount && this.telemetryService) {
-          this.telemetryService.setLastPromptTokenCount(lastPromptTokenCount);
+        if (lastPromptTokenCount) {
+          // Always update the per-chat counter so this chat (including
+          // subagents) can make its own compaction decisions.
+          this.lastPromptTokenCount = lastPromptTokenCount;
+          // Mirror to the global telemetry only when wired — subagents
+          // pass `telemetryService=undefined` to keep their context usage
+          // out of the main session's UI counters.
+          this.telemetryService?.setLastPromptTokenCount(lastPromptTokenCount);
         }
         if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
           this.telemetryService.setLastCachedContentTokenCount(

@@ -20,6 +20,7 @@ import { OverflowProvider } from '../contexts/OverflowContext.js';
 
 const staticPropsSpy = vi.fn();
 const staticItemsSpy = vi.fn();
+const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
 
 vi.mock('ink', async () => {
@@ -47,9 +48,10 @@ vi.mock('./AppHeader.js', () => ({
 }));
 
 vi.mock('./HistoryItemDisplay.js', () => ({
-  HistoryItemDisplay: ({ item }: { item: { id: number } }) => (
-    <Text>{`HISTORY:${item.id}`}</Text>
-  ),
+  HistoryItemDisplay: (props: { item: { id: number } }) => {
+    historyItemDisplayPropsSpy(props);
+    return <Text>{`HISTORY:${props.item.id}`}</Text>;
+  },
 }));
 
 vi.mock('./ShowMoreLines.js', () => ({
@@ -70,13 +72,19 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     historyManager: {} as UIState['historyManager'],
     isThemeDialogOpen: false,
     themeError: null,
-    isAuthenticating: false,
+    auth: {
+      authError: null,
+      isAuthDialogOpen: false,
+      isAuthenticating: false,
+      pendingAuthType: undefined,
+      externalAuthState: null,
+      qwenAuthState: {
+        deviceAuth: null,
+        authStatus: 'idle',
+        authMessage: null,
+      },
+    },
     isConfigInitialized: true,
-    authError: null,
-    isAuthDialogOpen: false,
-    pendingAuthType: undefined,
-    externalAuthState: null,
-    qwenAuthState: {} as UIState['qwenAuthState'],
     editorError: null,
     isEditorDialogOpen: false,
     debugMessage: '',
@@ -99,7 +107,7 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     shellConfirmationRequest: null,
     confirmationRequest: null,
     confirmUpdateExtensionRequests: [],
-    codingPlanUpdateRequest: undefined,
+    providerUpdateRequest: undefined,
     settingInputRequests: [],
     pluginChoiceRequests: [],
     loopDetectionConfirmationRequest: null,
@@ -201,6 +209,7 @@ describe('<MainContent />', () => {
   it('renders AppHeader inside Static at the top of the static content', () => {
     staticPropsSpy.mockClear();
     staticItemsSpy.mockClear();
+    historyItemDisplayPropsSpy.mockClear();
     appHeaderSpy.mockClear();
 
     const { lastFrame, rerender } = renderMainContent(
@@ -242,5 +251,209 @@ describe('<MainContent />', () => {
 
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(3);
     expect(appHeaderSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('continues source copy numbering from static history into pending chunks', () => {
+    historyItemDisplayPropsSpy.mockClear();
+
+    renderMainContent(
+      createUIState({
+        history: [
+          {
+            id: 1,
+            type: 'gemini_content',
+            text: [
+              '```mermaid',
+              'flowchart TD',
+              '  A --> B',
+              '```',
+              '$$',
+              '\\alpha',
+              '$$',
+            ].join('\n'),
+          },
+        ],
+        pendingHistoryItems: [
+          {
+            type: 'gemini_content',
+            text: [
+              '```mermaid',
+              'sequenceDiagram',
+              '  A->>B: hi',
+              '```',
+              '$$',
+              '\\beta',
+              '$$',
+            ].join('\n'),
+          },
+        ],
+      }),
+    );
+
+    const pendingProps = historyItemDisplayPropsSpy.mock.calls
+      .map((call) => call[0])
+      .find((props) => props.isPending);
+
+    expect(pendingProps?.sourceCopyIndexOffsets).toMatchObject({
+      mathBlockCount: 1,
+    });
+    expect(
+      pendingProps?.sourceCopyIndexOffsets?.codeBlockLanguageCounts.get(
+        'mermaid',
+      ),
+    ).toBe(1);
+  });
+
+  it('passes the full history to Static in one render when below the progressive replay threshold', () => {
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 50 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+
+    renderMainContent(createUIState({ history }));
+
+    // 3 prefix items (header / debug / notifications) + 50 history items
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
+  });
+
+  it('progressively replays Static items when history exceeds the threshold (issue #3899)', async () => {
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 200 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+
+    renderMainContent(createUIState({ history }));
+
+    const lengthAtLastCall = () =>
+      staticItemsSpy.mock.calls.at(-1)?.[0].length ?? 0;
+
+    // Initial render: only the first chunk (50) plus the 3 prefix items
+    // should be in Static — long history must not block the input thread.
+    const TOTAL = 203; // 200 history + 3 prefix items
+    expect(lengthAtLastCall()).toBe(53);
+    expect(lengthAtLastCall()).toBeLessThan(TOTAL);
+
+    // Drain setImmediate ticks. Each iteration must not regress the visible
+    // count (monotonic) and we must reach TOTAL inside the loop budget — a
+    // silent regression that stops advancing will fail the final assert
+    // rather than spuriously time out.
+    let prev = lengthAtLastCall();
+    for (let i = 0; i < 50; i++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const curr = lengthAtLastCall();
+      expect(curr).toBeGreaterThanOrEqual(prev); // never shrinks mid-replay
+      prev = curr;
+      if (curr === TOTAL) break;
+    }
+
+    // After catch-up the full history must be present.
+    expect(lengthAtLastCall()).toBe(TOTAL);
+  });
+
+  it('renders newly finalized item without a disappear frame when gap is within CHUNK_SIZE (issue #3899)', () => {
+    // Regression: when a pending item finalizes, it is removed from
+    // pendingHistoryItems immediately. If replayCount still lags behind
+    // mergedHistory.length by ≤ PROGRESSIVE_REPLAY_CHUNK_SIZE, the item
+    // would be absent from BOTH areas for one render frame. The gap-based
+    // condition must render the full list synchronously in that case.
+    //
+    // Setup: 100 items = exactly the replay threshold, so initialReplayCount
+    // returns 100 (fully shown, no chunking). The component state is stable
+    // at replayCount=100 with no pending effects.
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 100 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+
+    const { rerender } = renderMainContent(
+      createUIState({ history, historyRemountKey: 1 }),
+    );
+    // All 100 + 3 prefix items rendered immediately (below/at threshold).
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(103);
+
+    // Simulate a pending item finalizing: history grows by 1, same remount key.
+    // replayCount is 100; new length is 101; gap = 1 ≤ PROGRESSIVE_REPLAY_CHUNK_SIZE (50).
+    staticItemsSpy.mockClear();
+    rerender(
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <CompactModeProvider value={{ compactMode: false }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                history: [
+                  ...history,
+                  { type: 'user' as const, id: 100, text: 'new msg' },
+                ],
+                historyRemountKey: 1,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </CompactModeProvider>
+      </AppContext.Provider>,
+    );
+
+    // The first render after the append must show all 104 items — no frame
+    // where the 101st item disappears (which would register as 103 here).
+    expect(staticItemsSpy.mock.calls[0]?.[0]).toHaveLength(104);
+  });
+
+  it('synchronously resets to the first chunk on historyRemountKey change after a full catch-up (Ctrl+O regression, issue #3899)', async () => {
+    // Wenshao's review: with the previous useEffect-based reset, the FIRST
+    // render after a Ctrl+O-induced historyRemountKey bump would still feed
+    // <Static> the full (pre-reset) replayCount, causing the synchronous
+    // remount blocking the input thread that the PR is trying to fix. This
+    // test pins the synchronous-reset behavior.
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 200 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+    const TOTAL = 203;
+
+    const { rerender } = renderMainContent(
+      createUIState({ history, historyRemountKey: 1 }),
+    );
+
+    // Drive the chunked replay to completion.
+    for (let i = 0; i < 50; i++) {
+      const len = staticItemsSpy.mock.calls.at(-1)?.[0].length ?? 0;
+      if (len === TOTAL) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
+
+    // Re-render with a bumped key — analogous to refreshStatic() firing.
+    // The very next render must immediately drop back to the first chunk;
+    // if reset were deferred to useEffect, <Static> would receive 203 items
+    // first and Ink would do the synchronous full-history layout the PR is
+    // meant to avoid.
+    rerender(
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <CompactModeProvider value={{ compactMode: false }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({ history, historyRemountKey: 2 })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </CompactModeProvider>
+      </AppContext.Provider>,
+    );
+
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
   });
 });

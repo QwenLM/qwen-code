@@ -9,15 +9,18 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Session } from './Session.js';
+import type { Content } from '@google/genai';
 import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
   PromptRequest,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
+import { CommandKind } from '../../ui/commands/types.js';
 
 vi.mock('../../nonInteractiveCliCommands.js', () => ({
   ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE: [
@@ -46,6 +49,20 @@ function createStreamWithChunks(
   })();
 }
 
+function expectCompressBeforeSend(
+  compressMock: ReturnType<typeof vi.fn>,
+  sendMock: ReturnType<typeof vi.fn>,
+  callIndex: number,
+) {
+  expect(compressMock.mock.invocationCallOrder.length).toBeGreaterThan(
+    callIndex,
+  );
+  expect(sendMock.mock.invocationCallOrder.length).toBeGreaterThan(callIndex);
+  expect(compressMock.mock.invocationCallOrder[callIndex]).toBeLessThan(
+    sendMock.mock.invocationCallOrder[callIndex],
+  );
+}
+
 describe('Session', () => {
   let mockChat: GeminiChat;
   let mockConfig: Config;
@@ -56,6 +73,17 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
+  let mockChatRecordingService: {
+    recordUserMessage: ReturnType<typeof vi.fn>;
+    recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
+    recordToolResult: ReturnType<typeof vi.fn>;
+    recordSlashCommand: ReturnType<typeof vi.fn>;
+    rewindRecording: ReturnType<typeof vi.fn>;
+  };
+  let mockGeminiClient: {
+    getChat: ReturnType<typeof vi.fn>;
+    tryCompressChat: ReturnType<typeof vi.fn>;
+  };
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
@@ -74,7 +102,26 @@ describe('Session', () => {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      setHistory: vi.fn(),
+      truncateHistory: vi.fn(),
+      stripThoughtsFromHistory: vi.fn(),
     } as unknown as GeminiChat;
+    mockGeminiClient = {
+      getChat: vi.fn().mockReturnValue(mockChat),
+      tryCompressChat: vi.fn().mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: core.CompressionStatus.NOOP,
+      }),
+    };
+
+    mockChatRecordingService = {
+      recordUserMessage: vi.fn(),
+      recordUiTelemetryEvent: vi.fn(),
+      recordToolResult: vi.fn(),
+      recordSlashCommand: vi.fn(),
+      rewindRecording: vi.fn(),
+    };
 
     mockToolRegistry = {
       getTool: vi.fn(),
@@ -98,11 +145,9 @@ describe('Session', () => {
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
-      getChatRecordingService: vi.fn().mockReturnValue({
-        recordUserMessage: vi.fn(),
-        recordUiTelemetryEvent: vi.fn(),
-        recordToolResult: vi.fn(),
-      }),
+      getChatRecordingService: vi
+        .fn()
+        .mockReturnValue(mockChatRecordingService),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       // #buildInitialSystemReminders iterates listSubagents() on every
       // session.prompt(). Default to an empty list so tests that don't
@@ -117,9 +162,8 @@ describe('Session', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       isCronEnabled: vi.fn().mockReturnValue(false),
-      getGeminiClient: vi
-        .fn()
-        .mockReturnValue({ getChat: vi.fn().mockReturnValue(mockChat) }),
+      getSessionTokenLimit: vi.fn().mockReturnValue(0),
+      getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
     } as unknown as Config;
 
     mockClient = {
@@ -132,7 +176,11 @@ describe('Session', () => {
 
     mockSettings = {
       merged: {},
-    } as LoadedSettings;
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
 
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
       .getAvailableCommands as unknown as ReturnType<typeof vi.fn>;
@@ -155,6 +203,7 @@ describe('Session', () => {
     mockConfig = undefined as unknown as Config;
     mockClient = undefined as unknown as AgentSideConnection;
     mockSettings = undefined as unknown as LoadedSettings;
+    mockGeminiClient = undefined as unknown as typeof mockGeminiClient;
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
@@ -176,6 +225,134 @@ describe('Session', () => {
     });
   });
 
+  describe('rewindToTurn', () => {
+    it('truncates model history before the requested user turn and records rewind', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+
+      const result = session.rewindToTurn(1);
+
+      expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(1, {
+        truncatedCount: 2,
+      });
+    });
+
+    it('preserves startup context when rewinding to the first user turn', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'startup context' }] },
+        { role: 'model', parts: [{ text: 'Got it. Thanks for the context!' }] },
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+
+      const result = session.rewindToTurn(0);
+
+      expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 2 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+    });
+
+    it('rejects unreachable user turns', () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'first' }] },
+      ]);
+
+      expect(() => session.rewindToTurn(2)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a cron prompt is mutating history', () => {
+      (session as unknown as { cronProcessing: boolean }).cronProcessing = true;
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects invalid target turn indexes', () => {
+      expect(() => session.rewindToTurn(-1)).toThrow(
+        'targetTurnIndex must be a non-negative integer',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a prompt is running', () => {
+      (session as unknown as { pendingPrompt: AbortController }).pendingPrompt =
+        new AbortController();
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a cron abort is active', () => {
+      (
+        session as unknown as { cronAbortController: AbortController }
+      ).cronAbortController = new AbortController();
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('restores a captured history snapshot', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+
+      const snapshot = session.captureHistorySnapshot();
+      session.restoreHistory(snapshot);
+
+      expect(snapshot).toEqual(history);
+      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+    });
+
+    it('rejects history restore while a prompt is running', () => {
+      (session as unknown as { pendingPrompt: AbortController }).pendingPrompt =
+        new AbortController();
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects history restore while a cron prompt is mutating history', () => {
+      (session as unknown as { cronProcessing: boolean }).cronProcessing = true;
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects history restore while a cron abort is active', () => {
+      (
+        session as unknown as { cronAbortController: AbortController }
+      ).cronAbortController = new AbortController();
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+  });
+
   describe('setModel', () => {
     it('sets model via config and returns current model', async () => {
       const requested = `qwen3-coder-plus(${AuthType.USE_OPENAI})`;
@@ -189,6 +366,16 @@ describe('Session', () => {
         'qwen3-coder-plus',
         undefined,
       );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'qwen3-coder-plus',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'security.auth.selectedType',
+        AuthType.USE_OPENAI,
+      );
     });
 
     it('rejects empty/whitespace model IDs', async () => {
@@ -200,6 +387,24 @@ describe('Session', () => {
       ).rejects.toThrow('Invalid params');
 
       expect(mockConfig.switchModel).not.toHaveBeenCalled();
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
+    it('can switch the session model without persisting a new default', async () => {
+      await session.setModel(
+        {
+          sessionId: 'test-session-id',
+          modelId: `qwen3-coder-flash(${AuthType.USE_OPENAI})`,
+        },
+        { persistDefault: false },
+      );
+
+      expect(mockConfig.switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'qwen3-coder-flash',
+        undefined,
+      );
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
 
     it('propagates errors from config.switchModel', async () => {
@@ -212,6 +417,7 @@ describe('Session', () => {
           modelId: `invalid-model(${AuthType.USE_OPENAI})`,
         }),
       ).rejects.toThrow('Invalid model');
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
   });
 
@@ -221,7 +427,25 @@ describe('Session', () => {
         {
           name: 'init',
           description: 'Initialize project context',
+          kind: 'built-in',
           argumentHint: '[path]',
+          source: 'builtin-command',
+          sourceLabel: 'Built-in',
+          supportedModes: ['interactive', 'non_interactive', 'acp'],
+          modelInvocable: false,
+          subCommands: [
+            {
+              name: 'visible',
+              description: 'Visible subcommand',
+              kind: CommandKind.BUILT_IN,
+            },
+            {
+              name: 'hidden',
+              description: 'Hidden subcommand',
+              kind: CommandKind.BUILT_IN,
+              hidden: true,
+            },
+          ],
         },
       ]);
 
@@ -231,6 +455,7 @@ describe('Session', () => {
         mockConfig,
         expect.any(AbortSignal),
         'acp',
+        mockSettings,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -241,6 +466,95 @@ describe('Session', () => {
               name: 'init',
               description: 'Initialize project context',
               input: { hint: '[path]' },
+              _meta: {
+                argumentHint: '[path]',
+                source: 'builtin-command',
+                sourceLabel: 'Built-in',
+                supportedModes: ['interactive', 'non_interactive', 'acp'],
+                subcommands: ['visible'],
+                modelInvocable: false,
+              },
+            },
+          ],
+        },
+      });
+    });
+
+    it('forwards localized command descriptions from getAvailableCommands()', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'review',
+          description: '审查代码变更',
+          kind: CommandKind.SKILL,
+          source: 'skill-dir-command',
+          sourceLabel: '用户',
+          sourceDetail: 'user',
+          supportedModes: ['acp'],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.any(AbortSignal),
+        'acp',
+        mockSettings,
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'review',
+              description: '审查代码变更',
+              input: { hint: '' },
+              _meta: {
+                argumentHint: undefined,
+                source: 'skill-dir-command',
+                sourceLabel: '用户',
+                supportedModes: ['acp'],
+                subcommands: [],
+                modelInvocable: false,
+              },
+            },
+          ],
+        },
+      });
+    });
+
+    it('sets input for built-in commands with subCommands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'export',
+          description: 'Export conversation history',
+          kind: 'built-in',
+          subCommands: [
+            { name: 'md', description: 'Export as markdown', kind: 'built-in' },
+          ],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'export',
+              description: 'Export conversation history',
+              input: { hint: '' },
+              _meta: {
+                argumentHint: undefined,
+                source: undefined,
+                sourceLabel: undefined,
+                supportedModes: ['interactive'],
+                subcommands: ['md'],
+                modelInvocable: false,
+              },
             },
           ],
         },
@@ -252,6 +566,7 @@ describe('Session', () => {
         {
           name: 'init',
           description: 'Initialize project context',
+          kind: 'built-in',
         },
       ]);
       mockConfig.getSkillManager = vi.fn().mockReturnValue({
@@ -275,6 +590,14 @@ describe('Session', () => {
               name: 'init',
               description: 'Initialize project context',
               input: null,
+              _meta: {
+                argumentHint: undefined,
+                source: undefined,
+                sourceLabel: undefined,
+                supportedModes: ['interactive'],
+                subcommands: [],
+                modelInvocable: false,
+              },
             },
           ],
           _meta: {
@@ -297,6 +620,1012 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    describe('auto-compress', () => {
+      it('runs automatic compression before sending an ACP prompt', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledWith(
+          'test-session-id########1',
+          false,
+          expect.any(AbortSignal),
+        );
+
+        const sendMessageStream = mockChat.sendMessageStream as ReturnType<
+          typeof vi.fn
+        >;
+        expectCompressBeforeSend(
+          mockGeminiClient.tryCompressChat,
+          sendMessageStream,
+          0,
+        );
+      });
+
+      it('uses the current chat after automatic compression replaces it', async () => {
+        const compressedChat = {
+          sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+        } as unknown as GeminiChat;
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        mockGeminiClient.tryCompressChat.mockImplementation(async () => {
+          mockGeminiClient.getChat.mockReturnValue(compressedChat);
+          return {
+            originalTokenCount: 1000,
+            newTokenCount: 200,
+            compressionStatus: core.CompressionStatus.COMPRESSED,
+          };
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(compressedChat.sendMessageStream).toHaveBeenCalledWith(
+          'qwen3-code-plus',
+          {
+            message: expect.any(Array),
+            config: { abortSignal: expect.any(AbortSignal) },
+          },
+          'test-session-id########1',
+        );
+      });
+
+      it('emits an ACP-visible update when automatic compression succeeds', async () => {
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 1200,
+          newTokenCount: 450,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'IMPORTANT: This conversation approached the input token limit for qwen3-code-plus. ' +
+                'A compressed context will be sent for future messages (compressed from: 1200 to 450 tokens).',
+            },
+          },
+        });
+      });
+
+      it('continues sending when automatic compression fails', async () => {
+        mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledWith(
+          'test-session-id########1',
+          false,
+          expect.any(AbortSignal),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          'qwen3-code-plus',
+          {
+            message: expect.any(Array),
+            config: { abortSignal: expect.any(AbortSignal) },
+          },
+          'test-session-id########1',
+        );
+      });
+
+      it('does not use global UI telemetry when compression fails before local token counts exist', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        vi.spyOn(
+          core.uiTelemetryService,
+          'getLastPromptTokenCount',
+        ).mockReturnValue(101);
+        mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            update: expect.objectContaining({
+              sessionUpdate: 'agent_message_chunk',
+              content: expect.objectContaining({
+                text: expect.stringContaining('Session token limit exceeded'),
+              }),
+            }),
+          }),
+        );
+      });
+
+      it('returns cancelled when automatic compression is aborted', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat.mockImplementation(
+          async (_promptId: string, _force: boolean, signal: AbortSignal) =>
+            new Promise((_, reject) => {
+              signal.addEventListener('abort', () => {
+                const abortError = new Error('aborted');
+                abortError.name = 'AbortError';
+                reject(abortError);
+              });
+            }),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        const promptPromise = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockGeminiClient.tryCompressChat).toHaveBeenCalled();
+        });
+
+        await session.cancelPendingPrompt();
+
+        await expect(promptPromise).resolves.toEqual({
+          stopReason: 'cancelled',
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.any(Array),
+        });
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'Session token limit exceeded: 101 tokens > 100 limit. ' +
+                'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+            },
+          },
+        });
+      });
+
+      it('uses compression token info instead of global UI telemetry for the session limit', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        vi.spyOn(
+          core.uiTelemetryService,
+          'getLastPromptTokenCount',
+        ).mockReturnValue(999);
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('falls back to the previous prompt token count when compression returns zero token info', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat.mockResolvedValue({
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('falls back to the previous prompt token count when compressed token info is zero', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockResolvedValueOnce({
+            originalTokenCount: 1200,
+            newTokenCount: 0,
+            compressionStatus: core.CompressionStatus.COMPRESSED,
+          });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('records prompt token count instead of total token count for later session-limit checks', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockRejectedValueOnce(new Error('compression unavailable'));
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 500,
+                    promptTokenCount: 50,
+                  },
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'long response' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'next prompt' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      it('resets the session-local token count when the active chat instance changes', async () => {
+        const clearedChat = {
+          sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+        } as unknown as GeminiChat;
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockRejectedValueOnce(new Error('compression unavailable'));
+        mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                usageMetadata: {
+                  totalTokenCount: 500,
+                  promptTokenCount: 101,
+                },
+              },
+            },
+          ]),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'before clear' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        mockGeminiClient.getChat.mockReturnValue(clearedChat);
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'after clear' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(clearedChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('continues sending when the compression notification fails', async () => {
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 1200,
+          newTokenCount: 450,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+        mockClient.sessionUpdate = vi
+          .fn()
+          .mockRejectedValueOnce(new Error('client disconnected'));
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('stops before sending when the compressed prompt exceeds the session token limit', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 1200,
+          newTokenCount: 101,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalled();
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).not.toHaveBeenCalled();
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'IMPORTANT: This conversation approached the input token limit for qwen3-code-plus. ' +
+                'A compressed context will be sent for future messages (compressed from: 1200 to 101 tokens).',
+            },
+          },
+        });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'Session token limit exceeded: 101 tokens > 100 limit. ' +
+                'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+            },
+          },
+        });
+      });
+
+      it('stops without throwing when the token-limit diagnostic fails', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 101,
+          newTokenCount: 101,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockClient.sessionUpdate = vi
+          .fn()
+          .mockRejectedValueOnce(new Error('client disconnected'));
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).not.toHaveBeenCalled();
+      });
+
+      it('also runs automatic compression before tool response follow-up sends', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
+          2,
+          'test-session-id########1',
+          false,
+          expect.any(AbortSignal),
+        );
+
+        const sendMessageStream = mockChat.sendMessageStream as ReturnType<
+          typeof vi.fn
+        >;
+        expectCompressBeforeSend(
+          mockGeminiClient.tryCompressChat,
+          sendMessageStream,
+          1,
+        );
+      });
+
+      it('stops tool response follow-up before sending when the session token limit is exceeded', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockResolvedValueOnce({
+            originalTokenCount: 101,
+            newTokenCount: 101,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(executeSpy).toHaveBeenCalledTimes(1);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
+          2,
+          'test-session-id########1',
+          false,
+          expect.any(AbortSignal),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'call-1',
+                name: 'read_file',
+              }),
+            }),
+          ],
+        });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'Session token limit exceeded: 101 tokens > 100 limit. ' +
+                'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+            },
+          },
+        });
+      });
+
+      it('runs automatic compression before Stop-hook continuation sends', async () => {
+        const messageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            })
+            .mockResolvedValueOnce({
+              success: true,
+              output: {},
+            }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
+          2,
+          'test-session-id########1_stop_hook_1',
+          false,
+          expect.any(AbortSignal),
+        );
+
+        const sendMessageStream = mockChat.sendMessageStream as ReturnType<
+          typeof vi.fn
+        >;
+        expectCompressBeforeSend(
+          mockGeminiClient.tryCompressChat,
+          sendMessageStream,
+          1,
+        );
+      });
+
+      it('skips automatic compression after the first Stop-hook continuation', async () => {
+        const messageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after first Stop hook',
+              },
+            })
+            .mockResolvedValueOnce({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after second Stop hook',
+              },
+            })
+            .mockResolvedValueOnce({
+              success: true,
+              output: {},
+            }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
+          2,
+          'test-session-id########1_stop_hook_1',
+          false,
+          expect.any(AbortSignal),
+        );
+        expect(mockGeminiClient.tryCompressChat).not.toHaveBeenCalledWith(
+          'test-session-id########1_stop_hook_2',
+          false,
+          expect.any(AbortSignal),
+        );
+
+        const sendMessageStream = mockChat.sendMessageStream as ReturnType<
+          typeof vi.fn
+        >;
+        expect(sendMessageStream.mock.calls[2]?.[2]).toBe(
+          'test-session-id########1_stop_hook_2',
+        );
+      });
+
+      it('stops Stop-hook continuation before sending when the session token limit is exceeded', async () => {
+        const messageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            })
+            .mockResolvedValueOnce({
+              success: true,
+              output: {},
+            }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockResolvedValueOnce({
+            originalTokenCount: 101,
+            newTokenCount: 101,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
+          2,
+          'test-session-id########1_stop_hook_1',
+          false,
+          expect.any(AbortSignal),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'Session token limit exceeded: 101 tokens > 100 limit. ' +
+                'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+            },
+          },
+        });
+      });
+
+      it('runs automatic compression before cron-fired ACP prompt sends', async () => {
+        const scheduler = {
+          size: 1,
+          start: vi.fn((callback: (job: { prompt: string }) => void) => {
+            callback({ prompt: 'scheduled prompt' });
+          }),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+
+        expect(scheduler.start).toHaveBeenCalledTimes(1);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
+          1,
+          'test-session-id########1',
+          false,
+          expect.any(AbortSignal),
+        );
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
+          2,
+          expect.stringMatching(/^test-session-id########cron\d+$/),
+          false,
+          expect.any(AbortSignal),
+        );
+
+        const sendMessageStream = mockChat.sendMessageStream as ReturnType<
+          typeof vi.fn
+        >;
+        expectCompressBeforeSend(
+          mockGeminiClient.tryCompressChat,
+          sendMessageStream,
+          1,
+        );
+      });
+
+      it('stops cron-fired ACP prompt before sending when the session token limit is exceeded', async () => {
+        let cronCallback: ((job: { prompt: string }) => void) | undefined;
+        const scheduler = {
+          size: 1,
+          start: vi.fn((callback: (job: { prompt: string }) => void) => {
+            cronCallback = callback;
+            callback({ prompt: 'scheduled prompt' });
+          }),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockResolvedValueOnce({
+            originalTokenCount: 101,
+            newTokenCount: 101,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+        });
+
+        expect(scheduler.start).toHaveBeenCalledTimes(1);
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenNthCalledWith(
+          2,
+          expect.stringMatching(/^test-session-id########cron\d+$/),
+          false,
+          expect.any(AbortSignal),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'Session token limit exceeded: 101 tokens > 100 limit. ' +
+                'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+            },
+          },
+        });
+        expect(scheduler.stop).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'Cron jobs disabled for the rest of this session due to token limit. Restart the session to re-enable.',
+              },
+            },
+          });
+        });
+
+        const sessionUpdateMock = mockClient.sessionUpdate as ReturnType<
+          typeof vi.fn
+        >;
+        const tokenLimitDiagnosticCount = () =>
+          sessionUpdateMock.mock.calls.filter((call) => {
+            const notification = call[0] as {
+              update?: {
+                sessionUpdate?: string;
+                content?: { type?: string; text?: string };
+              };
+            };
+            return (
+              notification.update?.sessionUpdate === 'agent_message_chunk' &&
+              notification.update.content?.type === 'text' &&
+              notification.update.content.text?.includes(
+                'Session token limit exceeded',
+              )
+            );
+          }).length;
+        const diagnosticCountBefore = tokenLimitDiagnosticCount();
+
+        cronCallback?.({ prompt: 'scheduled prompt again' });
+        await Promise.resolve();
+
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+        expect(tokenLimitDiagnosticCount()).toBe(diagnosticCountBefore);
+      });
+
+      it('does not auto-compress slash commands handled without a model send', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Already compressed.',
+        });
+        mockChat.sendMessageStream = vi.fn();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        expect(mockGeminiClient.tryCompressChat).not.toHaveBeenCalled();
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+    });
+
     it('passes resolved paths to read_many_files tool', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'qwen-acp-session-'),

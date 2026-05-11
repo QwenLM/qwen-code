@@ -21,6 +21,7 @@ import {
   OutputFormat,
   InputFormat,
   LoopType,
+  ToolNames,
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
@@ -36,13 +37,12 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
+  AlreadyReportedError,
   handleError,
   handleToolError,
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
-
-const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -51,6 +51,8 @@ import {
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
 // Human-readable labels for the detectors that can fire mid-stream.
 // Surfaced to stderr in TEXT mode so a headless run that halts on a loop
@@ -139,6 +141,10 @@ export interface RunNonInteractiveOptions {
   adapter?: JsonOutputAdapterInterface;
   userMessage?: CLIUserMessage;
   controlService?: ControlService;
+  sendMessageType?: SendMessageType;
+  notificationDisplayText?: string;
+  captureMonitorNotifications?: boolean;
+  captureMonitorRegistrations?: boolean;
 }
 
 /**
@@ -178,6 +184,49 @@ export async function runNonInteractive(
     const geminiClient = config.getGeminiClient();
     const abortController = options.abortController ?? new AbortController();
 
+    interface LocalQueueItem {
+      displayText: string;
+      modelText: string;
+      sendMessageType: SendMessageType;
+      sdkNotification?: {
+        task_id: string;
+        tool_use_id?: string;
+        status: BackgroundTaskStatus;
+        usage?: {
+          total_tokens: number;
+          tool_uses: number;
+          duration_ms: number;
+        };
+      };
+    }
+    const localQueue: LocalQueueItem[] = [];
+    const sdkOnlyMonitorQueue: LocalQueueItem[] = [];
+    const emitNotificationToSdk = (item: LocalQueueItem) => {
+      if (item.sendMessageType !== SendMessageType.Notification) return;
+      adapter.emitUserMessage([{ text: item.displayText }]);
+      if (item.sdkNotification) {
+        adapter.emitSystemMessage('task_notification', item.sdkNotification);
+      }
+    };
+    const flushQueuedNotificationsToSdk = (queue: LocalQueueItem[]) => {
+      while (queue.length > 0) {
+        emitNotificationToSdk(queue.shift()!);
+      }
+    };
+    let captureMonitorTurnsInLocalQueue = true;
+    let oneShotMonitorsFinalized = false;
+    const finalizeOneShotMonitors = () => {
+      if (
+        options.captureMonitorNotifications === false ||
+        oneShotMonitorsFinalized
+      )
+        return;
+      oneShotMonitorsFinalized = true;
+      captureMonitorTurnsInLocalQueue = false;
+      config.getMonitorRegistry().abortAll();
+      flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
+    };
+
     // EPIPE: don't process.exit here — that bypasses the caller's
     // runExitCleanup → flush() and drops queued JSONL writes. Destroy
     // stdout instead and let the natural return drive cleanup. (Aborting
@@ -208,6 +257,7 @@ export async function runNonInteractive(
         config,
         sessionId,
         permissionMode,
+        settings,
       );
       adapter.emitMessage(systemMessage);
 
@@ -295,22 +345,6 @@ export async function runNonInteractive(
 
       // Register the callback early so background agents launched during the main
       // tool-call chain can push completions onto the queue.
-      interface LocalQueueItem {
-        displayText: string;
-        modelText: string;
-        sendMessageType: SendMessageType;
-        sdkNotification?: {
-          task_id: string;
-          tool_use_id?: string;
-          status: BackgroundTaskStatus;
-          usage?: {
-            total_tokens: number;
-            tool_uses: number;
-            duration_ms: number;
-          };
-        };
-      }
-      const localQueue: LocalQueueItem[] = [];
       const registry = config.getBackgroundTaskRegistry();
       registry.setNotificationCallback((displayText, modelText, meta) => {
         localQueue.push({
@@ -341,8 +375,54 @@ export async function runNonInteractive(
         });
       });
 
+      const monitorRegistry = config.getMonitorRegistry();
+      if (options.captureMonitorNotifications !== false) {
+        // One-shot headless runs capture monitor notifications locally so any
+        // events already emitted before exit can be surfaced to the SDK/model.
+        // Persistent stream-json sessions own this callback at the Session
+        // layer instead, so future monitor events can continue after the
+        // originating turn has already completed.
+        monitorRegistry.setNotificationCallback(
+          (displayText, modelText, meta) => {
+            const queueItem = {
+              displayText,
+              modelText,
+              sendMessageType: SendMessageType.Notification,
+              sdkNotification: {
+                task_id: meta.monitorId,
+                tool_use_id: meta.toolUseId,
+                status: meta.status,
+              },
+            };
+
+            if (captureMonitorTurnsInLocalQueue) {
+              localQueue.push(queueItem);
+            } else {
+              sdkOnlyMonitorQueue.push(queueItem);
+              flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
+            }
+          },
+        );
+      }
+
+      if (options.captureMonitorRegistrations !== false) {
+        monitorRegistry.setRegisterCallback((entry) => {
+          adapter.emitSystemMessage('task_started', {
+            task_id: entry.monitorId,
+            tool_use_id: entry.toolUseId,
+            description: entry.description,
+          });
+        });
+      }
+
       let isFirstTurn = true;
       let modelOverride: string | undefined;
+      // Captures the first ~200 chars of model-emitted plain text across
+      // turns. Used only to enrich the --json-schema "produced plain
+      // text" error: the user/operator gets a hint of what the model
+      // actually said instead of a static, context-free message.
+      let plainTextPreview = '';
+      const PLAIN_TEXT_PREVIEW_LIMIT = 200;
       while (true) {
         turnCount++;
         if (
@@ -360,9 +440,13 @@ export async function runNonInteractive(
           prompt_id,
           {
             type: isFirstTurn
-              ? SendMessageType.UserQuery
+              ? (options.sendMessageType ?? SendMessageType.UserQuery)
               : SendMessageType.ToolResult,
             modelOverride,
+            ...(isFirstTurn &&
+              options.notificationDisplayText && {
+                notificationDisplayText: options.notificationDisplayText,
+              }),
           },
         );
         isFirstTurn = false;
@@ -379,6 +463,14 @@ export async function runNonInteractive(
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
+          if (
+            event.type === GeminiEventType.Content &&
+            plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
+          ) {
+            const remaining =
+              PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
+            plainTextPreview += String(event.value).slice(0, remaining);
+          }
           if (event.type === GeminiEventType.LoopDetected) {
             emitLoopDetectedMessage(config, event.value?.loopType);
           }
@@ -391,8 +483,11 @@ export async function runNonInteractive(
               config.getContentGeneratorConfig()?.authType,
             );
             process.stderr.write(`${errorText}\n`);
-            // Throw error to exit with non-zero code
-            throw new Error(errorText);
+            // We have already formatted and written the message; mark the
+            // throw so the top-level handleError doesn't reformat (which
+            // would yield "[API Error: [API Error: ...]]") or print it a
+            // second time. Exit code stays 1 — same as before.
+            throw new AlreadyReportedError(errorText);
           }
         }
 
@@ -402,8 +497,48 @@ export async function runNonInteractive(
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
+          // When --json-schema is active, the first successful call to the
+          // synthetic structured_output tool terminates the session with the
+          // submitted args as the structured result. A separate boolean
+          // tracks whether a submission happened, since `args` itself may
+          // legitimately be undefined or any falsy value (an empty schema
+          // `{}` accepts any payload, including no fields at all).
+          let structuredSubmission: unknown = undefined;
+          let hasStructuredSubmission = false;
 
-          for (const requestInfo of toolCallRequests) {
+          // Pre-scan: when --json-schema is active and the model emitted
+          // structured_output alongside other tools in the same turn,
+          // execute structured_output FIRST so its terminal-flag wins
+          // before sibling tools' side effects (write_file, shell, …)
+          // get a chance to persist. If structured_output succeeds the
+          // loop breaks immediately and siblings are skipped — no
+          // tool_result is emitted for them; the session terminates via
+          // the emitResult call below so the missing function_response
+          // entries cause no API protocol issue (there is no next turn).
+          // If structured_output fails (validation), `hasStructuredSubmission`
+          // stays false and the siblings still run via the normal loop
+          // body — same behavior as a turn that didn't issue
+          // structured_output at all.
+          //
+          // Without this, [write_file, structured_output] runs write_file
+          // first (irreversible), THEN structured_output sets the flag,
+          // and the user gets back a "successful" structured result with
+          // unrelated side-effects already on disk.
+          let orderedToolCallRequests = toolCallRequests;
+          if (config.getJsonSchema()) {
+            const structIdx = orderedToolCallRequests.findIndex(
+              (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+            );
+            if (structIdx > 0) {
+              orderedToolCallRequests = [
+                orderedToolCallRequests[structIdx],
+                ...orderedToolCallRequests.slice(0, structIdx),
+                ...orderedToolCallRequests.slice(structIdx + 1),
+              ];
+            }
+          }
+
+          for (const requestInfo of orderedToolCallRequests) {
             const finalRequestInfo = requestInfo;
 
             const inputFormat =
@@ -457,6 +592,21 @@ export async function runNonInteractive(
             }
 
             adapter.emitToolResult(finalRequestInfo, toolResponse);
+            config
+              .getGeminiClient()
+              .recordCompletedToolCall(
+                finalRequestInfo.name,
+                finalRequestInfo.args as Record<string, unknown>,
+              );
+
+            if (
+              finalRequestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+              !toolResponse.error &&
+              !hasStructuredSubmission
+            ) {
+              structuredSubmission = finalRequestInfo.args;
+              hasStructuredSubmission = true;
+            }
 
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
@@ -468,22 +618,43 @@ export async function runNonInteractive(
             if ('modelOverride' in toolResponse) {
               modelOverride = toolResponse.modelOverride;
             }
+
+            // Single-shot contract: structured_output is terminal.
+            // The pre-scan above hoists it to the front of the batch,
+            // so once it succeeds the remaining (now reordered)
+            // entries are guaranteed to be siblings the model
+            // intended for THIS turn — break and let the terminal
+            // emitResult fire below. Unpaired tool_use entries in
+            // the model's record are harmless because no next API
+            // call happens (the session is over).
+            if (hasStructuredSubmission) {
+              break;
+            }
+          }
+          if (hasStructuredSubmission) {
+            // Abort any in-flight background agents so they don't race the
+            // terminal emitResult; structured-output mode is a single-shot
+            // contract and the caller expects a deterministic shutdown.
+            registry.abortAll();
+            const metrics = uiTelemetryService.getMetrics();
+            const usage = computeUsageFromMetrics(metrics);
+            const stats =
+              outputFormat === OutputFormat.JSON
+                ? uiTelemetryService.getMetrics()
+                : undefined;
+            adapter.emitResult({
+              isError: false,
+              durationMs: Date.now() - startTime,
+              apiDurationMs: totalApiDurationMs,
+              numTurns: turnCount,
+              usage,
+              stats,
+              structuredResult: structuredSubmission,
+            });
+            return;
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
-          // Shared between the normal drain and the cancellation flush so stream-json
-          // consumers always see a terminal task_notification paired with task_started.
-          const emitNotificationToSdk = (item: LocalQueueItem) => {
-            if (item.sendMessageType !== SendMessageType.Notification) return;
-            adapter.emitUserMessage([{ text: item.displayText }]);
-            if (item.sdkNotification) {
-              adapter.emitSystemMessage(
-                'task_notification',
-                item.sdkNotification,
-              );
-            }
-          };
-
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
@@ -560,7 +731,10 @@ export async function runNonInteractive(
                     config.getContentGeneratorConfig()?.authType,
                   );
                   process.stderr.write(`${errorText}\n`);
-                  throw new Error(errorText);
+                  // See the matching note in the first stream loop above —
+                  // we mark the throw so handleError doesn't reformat or
+                  // reprint downstream.
+                  throw new AlreadyReportedError(errorText);
                 }
               }
 
@@ -605,6 +779,12 @@ export async function runNonInteractive(
                   }
 
                   adapter.emitToolResult(requestInfo, toolResponse);
+                  config
+                    .getGeminiClient()
+                    .recordCompletedToolCall(
+                      requestInfo.name,
+                      requestInfo.args as Record<string, unknown>,
+                    );
 
                   if (toolResponse.responseParts) {
                     itemToolResponseParts.push(...toolResponse.responseParts);
@@ -708,20 +888,34 @@ export async function runNonInteractive(
               // Flush queued terminal notifications before handleCancellationError
               // exits so stream-json consumers always see a task_notification paired
               // with every task_started.
-              while (localQueue.length > 0) {
-                emitNotificationToSdk(localQueue.shift()!);
-              }
+              flushQueuedNotificationsToSdk(localQueue);
+              finalizeOneShotMonitors();
               await handleCancellationError(config);
             }
+            // Once we enter the final holdback loop, monitor events should no
+            // longer extend one-shot runtime. Already-queued events still drain
+            // through the model, but later monitor output is SDK-only.
+            captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
-            // Wait for every task's terminal notification, not just the
-            // running ones: cancel() marks status 'cancelled' synchronously
-            // but the notification is emitted later by the natural handler,
-            // and SDK consumers need every task_started paired with one.
+            // Wait for every background task's terminal notification, not
+            // just the running ones: cancel() marks status 'cancelled'
+            // synchronously but the notification is emitted later by the
+            // natural handler, and SDK consumers need every task_started
+            // paired with one. Monitors are different: they intentionally
+            // continue in the background, so final result emission is not
+            // gated on monitor lifetime.
             if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
               break;
             await new Promise((r) => setTimeout(r, 100));
           }
+
+          const memoryTaskPromises = config
+            .getGeminiClient()
+            .consumePendingMemoryTaskPromises();
+          if (memoryTaskPromises.length > 0) {
+            await Promise.allSettled(memoryTaskPromises);
+          }
+          finalizeOneShotMonitors();
 
           const metrics = uiTelemetryService.getMetrics();
           const usage = computeUsageFromMetrics(metrics);
@@ -730,6 +924,48 @@ export async function runNonInteractive(
             outputFormat === OutputFormat.JSON
               ? uiTelemetryService.getMetrics()
               : undefined;
+
+          // --json-schema contract: the model MUST terminate via the
+          // structured_output tool. Reaching this branch means it emitted
+          // plain text instead — surface as an error rather than silently
+          // returning whatever free-form summary the adapter collected.
+          // Setting exitCode + returning (rather than throwing) avoids the
+          // outer catch re-emitting the result a second time.
+          if (config.getJsonSchema()) {
+            // Enrich the static contract message with diagnostic context:
+            // turn count (how many tries the model got) + a preview of
+            // what it actually said (truncated). Operators debugging a
+            // headless run shouldn't have to scrape `--output-format
+            // json` to understand why the contract failed.
+            const previewSnippet = plainTextPreview.trim();
+            const previewSuffix = previewSnippet
+              ? ` Output preview (${plainTextPreview.length}${
+                  plainTextPreview.length >= PLAIN_TEXT_PREVIEW_LIMIT ? '+' : ''
+                } chars): ${JSON.stringify(previewSnippet)}.`
+              : '';
+            const errorMessage =
+              `Model produced plain text instead of calling the structured_output tool as required by --json-schema after ${turnCount} turn(s).` +
+              previewSuffix;
+            adapter.emitResult({
+              isError: true,
+              durationMs: Date.now() - startTime,
+              apiDurationMs: totalApiDurationMs,
+              numTurns: turnCount,
+              errorMessage,
+              usage,
+              stats,
+            });
+            // Adapter handles user-visible feedback per output format:
+            //   - TEXT: writes errorMessage to stderr (JsonOutputAdapter
+            //     emitResult, line ~70).
+            //   - JSON / STREAM_JSON: emits the structured result with
+            //     is_error=true.
+            // No extra stderr write here — duplicating in TEXT mode
+            // produced two copies of the same line in headless runs.
+            process.exitCode = 1;
+            return;
+          }
+
           adapter.emitResult({
             isError: false,
             durationMs: Date.now() - startTime,
@@ -752,6 +988,9 @@ export async function runNonInteractive(
         // Expected when no message was started or already finalized
       }
 
+      flushQueuedNotificationsToSdk(localQueue);
+      finalizeOneShotMonitors();
+
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = error instanceof Error ? error.message : String(error);
       const metrics = uiTelemetryService.getMetrics();
@@ -761,20 +1000,47 @@ export async function runNonInteractive(
         outputFormat === OutputFormat.JSON
           ? uiTelemetryService.getMetrics()
           : undefined;
-      adapter.emitResult({
-        isError: true,
-        durationMs: Date.now() - startTime,
-        apiDurationMs: totalApiDurationMs,
-        numTurns: turnCount,
-        errorMessage: message,
-        usage,
-        stats,
-      });
+
+      // In TEXT mode the adapter's emitResult writes errorMessage straight
+      // to stderr, which would duplicate the line the stream-error handler
+      // has already printed. AlreadyReportedError marks the case where the
+      // user-facing line is already on the wire — skip the adapter call
+      // entirely in that case so we don't emit a phantom blank line.
+      // JSON / STREAM_JSON modes still emit normally; the adapter is the
+      // primary output channel there, not a duplicate of stderr.
+      const isAlreadyReportedError = error instanceof AlreadyReportedError;
+      const skipAdapterEmit =
+        outputFormat === OutputFormat.TEXT && isAlreadyReportedError;
+
+      if (!skipAdapterEmit) {
+        adapter.emitResult({
+          isError: true,
+          durationMs: Date.now() - startTime,
+          apiDurationMs: totalApiDurationMs,
+          numTurns: turnCount,
+          errorMessage: message,
+          usage,
+          stats,
+        });
+      }
       await handleError(error, config);
     } finally {
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);
+      const monReg = config.getMonitorRegistry();
+      // In one-shot (non-Session) runs, abort all running monitors so their
+      // piped stdio refs don't keep the Node event loop alive after the result
+      // is emitted. Session runs manage monitor lifecycle independently.
+      if (options.captureMonitorNotifications !== false) {
+        if (!oneShotMonitorsFinalized) {
+          monReg.abortAll({ notify: false });
+        }
+        monReg.setNotificationCallback(undefined);
+      }
+      if (options.captureMonitorRegistrations !== false) {
+        monReg.setRegisterCallback(undefined);
+      }
 
       process.stdout.removeListener('error', stdoutErrorHandler);
       // Cleanup signal handlers

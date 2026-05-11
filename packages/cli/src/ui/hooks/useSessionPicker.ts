@@ -25,6 +25,10 @@ import {
   type SessionState,
 } from '../utils/sessionPickerUtils.js';
 import { useKeypress } from './useKeypress.js';
+import {
+  isPrintableSearchChar,
+  useSessionSearchInput,
+} from './useSessionSearchInput.js';
 
 export interface UseSessionPickerOptions {
   sessionService: SessionService | null;
@@ -66,9 +70,16 @@ export interface UseSessionPickerResult {
   showScrollUp: boolean;
   showScrollDown: boolean;
   loadMoreSessions: () => Promise<void>;
-  viewMode: 'list' | 'preview';
+  viewMode: 'list' | 'search' | 'preview';
   previewSessionId: string | null;
   exitPreview: () => void;
+  /** Free-text filter applied on top of branch filter. */
+  searchQuery: string;
+  /**
+   * True iff `viewMode === 'search'`. Convenience for UI that conditions
+   * on "the user is currently typing a query".
+   */
+  isSearchActive: boolean;
 }
 
 export function useSessionPicker({
@@ -95,8 +106,10 @@ export function useSessionPicker({
   // For follow mode (non-centered)
   const [followScrollOffset, setFollowScrollOffset] = useState(0);
 
-  // Preview view state.
-  const [viewMode, setViewMode] = useState<'list' | 'preview'>('list');
+  // Picker mode state
+  const [viewMode, setViewMode] = useState<'list' | 'search' | 'preview'>(
+    'list',
+  );
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
 
   const exitPreview = useCallback(() => {
@@ -104,11 +117,27 @@ export function useSessionPicker({
     setPreviewSessionId(null);
   }, []);
 
+  // Search-mode editor — owns the query buffer and handles the
+  // edit-keys (printable chars, Backspace/Delete, Ctrl+U/L, Esc).
+  // The outer hook below dispatches keys to it whenever
+  // `viewMode === 'search'`.
+  const onExitToList = useCallback(() => {
+    setViewMode('list');
+  }, []);
+  const { searchQuery, setSearchQuery, handleSearchKey } =
+    useSessionSearchInput({ onExitToList });
+
   const isLoadingMoreRef = useRef(false);
 
   const filteredSessions = useMemo(
-    () => filterSessions(sessionState.sessions, filterByBranch, currentBranch),
-    [sessionState.sessions, filterByBranch, currentBranch],
+    () =>
+      filterSessions(
+        sessionState.sessions,
+        filterByBranch,
+        currentBranch,
+        searchQuery,
+      ),
+    [sessionState.sessions, filterByBranch, currentBranch, searchQuery],
   );
 
   const scrollOffset = useMemo(() => {
@@ -184,11 +213,11 @@ export function useSessionPicker({
     }
   }, [sessionService, sessionState.hasMore, sessionState.nextCursor]);
 
-  // Reset selection when filter changes
+  // Reset selection when any filter changes (branch toggle or text query).
   useEffect(() => {
     setSelectedIndex(0);
     setFollowScrollOffset(0);
-  }, [filterByBranch]);
+  }, [filterByBranch, searchQuery]);
 
   // Ensure selectedIndex is valid when filtered sessions change
   useEffect(() => {
@@ -228,31 +257,15 @@ export function useSessionPicker({
     sessionState.hasMore,
   ]);
 
-  // Key handling (KeypressContext)
-  useKeypress(
-    (key) => {
-      // Preview owns the keyboard while active; suppress list-mode
-      // handlers so we don't double-handle Escape / Enter / navigation.
-      if (viewMode !== 'list') {
-        return;
-      }
-
-      const { name, sequence, ctrl } = key;
-
-      if (name === 'escape' || (ctrl && name === 'c')) {
-        onCancel();
-        return;
-      }
-
-      if (name === 'return') {
-        const session = filteredSessions[selectedIndex];
-        if (session) {
-          onSelect(session.sessionId);
-        }
-        return;
-      }
-
-      if (name === 'up' || name === 'k') {
+  const moveSelection = useCallback(
+    (delta: -1 | 1) => {
+      // Both directions need the same empty-list guard. Without it, the
+      // -1 branch coasts on `Math.max(0, 0-1) === 0` (no crash), but the
+      // asymmetry was a tell that the empty case wasn't being thought
+      // about — share the early-return so a future tweak in either
+      // branch can't drift past length 0.
+      if (filteredSessions.length === 0) return;
+      if (delta === -1) {
         setSelectedIndex((prev) => {
           const newIndex = Math.max(0, prev - 1);
           if (!centerSelection && newIndex < followScrollOffset) {
@@ -262,29 +275,110 @@ export function useSessionPicker({
         });
         return;
       }
+      setSelectedIndex((prev) => {
+        const newIndex = Math.min(filteredSessions.length - 1, prev + 1);
+        if (
+          !centerSelection &&
+          newIndex >= followScrollOffset + maxVisibleItems
+        ) {
+          setFollowScrollOffset(newIndex - maxVisibleItems + 1);
+        }
+        if (!centerSelection && newIndex >= filteredSessions.length - 3) {
+          void loadMoreSessions();
+        }
+        return newIndex;
+      });
+    },
+    [
+      centerSelection,
+      filteredSessions.length,
+      followScrollOffset,
+      loadMoreSessions,
+      maxVisibleItems,
+    ],
+  );
 
-      if (name === 'down' || name === 'j') {
-        if (filteredSessions.length === 0) {
+  useKeypress(
+    (key) => {
+      // Preview mode is gated by the `isActive` option below, so this
+      // callback only runs in list/search modes — no inline guard
+      // needed.
+      const { name, sequence, ctrl } = key;
+
+      if (ctrl && name === 'c') {
+        onCancel();
+        return;
+      }
+
+      if (name === 'return') {
+        if (viewMode === 'search') {
+          if (filteredSessions.length === 0) {
+            // Nothing to commit to — keep editing.
+            return;
+          }
+          setViewMode('list');
           return;
         }
+        const session = filteredSessions[selectedIndex];
+        if (session) {
+          onSelect(session.sessionId);
+        }
+        return;
+      }
 
-        setSelectedIndex((prev) => {
-          const newIndex = Math.min(filteredSessions.length - 1, prev + 1);
+      if (name === 'up' || name === 'down') {
+        const delta = name === 'up' ? -1 : +1;
+        const inSearch = viewMode === 'search';
+        if (inSearch) {
+          if (filteredSessions.length === 0) return;
+          setViewMode('list');
+          return;
+        }
+        if (
+          delta === -1 &&
+          filteredSessions.length > 0 &&
+          selectedIndex === 0
+        ) {
+          setViewMode('search');
+          return;
+        }
+        moveSelection(delta);
+        return;
+      }
 
-          if (
-            !centerSelection &&
-            newIndex >= followScrollOffset + maxVisibleItems
-          ) {
-            setFollowScrollOffset(newIndex - maxVisibleItems + 1);
-          }
+      // While the search input is focused it owns the keyboard
+      // exclusively: anything `handleSearchKey` doesn't claim is
+      // intentionally swallowed (e.g. Ctrl+B, '/' typed as a query
+      // char, etc.). The mode-independent shortcuts above (Ctrl+C,
+      // Enter, ↑↓) are the only escape hatches. To make a list-mode
+      // shortcut work in search, hoist it above this delegate the
+      // way Enter / ↑↓ already are.
+      if (viewMode === 'search') {
+        handleSearchKey(key);
+        return;
+      }
 
-          // Follow mode: load more when near the end.
-          if (!centerSelection && newIndex >= filteredSessions.length - 3) {
-            void loadMoreSessions();
-          }
+      // ── list mode ──
+      if (name === 'escape') {
+        if (searchQuery !== '') {
+          setSearchQuery('');
+        } else {
+          onCancel();
+        }
+        return;
+      }
 
-          return newIndex;
-        });
+      // `j`/`k` are list-mode navigation only — intentionally claimed
+      // BEFORE the implicit-search-seed branch below, so typing `j`
+      // never seeds the query with "j". vim users stay in list mode;
+      // anyone wanting to search for a literal "j..." can press `/`
+      // first to enter search explicitly.
+      if (name === 'k') {
+        moveSelection(-1);
+        return;
+      }
+      if (name === 'j') {
+        moveSelection(+1);
         return;
       }
 
@@ -297,13 +391,30 @@ export function useSessionPicker({
         return;
       }
 
-      if (sequence === 'b' || sequence === 'B') {
+      if (ctrl && (name === 'b' || name === 'B')) {
         if (currentBranch) {
           setFilterByBranch((prev) => !prev);
         }
+        return;
+      }
+
+      if (sequence === '/') {
+        setViewMode('search');
+        return;
+      }
+
+      if (isPrintableSearchChar(key)) {
+        // Skip Space when it would seed a leading-whitespace query —
+        // hits this branch only when enablePreview=false (otherwise
+        // the Space-preview shortcut above already returned).
+        if (sequence === ' ') {
+          return;
+        }
+        setViewMode('search');
+        setSearchQuery((q) => q + sequence);
       }
     },
-    { isActive: isActive && viewMode === 'list' },
+    { isActive: isActive && viewMode !== 'preview' },
   );
 
   return {
@@ -320,5 +431,7 @@ export function useSessionPicker({
     viewMode,
     previewSessionId,
     exitPreview,
+    searchQuery,
+    isSearchActive: viewMode === 'search',
   };
 }

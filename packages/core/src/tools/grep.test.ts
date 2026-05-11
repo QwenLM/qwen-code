@@ -97,6 +97,9 @@ describe('GrepTool', () => {
   } as unknown as Config;
 
   beforeEach(async () => {
+    Object.assign(mockConfig, {
+      getTruncateToolOutputThreshold: () => 25000,
+    });
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
     grepTool = new GrepTool(mockConfig);
 
@@ -174,6 +177,21 @@ describe('GrepTool', () => {
         `Path is not a directory: ${filePath}`,
       );
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped path',
+      async () => {
+        // Create a directory with a space so the unescaped path exists
+        const dirWithSpace = path.join(tempRootDir, 'sub dir');
+        await fs.mkdir(dirWithSpace);
+        const params: GrepToolParams = {
+          pattern: 'hello',
+          path: path.join(tempRootDir, 'sub\\ dir'),
+        };
+        expect(grepTool.validateToolParams(params)).toBeNull();
+        expect(params.path).toBe(dirWithSpace);
+      },
+    );
   });
 
   describe('execute', () => {
@@ -192,6 +210,73 @@ describe('GrepTool', () => {
       );
       expect(result.llmContent).toContain('L1: another world in sub dir');
       expect(result.returnDisplay).toBe('Found 3 matches');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileA.txt'),
+        path.join(tempRootDir, 'sub', 'fileC.txt'),
+      ]);
+    });
+
+    it('normalizes CRLF fallback grep output without dropping result paths', () => {
+      const invocationForPrivateMethod = grepTool.build({
+        pattern: 'world',
+      }) as unknown as {
+        parseGrepOutput: (
+          output: string,
+          basePath: string,
+        ) => Array<{ absoluteFilePath: string; line: string }>;
+      };
+      const filePath = path.join(tempRootDir, 'crlf.txt');
+
+      const matches = invocationForPrivateMethod.parseGrepOutput(
+        `crlf.txt:1:hello world\r${os.EOL}`,
+        tempRootDir,
+      );
+
+      expect(matches[0]).toMatchObject({
+        absoluteFilePath: filePath,
+        line: 'hello world',
+      });
+    });
+
+    it('includes result paths for partially rendered match lines', async () => {
+      Object.assign(mockConfig, {
+        getTruncateToolOutputThreshold: () => 22,
+      });
+      await fs.writeFile(
+        path.join(tempRootDir, 'partial.ts'),
+        'partial marker',
+      );
+
+      const invocation = grepTool.build({ pattern: 'marker', glob: '*.ts' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'partial.ts'),
+      ]);
+    });
+
+    it('only reports result paths for matches visible before character truncation', async () => {
+      Object.assign(mockConfig, {
+        getTruncateToolOutputThreshold: () => 30,
+      });
+      await fs.writeFile(path.join(tempRootDir, 'a.ts'), 'visible marker');
+      await fs.writeFile(path.join(tempRootDir, 'z.ts'), 'hidden marker');
+
+      const invocation = grepTool.build({ pattern: 'marker', glob: '*.ts' });
+      const result = await invocation.execute(abortSignal);
+
+      const allResultPaths = [
+        path.join(tempRootDir, 'a.ts'),
+        path.join(tempRootDir, 'z.ts'),
+      ];
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.resultFilePaths?.length).toBeLessThan(
+        allResultPaths.length,
+      );
+      for (const resultPath of result.resultFilePaths ?? []) {
+        expect(allResultPaths).toContain(resultPath);
+      }
     });
 
     it('should find matches in a specific path', async () => {

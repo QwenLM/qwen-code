@@ -202,7 +202,9 @@ describe('file-system', () => {
     const toolLogs = rig.readToolLogs();
 
     const readAttempt = toolLogs.find(
-      (log) => log.toolRequest.name === 'read_file',
+      (log) =>
+        log.toolRequest.name === 'read_file' &&
+        log.toolRequest.args.includes(fileName),
     );
     const editAttempt = toolLogs.find(
       (log) => log.toolRequest.name === 'edit_file',

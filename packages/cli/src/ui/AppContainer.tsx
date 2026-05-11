@@ -11,6 +11,8 @@ import {
   useEffect,
   useRef,
   useLayoutEffect,
+  type Dispatch,
+  type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
 import { App } from './App.js';
@@ -58,8 +60,13 @@ import {
   type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
-import { getStickyTodos } from './utils/todoSnapshot.js';
-import { validateAuthMethod } from '../config/auth.js';
+import {
+  getStickyTodos,
+  getStickyTodoMaxVisibleItems,
+  getStickyTodosLayoutKey,
+  getStickyTodosRenderKey,
+} from './utils/todoSnapshot.js';
+import type { TodoItem } from './components/TodoDisplay.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import process from 'node:process';
 import { useHistory } from './hooks/useHistoryManager.js';
@@ -73,6 +80,7 @@ import { useModelCommand } from './hooks/useModelCommand.js';
 import { useManageModelsCommand } from './hooks/useManageModelsCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
@@ -124,8 +132,13 @@ import {
   useSettingInputRequests,
   usePluginChoiceRequests,
 } from './hooks/useExtensionUpdates.js';
-import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
+import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import {
+  RenderModeProvider,
+  type RenderMode,
+} from './contexts/RenderModeContext.js';
+import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -151,9 +164,33 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
+
+export function isRenderModeToggleKey(key: Key): boolean {
+  return (
+    keyMatchers[Command.TOGGLE_RENDER_MODE](key) ||
+    (key.name === 'm' && key.meta && !key.ctrl && !key.paste)
+  );
+}
+
+export function getNextRenderMode(current: RenderMode): RenderMode {
+  return current === 'render' ? 'raw' : 'render';
+}
+
+export function handleRenderModeToggleKey(
+  key: Key,
+  setRenderMode: Dispatch<SetStateAction<RenderMode>>,
+): boolean {
+  if (!isRenderModeToggleKey(key)) {
+    return false;
+  }
+
+  setRenderMode(getNextRenderMode);
+  return true;
+}
 
 function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   return pendingHistoryItems.some((item) => {
@@ -164,6 +201,20 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+function useStableStickyTodos(todos: TodoItem[] | null): TodoItem[] | null {
+  const renderKey = getStickyTodosRenderKey(todos);
+  const stableTodosRef = useRef<{
+    renderKey: string;
+    todos: TodoItem[] | null;
+  } | null>(null);
+
+  if (stableTodosRef.current?.renderKey !== renderKey) {
+    stableTodosRef.current = { renderKey, todos };
+  }
+
+  return stableTodosRef.current.todos;
 }
 
 // Exported for tests. Given a newest-first list of messages, return a list
@@ -203,6 +254,12 @@ const SHELL_HEIGHT_PADDING = 10;
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
   const historyManager = useHistory();
+  // `useHistory()` returns a fresh memoized object whenever `history` changes,
+  // so depending on `historyManager` directly inside event-handler callbacks
+  // would rebuild them on every message. Mirror history into a ref so
+  // handlers can read the latest snapshot at call time without reactive deps.
+  const historyRef = useRef(historyManager.history);
+  historyRef.current = historyManager.history;
   useMemoryMonitor(historyManager);
   const [debugMessage, setDebugMessage] = useState<string>('');
   const [quittingMessages, setQuittingMessages] = useState<
@@ -289,8 +346,11 @@ export const AppContainer = (props: AppContainerProps) => {
     config.getWorkingDir(),
   );
 
-  const { codingPlanUpdateRequest, dismissCodingPlanUpdate } =
-    useCodingPlanUpdates(settings, config, historyManager.addItem);
+  const { providerUpdateRequest, dismissProviderUpdate } = useProviderUpdates(
+    settings,
+    config,
+    historyManager.addItem,
+  );
 
   const [isTrustDialogOpen, setTrustDialogOpen] = useState(false);
   const openTrustDialog = useCallback(() => setTrustDialogOpen(true), []);
@@ -314,6 +374,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
+  const previousTerminalWidthRef = useRef(terminalWidth);
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
 
@@ -358,6 +419,21 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        const recovered = await config.loadPausedBackgroundAgents(
+          config.getSessionId(),
+        );
+        if (recovered.length > 0) {
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: config
+                .getBackgroundAgentResumeService()
+                .buildRecoveredBackgroundAgentsNotice(recovered.length),
+            },
+            Date.now(),
+          );
+        }
 
         // Restore session name tag from custom title
         const title = config
@@ -495,6 +571,13 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
 
+  // Targeted repaint for resize events: move cursor to top-left and erase
+  // downward instead of a full clearTerminal, avoiding the full-screen flash.
+  const repaintStaticViewport = useCallback(() => {
+    stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
+    remountStaticHistory();
+  }, [remountStaticHistory, stdout]);
+
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
@@ -530,23 +613,15 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeSelect,
   } = useApprovalModeCommand(settings, config);
 
-  const {
-    setAuthState,
-    authError,
-    onAuthError,
-    isAuthDialogOpen,
-    isAuthenticating,
-    pendingAuthType,
-    externalAuthState,
-    qwenAuthState,
-    handleAuthSelect,
-    handleCodingPlanSubmit,
-    handleAlibabaStandardSubmit,
-    handleOpenRouterSubmit,
-    handleCustomApiKeySubmit,
-    openAuthDialog,
-    cancelAuthentication,
-  } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
+  const auth = useAuthCommand(
+    settings,
+    config,
+    historyManager.addItem,
+    refreshStatic,
+  );
+  const { state: authState, actions: authActions } = auth;
+  const { onAuthError, openAuthDialog, handleAuthSelect } = authActions;
+  const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
   useInitializationAuthError(initializationResult.authError, onAuthError);
 
@@ -577,22 +652,8 @@ export const AppContainer = (props: AppContainerProps) => {
           },
         ),
       );
-    } else if (!settings.merged.security?.auth?.useExternal) {
-      // If no authType is selected yet, allow the auth UI flow to prompt the user.
-      // Only validate credentials once a concrete authType exists.
-      if (currentAuthType) {
-        const error = validateAuthMethod(currentAuthType, config);
-        if (error) {
-          onAuthError(error);
-        }
-      }
     }
-  }, [
-    settings.merged.security?.auth?.enforcedType,
-    settings.merged.security?.auth?.useExternal,
-    config,
-    onAuthError,
-  ]);
+  }, [settings.merged.security?.auth?.enforcedType, config, onAuthError]);
 
   const [editorError, setEditorError] = useState<string | null>(null);
   const {
@@ -638,6 +699,14 @@ export const AppContainer = (props: AppContainerProps) => {
     remount: refreshStatic,
   });
 
+  const { handleBranch } = useBranchCommand({
+    config,
+    historyManager,
+    startNewSession,
+    setSessionName,
+    remount: refreshStatic,
+  });
+
   const {
     isDeleteDialogOpen,
     openDeleteDialog,
@@ -647,6 +716,13 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     addItem: historyManager.addItem,
   });
+
+  const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);
+  const [activeHelpTab, setHelpTab] = useState<
+    'general' | 'commands' | 'custom-commands'
+  >('general');
+  const openHelpDialog = useCallback(() => setHelpDialogOpen(true), []);
+  const closeHelpDialog = useCallback(() => setHelpDialogOpen(false), []);
 
   const { toggleVimEnabled } = useVimMode();
 
@@ -706,7 +782,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
       handleResume,
+      handleBranch,
       openDeleteDialog,
+      openHelpDialog,
     }),
     [
       openAuthDialog,
@@ -730,13 +808,16 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openResumeDialog,
       handleResume,
+      handleBranch,
       openDeleteDialog,
+      openHelpDialog,
     ],
   );
 
   const {
     handleSlashCommand,
     slashCommands,
+    recentSlashCommands,
     pendingHistoryItems: pendingSlashCommandHistoryItems,
     btwItem,
     setBtwItem,
@@ -1261,10 +1342,11 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
-  const stickyTodos = useMemo(
+  const rawStickyTodos = useMemo(
     () => getStickyTodos(historyManager.history, pendingHistoryItems),
     [historyManager.history, pendingHistoryItems],
   );
+  const stickyTodos = useStableStickyTodos(rawStickyTodos);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
@@ -1531,6 +1613,28 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
+  const configuredRenderMode = settings.merged.ui?.renderMode;
+  const [renderMode, setRenderMode] = useState<RenderMode>(
+    configuredRenderMode === 'raw' ? 'raw' : 'render',
+  );
+  const renderModeConfigMountedRef = useRef(false);
+  useEffect(() => {
+    if (!renderModeConfigMountedRef.current) {
+      renderModeConfigMountedRef.current = true;
+      return;
+    }
+
+    setRenderMode(configuredRenderMode === 'raw' ? 'raw' : 'render');
+  }, [configuredRenderMode]);
+  const renderModeMountedRef = useRef(false);
+  useEffect(() => {
+    if (!renderModeMountedRef.current) {
+      renderModeMountedRef.current = true;
+      return;
+    }
+
+    refreshStatic();
+  }, [renderMode, refreshStatic]);
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -1574,7 +1678,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
-    !!codingPlanUpdateRequest ||
+    !!providerUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
@@ -1597,6 +1701,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
+    isHelpDialogOpen ||
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
     bgTasksDialogOpen;
@@ -1606,24 +1711,39 @@ export const AppContainer = (props: AppContainerProps) => {
     !dialogsVisible &&
     !isFeedbackDialogOpen &&
     streamingState !== StreamingState.WaitingForConfirmation;
+  const stickyTodoWidth = Math.min(mainAreaWidth, 64);
+  const stickyTodoMaxVisibleItems =
+    getStickyTodoMaxVisibleItems(terminalHeight);
+  const stickyTodosLayoutKey = shouldShowStickyTodos
+    ? getStickyTodosLayoutKey(
+        stickyTodos,
+        stickyTodoWidth,
+        stickyTodoMaxVisibleItems,
+      )
+    : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
   useLayoutEffect(() => {
     if (!mainControlsRef.current) {
-      setControlsHeight(0);
+      setControlsHeight((previousHeight) =>
+        previousHeight === 0 ? previousHeight : 0,
+      );
       return;
     }
 
     const fullFooterMeasurement = measureElement(mainControlsRef.current);
-    setControlsHeight(fullFooterMeasurement.height);
+    setControlsHeight((previousHeight) =>
+      previousHeight === fullFooterMeasurement.height
+        ? previousHeight
+        : fullFooterMeasurement.height,
+    );
   }, [
     buffer,
     terminalWidth,
     terminalHeight,
     btwItem,
     dialogsVisible,
-    shouldShowStickyTodos,
-    stickyTodos,
+    stickyTodosLayoutKey,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -1643,8 +1763,6 @@ export const AppContainer = (props: AppContainerProps) => {
     pager: settings.merged.tools?.shell?.pager,
     showColor: settings.merged.tools?.shell?.showColor,
   });
-  const isInitialMount = useRef(true);
-
   useEffect(() => {
     if (activePtyId) {
       ShellExecutionService.resizePty(
@@ -1656,26 +1774,19 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
   useEffect(() => {
+    if (previousTerminalWidthRef.current === terminalWidth) {
+      return;
+    }
+    previousTerminalWidthRef.current = terminalWidth;
+    repaintStaticViewport();
+  }, [terminalWidth, repaintStaticViewport]);
+
+  useEffect(() => {
     if (ideNeedsRestart) {
       // IDE trust changed, force a restart.
       setShowIdeRestartPrompt(true);
     }
   }, [ideNeedsRestart]);
-
-  useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-
-    const handler = setTimeout(() => {
-      refreshStatic();
-    }, 300);
-
-    return () => {
-      clearTimeout(handler);
-    };
-  }, [terminalWidth, refreshStatic]);
 
   useEffect(() => {
     const unsubscribe = ideContextStore.subscribe(setIdeContextState);
@@ -1738,9 +1849,10 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      // 3. Truncate API history and strip stale thinking blocks
+      // 3. Truncate API history to the target point.
+      // Do NOT strip thought parts — reasoning models (e.g. DeepSeek) require
+      // reasoning_content continuity across all turns in the conversation.
       geminiClient.truncateHistory(apiTruncateIndex);
-      geminiClient.stripThoughtsFromHistory();
 
       // 4. Truncate UI history (keep everything before the target item)
       const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
@@ -1924,6 +2036,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
+    isHelpDialogOpen,
+    closeHelpDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
   });
@@ -2066,7 +2180,12 @@ export const AppContainer = (props: AppContainerProps) => {
         }
 
         // Input is empty, cancel request immediately (no double-press needed)
-        if (streamingState === StreamingState.Responding) {
+        // Skip when a dialog (background tasks, etc.) is open — ESC should
+        // close the dialog, not cancel the running request.
+        if (
+          streamingState === StreamingState.Responding &&
+          !dialogsVisibleRef.current
+        ) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
@@ -2122,7 +2241,9 @@ export const AppContainer = (props: AppContainerProps) => {
         setConstrainHeight(true);
       }
 
-      if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
+      if (handleRenderModeToggleKey(key, setRenderMode)) {
+        return;
+      } else if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
         const newValue = !showToolDescriptions;
         setShowToolDescriptions(newValue);
 
@@ -2149,7 +2270,15 @@ export const AppContainer = (props: AppContainerProps) => {
         const newValue = !compactMode;
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
-        refreshStatic();
+        // Skip the expensive clearTerminal + Static remount when no past
+        // item would render differently (no tool_group / gemini_thought*).
+        // Future items pick up the new mode naturally because Static is
+        // append-only. Issue #3899: this unfreezes Ctrl+O for plain-chat
+        // long sessions; tool/thinking-bearing sessions still go through
+        // the (now chunked) full path in MainContent.
+        if (compactToggleHasVisualEffect(historyRef.current)) {
+          refreshStatic();
+        }
       }
     },
     [
@@ -2185,6 +2314,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
+      setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
     ],
@@ -2269,14 +2399,8 @@ export const AppContainer = (props: AppContainerProps) => {
       historyManager,
       isThemeDialogOpen,
       themeError,
-      isAuthenticating,
+      auth: authState,
       isConfigInitialized,
-      authError,
-      isAuthDialogOpen,
-      pendingAuthType,
-      externalAuthState,
-      // Qwen OAuth state
-      qwenAuthState,
       editorError,
       isEditorDialogOpen,
       debugMessage,
@@ -2293,13 +2417,16 @@ export const AppContainer = (props: AppContainerProps) => {
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
+      isHelpDialogOpen,
+      activeHelpTab,
       slashCommands,
+      recentSlashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
-      codingPlanUpdateRequest,
+      providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -2390,14 +2517,8 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       isThemeDialogOpen,
       themeError,
-      isAuthenticating,
+      authState,
       isConfigInitialized,
-      authError,
-      isAuthDialogOpen,
-      pendingAuthType,
-      externalAuthState,
-      // Qwen OAuth state
-      qwenAuthState,
       editorError,
       isEditorDialogOpen,
       debugMessage,
@@ -2414,13 +2535,16 @@ export const AppContainer = (props: AppContainerProps) => {
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
+      isHelpDialogOpen,
+      activeHelpTab,
       slashCommands,
+      recentSlashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
-      codingPlanUpdateRequest,
+      providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -2519,14 +2643,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
-      handleAuthSelect,
-      setAuthState,
-      onAuthError,
-      cancelAuthentication,
-      handleCodingPlanSubmit,
-      handleAlibabaStandardSubmit,
-      handleOpenRouterSubmit,
-      handleCustomApiKeySubmit,
+      auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -2538,7 +2655,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissCodingPlanUpdate,
+      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -2572,10 +2689,16 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Branch (fork) session
+      handleBranch,
       // Delete session dialog
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      // Help dialog
+      openHelpDialog,
+      closeHelpDialog,
+      setHelpTab,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
@@ -2593,14 +2716,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
-      handleAuthSelect,
-      setAuthState,
-      onAuthError,
-      cancelAuthentication,
-      handleCodingPlanSubmit,
-      handleAlibabaStandardSubmit,
-      handleOpenRouterSubmit,
-      handleCustomApiKeySubmit,
+      authActions,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -2612,7 +2728,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissCodingPlanUpdate,
+      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -2644,10 +2760,16 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Branch (fork) session
+      handleBranch,
       // Delete session dialog
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      // Help dialog
+      openHelpDialog,
+      closeHelpDialog,
+      setHelpTab,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
@@ -2664,6 +2786,10 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({ compactMode, setCompactMode }),
     [compactMode, setCompactMode],
   );
+  const renderModeValue = useMemo(
+    () => ({ renderMode, setRenderMode }),
+    [renderMode, setRenderMode],
+  );
 
   return (
     <UIStateContext.Provider value={uiState}>
@@ -2676,9 +2802,13 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <CompactModeProvider value={compactModeValue}>
-              <ShellFocusContext.Provider value={isFocused}>
-                <App />
-              </ShellFocusContext.Provider>
+              <RenderModeProvider value={renderModeValue}>
+                <TerminalOutputProvider value={writeRaw}>
+                  <ShellFocusContext.Provider value={isFocused}>
+                    <App />
+                  </ShellFocusContext.Provider>
+                </TerminalOutputProvider>
+              </RenderModeProvider>
             </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>

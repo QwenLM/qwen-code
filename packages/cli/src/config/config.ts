@@ -30,7 +30,9 @@ import {
   NativeLspService,
   isBareMode,
   isToolEnabled,
+  type ConfigParameters,
   type MCPServerConfig,
+  SchemaValidator,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -54,6 +56,7 @@ import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
+import { reviewCommand } from '../commands/review.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -163,7 +166,119 @@ export interface CliArgs {
   channel: string | undefined;
   jsonFd?: number | undefined;
   jsonFile?: string | undefined;
+  jsonSchema?: string | undefined;
   inputFile?: string | undefined;
+}
+
+/** 4 MiB — well above any real schema, well below an accidental
+ * gigabyte-sized file that would OOM `fs.readFileSync` + `JSON.parse`.
+ */
+const MAX_JSON_SCHEMA_FILE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Resolves the `--json-schema` argument into a parsed JSON Schema object.
+ *
+ * Accepts either a JSON literal or `@path/to/schema.json`. Fails fast with a
+ * FatalConfigError if the input can't be read/parsed/compiled — invalid
+ * schemas should not silently skip validation at runtime.
+ */
+export function resolveJsonSchemaArg(
+  raw: string | undefined,
+): Record<string, unknown> | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new FatalConfigError('--json-schema cannot be empty.');
+  }
+
+  let payload: string;
+  if (trimmed.startsWith('@')) {
+    const resolvedPath = resolvePath(trimmed.slice(1));
+    try {
+      // Cap the read size at 4 MiB. Real-world JSON schemas are well
+      // under this (the spec encourages decomposition via `$ref`); any
+      // multi-MiB file is almost certainly a wrong-path mistake or a
+      // typo'd argument. Without a cap, a multi-GB file (e.g. accidental
+      // `--json-schema @./node_modules/.cache/*.json`) loads into memory
+      // before `JSON.parse` even runs and OOMs the CLI.
+      const stat = fs.statSync(resolvedPath);
+      if (stat.size > MAX_JSON_SCHEMA_FILE_BYTES) {
+        throw new FatalConfigError(
+          `--json-schema file "${resolvedPath}" is ${stat.size} bytes ` +
+            `(>${MAX_JSON_SCHEMA_FILE_BYTES}). Refusing to read; this is ` +
+            'almost certainly a wrong-path argument. Schemas should be ' +
+            'small enough to fit in a few KiB; decompose with `$ref` if ' +
+            'you need a large family of types.',
+        );
+      }
+      payload = fs.readFileSync(resolvedPath, 'utf8');
+    } catch (err) {
+      if (err instanceof FatalConfigError) throw err;
+      throw new FatalConfigError(
+        `--json-schema could not read "${resolvedPath}": ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  } else {
+    payload = trimmed;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch (err) {
+    throw new FatalConfigError(
+      `--json-schema is not valid JSON: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new FatalConfigError(
+      '--json-schema must be a JSON object describing a schema.',
+    );
+  }
+
+  // Ajv compile-time validation. SchemaValidator.validate is deliberately
+  // lenient at runtime (falls back to no-op on compile failure to support
+  // exotic MCP schemas) — but `--json-schema` is explicit user intent, so
+  // surface a bad schema here rather than letting it silently no-op later.
+  const compileError = SchemaValidator.compileStrict(parsed);
+  if (compileError) {
+    throw new FatalConfigError(
+      `--json-schema is not a valid JSON Schema: ${compileError}`,
+    );
+  }
+
+  // The schema becomes the parameter schema of the synthetic
+  // structured_output tool, and tool-call arguments are object-shaped.
+  // A schema like `{"type":"string"}` would compile fine but be
+  // unsatisfiable as a tool-call argument — fail at parse time so the
+  // user sees the contract violation immediately instead of at runtime.
+  //
+  // We only check the direct `type` field (or array of types). Deeper
+  // analysis of `anyOf`/`oneOf`/`not` is intentionally not done here:
+  // the strict-Ajv compile is the right place for full structural
+  // validation, and a partial check would either give false reassurance
+  // or wrongly reject valid composed schemas. Schemas with no top-level
+  // `type` are allowed through (covers `{}`, plain `properties`, etc).
+  const schemaType = (parsed as { type?: unknown }).type;
+  const isObjectAllowed =
+    schemaType === undefined ||
+    schemaType === 'object' ||
+    (Array.isArray(schemaType) && schemaType.includes('object'));
+  if (!isObjectAllowed) {
+    throw new FatalConfigError(
+      `--json-schema top-level type must include "object" (got ${JSON.stringify(schemaType)}); ` +
+        'wrap your value under an object property if you need a non-object payload.',
+    );
+  }
+
+  return parsed as Record<string, unknown>;
 }
 
 function normalizeOutputFormat(
@@ -469,6 +584,14 @@ export async function parseArguments(): Promise<CliArgs> {
             'File path for structured JSON event output (dual output mode). ' +
             'Can be a regular file, FIFO (named pipe), or /dev/fd/N.',
         })
+        .option('json-schema', {
+          type: 'string',
+          description:
+            "JSON Schema that the model's final output must conform to " +
+            '(headless mode only). Accepts a JSON literal or "@path/to/schema.json". ' +
+            'Registers a synthetic `structured_output` tool; the session ends on ' +
+            'the first valid call.',
+        })
         .option('input-file', {
           type: 'string',
           description:
@@ -602,6 +725,31 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
             return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
           }
+          if (argv['jsonSchema']) {
+            if (argv['promptInteractive']) {
+              return '--json-schema cannot be used with --prompt-interactive (-i); structured output only terminates the non-interactive flow.';
+            }
+            // Stream-json input runs through runNonInteractiveStreamJson,
+            // which doesn't honor the structured-output termination
+            // contract. Reject the combination explicitly so users see
+            // the mismatch at parse time instead of confusion at runtime.
+            if (argv['inputFormat'] === 'stream-json') {
+              return '--json-schema cannot be used with --input-format stream-json; structured output is a single-shot contract incompatible with stream-json input.';
+            }
+            const hasPrompt = !!argv['prompt'];
+            const query = argv['query'] as string | string[] | undefined;
+            const hasPositionalQuery = Array.isArray(query)
+              ? query.length > 0
+              : !!query;
+            // Allow stdin piping (`echo "..." | qwen --json-schema ...`):
+            // when stdin is not a TTY, the prompt is supplied via the pipe
+            // and headless mode runs normally. Only reject true interactive
+            // invocations with neither flag nor positional nor pipe.
+            const stdinIsPiped = !process.stdin.isTTY;
+            if (!hasPrompt && !hasPositionalQuery && !stdinIsPiped) {
+              return '--json-schema only applies to non-interactive mode; pass a prompt via -p, as a positional argument, or piped via stdin.';
+            }
+          }
           return true;
         }),
     )
@@ -614,7 +762,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Hooks subcommands
     .command(hooksCommand)
     // Register Channel subcommands
-    .command(channelCommand);
+    .command(channelCommand)
+    // Register /review skill helpers (presubmit checks, cleanup)
+    .command(reviewCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -636,9 +786,13 @@ export async function parseArguments(): Promise<CliArgs> {
     (result._[0] === 'mcp' ||
       result._[0] === 'extensions' ||
       result._[0] === 'hooks' ||
-      result._[0] === 'channel')
+      result._[0] === 'channel' ||
+      result._[0] === 'review')
   ) {
-    // MCP/Extensions/Hooks commands handle their own execution and process exit
+    // MCP/Extensions/Hooks/Channel/Review commands handle their own
+    // execution and exit. Returning here would let the main interactive
+    // flow run, which would prompt for stdin input despite the user
+    // having already invoked a subcommand.
     process.exit(0);
   }
 
@@ -1028,16 +1182,8 @@ export async function loadCliConfig(
   // to preserve the original behaviour where "ShellTool", "Shell", and
   // "run_shell_command" are all accepted as the same tool.
   const isExplicitlyAllowed = (toolName: ToolName): boolean => {
-    const name = toolName as string;
     // 1. Check permissions.allow / allowedTools rules.
-    if (
-      mergedAllow.some((rule) => {
-        const openParen = rule.indexOf('(');
-        const ruleName =
-          openParen === -1 ? rule.trim() : rule.substring(0, openParen).trim();
-        return ruleName === name;
-      })
-    ) {
+    if (mergedAllow.some((rule) => isToolEnabled(toolName, [rule], []))) {
       return true;
     }
     // 2. Check coreTools whitelist (with alias matching).
@@ -1071,12 +1217,14 @@ export async function loadCliConfig(
       case ApprovalMode.DEFAULT:
         // Deny all write/execute tools unless explicitly allowed.
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
         denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
         break;
       case ApprovalMode.AUTO_EDIT:
-        // Only shell requires a prompt in auto-edit mode.
+        // Shell-like execute tools still require a prompt in auto-edit mode.
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         break;
       case ApprovalMode.YOLO:
         // No extra denials for YOLO mode.
@@ -1170,7 +1318,7 @@ export async function loadCliConfig(
 
   const modelProvidersConfig = settings.modelProviders;
 
-  const config = new Config({
+  const configParams: ConfigParameters = {
     sessionId,
     sessionData,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -1220,11 +1368,13 @@ export async function loadCliConfig(
       : settings.tools?.discoveryCommand,
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
-    mcpServers: bareMode ? {} : (() => {
-      const base = settings.mcpServers || {};
-      const cliMcpServers = parseMcpConfig(argv.mcpConfig);
-      return cliMcpServers ? { ...base, ...cliMcpServers } : base;
-    })(),
+    mcpServers: bareMode
+      ? {}
+      : (() => {
+          const base = settings.mcpServers || {};
+          const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+          return cliMcpServers ? { ...base, ...cliMcpServers } : base;
+        })(),
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -1244,6 +1394,7 @@ export async function loadCliConfig(
       argv.checkpointing || settings.general?.checkpointing?.enabled,
     proxy:
       argv.proxy ||
+      settings.proxy ||
       process.env['HTTPS_PROXY'] ||
       process.env['https_proxy'] ||
       process.env['HTTP_PROXY'] ||
@@ -1297,6 +1448,9 @@ export async function loadCliConfig(
       ? false
       : (settings.memory?.enableManagedAutoMemory ?? true),
     enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    enableAutoSkill: bareMode
+      ? false
+      : (settings.memory?.enableAutoSkill ?? false),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
@@ -1312,6 +1466,7 @@ export async function loadCliConfig(
     // absent.
     jsonFd: argv.jsonFd,
     jsonFile: argv.jsonFile ?? settings.dualOutput?.jsonFile,
+    jsonSchema: resolveJsonSchemaArg(argv.jsonSchema),
     inputFile: argv.inputFile ?? settings.dualOutput?.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
@@ -1334,7 +1489,9 @@ export async function loadCliConfig(
             : undefined,
         }
       : undefined,
-  });
+  };
+
+  const config = new Config(configParams);
 
   if (lspEnabled) {
     try {

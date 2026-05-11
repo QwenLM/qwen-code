@@ -363,6 +363,9 @@ Use the `/model` command at any time to switch between all configured models.
 
 You can also run models locally — no API key or cloud account needed. This is not an authentication method; instead, configure your local model endpoint in `~/.qwen/settings.json` using the `modelProviders` field.
 
+Set `generationConfig.contextWindowSize` inside the matching provider entry
+and adjust it to the context length configured on your local server.
+
 <details>
 <summary>Ollama setup</summary>
 
@@ -378,7 +381,10 @@ You can also run models locally — no API key or cloud account needed. This is 
         "id": "qwen3:32b",
         "name": "Qwen3 32B (Ollama)",
         "baseUrl": "http://localhost:11434/v1",
-        "description": "Qwen3 32B running locally via Ollama"
+        "description": "Qwen3 32B running locally via Ollama",
+        "generationConfig": {
+          "contextWindowSize": 131072
+        }
       }
     ]
   },
@@ -410,7 +416,10 @@ You can also run models locally — no API key or cloud account needed. This is 
         "id": "Qwen/Qwen3-32B",
         "name": "Qwen3 32B (vLLM)",
         "baseUrl": "http://localhost:8000/v1",
-        "description": "Qwen3 32B running locally via vLLM"
+        "description": "Qwen3 32B running locally via vLLM",
+        "generationConfig": {
+          "contextWindowSize": 131072
+        }
       }
     ]
   },

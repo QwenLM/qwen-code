@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { SlashCommand } from '../commands/types.js';
+import { findSlashCommandTokens } from './commandUtils.js';
 import { cpLen, cpSlice } from './textUtils.js';
 
 export type HighlightToken = {
@@ -11,20 +13,30 @@ export type HighlightToken = {
   type: 'default' | 'command' | 'file';
 };
 
-const HIGHLIGHT_REGEX = /(^\/[a-zA-Z0-9_-]+|@(?:\\ |[a-zA-Z0-9_./-])+)/g;
+const HIGHLIGHT_REGEX =
+  /(^\/[a-zA-Z][a-zA-Z0-9:_-]*)|((?<=\s)\/[a-zA-Z][a-zA-Z0-9:_-]*)|(@(?:\\ |[a-zA-Z0-9_./-])+)/g;
 
 export function parseInputForHighlighting(
   text: string,
   index: number,
+  slashCommands?: readonly SlashCommand[],
 ): readonly HighlightToken[] {
   if (!text) {
     return [{ text: '', type: 'default' }];
   }
 
   const tokens: HighlightToken[] = [];
+  const validSlashTokenStarts = new Set(
+    slashCommands
+      ? findSlashCommandTokens(text, slashCommands)
+          .filter((token) => token.valid)
+          .map((token) => token.start)
+      : undefined,
+  );
   let lastIndex = 0;
   let match;
 
+  HIGHLIGHT_REGEX.lastIndex = 0;
   while ((match = HIGHLIGHT_REGEX.exec(text)) !== null) {
     const [fullMatch] = match;
     const matchIndex = match.index;
@@ -38,19 +50,22 @@ export function parseInputForHighlighting(
     }
 
     // Add the matched token
-    const type = fullMatch.startsWith('/') ? 'command' : 'file';
-    // Only highlight slash commands if the index is 0.
-    if (type === 'command' && index !== 0) {
-      tokens.push({
-        text: fullMatch,
-        type: 'default',
-      });
+    let type: HighlightToken['type'];
+    if (match[1] !== undefined || match[2] !== undefined) {
+      if (slashCommands) {
+        type = validSlashTokenStarts.has(matchIndex) ? 'command' : 'default';
+      } else if (match[1] !== undefined) {
+        // Group 1: line-start slash command — only highlight on logical line 0
+        type = index === 0 ? 'command' : 'default';
+      } else {
+        // Backwards-compatible fallback when no command metadata is provided.
+        type = 'command';
+      }
     } else {
-      tokens.push({
-        text: fullMatch,
-        type,
-      });
+      // Group 3: @file pattern
+      type = 'file';
     }
+    tokens.push({ text: fullMatch, type });
 
     lastIndex = matchIndex + fullMatch.length;
   }

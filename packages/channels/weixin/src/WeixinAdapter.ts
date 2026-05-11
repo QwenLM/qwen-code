@@ -17,13 +17,18 @@ import type {
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
-import { sendText } from './send.js';
+import { sendText, sendImage, detectImageMime } from './send.js';
 import { downloadAndDecrypt } from './media.js';
-import { getConfig, sendTyping } from './api.js';
+import { getConfig, sendTyping, WeixinApiError } from './api.js';
 import { TypingStatus } from './types.js';
 
 /** In-memory typing ticket cache: userId -> typingTicket */
 const typingTickets = new Map<string, string>();
+
+/** Escape special regex characters in a string. */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export class WeixinChannel extends ChannelBase {
   private abortController: AbortController | null = null;
@@ -43,6 +48,35 @@ export class WeixinChannel extends ChannelBase {
   }
 
   async connect(): Promise<void> {
+    // Default channel instructions — always include image capability info
+    const imageInstructions = [
+      '',
+      'If you created an image file (screenshot, chart, etc.), you can send it to the user by writing:',
+      '[IMAGE: /absolute/path/to/file.png]',
+      '',
+      'The marker is stripped from text and the image is uploaded automatically.',
+      '',
+      'CRITICAL: Only use real file paths. Do NOT write [IMAGE: ...] with:',
+      '- Example paths like /path/to/file or /tmp/cat.png',
+      '- Placeholder symbols like ...',
+      "- Paths that don't exist on disk",
+    ].join('\n');
+
+    if (!this.config.instructions) {
+      this.config.instructions = [
+        '## WeChat Channel',
+        '',
+        'You are a concise coding assistant responding via WeChat.',
+        'Keep responses under 500 characters. Use plain text only.',
+        '',
+        'Users can also send you images.',
+        imageInstructions,
+      ].join('\n');
+    } else if (!this.config.instructions.includes('[IMAGE:')) {
+      // Use a local copy to avoid mutating this.config.instructions on reconnect.
+      this.config.instructions =
+        this.config.instructions + '\n' + imageInstructions;
+    }
     const account = loadAccount();
     if (!account) {
       throw new Error(
@@ -158,13 +192,84 @@ export class WeixinChannel extends ChannelBase {
 
   async sendMessage(chatId: string, text: string): Promise<void> {
     const contextToken = getContextToken(chatId) || '';
-    await sendText({
-      to: chatId,
-      text,
-      baseUrl: this.baseUrl,
-      token: this.token,
-      contextToken,
-    });
+
+    // Parse [IMAGE: /path/to/file.png] markers from text.
+    // Strip code blocks first to avoid matching example syntax inside them.
+    const textWithoutCode = text
+      .replace(/```[\s\S]*?```/g, '')
+      .replace(/`[^`]*`/g, '');
+
+    // Extract image paths from code-free text.
+    const imageRegex = /\[IMAGE:\s*([^\]]+)\]/gi;
+    const parsedImages: string[] = [];
+    for (const m of textWithoutCode.matchAll(imageRegex)) {
+      const trimmed = m[1]?.trim();
+      if (trimmed) parsedImages.push(trimmed);
+    }
+
+    // Only strip markers that were actually parsed (avoids silently
+    // removing [IMAGE:] inside code blocks from the displayed text).
+    let cleanedText = text;
+    for (const path of parsedImages) {
+      cleanedText = cleanedText.replace(
+        new RegExp(`\\[IMAGE:\\s*${escapeRegex(path)}\\]`, 'gi'),
+        '',
+      );
+    }
+
+    // Clean up double blank lines left by removed markers
+    cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n').trim();
+
+    // Send text first if non-empty
+    if (cleanedText) {
+      await sendText({
+        to: chatId,
+        text: cleanedText,
+        baseUrl: this.baseUrl,
+        token: this.token,
+        contextToken,
+      });
+    }
+
+    // Send images
+    if (parsedImages.length) {
+      const workspaceDirs = [this.config.cwd];
+
+      for (const imagePath of parsedImages) {
+        try {
+          await sendImage({
+            to: chatId,
+            imagePath,
+            baseUrl: this.baseUrl,
+            token: this.token,
+            contextToken,
+            workspaceDirs,
+          });
+        } catch (err) {
+          const status = err instanceof WeixinApiError ? err.status : 0;
+          const ret = err instanceof WeixinApiError ? err.ret : undefined;
+          const errcode =
+            err instanceof WeixinApiError ? err.errcode : undefined;
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to send image (status=${status} ret=${ret} errcode=${errcode}): ${msg}\n`,
+          );
+          try {
+            await sendText({
+              to: chatId,
+              text: '图片发送失败，请稍后重试',
+              baseUrl: this.baseUrl,
+              token: this.token,
+              contextToken,
+            });
+          } catch (fallbackErr) {
+            process.stderr.write(
+              `[Weixin:${this.name}] Fallback text also failed: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}\n`,
+            );
+          }
+        }
+      }
+    }
   }
 
   disconnect(): void {
@@ -201,28 +306,4 @@ export class WeixinChannel extends ChannelBase {
       // Typing is best-effort — don't fail the message flow
     }
   }
-}
-
-/** Detect image MIME type from magic bytes. */
-function detectImageMime(data: Buffer): string {
-  if (
-    data[0] === 0x89 &&
-    data[1] === 0x50 &&
-    data[2] === 0x4e &&
-    data[3] === 0x47
-  ) {
-    return 'image/png';
-  }
-  if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) {
-    return 'image/gif';
-  }
-  if (
-    data[0] === 0x52 &&
-    data[1] === 0x49 &&
-    data[2] === 0x46 &&
-    data[3] === 0x46
-  ) {
-    return 'image/webp';
-  }
-  return 'image/jpeg';
 }

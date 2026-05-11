@@ -107,6 +107,10 @@ function extractLastAssistantText(history: HistoryItem[]): string | undefined {
   return undefined;
 }
 
+function stripLeadingBlankLines(text: string): string {
+  return text.replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
 /**
  * Flatten `functionResponse` parts into a compact string for the summarizer.
  * The summarizer itself truncates to 300 chars per field, so we just join
@@ -766,11 +770,14 @@ export const useGeminiStream = (
         pendingHistoryItemRef.current?.type !== 'gemini' &&
         pendingHistoryItemRef.current?.type !== 'gemini_content'
       ) {
+        if (newGeminiMessageBuffer.trim().length === 0) {
+          return newGeminiMessageBuffer;
+        }
         if (pendingHistoryItemRef.current) {
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
         setPendingHistoryItem({ type: 'gemini', text: '' });
-        newGeminiMessageBuffer = eventValue;
+        newGeminiMessageBuffer = stripLeadingBlankLines(newGeminiMessageBuffer);
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.
@@ -845,13 +852,22 @@ export const useGeminiStream = (
       const isPendingThought =
         pendingType === 'gemini_thought' ||
         pendingType === 'gemini_thought_content';
+      let thoughtToMerge = eventValue;
 
       // If we're not already showing a thought, start a new one
       if (!isPendingThought) {
+        if (newThoughtBuffer.trim().length === 0) {
+          return newThoughtBuffer;
+        }
         // If there's a pending non-thought item, finalize it first
         if (pendingHistoryItemRef.current) {
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
+        newThoughtBuffer = stripLeadingBlankLines(newThoughtBuffer);
+        thoughtToMerge = {
+          ...eventValue,
+          description: newThoughtBuffer,
+        };
         setPendingHistoryItem({ type: 'gemini_thought', text: '' });
       }
 
@@ -888,7 +904,7 @@ export const useGeminiStream = (
       }
 
       // Also update the thought state for the loading indicator
-      mergeThought(eventValue);
+      mergeThought(thoughtToMerge);
 
       return newThoughtBuffer;
     },
@@ -1882,6 +1898,13 @@ export const useGeminiStream = (
         (t) => !t.request.isClientInitiated,
       );
 
+      for (const toolCall of geminiTools) {
+        geminiClient?.recordCompletedToolCall(
+          toolCall.request.name,
+          toolCall.request.args as Record<string, unknown>,
+        );
+      }
+
       if (geminiTools.length === 0) {
         return;
       }
@@ -2216,6 +2239,15 @@ export const useGeminiStream = (
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+  const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
+
+  useEffect(() => {
+    if (notificationQueueSessionIdRef.current === sessionStates.sessionId) {
+      return;
+    }
+    notificationQueueSessionIdRef.current = sessionStates.sessionId;
+    notificationQueueRef.current = [];
+  }, [sessionStates.sessionId]);
 
   // Start the cron scheduler on mount, stop on unmount.
   // Cron fires enqueue onto the shared notification queue.
@@ -2243,6 +2275,22 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
+  // Register monitor notification callback onto the shared queue.
+  useEffect(() => {
+    const registry = config.getMonitorRegistry();
     registry.setNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,

@@ -15,6 +15,7 @@ import {
   SessionService,
   type Config,
   createDebugLogger,
+  writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
@@ -30,6 +31,7 @@ import {
   createMinimalSettings,
   getSettingsWarnings,
   loadSettings,
+  preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import {
   initializeApp,
@@ -164,6 +166,48 @@ ${reason.stack}`
   });
 }
 
+function getSignalExitCode(signal: NodeJS.Signals): number {
+  return signal === 'SIGINT' ? 130 : 143;
+}
+
+function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
+  let cleanupStarted = false;
+
+  const handleSignal = (signal: NodeJS.Signals) => {
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(wasRaw);
+    }
+
+    if (cleanupStarted) {
+      return;
+    }
+    cleanupStarted = true;
+
+    void runExitCleanup()
+      .catch((error) => {
+        debugLogger.error(`Error during ${signal} cleanup:`, error);
+      })
+      .finally(() => {
+        process.exit(getSignalExitCode(signal));
+      });
+  };
+
+  const handleSigterm = () => {
+    handleSignal('SIGTERM');
+  };
+  const handleSigint = () => {
+    handleSignal('SIGINT');
+  };
+
+  process.once('SIGTERM', handleSigterm);
+  process.once('SIGINT', handleSigint);
+
+  return () => {
+    process.removeListener('SIGTERM', handleSigterm);
+    process.removeListener('SIGINT', handleSigint);
+  };
+}
+
 export async function startInteractiveUI(
   config: Config,
   settings: LoadedSettings,
@@ -173,6 +217,28 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
+
+  // Write a small runtime.json sidecar next to the chat log so external
+  // tools (terminal multiplexers, IDE integrations, status daemons) can
+  // map the running PID back to its session id and work directory.
+  // Best-effort: a read-only filesystem must not prevent the UI from
+  // starting up.
+  try {
+    const sessionId = config.getSessionId();
+    const runtimeStatusPath = config.storage.getRuntimeStatusPath(sessionId);
+    await writeRuntimeStatus(runtimeStatusPath, {
+      sessionId,
+      workDir: config.getTargetDir(),
+      qwenVersion: version,
+    });
+    // Mark this process as the runtime.json owner so subsequent
+    // session swaps (/clear, /resume, etc.) refresh the sidecar.
+    // Non-interactive entry points never reach here, so they won't
+    // trample a sibling shell's sidecar on the same session id.
+    config.markRuntimeStatusEnabled();
+  } catch {
+    // ignored: best-effort, never block UI startup.
+  }
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
@@ -318,6 +384,10 @@ export async function main() {
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
+
+  // Run before yargs parses subcommands — handlers like `channel status`/`stop`
+  // call `process.exit` before `loadSettings()` would otherwise bootstrap.
+  preResolveHomeEnvOverrides();
 
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
@@ -559,6 +629,9 @@ export async function main() {
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
     let themeAutoDetectionComplete: Promise<void> | undefined;
+    if (config.isInteractive()) {
+      registerCleanup(installInteractiveSignalHandlers(wasRaw));
+    }
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
@@ -568,14 +641,6 @@ export async function main() {
       startEarlyInputCapture();
       // Ensure the stdin listener is removed on any exit path (error, signal, etc.)
       registerCleanup(() => stopAndGetCapturedInput());
-
-      // This cleanup isn't strictly needed but may help in certain situations.
-      process.on('SIGTERM', () => {
-        process.stdin.setRawMode(wasRaw);
-      });
-      process.on('SIGINT', () => {
-        process.stdin.setRawMode(wasRaw);
-      });
 
       // Detect and enable Kitty keyboard protocol once at startup.
       kittyProtocolDetectionComplete = detectAndEnableKittyProtocol();
@@ -705,9 +770,13 @@ export async function main() {
       await runNonInteractiveStreamJson(
         nonInteractiveConfig,
         trimmedInput.length > 0 ? trimmedInput : '',
+        settings,
       );
       await runExitCleanup();
-      process.exit(0);
+      // Honor any exitCode set by the run (e.g. --json-schema plain-text
+      // path sets it to 1). Hardcoding 0 here would silently mask non-zero
+      // shell exits so the caller can't detect failures.
+      process.exit(process.exitCode ?? 0);
     }
 
     if (!input) {
@@ -731,7 +800,10 @@ export async function main() {
     await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
     // Call cleanup before process.exit, which causes cleanup to not run
     await runExitCleanup();
-    process.exit(0);
+    // Honor any exitCode set by the run (e.g. --json-schema plain-text
+    // path sets it to 1). Hardcoding 0 here would silently mask non-zero
+    // shell exits so the caller can't detect failures.
+    process.exit(process.exitCode ?? 0);
   }
 }
 

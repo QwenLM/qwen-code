@@ -483,6 +483,9 @@ export function appendAdditionalContext(
     return [...content, { text: additionalContext } as Part];
   }
 
-  // For non-array content that's still PartListUnion, return as-is
-  return content;
+  // Single non-array Part (e.g. ReadFile returning `{ inlineData: {...} }`
+  // for an image or PDF). Wrap in an array so the additional context still
+  // reaches the model — the previous "return as-is" silently dropped
+  // hook-injected reminders for any tool whose llmContent is a single Part.
+  return [content, { text: additionalContext } as Part];
 }

@@ -62,7 +62,6 @@ export interface ModelMetricsCore {
     total: number;
     cached: number;
     thoughts: number;
-    tool: number;
   };
 }
 
@@ -109,7 +108,6 @@ const createInitialModelMetricsCore = (): ModelMetricsCore => ({
     total: 0,
     cached: 0,
     thoughts: 0,
-    tool: 0,
   },
 });
 
@@ -241,7 +239,6 @@ export class UiTelemetryService extends EventEmitter {
       bucket.tokens.total += event.total_token_count;
       bucket.tokens.cached += event.cached_content_token_count;
       bucket.tokens.thoughts += event.thoughts_token_count;
-      bucket.tokens.tool += event.tool_token_count;
     }
   }
 
