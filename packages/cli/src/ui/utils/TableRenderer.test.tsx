@@ -41,6 +41,85 @@ describe('<TableRenderer />', () => {
     expect(new Set(widths).size).toBe(1);
   };
 
+  const foregroundAtText = (
+    output: string,
+    text: string,
+  ): string | undefined => {
+    const line = output
+      .split('\n')
+      .find((candidate) => stripAnsi(candidate).includes(text));
+    expect(line, `Expected rendered output to contain "${text}"`).toBeDefined();
+
+    const textIndex = line!.indexOf(text);
+    expect(textIndex).toBeGreaterThanOrEqual(0);
+
+    let foreground: string | undefined;
+    let searchIndex = 0;
+    while (searchIndex < textIndex) {
+      const sgrStart = line!.indexOf('\u001b[', searchIndex);
+      if (sgrStart === -1 || sgrStart >= textIndex) {
+        break;
+      }
+      const sgrEnd = line!.indexOf('m', sgrStart + 2);
+      if (sgrEnd === -1 || sgrEnd >= textIndex) {
+        break;
+      }
+      const paramsText = line!.slice(sgrStart + 2, sgrEnd);
+      if (!/^[0-9;]*$/.test(paramsText)) {
+        searchIndex = sgrStart + 1;
+        continue;
+      }
+      const params =
+        paramsText.length > 0
+          ? paramsText.split(';').map((param) => Number(param))
+          : [0];
+
+      for (let index = 0; index < params.length; index++) {
+        const code = params[index];
+        if (code === 0 || code === 39) {
+          foreground = undefined;
+        } else if (
+          typeof code === 'number' &&
+          ((code >= 30 && code <= 37) || (code >= 90 && code <= 97))
+        ) {
+          foreground = String(code);
+        } else if (code === 38) {
+          const mode = params[index + 1];
+          if (mode === 5 && Number.isFinite(params[index + 2])) {
+            foreground = `38;5;${params[index + 2]}`;
+            index += 2;
+          } else if (
+            mode === 2 &&
+            Number.isFinite(params[index + 2]) &&
+            Number.isFinite(params[index + 3]) &&
+            Number.isFinite(params[index + 4])
+          ) {
+            foreground = `38;2;${params[index + 2]};${params[index + 3]};${params[index + 4]}`;
+            index += 4;
+          }
+        }
+      }
+      searchIndex = sgrEnd + 1;
+    }
+
+    return foreground;
+  };
+
+  const expectWrappedContinuation = (
+    output: string,
+    wholeText: string,
+    continuationText: string,
+  ) => {
+    expect(stripAnsi(output)).not.toContain(wholeText);
+    const continuationLine = output
+      .split('\n')
+      .find((candidate) => stripAnsi(candidate).includes(continuationText));
+    expect(
+      continuationLine,
+      `Expected rendered output to wrap before "${continuationText}"`,
+    ).toBeDefined();
+  };
+
   it('renders a basic table with borders', () => {
     const output = renderTable(['Name', 'Value'], [['foo', 'bar']]);
 
@@ -305,6 +384,56 @@ describe('<TableRenderer />', () => {
     expect(output).toContain('green');
     expect(output).toContain('blue');
     expect(output).toContain('文本');
+    expectAllLinesToHaveSameVisibleWidth(output);
+  });
+
+  it('preserves truecolor inline-code foreground across wrapped lines', () => {
+    const tableName =
+      'deleted_t_spark_odps_sql_type_system2_test_view_more_times_expand_view_f44c82c06096_244650615';
+    const output = renderTable(['表名'], [[`\`${tableName}\``]], 64);
+
+    expect(output).toContain('244650615');
+    expectWrappedContinuation(output, tableName, '244650615');
+    expect(foregroundAtText(output, '244650615')).toMatch(/^38;2;/);
+    expectAllLinesToHaveSameVisibleWidth(output);
+  });
+
+  it('preserves 256-color foreground across wrapped lines', () => {
+    const output = renderTable(
+      ['Color'],
+      [['\u001b[38;5;45mabcdefghijklmnopqrstuvwxyz0123456789\u001b[39m']],
+      24,
+    );
+
+    expectWrappedContinuation(
+      output,
+      'abcdefghijklmnopqrstuvwxyz0123456789',
+      'qrstuvwxyz012345',
+    );
+    expect(foregroundAtText(output, 'qrstuvwxyz012345')).toBe('38;5;45');
+    expectAllLinesToHaveSameVisibleWidth(output);
+  });
+
+  it('does not preserve foreground after an explicit reset', () => {
+    const output = renderTable(
+      ['Color'],
+      [['\u001b[38;5;45mcolored\u001b[0m reset']],
+      18,
+    );
+
+    expect(foregroundAtText(output, 'reset')).toBeUndefined();
+    expectAllLinesToHaveSameVisibleWidth(output);
+  });
+
+  it('does not preserve foreground after an explicit foreground reset', () => {
+    const output = renderTable(
+      ['Color'],
+      [['\u001b[38;5;45mcolored\u001b[39m reset']],
+      18,
+    );
+
+    expectWrappedContinuation(output, 'colored reset', 'reset');
+    expect(foregroundAtText(output, 'reset')).toBeUndefined();
     expectAllLinesToHaveSameVisibleWidth(output);
   });
 
