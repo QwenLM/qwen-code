@@ -328,6 +328,19 @@ describe('osc8 helpers', () => {
       setTTY(true);
       process.env['KONSOLE_VERSION'] = '230400';
       expect(supportsHyperlinks()).toBe(true);
+      process.env['KONSOLE_VERSION'] = '210400';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('Konsole < 21.04 falls through (no OSC 8 in 20.x)', () => {
+      // KONSOLE_VERSION is set by every Konsole release, including ones
+      // that pre-date OSC 8 support. Without a version gate those older
+      // sessions would receive escape bytes they can't render.
+      setTTY(true);
+      process.env['KONSOLE_VERSION'] = '201200'; // Konsole 20.12
+      expect(supportsHyperlinks()).toBe(false);
+      process.env['KONSOLE_VERSION'] = '210399'; // one patch below the gate
+      expect(supportsHyperlinks()).toBe(false);
     });
 
     it('Alacritty is enabled via TERM=alacritty', () => {
@@ -386,11 +399,20 @@ describe('osc8 helpers', () => {
       expect(supportsHyperlinks()).toBe(false);
     });
 
-    it('honors FORCE_HYPERLINK=1 even inside tmux and even when isTTY=false', () => {
-      setTTY(false);
+    it('honors FORCE_HYPERLINK=1 inside tmux on a TTY', () => {
+      setTTY(true);
       process.env['TMUX'] = '/tmp/x,1,0';
       process.env['FORCE_HYPERLINK'] = '1';
       expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('FORCE_HYPERLINK=1 does NOT override non-TTY suppression', () => {
+      // A user with `FORCE_HYPERLINK=1` in their shell profile (to enable
+      // OSC 8 inside tmux interactively) must still get a clean pipe when
+      // running `qwen | cat` — escape bytes never go into a file/pipe.
+      setTTY(false);
+      process.env['FORCE_HYPERLINK'] = '1';
+      expect(supportsHyperlinks()).toBe(false);
     });
 
     it('FORCE_HYPERLINK=0 disables even on capable terminals', () => {

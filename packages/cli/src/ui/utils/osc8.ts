@@ -141,17 +141,22 @@ export function supportsHyperlinks(
     return false;
   }
 
+  // Embedded escapes must never end up in a file or another process. This
+  // guard sits above `FORCE_HYPERLINK` on purpose: a user who has
+  // `FORCE_HYPERLINK=1` in their shell profile (to enable OSC 8 inside
+  // tmux/Hyper interactively) still shouldn't see escape bytes when they
+  // run `qwen | cat` or `qwen > out.txt`.
+  if (!stream || !stream.isTTY) return false;
+
   // Explicit force overrides every heuristic below — but not the opt-outs
-  // above. Mirrors the `FORCE_HYPERLINK` contract from supports-hyperlinks:
-  // any non-zero numeric value (or empty string) enables, `0` disables.
+  // above nor the non-TTY guard. Mirrors the `FORCE_HYPERLINK` contract
+  // from supports-hyperlinks: any non-zero numeric value (or empty string)
+  // enables, `0` disables.
   const force = env['FORCE_HYPERLINK'];
   if (force !== undefined) {
     if (force.length === 0) return true;
     return parseInt(force, 10) !== 0;
   }
-
-  // Embedded escapes must never end up in a file or another process.
-  if (!stream || !stream.isTTY) return false;
 
   if (env['CI']) return false;
   if (env['TEAMCITY_VERSION']) return false;
@@ -169,8 +174,17 @@ export function supportsHyperlinks(
   if (env['GHOSTTY_RESOURCES_DIR'] || env['TERM'] === 'xterm-ghostty') {
     return true;
   }
-  // Konsole ≥ 21.04 ships OSC 8 and sets KONSOLE_VERSION on every session.
-  if (env['KONSOLE_VERSION']) return true;
+  // Konsole sets KONSOLE_VERSION on every session as a packed integer
+  // (e.g. 21.04 → 210400, 23.08.5 → 230805). OSC 8 support landed in
+  // Konsole 21.04, so version-gate against `>= 210400` and let older
+  // releases fall through to the final `return false` so we don't emit
+  // escapes on a host that won't render them.
+  if (env['KONSOLE_VERSION']) {
+    const konsoleVersion = parseInt(env['KONSOLE_VERSION'], 10);
+    if (Number.isFinite(konsoleVersion) && konsoleVersion >= 210400) {
+      return true;
+    }
+  }
   // Alacritty ≥ 0.11 supports OSC 8. Identify it via TERM=alacritty (set
   // when the alacritty terminfo is installed) or the ALACRITTY_LOG /
   // ALACRITTY_WINDOW_ID env vars that Alacritty 0.12+ sets unconditionally.
