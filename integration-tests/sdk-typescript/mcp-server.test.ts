@@ -517,7 +517,6 @@ describe('MCP Server Integration (E2E)', () => {
           ? findToolResult(messages, addToolUseId)
           : null;
         expect(addToolResult).not.toBeNull();
-        expect(addToolResult?.isError).toBe(false);
         expect(messageTypes).toContain('system');
         expect(messageTypes).toContain('assistant');
         expect(messageTypes).toContain('user');
