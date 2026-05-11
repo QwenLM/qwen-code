@@ -470,7 +470,7 @@ qwen serve
 # → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge)
 ```
 
-Run Qwen Code as a local HTTP daemon so IDE plugins, web UIs, CI scripts and custom CLIs all share **one** agent session over HTTP+SSE — instead of each spawning their own subprocess. Loopback bind has no auth; remote binds (`--hostname 0.0.0.0`) require `QWEN_SERVER_TOKEN`. See:
+Run Qwen Code as a local HTTP daemon so IDE plugins, web UIs, CI scripts and custom CLIs all share **one** agent session over HTTP+SSE — instead of each spawning their own subprocess. Loopback bind has no auth by default (set `QWEN_SERVER_TOKEN` to enable bearer auth even on loopback); remote binds (`--hostname 0.0.0.0`) **require** a token — boot refuses without one. See:
 
 - [Daemon mode user guide](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve)
 - [HTTP protocol reference](https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol)

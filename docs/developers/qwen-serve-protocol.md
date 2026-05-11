@@ -82,10 +82,10 @@ Request:
 }
 ```
 
-| Field            | Required | Notes                                                                                                                                                                                                                           |
-| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cwd`            | yes      | Absolute path. Relative paths return `400`. Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't fork sessions per spelling. |
-| `modelServiceId` | no       | If omitted the agent uses its default model. If the workspace already has a session, this calls `setSessionModel` on the existing one and broadcasts `model_switched`.                                                          |
+| Field            | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cwd`            | yes      | Absolute path. Relative paths return `400`. Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't fork sessions per spelling.                                                                                                                                                                                                                                                                                                                                                                                          |
+| `modelServiceId` | no       | Selects which configured _model service_ the agent will route through (the back-end provider — Alibaba ModelStudio, OpenRouter, etc). If omitted the agent uses its default. If the workspace already has a session, this calls `setSessionModel` on the existing one and broadcasts `model_switched`. Distinct from `modelId` on `POST /session/:id/model`, which selects the model **within** an already-bound service. The `modelServices` array on `/capabilities` is reserved for advertising configured services; in Stage 1 it is always `[]` (the agent's default service is used and not enumerated over HTTP). |
 
 Response:
 
@@ -99,7 +99,7 @@ Response:
 
 `attached: true` means a session for that workspace already existed and you're now sharing it.
 
-Concurrent `POST /session` calls for the same workspace are **coalesced** to one spawn — both callers get the same `sessionId`, exactly one reports `attached: false`.
+Concurrent `POST /session` calls for the same workspace are **coalesced** to one spawn — both callers get the same `sessionId`, exactly one reports `attached: false`. If the underlying spawn fails (init timeout, malformed agent output, OOM), **all coalesced callers receive the same error** — the in-flight slot is cleared so a follow-up call can retry from scratch.
 
 ### `GET /workspace/:id/sessions`
 
@@ -156,7 +156,9 @@ curl -X POST http://127.0.0.1:4170/session/$SID/cancel
 
 ### `POST /session/:id/model`
 
-Switch the active model for an existing session. Serialized through the per-session model-change queue.
+Switch the active model **within** the session's currently bound model service. Serialized through the per-session model-change queue.
+
+(For switching the _service_ itself — Alibaba ModelStudio vs OpenRouter etc — pass `modelServiceId` on `POST /session` for a fresh session. Stage 1 has no live service-switch route.)
 
 Request:
 
@@ -170,7 +172,7 @@ Response:
 { "modelId": "qwen-staging" }
 ```
 
-On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Re-races against the agent channel exit so a wedged child can't block the HTTP handler.
+On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler.
 
 ### `GET /session/:id/events` (SSE)
 
@@ -200,16 +202,16 @@ event: client_evicted    ← terminal frame, no id (synthetic)
 data: {"reason":"queue_overflow","droppedAfter":42}
 ```
 
-| Event type            | Trigger                                                              |
-| --------------------- | -------------------------------------------------------------------- |
-| `session_update`      | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage) |
-| `permission_request`  | Agent asked for tool approval                                        |
-| `permission_resolved` | Some client voted on a permission via `POST /permission/:requestId`  |
-| `model_switched`      | `POST /session/:id/model` succeeded                                  |
-| `model_switch_failed` | `POST /session/:id/model` rejected                                   |
-| `session_died`        | Agent child crashed unexpectedly                                     |
-| `client_evicted`      | Subscriber-local: queue overflow (terminal, no id)                   |
-| `stream_error`        | Daemon-side error during fan-out (terminal, no id)                   |
+| Event type            | Trigger                                                                                                                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_update`      | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage)                                                                                                                        |
+| `permission_request`  | Agent asked for tool approval                                                                                                                                                               |
+| `permission_resolved` | Some client voted on a permission via `POST /permission/:requestId`                                                                                                                         |
+| `model_switched`      | `POST /session/:id/model` succeeded                                                                                                                                                         |
+| `model_switch_failed` | `POST /session/:id/model` rejected                                                                                                                                                          |
+| `session_died`        | Agent child crashed unexpectedly. **Terminal: SSE stream closes after this frame; the session is gone from `byId`.** Subscribers should reconnect via `POST /session` to spawn a fresh one. |
+| `client_evicted`      | Subscriber-local: queue overflow. **Terminal: SSE stream closes after this frame** (no `id` — synthetic). Other subscribers on the same session continue.                                   |
+| `stream_error`        | Daemon-side error during fan-out. **Terminal: SSE stream closes after this frame** (no `id` — synthetic).                                                                                   |
 
 Reconnect semantics:
 

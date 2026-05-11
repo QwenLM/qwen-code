@@ -38,19 +38,28 @@ const session = await client.createOrAttachSession({
 });
 console.log(`session=${session.sessionId} attached=${session.attached}`);
 
-// 3. Subscribe to the event stream BEFORE sending the prompt so we don't
-//    miss the initial `available_commands_update` / `agent_thought_chunk`
-//    frames the agent emits while warming up.
+// 3. Subscribe to the event stream. Pass `lastEventId: 0` so the daemon
+//    replays everything from the session's start — without it, there's
+//    a TOCTOU window between `subscribeEvents()` returning the iterator
+//    and the underlying SSE connection actually opening (one fetch
+//    round-trip), during which a fast-starting agent can emit events
+//    that go into the per-session ring but won't be streamed to a fresh
+//    no-cursor subscriber. `lastEventId: 0` makes the replay buffer
+//    cover that gap (and any reconnect later — see below).
 const abort = new AbortController();
 const subscription = (async () => {
   for await (const event of client.subscribeEvents(session.sessionId, {
     signal: abort.signal,
+    lastEventId: 0,
   })) {
     handleEvent(event);
   }
 })();
 
-// 4. Send a prompt and wait for it to settle.
+// 4. Send a prompt and wait for it to settle. (Order-of-operations
+//    note: even if `sendPrompt` fires before the SSE handshake
+//    completes, step 3's `lastEventId: 0` guarantees every event
+//    lands in the iterator.)
 const result = await client.sendPrompt(session.sessionId, {
   prompt: [{ type: 'text', text: 'Summarize src/main.ts in one sentence.' }],
 });

@@ -44,26 +44,37 @@ curl -X POST http://127.0.0.1:4170/session \
 
 A second client posting to `/session` with the same `cwd` gets `"attached": true` — they're now sharing the agent.
 
-### 4. Send a prompt
+### 4. Subscribe to the event stream (in another terminal first)
 
 ```bash
 SESSION_ID="<from step 3>"
-curl -X POST http://127.0.0.1:4170/session/$SESSION_ID/prompt \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":[{"type":"text","text":"What does src/main.ts do?"}]}'
-# → {"stopReason":"end_turn"}
-```
-
-### 5. Subscribe to the event stream
-
-```bash
 curl -N http://127.0.0.1:4170/session/$SESSION_ID/events
 # → id: 1
 #   event: session_update
 #   data: {"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}
 ```
 
-The stream emits `session_update` (LLM chunks, tool calls, usage), `permission_request` (tool needs approval), `permission_resolved` (someone voted), `model_switched`, `model_switch_failed`, `session_died`, and a terminal `client_evicted` if your queue overflows.
+Open this **before** sending the prompt — the SSE replay buffer holds the
+last 1000 events so a late subscriber can catch up via `Last-Event-ID`,
+but for the simple "watch a single prompt" case it's easiest to subscribe
+first and let it stream live.
+
+The stream emits `session_update` (LLM chunks, tool calls, usage),
+`permission_request` (tool needs approval), `permission_resolved`
+(someone voted), `model_switched`, `model_switch_failed`, and the terminal
+frames `session_died` (agent child crashed — SSE then closes) and
+`client_evicted` (your queue overflowed — SSE then closes).
+
+### 5. Send a prompt (back in the original terminal)
+
+```bash
+curl -X POST http://127.0.0.1:4170/session/$SESSION_ID/prompt \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":[{"type":"text","text":"What does src/main.ts do?"}]}'
+# → {"stopReason":"end_turn"}
+```
+
+The `curl -N` from step 4 will print frames as they arrive.
 
 ## Authentication
 
