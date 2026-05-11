@@ -495,6 +495,7 @@ describe('Gemini Client (client.ts)', () => {
           next_speaker: 'user',
           reasoning: 'test',
         }),
+        clearPerModelGeneratorCache: vi.fn(),
       }),
       getSubagentManager: vi.fn().mockReturnValue(mockSubagentManager),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
