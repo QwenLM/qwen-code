@@ -149,6 +149,18 @@ Other stop reasons: `cancelled`, `max_tokens`, `error`, `length` (per ACP spec).
 
 If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` notification to the agent, which winds the prompt down with `stopReason: "cancelled"`.
 
+> **Stage 1 limitation — no server-side prompt timeout.** The bridge
+> only races the agent's `prompt()` against `transportClosedReject`
+> (the agent child crashing) and the caller's HTTP-disconnect
+> AbortSignal. A wedged-but-alive agent (e.g. a model call that
+> hangs) blocks the per-session FIFO until the HTTP client times out
+> on its end and disconnects. Long-running prompts are legitimate
+> (deep research, large-codebase analysis) so a default deadline is
+> deliberately not set; Stage 2 will expose a configurable
+> `promptTimeoutMs` opt-in. Until then, callers should set their own
+> client-side timeout and disconnect (or call
+> `POST /session/:id/cancel`) on expiry.
+
 ### `POST /session/:id/cancel`
 
 Cancel the **currently active** prompt on the session. ACP-side this is a notification, not a request — the agent acknowledges by resolving the active `prompt()` with `cancelled`.
