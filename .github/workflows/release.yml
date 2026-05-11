@@ -386,6 +386,9 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
 
+      - name: 'Verify Installation Release Assets'
+        run: 'npm run verify:installation-release -- --dir dist/standalone'
+
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-

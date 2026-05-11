@@ -43,6 +43,13 @@ specific standalone release. This keeps the public install command on a stable
 hosted entrypoint while still allowing version pinning, rather than using
 per-release installer URLs.
 
+> **Hosted endpoint status**: Until the hosted endpoint is re-synced after the
+> next release, the URL below still serves the legacy NVM-based installer,
+> which does not honor `--version` or `QWEN_INSTALL_VERSION` in the way
+> documented here. To get the standalone-archive-first behavior immediately,
+> run `install-qwen-with-source.sh` from a local checkout of this repository.
+> The `--version` examples below describe the post-sync behavior.
+
 Latest hosted entrypoints used today:
 
 ```bash
@@ -58,6 +65,25 @@ Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/install
 
 `QWEN_INSTALL_VERSION` is the equivalent environment variable when arguments
 cannot be passed through.
+
+Hosted installer assets are staged separately from GitHub Release archives:
+
+- `install-qwen.sh` is the Linux/macOS hosted entrypoint.
+- `install-qwen.bat` is the Windows hosted entrypoint.
+
+Build them with:
+
+```bash
+npm run package:hosted-installation -- --out-dir dist/installation
+```
+
+The staged `install-qwen.sh` and `install-qwen.bat` files map to the fixed
+hosted URLs shown above. Upload their contents byte-for-byte to
+`installation/install-qwen.sh` and `installation/install-qwen.bat`; the staging
+command also writes `SHA256SUMS` for upload verification. The hosted installers
+intentionally default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to
+pin a standalone release. OSS/CDN upload automation is still a follow-up release
+operation; until then, release operators must sync these staged files manually.
 
 Archive layout:
 

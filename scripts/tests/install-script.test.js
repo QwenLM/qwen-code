@@ -31,6 +31,12 @@ const standaloneReleaseScriptUrl = pathToFileURL(
 const standalonePackageScriptUrl = pathToFileURL(
   path.resolve('scripts/create-standalone-package.js'),
 ).href;
+const hostedInstallationScriptUrl = pathToFileURL(
+  path.resolve('scripts/build-hosted-installation-assets.js'),
+).href;
+const installationReleaseVerificationScriptUrl = pathToFileURL(
+  path.resolve('scripts/verify-installation-release.js'),
+).href;
 const releaseAssetConfigUrl = pathToFileURL(
   path.resolve('scripts/release-asset-config.js'),
 ).href;
@@ -248,12 +254,22 @@ describe('standalone release packaging', () => {
     expect(packageJson.scripts['package:standalone:release']).toBe(
       'node scripts/build-standalone-release.js',
     );
+    expect(packageJson.scripts['package:hosted-installation']).toBe(
+      'node scripts/build-hosted-installation-assets.js',
+    );
+    expect(packageJson.scripts['verify:installation-release']).toBe(
+      'node scripts/verify-installation-release.js',
+    );
     // Per-release installer publishing was removed in favor of a stable hosted
     // entrypoint with --version pinning, so no package:installation-assets
     // script should exist.
     expect(packageJson.scripts['package:installation-assets']).toBeUndefined();
     expect(existsSync('scripts/create-standalone-package.js')).toBe(true);
     expect(existsSync('scripts/build-standalone-release.js')).toBe(true);
+    expect(existsSync('scripts/build-hosted-installation-assets.js')).toBe(
+      true,
+    );
+    expect(existsSync('scripts/verify-installation-release.js')).toBe(true);
     expect(existsSync('scripts/build-installation-assets.js')).toBe(false);
     expect(existsSync('scripts/release-asset-config.js')).toBe(true);
     expect(existsSync('scripts/release-script-utils.js')).toBe(true);
@@ -314,6 +330,33 @@ describe('standalone release packaging', () => {
       'parseCliArgs(process.argv.slice(2), CLI_OPTIONS',
     );
     expect(releaseScript).not.toContain('function parseArgs');
+
+    const hostedInstallScript = readScript(
+      'scripts/build-hosted-installation-assets.js',
+    );
+    expect(hostedInstallScript).toContain('Copyright 2025 Qwen Team');
+    expect(hostedInstallScript).toContain('buildHostedInstallationAssets');
+    expect(hostedInstallScript).toContain('HOSTED_INSTALLATION_ASSETS');
+    expect(hostedInstallScript).not.toContain("output: 'install'");
+
+    const releaseVerifyScript = readScript(
+      'scripts/verify-installation-release.js',
+    );
+    expect(releaseVerifyScript).toContain('Copyright 2025 Qwen Team');
+    expect(releaseVerifyScript).toContain('verifyReleaseDirectory');
+    expect(releaseVerifyScript).toContain('verifyReleaseBaseUrl');
+    expect(releaseVerifyScript).toContain('EXPECTED_RELEASE_ASSET_NAMES');
+    expect(releaseVerifyScript).toContain('EXPECTED_STANDALONE_ARCHIVE_NAMES');
+    // The verifier targets only standalone archives + SHA256SUMS; hosted
+    // installer scripts have their own staging path and are intentionally
+    // not part of the GitHub release surface. Asserting absence of the
+    // alias / installer-asset *helper functions* is enough — comments may
+    // legitimately reference the hosted filenames as context.
+    expect(releaseVerifyScript).not.toContain('INSTALLATION_ASSET_NAMES');
+    expect(releaseVerifyScript).not.toContain('isReleaseChecksumAsset');
+    expect(releaseVerifyScript).not.toContain('assertInstallAliasMatches');
+    expect(releaseVerifyScript).not.toContain('assertInstallAliasBuffersMatch');
+    expect(releaseVerifyScript).not.toContain('assertUnixInstallersExecutable');
 
     const releaseAssetConfig = readScript('scripts/release-asset-config.js');
     expect(releaseAssetConfig).toContain('Copyright 2025 Qwen Team');
@@ -399,6 +442,70 @@ describe('standalone release packaging', () => {
     expect(normalizeNodeVersion('20.19.0')).toBe('20.19.0');
   });
 
+  it('loads the hosted installation asset staging helper', () => {
+    const output = execFileSync(
+      process.execPath,
+      ['scripts/build-hosted-installation-assets.js', '--help'],
+      { encoding: 'utf8' },
+    );
+
+    expect(output).toContain('package:hosted-installation');
+    expect(output).toContain('--out-dir PATH');
+  });
+
+  it('loads the installation release verification helper', () => {
+    const output = execFileSync(
+      process.execPath,
+      ['scripts/verify-installation-release.js', '--help'],
+      { encoding: 'utf8' },
+    );
+
+    expect(output).toContain('verify:installation-release');
+    expect(output).toContain('--dir PATH');
+    expect(output).toContain('--base-url URL');
+  });
+
+  it('rejects invalid installation release verification CLI arguments', () => {
+    const expectFail = (args, expectedOutput) => {
+      let caughtError;
+      try {
+        execFileSync(process.execPath, args, {
+          encoding: 'utf8',
+          stdio: 'pipe',
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+      expect(caughtError).toBeTruthy();
+      expect(
+        [
+          caughtError?.message,
+          caughtError?.stdout?.toString(),
+          caughtError?.stderr?.toString(),
+        ].join('\n'),
+      ).toMatch(expectedOutput);
+    };
+
+    expectFail(
+      ['scripts/verify-installation-release.js', '--unknown'],
+      /Unknown option: --unknown/,
+    );
+    expectFail(
+      ['scripts/verify-installation-release.js', '--dir'],
+      /--dir requires a value/,
+    );
+    expectFail(
+      [
+        'scripts/verify-installation-release.js',
+        '--dir',
+        '/tmp',
+        '--base-url',
+        'https://example.com/r/',
+      ],
+      /Pass --dir or --base-url, not both/,
+    );
+  });
+
   it('exposes only standalone archive classification', async () => {
     const config = await import(releaseAssetConfigUrl);
 
@@ -480,6 +587,340 @@ describe('standalone release packaging', () => {
     );
     expect(installBatchSource).toContain('"%~1"=="--version"');
     expect(installBatchSource).toContain('--version requires a value');
+  });
+
+  it('stages hosted installation assets with checksums', async () => {
+    const {
+      HOSTED_INSTALLATION_ASSET_NAMES,
+      HOSTED_INSTALLATION_ASSETS,
+      HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS,
+      HOSTED_INSTALLER_REQUIRED_FRAGMENTS,
+      assertHostedInstallationAssetChecksums,
+      buildHostedInstallationAssets,
+    } = await import(hostedInstallationScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+
+    try {
+      await buildHostedInstallationAssets(tmpDir);
+
+      const installSh = path.join(tmpDir, 'install-qwen.sh');
+      const installBat = path.join(tmpDir, 'install-qwen.bat');
+      const checksums = readScript(path.join(tmpDir, 'SHA256SUMS'));
+      const checksumLines = checksums.trim().split('\n');
+
+      expect(HOSTED_INSTALLATION_ASSET_NAMES).toEqual([
+        'install-qwen.sh',
+        'install-qwen.bat',
+      ]);
+      expect(HOSTED_INSTALLATION_ASSETS.map(({ output }) => output)).toEqual(
+        HOSTED_INSTALLATION_ASSET_NAMES,
+      );
+      expect(HOSTED_INSTALLER_REQUIRED_FRAGMENTS).toEqual([
+        '--version',
+        'QWEN_INSTALL_VERSION',
+      ]);
+      // The default-version regex pins `latest` semantically rather than as a
+      // loose substring, so a stray `latest` in a comment cannot satisfy it.
+      expect(
+        HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS['install-qwen.sh'].test(
+          'VERSION="${QWEN_INSTALL_VERSION:-latest}"',
+        ),
+      ).toBe(true);
+      expect(
+        HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS['install-qwen.sh'].test(
+          '# defaults to latest',
+        ),
+      ).toBe(false);
+      expect(
+        HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS['install-qwen.bat'].test(
+          'set "VERSION=latest"',
+        ),
+      ).toBe(true);
+      expect(
+        HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS['install-qwen.bat'].test(
+          'rem defaults to latest',
+        ),
+      ).toBe(false);
+      expect(readScript(installSh)).toBe(
+        readScript('scripts/installation/install-qwen-with-source.sh'),
+      );
+      expect(readScript(installBat)).toBe(
+        readScript('scripts/installation/install-qwen-with-source.bat'),
+      );
+      expect(existsSync(path.join(tmpDir, 'install'))).toBe(false);
+      const checksumNames = checksumLines.map((line) => line.split('  ')[1]);
+      expect(checksumNames).toEqual([...checksumNames].sort());
+      expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.sh$/m);
+      expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.bat$/m);
+      expect(checksums).not.toMatch(/ {2}install$/m);
+      if (process.platform !== 'win32') {
+        expect(lstatSync(installSh).mode & 0o111).not.toBe(0);
+      }
+
+      writeFileSync(installSh, 'tampered');
+      await expect(
+        assertHostedInstallationAssetChecksums(tmpDir),
+      ).rejects.toThrow(/Checksum verification failed for install-qwen\.sh/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects hosted installer sources missing pinned install behavior', async () => {
+    const { buildHostedInstallationAssets } = await import(
+      hostedInstallationScriptUrl
+    );
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-root-'));
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+    const sourceDir = path.join(tmpRoot, 'scripts', 'installation');
+
+    try {
+      mkdirSync(sourceDir, { recursive: true });
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-with-source.sh'),
+        '#!/usr/bin/env bash\nVERSION="${QWEN_INSTALL_VERSION:-latest}"\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-with-source.bat'),
+        '@echo off\r\nset "VERSION=latest"\r\n',
+      );
+
+      await expect(
+        buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
+      ).rejects.toThrow(
+        /install-qwen\.sh is missing hosted installer behavior: --version/,
+      );
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects hosted installer sources whose default version is not latest', async () => {
+    const { buildHostedInstallationAssets } = await import(
+      hostedInstallationScriptUrl
+    );
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-root-'));
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+    const sourceDir = path.join(tmpRoot, 'scripts', 'installation');
+
+    try {
+      mkdirSync(sourceDir, { recursive: true });
+      // Both fragments are present, but the default version was changed to
+      // something other than `latest`. The default-version pattern guard
+      // catches this, even though loose substring matching would not.
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-with-source.sh'),
+        '#!/usr/bin/env bash\n' +
+          '# Defaults to latest unless --version is passed.\n' +
+          'VERSION="${QWEN_INSTALL_VERSION:-stable}"\n' +
+          'case "$1" in --version) shift; VERSION="$1" ;; esac\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-with-source.bat'),
+        '@echo off\r\nset "VERSION=stable"\r\n',
+      );
+
+      await expect(
+        buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
+      ).rejects.toThrow(
+        /install-qwen\.sh default install version must be 'latest'/,
+      );
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects stale hosted installation assets in the output directory', async () => {
+    const { buildHostedInstallationAssets } = await import(
+      hostedInstallationScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+
+    try {
+      writeFileSync(path.join(tmpDir, 'install'), 'stale alias');
+
+      await expect(buildHostedInstallationAssets(tmpDir)).rejects.toThrow(
+        /Unexpected hosted installer asset: install/,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('verifies release asset directory contents and checksums', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseDirectory } =
+      await import(installationReleaseVerificationScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-verify-'));
+
+    try {
+      writeStandaloneReleaseAssets(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES);
+      await expect(verifyReleaseDirectory(tmpDir)).resolves.not.toThrow();
+
+      // Tampering an archive must be caught by the per-asset hash check.
+      appendFileSync(
+        path.join(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES[0]),
+        'tamper',
+      );
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        new RegExp(
+          `Checksum verification failed for ${EXPECTED_STANDALONE_ARCHIVE_NAMES[0].replace(/\./g, '\\.')}`,
+        ),
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects missing release archives and unexpected checksum entries', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseDirectory } =
+      await import(installationReleaseVerificationScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-verify-'));
+
+    try {
+      writeStandaloneReleaseAssets(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES);
+      rmSync(path.join(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES[0]));
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /Missing release asset: qwen-code-/,
+      );
+
+      writeStandaloneReleaseAssets(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES);
+      writeStandaloneReleaseChecksums(tmpDir, [
+        ...EXPECTED_STANDALONE_ARCHIVE_NAMES,
+        'qwen-code-extra.tar.gz',
+      ]);
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /Unexpected release asset checksum: qwen-code-extra\.tar\.gz/,
+      );
+
+      writeStandaloneReleaseAssets(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES);
+      writeFileSync(path.join(tmpDir, 'qwen-code-stale.tar.gz'), 'stale');
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /Unexpected release asset: qwen-code-stale\.tar\.gz/,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a release directory without SHA256SUMS', async () => {
+    const { verifyReleaseDirectory } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-verify-'));
+
+    try {
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /SHA256SUMS was not found at /,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('verifies release asset URLs from SHA256SUMS', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+    const checksumContent = placeholderChecksumContent(
+      EXPECTED_STANDALONE_ARCHIVE_NAMES,
+    );
+    const fetchedUrls = [];
+
+    await expect(
+      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+        fetchImpl: async (url, options = {}) => {
+          fetchedUrls.push([url, options.method || 'GET']);
+          if (url.endsWith('/SHA256SUMS')) {
+            return new Response(checksumContent);
+          }
+          return new Response(null, { status: 200 });
+        },
+      }),
+    ).resolves.not.toThrow();
+
+    expect(fetchedUrls).toContainEqual([
+      'https://example.com/qwen-code/v0.0.0/SHA256SUMS',
+      'GET',
+    ]);
+    for (const assetName of EXPECTED_STANDALONE_ARCHIVE_NAMES) {
+      expect(fetchedUrls).toContainEqual([
+        `https://example.com/qwen-code/v0.0.0/${assetName}`,
+        'HEAD',
+      ]);
+    }
+    // Hosted installer scripts must not be fetched: the verifier targets
+    // GitHub release assets only.
+    for (const [url] of fetchedUrls) {
+      expect(url).not.toMatch(/install-qwen\.(sh|bat)$/);
+      expect(url).not.toMatch(/\/install$/);
+    }
+  });
+
+  it('falls back to ranged GET when remote HEAD is unavailable', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+    const checksumContent = placeholderChecksumContent(
+      EXPECTED_STANDALONE_ARCHIVE_NAMES,
+    );
+    const observedMethods = [];
+
+    await expect(
+      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+        fetchImpl: async (url, options = {}) => {
+          if (url.endsWith('/SHA256SUMS')) {
+            return new Response(checksumContent);
+          }
+          const method = options.method || 'GET';
+          observedMethods.push(method);
+          if (method === 'HEAD') {
+            return new Response(null, { status: 405 });
+          }
+          // Ranged GET fallback succeeds.
+          return new Response(null, { status: 206 });
+        },
+      }),
+    ).resolves.not.toThrow();
+
+    expect(observedMethods).toContain('HEAD');
+    expect(observedMethods).toContain('GET');
+  });
+
+  it('rejects a release base URL with no archives reachable', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+    const checksumContent = placeholderChecksumContent(
+      EXPECTED_STANDALONE_ARCHIVE_NAMES,
+    );
+
+    await expect(
+      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+        fetchImpl: async (url) => {
+          if (url.endsWith('/SHA256SUMS')) {
+            return new Response(checksumContent);
+          }
+          return new Response(null, { status: 404 });
+        },
+      }),
+    ).rejects.toThrow(/Release asset URL is not available/);
+  });
+
+  it('rejects a release base URL that is not https', async () => {
+    const { verifyReleaseBaseUrl } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+
+    // file:// must be rejected as a URL the verifier cannot reach safely.
+    await expect(verifyReleaseBaseUrl('file:///tmp/release/')).rejects.toThrow(
+      /--base-url must use https/,
+    );
+
+    // Plain http must also be rejected even though it is technically a valid
+    // URL — release URLs are always HTTPS, and accepting http would let an
+    // operator silently target a stale or attacker-controlled mirror.
+    await expect(
+      verifyReleaseBaseUrl('http://example.com/release/'),
+    ).rejects.toThrow(/--base-url must use https/);
   });
 
   it('rejects a runtime archive without a Node executable', () => {
@@ -736,6 +1177,15 @@ describe('standalone release packaging', () => {
     expect(workflow).toContain('dist/standalone/qwen-code-*.tar.gz');
     expect(workflow).toContain('dist/standalone/qwen-code-*.zip');
     expect(workflow).toContain('dist/standalone/SHA256SUMS');
+    // The verify step must run after the build step so a broken release
+    // directory is caught before publishing.
+    expect(workflow).toContain(
+      'npm run verify:installation-release -- --dir dist/standalone',
+    );
+    const buildIndex = workflow.indexOf('npm run package:standalone:release');
+    const verifyIndex = workflow.indexOf('npm run verify:installation-release');
+    expect(buildIndex).toBeGreaterThan(-1);
+    expect(verifyIndex).toBeGreaterThan(buildIndex);
   });
 
   it('does not whitelist internal planning documents in gitignore', () => {
@@ -749,6 +1199,15 @@ describe('standalone release packaging', () => {
     const guide = readScript('scripts/installation/INSTALLATION_GUIDE.md');
 
     expect(guide).toContain('Optional Native Modules');
+    expect(guide).toContain('package:hosted-installation');
+    expect(guide).toContain('installation/install-qwen.sh');
+    expect(guide).toContain('installation/install-qwen.bat');
+    expect(guide).toContain('release operators must sync these staged files');
+    // The hosted-endpoint status callout must keep flagging the transition
+    // window so users do not assume the documented --version flow works
+    // before the next OSS sync.
+    expect(guide).toContain('Hosted endpoint status');
+    expect(guide).toContain('legacy NVM-based installer');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
   });
@@ -1779,4 +2238,44 @@ function writeChecksumFile(outDir, archiveName) {
     .update(readFileSync(archive))
     .digest('hex');
   writeFileSync(path.join(outDir, 'SHA256SUMS'), `${hash}  ${archiveName}\n`);
+}
+
+// Writes a synthetic standalone release directory: each archive name in
+// `archiveNames` becomes a small file whose content equals the asset name,
+// and SHA256SUMS is regenerated to match.
+function writeStandaloneReleaseAssets(outDir, archiveNames) {
+  mkdirSync(outDir, { recursive: true });
+  for (const assetName of archiveNames) {
+    writeFileSync(path.join(outDir, assetName), `${assetName}\n`);
+  }
+  writeStandaloneReleaseChecksums(outDir, archiveNames);
+}
+
+function writeStandaloneReleaseChecksums(outDir, archiveNames) {
+  const lines = archiveNames.map((assetName) => {
+    const filePath = path.join(outDir, assetName);
+    // Allow callers to list a not-yet-written archive name (e.g. an
+    // "unexpected extra" entry) without requiring the file to exist.
+    const hash = existsSync(filePath)
+      ? crypto.createHash('sha256').update(readFileSync(filePath)).digest('hex')
+      : 'a'.repeat(64);
+    return `${hash}  ${assetName}`;
+  });
+  writeFileSync(path.join(outDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
+}
+
+// Generates a SHA256SUMS-formatted string for the given archive names. The
+// hash values are placeholders — the remote verifier (verifyReleaseBaseUrl)
+// only checks that SHA256SUMS lists the expected entries and that each
+// archive URL is reachable; it does not download archives or compare hashes.
+function placeholderChecksumContent(archiveNames) {
+  return `${archiveNames
+    .map(
+      (assetName) =>
+        `${crypto
+          .createHash('sha256')
+          .update(`${assetName}\n`)
+          .digest('hex')}  ${assetName}`,
+    )
+    .join('\n')}\n`;
 }
