@@ -119,7 +119,7 @@ export const Composer = () => {
        */}
       {!uiState.embeddedShellFocused && suppressBottomLoadingIndicator && (
         <Box paddingLeft={2}>
-          <Text color={theme.text.secondary}>{t('(esc to cancel)')}</Text>
+          <Text color={theme.text.secondary}>({t('Esc to cancel')})</Text>
         </Box>
       )}
 
