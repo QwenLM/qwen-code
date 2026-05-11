@@ -1025,7 +1025,9 @@ describe('crawler', () => {
           typeof c[0] === 'string' &&
           (c[0] as string).startsWith('[crawler] falling back to'),
       );
-      expect(degradationWarns).toHaveLength(0);
+      expect(degradationWarns.map((c) => c[0])).toEqual([
+        '[crawler] falling back to fdir (ripgrep unavailable)',
+      ]);
       warnSpy.mockRestore();
     });
 
@@ -1330,7 +1332,7 @@ describe('crawler', () => {
       warnSpy.mockRestore();
     });
 
-    it('should warn on fdir fallback only after git repo listing failed and rg failed', async () => {
+    it('should warn on git→rg→fdir degradation when git listing then rg fail', async () => {
       tmpDir = await createTmpDir({ 'only-fdir.js': '' });
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 

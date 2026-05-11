@@ -33,20 +33,12 @@ function toPosixPath(p: string): string {
   return p.split(path.sep).join(path.posix.sep);
 }
 
-function normalizeGitRefPath(p: string): string {
+function normalizeGitPath(p: string, stripTrailingSlash = false): string {
   let s = toPosixPath(p);
   while (s.startsWith('./')) {
     s = s.slice(2);
   }
-  return s.replace(/\/+$/, '');
-}
-
-function normalizeGitLsOutputLine(p: string): string {
-  let s = toPosixPath(p);
-  while (s.startsWith('./')) {
-    s = s.slice(2);
-  }
-  return s;
+  return stripTrailingSlash ? s.replace(/\/+$/, '') : s;
 }
 
 function repoRelativePathsCaseFold(): boolean {
@@ -693,7 +685,12 @@ function stripCrawlDirectoryPrefix(
   return entry;
 }
 
-/** Depth limits apply here; git/rg streaming may still count maxFiles against paths later dropped by depth. */
+/**
+ * Applies depth limits and ignore rules. Git/rg streaming may add paths that are
+ * dropped here by depth while still contributing parent directory rows via
+ * `buildResultsFromFileSet`; optional `prevalidatedFiles` skips redundant ignore
+ * checks for streamed paths already accepted into `fileSet`.
+ */
 function applyFilters(
   results: string[],
   options: CrawlOptions,
@@ -933,9 +930,9 @@ function posixPathUnderGitRoot(
   relativeToGitRoot: string,
   relativeToCrawlDir: string,
 ): string {
-  const rg = normalizeGitRefPath(relativeToGitRoot);
-  const rc = normalizeGitRefPath(relativeToCrawlDir);
-  const nf = normalizeGitLsOutputLine(normalizedFile);
+  const rg = normalizeGitPath(relativeToGitRoot, true);
+  const rc = normalizeGitPath(relativeToCrawlDir, true);
+  const nf = normalizeGitPath(normalizedFile, false);
 
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     const rest = sliceAfterGitPathspecPrefix(nf, rg);
@@ -1366,12 +1363,16 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     return results;
   }
 
-  if (gitResult.gitRepoListingFailed) {
-    // eslint-disable-next-line no-console -- operator-visible crawl strategy degradation
-    console.warn('[crawler] falling back to fdir (ripgrep unavailable)');
-  }
+  // Ripgrep failed — fdir is the slowest crawl path (including non-git trees).
+  // eslint-disable-next-line no-console -- operator-visible crawl strategy degradation
+  console.warn('[crawler] falling back to fdir (ripgrep unavailable)');
 
+  const relativeToCrawlDirForFdir = getPosixRelative(
+    options.cwd,
+    options.crawlDirectory,
+  );
   let fdirResults = await crawlWithFdir(options);
+  fdirResults = applyFilters(fdirResults, options, relativeToCrawlDirForFdir);
   // Match git/rg list shape (`'.'` first) so `maxFiles` caps the same row count
   // (including `.`) as the tracked-file paths.
   if (fdirResults.length === 0) {
