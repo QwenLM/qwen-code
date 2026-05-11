@@ -82,7 +82,9 @@ async function main() {
     return;
   }
 
-  const nodeVersion = args.nodeVersion || process.versions.node;
+  const nodeVersion = normalizeNodeVersion(
+    args.nodeVersion || process.versions.node,
+  );
   const outDir = path.resolve(
     args.outDir || path.join(rootDir, 'dist', 'standalone'),
   );
@@ -134,6 +136,10 @@ async function main() {
   } finally {
     fs.rmSync(runtimeDir, { recursive: true, force: true });
   }
+}
+
+function normalizeNodeVersion(version) {
+  return version.replace(/^v/i, '');
 }
 
 async function packageTarget({
@@ -284,4 +290,9 @@ Host requirements:
 `);
 }
 
-export { assertStandaloneOutput, parseChecksums, RELEASE_TARGETS };
+export {
+  assertStandaloneOutput,
+  normalizeNodeVersion,
+  parseChecksums,
+  RELEASE_TARGETS,
+};

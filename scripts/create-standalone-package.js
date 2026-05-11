@@ -221,10 +221,10 @@ function copyRuntimeAssets(packageRoot, outDir) {
     );
   }
 
-  fs.copyFileSync(
-    path.join(rootDir, 'package.json'),
-    path.join(packageRoot, 'package.json'),
-  );
+  const packageJsonPath = fs.existsSync(path.join(distDir, 'package.json'))
+    ? path.join(distDir, 'package.json')
+    : path.join(rootDir, 'package.json');
+  fs.copyFileSync(packageJsonPath, path.join(packageRoot, 'package.json'));
 }
 
 function topLevelDistEntryForPath(candidatePath) {

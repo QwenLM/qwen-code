@@ -708,13 +708,24 @@ ensure_managed_install_dir() {
         return 0
     fi
 
-    if [[ -f "${install_dir}/manifest.json" ]]; then
+    if is_qwen_standalone_install_dir "${install_dir}"; then
         return 0
     fi
 
     log_error "${install_dir} exists but is not a Qwen Code standalone install."
     log_error "Refusing to overwrite it. Move or remove it manually, then rerun the installer."
     return 1
+}
+
+is_qwen_standalone_install_dir() {
+    local install_dir="$1"
+    local manifest_path="${install_dir}/manifest.json"
+
+    [[ -f "${manifest_path}" ]] || return 1
+    grep -Eq '"name"[[:space:]]*:[[:space:]]*"@qwen-code/qwen-code"' "${manifest_path}" 2>/dev/null || return 1
+    grep -Eq '"target"[[:space:]]*:[[:space:]]*"(darwin|linux)-(arm64|x64)"' "${manifest_path}" 2>/dev/null || return 1
+    [[ -f "${install_dir}/bin/qwen" && ! -L "${install_dir}/bin/qwen" && -x "${install_dir}/bin/qwen" ]] || return 1
+    [[ -f "${install_dir}/node/bin/node" && ! -L "${install_dir}/node/bin/node" && -x "${install_dir}/node/bin/node" ]] || return 1
 }
 
 write_unix_wrapper() {

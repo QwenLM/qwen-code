@@ -112,6 +112,13 @@ describe('installation scripts', () => {
     expect(script).toContain('qwen-code/node/bin/node');
     expect(script).toContain('Archive contains symlinks; refusing to install');
     expect(script).toContain('not a Qwen Code standalone install');
+    expect(script).toContain('is_qwen_standalone_install_dir()');
+    expect(script).toContain(
+      '"name"[[:space:]]*:[[:space:]]*"@qwen-code/qwen-code"',
+    );
+    expect(script).toContain(
+      '"target"[[:space:]]*:[[:space:]]*"(darwin|linux)-(arm64|x64)"',
+    );
     expect(script).toContain(
       'Return 2 only when a standalone archive is unavailable',
     );
@@ -195,6 +202,13 @@ describe('installation scripts', () => {
     expect(script).toContain('if "!INSTALL_DIR:~1,2!"==":/"');
     expect(script).toContain('if "!INSTALL_BIN_DIR:~1,2!"==":/"');
     expect(script).toContain(':ValidateVersion');
+    expect(script).not.toContain('^v*');
+    expect(script).toContain('/C:"^v[0-9]');
+    expect(script).toContain(':EnsureDir');
+    expect(script).toContain('Failed to create directory');
+    expect(script).toContain('ConvertFrom-Json');
+    expect(script).toContain("$data.name -ne '@qwen-code/qwen-code'");
+    expect(script).toContain("$data.target -notmatch '^win-(x64|arm64)$'");
     expect(script).toContain(
       'call :ValidateHttpsUrlVar "NPM_REGISTRY" "--registry"',
     );
@@ -249,7 +263,10 @@ describe('standalone release packaging', () => {
     expect(packageScript).toContain('DIST_ALLOWED_ENTRIES');
     expect(packageScript).toContain('Unexpected dist asset');
     expect(packageScript).toContain('topLevelDistEntryForPath(outDir)');
-    expect(packageScript).toContain("path.join(packageRoot, 'package.json')");
+    expect(packageScript).toContain("path.join(distDir, 'package.json')");
+    expect(packageScript).toContain(
+      "fs.copyFileSync(packageJsonPath, path.join(packageRoot, 'package.json'))",
+    );
     expect(packageScript).toContain('validateNodeRuntime');
     expect(packageScript).toContain('copyNodeRuntimeEntry');
     expect(packageScript).toContain('symlink cycle');
@@ -273,6 +290,8 @@ describe('standalone release packaging', () => {
 
     const releaseScript = readScript('scripts/build-standalone-release.js');
     expect(releaseScript).toContain('Copyright 2025 Qwen Team');
+    expect(releaseScript).toContain('normalizeNodeVersion(');
+    expect(releaseScript).toContain("version.replace(/^v/i, '')");
     expect(releaseScript).toContain('https://nodejs.org/dist/v${nodeVersion}');
     expect(releaseScript).toContain('SHASUMS256.txt');
     expect(releaseScript).toContain('verifyNodeArchive');
@@ -370,6 +389,13 @@ describe('standalone release packaging', () => {
 
     expect(output).toContain('package:standalone:release');
     expect(output).toContain('--node-version VERSION');
+  });
+
+  it('normalizes Node.js versions passed to the release helper', async () => {
+    const { normalizeNodeVersion } = await import(standaloneReleaseScriptUrl);
+
+    expect(normalizeNodeVersion('v20.19.0')).toBe('20.19.0');
+    expect(normalizeNodeVersion('20.19.0')).toBe('20.19.0');
   });
 
   it('exposes only standalone archive classification', async () => {
@@ -523,6 +549,13 @@ describe('standalone release packaging', () => {
       expect(
         existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
       ).toBe(true);
+      const packagedPackageJson = JSON.parse(
+        readScript(path.join(extractDir, 'qwen-code', 'package.json')),
+      );
+      expect(packagedPackageJson).toEqual({
+        name: '@qwen-code/qwen-code',
+        version: '0.0.0',
+      });
       expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
         'qwen-code-win-x64.zip',
       );
@@ -894,6 +927,36 @@ describe('Linux/macOS installer end-to-end', () => {
     }
   });
 
+  itOnUnix(
+    'refuses to overwrite a directory with an unrelated manifest',
+    () => {
+      const restoreDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const installDir = path.join(installRoot, 'lib', 'qwen-code');
+        mkdirSync(installDir, { recursive: true });
+        writeFileSync(
+          path.join(installDir, 'manifest.json'),
+          JSON.stringify({ name: 'other-app', target: 'linux-x64' }),
+        );
+        writeFileSync(path.join(installDir, 'important.txt'), 'keep me\n');
+
+        expect(() =>
+          runUnixInstaller(archive, installRoot, path.join(tmpDir, 'home')),
+        ).toThrow(/not a Qwen Code standalone install/);
+        expect(readScript(path.join(installDir, 'important.txt'))).toBe(
+          'keep me\n',
+        );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreDist();
+      }
+    },
+  );
+
   itOnUnix('does not fall back to npm when detect finds a bad archive', () => {
     const restoreDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
@@ -1111,6 +1174,45 @@ describe('Windows installer end-to-end', () => {
     }
   });
 
+  itOnWindows('rejects a local archive when SHA256SUMS is missing', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = createFakeWindowsStandaloneArchive(tmpDir);
+      rmSync(path.join(path.dirname(archive), 'SHA256SUMS'), { force: true });
+
+      expect(() =>
+        runWindowsInstaller(
+          archive,
+          path.join(tmpDir, 'install'),
+          path.join(tmpDir, 'home'),
+        ),
+      ).toThrow(/SHA256SUMS not found; cannot verify archive/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnWindows('rejects a local archive missing required entries', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = createFakeWindowsStandaloneArchive(tmpDir, {
+        includeNode: false,
+      });
+
+      expect(() =>
+        runWindowsInstaller(
+          archive,
+          path.join(tmpDir, 'install'),
+          path.join(tmpDir, 'home'),
+        ),
+      ).toThrow(/qwen-code\\node\\node.exe/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   itOnWindows(
     'rejects standalone archives containing path traversal entries',
     () => {
@@ -1127,6 +1229,34 @@ describe('Windows installer end-to-end', () => {
           ),
         ).toThrow(/Archive contains unsafe path/);
         expect(existsSync(path.join(tmpDir, 'qwen-slip'))).toBe(false);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnWindows(
+    'refuses to overwrite a directory with an unrelated manifest',
+    () => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = createFakeWindowsStandaloneArchive(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const installDir = path.join(installRoot, 'qwen-code');
+        mkdirSync(installDir, { recursive: true });
+        writeFileSync(
+          path.join(installDir, 'manifest.json'),
+          JSON.stringify({ name: 'other-app', target: 'win-x64' }),
+        );
+        writeFileSync(path.join(installDir, 'important.txt'), 'keep me\n');
+
+        expect(() =>
+          runWindowsInstaller(archive, installRoot, path.join(tmpDir, 'home')),
+        ).toThrow(/not a Qwen Code standalone install/);
+        expect(readScript(path.join(installDir, 'important.txt'))).toBe(
+          'keep me\n',
+        );
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -1304,7 +1434,11 @@ function createFakeWindowsNodeArchive(tmpDir) {
   return archive;
 }
 
-function createFakeWindowsStandaloneArchive(tmpDir) {
+function createFakeWindowsStandaloneArchive(tmpDir, options = {}) {
+  const {
+    includeNode = true,
+    manifest = { name: '@qwen-code/qwen-code', target: 'win-x64' },
+  } = options;
   const packageRoot = path.join(tmpDir, 'qwen-code');
   const outDir = path.join(tmpDir, 'out');
   mkdirSync(path.join(packageRoot, 'bin'), { recursive: true });
@@ -1315,10 +1449,15 @@ function createFakeWindowsStandaloneArchive(tmpDir) {
     path.join(packageRoot, 'bin', 'qwen.cmd'),
     ['@echo off', 'echo 0.0.0-smoke', ''].join('\r\n'),
   );
-  writeFileSync(path.join(packageRoot, 'node', 'node.exe'), 'fake node.exe\n');
+  if (includeNode) {
+    writeFileSync(
+      path.join(packageRoot, 'node', 'node.exe'),
+      'fake node.exe\n',
+    );
+  }
   writeFileSync(
     path.join(packageRoot, 'manifest.json'),
-    JSON.stringify({ name: '@qwen-code/qwen-code' }),
+    JSON.stringify(manifest),
   );
 
   const archive = path.join(outDir, 'qwen-code-win-x64.zip');
@@ -1356,7 +1495,7 @@ function createWindowsTraversalStandaloneArchive(tmpDir) {
       "  Add-ZipEntry $zip '../qwen-slip' 'path traversal'",
       '  Add-ZipEntry $zip \'qwen-code/bin/qwen.cmd\' "@echo off`r`necho 0.0.0-smoke`r`n"',
       "  Add-ZipEntry $zip 'qwen-code/node/node.exe' 'fake node.exe'",
-      '  Add-ZipEntry $zip \'qwen-code/manifest.json\' \'{"name":"@qwen-code/qwen-code"}\'',
+      '  Add-ZipEntry $zip \'qwen-code/manifest.json\' \'{"name":"@qwen-code/qwen-code","target":"win-x64"}\'',
       '} finally { $zip.Dispose() }',
       '',
     ].join('\r\n'),

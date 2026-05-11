@@ -306,8 +306,10 @@ exit /b 1
 
 :ValidateVersion
 if /i "!VERSION!"=="latest" exit /b 0
-echo(!VERSION!| findstr /R /C:"^v*[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[A-Za-z0-9.-]*$" >nul
-if %ERRORLEVEL% EQU 0 exit /b 0
+echo(!VERSION!| findstr /R /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[A-Za-z0-9.-]*$" >nul
+if !ERRORLEVEL! EQU 0 exit /b 0
+echo(!VERSION!| findstr /R /C:"^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[A-Za-z0-9.-]*$" >nul
+if !ERRORLEVEL! EQU 0 exit /b 0
 echo ERROR: --version must be 'latest' or a semver string.
 exit /b 1
 
@@ -512,7 +514,11 @@ if !ERRORLEVEL! NEQ 0 (
 
 REM Extract into a temporary directory, then validate required entry points.
 set "EXTRACT_DIR=!TEMP_DIR!\extract"
-mkdir "!EXTRACT_DIR!" >nul 2>&1
+call :EnsureDir "!EXTRACT_DIR!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
 call :ValidateArchiveContents "!ARCHIVE_FILE!"
 if !ERRORLEVEL! NEQ 0 (
     if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
@@ -548,10 +554,22 @@ if not exist "!EXTRACT_DIR!\qwen-code\node\node.exe" (
     exit /b 1
 )
 
-if not exist "!INSTALL_BASE!" mkdir "!INSTALL_BASE!"
-if not exist "!INSTALL_BIN_DIR!" mkdir "!INSTALL_BIN_DIR!"
+call :EnsureDir "!INSTALL_BASE!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
+call :EnsureDir "!INSTALL_BIN_DIR!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
 for %%I in ("!INSTALL_DIR!") do set "INSTALL_PARENT=%%~dpI"
-if not exist "!INSTALL_PARENT!" mkdir "!INSTALL_PARENT!"
+call :EnsureDir "!INSTALL_PARENT!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
 
 REM Stage into .new and keep .old so failed upgrades can roll back.
 set "NEW_INSTALL_DIR=!INSTALL_DIR!.new"
@@ -659,6 +677,18 @@ if "!TEMP_DIR!"=="" (
 )
 exit /b 0
 
+:EnsureDir
+set "REQUIRED_DIR=%~1"
+if exist "!REQUIRED_DIR!\NUL" exit /b 0
+if exist "!REQUIRED_DIR!" (
+    echo ERROR: Path exists but is not a directory: !REQUIRED_DIR!
+    exit /b 1
+)
+mkdir "!REQUIRED_DIR!" >nul 2>&1
+if !ERRORLEVEL! EQU 0 exit /b 0
+echo ERROR: Failed to create directory: !REQUIRED_DIR!
+exit /b 1
+
 :ValidateArchiveContents
 set "QWEN_ARCHIVE_FILE=%~1"
 REM Normalize backslashes to forward slashes before checking. Some Windows
@@ -699,7 +729,11 @@ exit /b %PS_STATUS%
 :EnsureManagedInstallDir
 set "MANAGED_DIR=%~1"
 if not exist "!MANAGED_DIR!" exit /b 0
-if exist "!MANAGED_DIR!\manifest.json" exit /b 0
+set "QWEN_MANAGED_DIR=!MANAGED_DIR!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $dir = $env:QWEN_MANAGED_DIR; $manifest = Join-Path $dir 'manifest.json'; if (!(Test-Path -LiteralPath $manifest -PathType Leaf)) { exit 1 }; try { $data = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json } catch { exit 1 }; if ($data.name -ne '@qwen-code/qwen-code') { exit 1 }; if ([string]$data.target -notmatch '^win-(x64|arm64)$') { exit 1 }; if (!(Test-Path -LiteralPath (Join-Path $dir 'bin\qwen.cmd') -PathType Leaf)) { exit 1 }; if (!(Test-Path -LiteralPath (Join-Path $dir 'node\node.exe') -PathType Leaf)) { exit 1 }; exit 0"
+set "PS_STATUS=!ERRORLEVEL!"
+set "QWEN_MANAGED_DIR="
+if !PS_STATUS! EQU 0 exit /b 0
 
 echo ERROR: !MANAGED_DIR! exists but is not a Qwen Code standalone install.
 echo ERROR: Refusing to overwrite it. Move or remove it manually, then rerun the installer.
@@ -784,7 +818,8 @@ exit /b 0
 if "!SOURCE!"=="unknown" exit /b 0
 
 set "QWEN_DIR=!USERPROFILE!\.qwen"
-if not exist "!QWEN_DIR!" mkdir "!QWEN_DIR!"
+call :EnsureDir "!QWEN_DIR!"
+if !ERRORLEVEL! NEQ 0 exit /b 1
 
 (
 echo {
