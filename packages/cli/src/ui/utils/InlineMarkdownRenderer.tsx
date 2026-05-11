@@ -10,6 +10,7 @@ import { theme } from '../semantic-colors.js';
 import stringWidth from 'string-width';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { renderInlineLatex } from './latexRenderer.js';
+import { osc8Close, osc8Open, supportsHyperlinks } from './osc8.js';
 
 // Constants for Markdown parsing
 const BOLD_MARKER_LENGTH = 2; // For "**"
@@ -138,7 +139,19 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         if (linkMatch) {
           const linkText = linkMatch[1];
           const url = linkMatch[2];
-          renderedNode = (
+          // When the host terminal supports OSC 8, wrap just the label so the
+          // entire visible region is one clickable target even if the URL is
+          // long enough to wrap across lines. The visible URL suffix is
+          // dropped because clicking the label resolves to the same target.
+          // Otherwise fall back to the legacy `label (url)` rendering so
+          // output remains byte-identical for terminals without support.
+          renderedNode = supportsHyperlinks() ? (
+            <Text key={key}>
+              {osc8Open(url)}
+              <Text color={theme.text.link}>{linkText}</Text>
+              {osc8Close()}
+            </Text>
+          ) : (
             <Text key={key}>
               {linkText}
               <Text color={theme.text.link}> ({url})</Text>
@@ -176,7 +189,13 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
           </Text>
         );
       } else if (fullMatch.match(/^https?:\/\//)) {
-        renderedNode = (
+        renderedNode = supportsHyperlinks() ? (
+          <Text key={key} color={theme.text.link}>
+            {osc8Open(fullMatch)}
+            {fullMatch}
+            {osc8Close()}
+          </Text>
+        ) : (
           <Text key={key} color={theme.text.link}>
             {fullMatch}
           </Text>
