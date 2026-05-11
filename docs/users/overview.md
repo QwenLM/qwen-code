@@ -9,7 +9,8 @@
 
 ### Install Qwen Code:
 
-The recommended installer uses a standalone archive when one is available for
+After the hosted installer endpoint is synced with the latest installer assets,
+the recommended installer uses a standalone archive when one is available for
 your platform. If it falls back to npm, Node.js 22 or later with npm must be
 available on PATH.
 
