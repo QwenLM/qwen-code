@@ -473,6 +473,7 @@ describe('agent-transcript', () => {
 
       emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
         subagentId: 'agent-x',
+        kind: 'message',
         text: 'follow-up from parent',
         timestamp: 100,
       });
@@ -485,7 +486,51 @@ describe('agent-transcript', () => {
         role: 'user',
         parts: [{ text: 'follow-up from parent' }],
       });
+      expect(records[1].externalInputKind).toBe('message');
       expect(records[1].parentUuid).toBe(records[0].uuid);
+    });
+
+    it('preserves notification kind for EXTERNAL_MESSAGE records', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: 'agent-x',
+        kind: 'notification',
+        text: '<task-notification />',
+        timestamp: 100,
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      expect(records[0].type).toBe('user');
+      expect(records[0].message).toEqual({
+        role: 'user',
+        parts: [{ text: '<task-notification />' }],
+      });
+      expect(records[0].externalInputKind).toBe('notification');
+    });
+
+    it('defaults legacy EXTERNAL_MESSAGE events without kind to message records', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: 'agent-x',
+        text: 'legacy follow-up from parent',
+        timestamp: 100,
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      expect(records[0].type).toBe('user');
+      expect(records[0].message).toEqual({
+        role: 'user',
+        parts: [{ text: 'legacy follow-up from parent' }],
+      });
+      expect(records[0].externalInputKind).toBe('message');
     });
 
     it('stops writing after cleanup', () => {
@@ -502,6 +547,7 @@ describe('agent-transcript', () => {
       });
       emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
         subagentId: 'agent-x',
+        kind: 'notification',
         text: 'late injection',
         timestamp: 2,
       });

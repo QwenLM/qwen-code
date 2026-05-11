@@ -58,6 +58,7 @@ import {
   type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import {
@@ -80,6 +81,7 @@ import { useModelCommand } from './hooks/useModelCommand.js';
 import { useManageModelsCommand } from './hooks/useManageModelsCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
@@ -101,6 +103,7 @@ import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
+import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
@@ -163,6 +166,7 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -252,6 +256,12 @@ const SHELL_HEIGHT_PADDING = 10;
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
   const historyManager = useHistory();
+  // `useHistory()` returns a fresh memoized object whenever `history` changes,
+  // so depending on `historyManager` directly inside event-handler callbacks
+  // would rebuild them on every message. Mirror history into a ref so
+  // handlers can read the latest snapshot at call time without reactive deps.
+  const historyRef = useRef(historyManager.history);
+  historyRef.current = historyManager.history;
   useMemoryMonitor(historyManager);
   const [debugMessage, setDebugMessage] = useState<string>('');
   const [quittingMessages, setQuittingMessages] = useState<
@@ -366,6 +376,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
+  const previousTerminalWidthRef = useRef(terminalWidth);
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
 
@@ -562,6 +573,13 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
 
+  // Targeted repaint for resize events: move cursor to top-left and erase
+  // downward instead of a full clearTerminal, avoiding the full-screen flash.
+  const repaintStaticViewport = useCallback(() => {
+    stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
+    remountStaticHistory();
+  }, [remountStaticHistory, stdout]);
+
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
@@ -683,6 +701,14 @@ export const AppContainer = (props: AppContainerProps) => {
     remount: refreshStatic,
   });
 
+  const { handleBranch } = useBranchCommand({
+    config,
+    historyManager,
+    startNewSession,
+    setSessionName,
+    remount: refreshStatic,
+  });
+
   const {
     isDeleteDialogOpen,
     openDeleteDialog,
@@ -692,6 +718,13 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     addItem: historyManager.addItem,
   });
+
+  const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);
+  const [activeHelpTab, setHelpTab] = useState<
+    'general' | 'commands' | 'custom-commands'
+  >('general');
+  const openHelpDialog = useCallback(() => setHelpDialogOpen(true), []);
+  const closeHelpDialog = useCallback(() => setHelpDialogOpen(false), []);
 
   const { toggleVimEnabled } = useVimMode();
 
@@ -751,7 +784,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
       handleResume,
+      handleBranch,
       openDeleteDialog,
+      openHelpDialog,
     }),
     [
       openAuthDialog,
@@ -775,13 +810,16 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openResumeDialog,
       handleResume,
+      handleBranch,
       openDeleteDialog,
+      openHelpDialog,
     ],
   );
 
   const {
     handleSlashCommand,
     slashCommands,
+    recentSlashCommands,
     pendingHistoryItems: pendingSlashCommandHistoryItems,
     btwItem,
     setBtwItem,
@@ -1665,6 +1703,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
+    isHelpDialogOpen ||
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
     bgTasksDialogOpen;
@@ -1735,6 +1774,14 @@ export const AppContainer = (props: AppContainerProps) => {
       );
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
+
+  useEffect(() => {
+    if (previousTerminalWidthRef.current === terminalWidth) {
+      return;
+    }
+    previousTerminalWidthRef.current = terminalWidth;
+    repaintStaticViewport();
+  }, [terminalWidth, repaintStaticViewport]);
 
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -1991,6 +2038,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
+    isHelpDialogOpen,
+    closeHelpDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
   });
@@ -2223,7 +2272,69 @@ export const AppContainer = (props: AppContainerProps) => {
         const newValue = !compactMode;
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
-        refreshStatic();
+        // Skip the expensive clearTerminal + Static remount when no past
+        // item would render differently (no tool_group / gemini_thought*).
+        // Future items pick up the new mode naturally because Static is
+        // append-only. Issue #3899: this unfreezes Ctrl+O for plain-chat
+        // long sessions; tool/thinking-bearing sessions still go through
+        // the (now chunked) full path in MainContent.
+        if (compactToggleHasVisualEffect(historyRef.current)) {
+          refreshStatic();
+        }
+      } else if (keyMatchers[Command.PROMOTE_SHELL_TO_BACKGROUND](key)) {
+        // Ctrl+B: promote a running foreground shell command to a
+        // background task (#3831). The child keeps running, the
+        // agent's turn unblocks, and the shell becomes a regular
+        // BackgroundShellEntry visible in `/tasks` + the dialog and
+        // stoppable via `task_stop`.
+        //
+        // Read from the ref (NOT the destructured `pendingToolCalls`)
+        // so we don't have to put `pendingToolCalls` in the deps
+        // array — that would re-bind the keypress handler on every
+        // tool-call status update, which is noisy.
+        //
+        // No-op when no foreground shell is currently executing OR
+        // the executing tool call is non-shell (no
+        // `promoteAbortController` projected). Falling through in
+        // the no-op case is intentional: while the agent is idle the
+        // input layer's own Ctrl+B handler (cursor-left in the
+        // prompt) should still fire as before.
+        //
+        // Broadcast caveat: `KeypressContext.broadcast()` has no
+        // consumed-flag mechanism today, so even after we `return`
+        // here the same Ctrl+B keypress is also dispatched to other
+        // useKeypress consumers (text buffer cursor-left,
+        // DebugProfiler, etc.). Visible side effect during a
+        // successful promote: the input cursor will move one
+        // character left if the prompt has focus. Cosmetic; tracked
+        // for a follow-up that introduces a `consumed` return value
+        // on KeypressHandler so global handlers can swallow keys.
+        const executingShell = pendingToolCallsRef.current.find(
+          (tc) =>
+            tc.status === 'executing' &&
+            // Defense-in-depth: also gate on the tool name. Today only
+            // the shell tool's invocation wires `promoteAbortController`,
+            // but a future copy-paste / type-confusion that adds the
+            // property to a non-shell tool would otherwise let Ctrl+B
+            // mistakenly fire `abort({kind:'background'})` on a tool
+            // whose service has no promote-handoff handler.
+            tc.request.name === ToolNames.SHELL &&
+            tc.promoteAbortController !== undefined,
+        ) as TrackedExecutingToolCall | undefined;
+        if (executingShell?.promoteAbortController) {
+          debugLogger.debug(
+            `Ctrl+B promote: matched executing shell tool call ${executingShell.request.callId}`,
+          );
+          executingShell.promoteAbortController.abort({
+            kind: 'background',
+          });
+          return;
+        }
+        debugLogger.debug(
+          `Ctrl+B promote: no executing shell tool call; falling through ` +
+            `(streamingState=${streamingState}, ` +
+            `pendingToolCalls=${pendingToolCallsRef.current.length})`,
+        );
       }
     },
     [
@@ -2362,7 +2473,10 @@ export const AppContainer = (props: AppContainerProps) => {
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
+      isHelpDialogOpen,
+      activeHelpTab,
       slashCommands,
+      recentSlashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
       shellConfirmationRequest,
@@ -2477,7 +2591,10 @@ export const AppContainer = (props: AppContainerProps) => {
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
+      isHelpDialogOpen,
+      activeHelpTab,
       slashCommands,
+      recentSlashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
       shellConfirmationRequest,
@@ -2628,10 +2745,16 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Branch (fork) session
+      handleBranch,
       // Delete session dialog
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      // Help dialog
+      openHelpDialog,
+      closeHelpDialog,
+      setHelpTab,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
@@ -2693,10 +2816,16 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Branch (fork) session
+      handleBranch,
       // Delete session dialog
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      // Help dialog
+      openHelpDialog,
+      closeHelpDialog,
+      setHelpTab,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,

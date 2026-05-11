@@ -381,6 +381,11 @@ jobs:
           npm run bundle
           npm run prepare:package
 
+      - name: 'Build Standalone Archives'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
+
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-
@@ -413,6 +418,8 @@ jobs:
 
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
+            dist/standalone/qwen-code-* \
+            dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
             --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \

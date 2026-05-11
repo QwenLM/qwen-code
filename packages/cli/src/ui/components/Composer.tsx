@@ -118,6 +118,7 @@ export const Composer = () => {
           config={config}
           slashCommands={uiState.slashCommands}
           commandContext={uiState.commandContext}
+          recentSlashCommands={uiState.recentSlashCommands}
           shellModeActive={uiState.shellModeActive}
           setShellModeActive={uiActions.setShellModeActive}
           approvalMode={showAutoAcceptIndicator}

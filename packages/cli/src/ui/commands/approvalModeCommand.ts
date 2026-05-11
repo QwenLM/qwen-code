@@ -33,6 +33,7 @@ export const approvalModeCommand: SlashCommand = {
   get description() {
     return t('View or change the approval mode for tool usage');
   },
+  argumentHint: '<mode>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: async (

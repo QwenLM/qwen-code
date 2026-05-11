@@ -66,6 +66,12 @@ export interface ResultOptions {
   readonly stats?: SessionMetrics;
   readonly summary?: string;
   readonly subtype?: string;
+  /**
+   * Payload that the model submitted via the synthetic `structured_output`
+   * tool. When set, `result` is forced to the JSON-stringified form and a
+   * top-level `structured_result` field is added to the result message.
+   */
+  readonly structuredResult?: unknown;
 }
 
 /**
@@ -1188,7 +1194,28 @@ export abstract class BaseJsonOutputAdapter {
         error: { message: errorMessage },
       };
     } else {
-      const success: CLIResultMessageSuccess & { stats?: SessionMetrics } = {
+      // Track presence by property existence — `runNonInteractive` may
+      // legitimately pass `structuredResult: undefined` (e.g. the model
+      // called structured_output with no args under an empty schema).
+      // A `!== undefined` sentinel would silently fall back to the
+      // free-text `resultText` path and drop the `structured_result`
+      // field, breaking the structured-output contract.
+      //
+      // Normalize an `undefined` submission to `null` so both
+      // `JSON.stringify` (for `result`) and the top-level
+      // `structured_result` field render as a JSON-safe `null` instead
+      // of being silently omitted.
+      const hasStructured = 'structuredResult' in options;
+      const normalizedStructured = hasStructured
+        ? (options.structuredResult ?? null)
+        : undefined;
+      const finalResult = hasStructured
+        ? JSON.stringify(normalizedStructured)
+        : resultText;
+      const success: CLIResultMessageSuccess & {
+        stats?: SessionMetrics;
+        structured_result?: unknown;
+      } = {
         type: 'result',
         subtype:
           (options.subtype as CLIResultMessageSuccess['subtype']) ?? 'success',
@@ -1198,13 +1225,16 @@ export abstract class BaseJsonOutputAdapter {
         duration_ms: options.durationMs,
         duration_api_ms: options.apiDurationMs,
         num_turns: options.numTurns,
-        result: resultText,
+        result: finalResult,
         usage,
         permission_denials: [...this.permissionDenials],
       };
 
       if (options.stats) {
         success.stats = options.stats;
+      }
+      if (hasStructured) {
+        success.structured_result = normalizedStructured;
       }
 
       return success;

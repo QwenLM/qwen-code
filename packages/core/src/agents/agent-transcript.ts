@@ -360,11 +360,15 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
-  const recordUserMessage = (text: string) => {
+  const recordUserMessage = (
+    text: string,
+    externalInputKind?: AgentExternalMessageEvent['kind'],
+  ) => {
     if (!text) return;
     append({
       ...baseFields('user'),
       message: { role: 'user', parts: [{ text }] },
+      ...(externalInputKind ? { externalInputKind } : {}),
     });
   };
 
@@ -380,7 +384,7 @@ export function attachJsonlTranscriptWriter(
   };
 
   const onExternalMessage = (event: AgentExternalMessageEvent) => {
-    recordUserMessage(event.text);
+    recordUserMessage(event.text, event.kind ?? 'message');
   };
 
   const hasBootstrapPayload =

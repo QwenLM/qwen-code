@@ -26,6 +26,9 @@ Use the `/language ui` command:
 /language ui ru-RU    # Russian
 /language ui de-DE    # German
 /language ui ja-JP    # Japanese
+/language ui pt-BR    # Portuguese (Brazil)
+/language ui fr-FR    # French
+/language ui ca-ES    # Catalan
 ```
 
 Aliases are also supported:
@@ -36,6 +39,9 @@ Aliases are also supported:
 /language ui ru       # Russian
 /language ui de       # German
 /language ui ja       # Japanese
+/language ui pt       # Portuguese
+/language ui fr       # French
+/language ui ca       # Catalan
 ```
 
 ### Auto-detection
@@ -48,6 +54,22 @@ Detection priority:
 2. `LANG` environment variable
 3. System locale via JavaScript Intl API
 4. Default: English
+
+### Dynamic Command Translation
+
+Dynamic slash command descriptions from skills, extensions, file commands, and
+MCP prompts can be translated with AI. This is **off by default** to avoid
+unexpected model calls, latency, and token usage.
+
+```bash
+/language translate status  # Show current status
+/language translate on      # Enable AI translation for dynamic descriptions
+/language translate off     # Disable AI translation
+```
+
+Use `/language translate cache refresh` to re-translate cached dynamic
+descriptions after enabling translation, or `/language translate cache clear` to
+remove cached translations.
 
 ## LLM Output Language
 
@@ -66,6 +88,9 @@ On first startup, if no `output-language.md` file exists, Qwen Code automaticall
 - System locale `ru` creates a rule for Russian responses
 - System locale `de` creates a rule for German responses
 - System locale `ja` creates a rule for Japanese responses
+- System locale `pt` creates a rule for Portuguese responses
+- System locale `fr` creates a rule for French responses
+- System locale `ca` creates a rule for Catalan responses
 
 ### Manual Setting
 

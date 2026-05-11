@@ -71,6 +71,7 @@ import { getManagedAutoMemoryStatus } from './status.js';
 import { appendManagedAutoMemoryToUserMemory } from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
+import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
@@ -100,7 +101,7 @@ export type MemoryTaskStatus =
 
 export interface MemoryTaskRecord {
   id: string;
-  taskType: 'extract' | 'dream';
+  taskType: 'extract' | 'dream' | 'skill-review';
   projectRoot: string;
   sessionId?: string;
   status: MemoryTaskStatus;
@@ -119,6 +120,31 @@ export interface ScheduleExtractParams {
   history: Content[];
   now?: Date;
   config?: Config;
+}
+
+export interface ScheduleSkillReviewParams {
+  projectRoot: string;
+  sessionId: string;
+  history: Content[];
+  toolCallCount: number;
+  skillsModified: boolean;
+  now?: Date;
+  config?: Config;
+  enabled?: boolean;
+  threshold?: number;
+  maxTurns?: number;
+  timeoutMs?: number;
+}
+
+export interface SkillReviewScheduleResult {
+  status: 'scheduled' | 'skipped';
+  taskId?: string;
+  skippedReason?:
+    | 'below_threshold'
+    | 'skills_modified_in_session'
+    | 'disabled'
+    | 'already_running';
+  promise?: Promise<MemoryTaskRecord>;
 }
 
 // AutoMemoryExtractResult is re-used as the return type
@@ -166,6 +192,8 @@ export interface DrainOptions {
 
 export const EXTRACT_TASK_TYPE = 'managed-auto-memory-extraction' as const;
 export const DREAM_TASK_TYPE = 'managed-auto-memory-dream' as const;
+export const SKILL_REVIEW_TASK_TYPE = 'managed-skill-extractor' as const;
+export const AUTO_SKILL_THRESHOLD = 20;
 
 export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
@@ -183,7 +211,7 @@ const WRITE_TOOL_NAMES = new Set([
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 function makeTaskRecord(
-  type: 'extract' | 'dream',
+  type: MemoryTaskRecord['taskType'],
   projectRoot: string,
   sessionId?: string,
 ): MemoryTaskRecord {
@@ -377,6 +405,9 @@ export class MemoryManager {
     { taskId: string; params: ScheduleExtractParams }
   >();
 
+  // ── Skill-review in-flight dedup ─────────────────────────────────────────────
+  private readonly skillReviewInFlightByProject = new Map<string, string>();
+
   // ── Dream scheduling state ───────────────────────────────────────────────────
   private readonly dreamInFlightByKey = new Map<string, string>();
   private readonly dreamLastSessionScanAt = new Map<string, number>();
@@ -444,9 +475,9 @@ export class MemoryManager {
    * subscribers can be reached too; the unfiltered subscriber set
    * always receives the wakeup either way.
    */
-  private notify(taskType?: 'extract' | 'dream'): void {
+  private notify(taskType?: 'extract' | 'dream' | 'skill-review'): void {
     for (const fn of this.subscribers) fn();
-    if (taskType) {
+    if (taskType && taskType !== 'skill-review') {
       const typed = this.subscribersByType.get(taskType);
       if (typed) for (const fn of typed) fn();
     }
@@ -490,7 +521,7 @@ export class MemoryManager {
 
   /** Return task records filtered by type and optionally by projectRoot. */
   listTasksByType(
-    taskType: 'extract' | 'dream',
+    taskType: MemoryTaskRecord['taskType'],
     projectRoot?: string,
   ): MemoryTaskRecord[] {
     return [...this.tasks.values()]
@@ -714,6 +745,90 @@ export class MemoryManager {
       queued.taskId,
       this.runExtract(queued.taskId, queued.params),
     );
+  }
+
+  // ─── Skill review ─────────────────────────────────────────────────────────────
+
+  scheduleSkillReview(
+    params: ScheduleSkillReviewParams,
+  ): SkillReviewScheduleResult {
+    if (params.enabled === false) {
+      return { status: 'skipped', skippedReason: 'disabled' };
+    }
+
+    if (params.skillsModified) {
+      return { status: 'skipped', skippedReason: 'skills_modified_in_session' };
+    }
+
+    const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
+    if (params.toolCallCount < threshold) {
+      return { status: 'skipped', skippedReason: 'below_threshold' };
+    }
+
+    if (!params.config) {
+      return { status: 'skipped', skippedReason: 'disabled' };
+    }
+
+    const existingTaskId = this.skillReviewInFlightByProject.get(
+      params.projectRoot,
+    );
+    if (existingTaskId) {
+      return {
+        status: 'skipped',
+        skippedReason: 'already_running',
+        taskId: existingTaskId,
+      };
+    }
+
+    const record = makeTaskRecord(
+      'skill-review',
+      params.projectRoot,
+      params.sessionId,
+    );
+    this.storeWith(record, {
+      status: 'running',
+      progressText: 'Running managed skill review.',
+      metadata: {
+        historyLength: params.history.length,
+        toolCallCount: params.toolCallCount,
+        threshold,
+      },
+    });
+
+    const promise = this.track(record.id, this.runSkillReview(record, params));
+    return { status: 'scheduled', taskId: record.id, promise };
+  }
+
+  private async runSkillReview(
+    record: MemoryTaskRecord,
+    params: ScheduleSkillReviewParams,
+  ): Promise<MemoryTaskRecord> {
+    this.skillReviewInFlightByProject.set(params.projectRoot, record.id);
+    try {
+      const result = await runSkillReviewByAgent({
+        config: params.config!,
+        projectRoot: params.projectRoot,
+        history: params.history,
+        maxTurns: params.maxTurns,
+        timeoutMs: params.timeoutMs,
+      });
+      this.update(record, {
+        status: 'completed',
+        progressText:
+          result.systemMessage ??
+          'Managed skill review completed without durable changes.',
+        metadata: { touchedSkillFiles: result.touchedSkillFiles },
+      });
+    } catch (error) {
+      this.update(record, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    } finally {
+      this.skillReviewInFlightByProject.delete(params.projectRoot);
+    }
+    return record;
   }
 
   // ─── Dream ────────────────────────────────────────────────────────────────────

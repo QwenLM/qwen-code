@@ -32,6 +32,7 @@ import type {
   ModelConfig,
   RunConfig,
   ToolConfig,
+  AgentExternalInput,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
 import { logSubagentExecution } from '../../telemetry/loggers.js';
@@ -138,7 +139,11 @@ export class AgentHeadless {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
-  private externalMessageProvider?: () => string[];
+  private externalMessageProvider?: () => AgentExternalInput[];
+  private externalMessageWaiter?: (
+    signal: AbortSignal,
+  ) => Promise<AgentExternalInput[]>;
+  private externalMessageWaitPredicate?: () => boolean;
 
   private constructor(core: AgentCore) {
     this.core = core;
@@ -273,6 +278,8 @@ export class AgentHeadless {
           maxTimeMinutes: this.core.runConfig.max_time_minutes,
           startTimeMs: startTime,
           getExternalMessages: this.externalMessageProvider,
+          waitForExternalMessages: this.externalMessageWaiter,
+          shouldWaitForExternalMessages: this.externalMessageWaitPredicate,
         },
       );
 
@@ -373,8 +380,18 @@ export class AgentHeadless {
    * Sets a callback that the reasoning loop calls between tool rounds
    * to drain external messages (e.g. from SendMessage tool).
    */
-  setExternalMessageProvider(provider: () => string[]): void {
+  setExternalMessageProvider(provider: () => AgentExternalInput[]): void {
     this.externalMessageProvider = provider;
+  }
+
+  setExternalMessageWaiter(
+    waiter: (signal: AbortSignal) => Promise<AgentExternalInput[]>,
+  ): void {
+    this.externalMessageWaiter = waiter;
+  }
+
+  setExternalMessageWaitPredicate(predicate: () => boolean): void {
+    this.externalMessageWaitPredicate = predicate;
   }
 
   get name(): string {
