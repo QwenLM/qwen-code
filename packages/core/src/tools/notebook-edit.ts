@@ -33,8 +33,11 @@ import { getSpecificMimeType } from '../utils/fileUtils.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import {
   findCellIndex,
+  getCellDisplayId,
   getNotebookLanguage,
+  hasStableCellIds,
   inferNotebookSourceArrayStyle,
+  isAmbiguousCellId,
   makeCellId,
   normalizeEditedCell,
   normalizeSource,
@@ -48,6 +51,11 @@ import {
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import { StructuredToolError } from './priorReadEnforcement.js';
+import type {
+  ModifiableDeclarativeTool,
+  ModifyContext,
+} from './modifiable-tool.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 export type NotebookEditMode = 'replace' | 'insert' | 'delete';
 
@@ -57,6 +65,9 @@ export interface NotebookEditToolParams {
   new_source?: string;
   cell_type?: EditableNotebookCellType;
   edit_mode?: NotebookEditMode;
+  modified_by_user?: boolean;
+  ai_proposed_content?: string;
+  modified_notebook_content?: string;
 }
 
 interface NotebookEditResult {
@@ -65,6 +76,7 @@ interface NotebookEditResult {
   editedCellType?: NotebookCellType;
   language: string;
   mode: NotebookEditMode;
+  requiresReadAfterWrite: boolean;
 }
 
 interface PreparedNotebookEdit extends NotebookEditResult {
@@ -110,7 +122,7 @@ function requireNotebookSource(
 }
 
 function displayCellId(cell: NotebookCell | undefined, index: number): string {
-  return cell?.id ?? `cell-${index}`;
+  return cell ? getCellDisplayId(cell, index) : `cell-${index}`;
 }
 
 function resolveTargetIndex(
@@ -124,6 +136,13 @@ function resolveTargetIndex(
     }
     throw new NotebookEditError(
       'cell_id is required for replace and delete operations.',
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+  }
+
+  if (isAmbiguousCellId(notebook, cellId)) {
+    throw new NotebookEditError(
+      `Cell ID "${cellId}" is ambiguous in the rendered notebook. Re-read the notebook and target a stable real cell ID before editing.`,
       ToolErrorType.INVALID_TOOL_PARAMS,
     );
   }
@@ -172,8 +191,25 @@ export function applyNotebookEdit(
 
   const mode = params.edit_mode ?? 'replace';
   const source = requireNotebookSource(params.new_source, mode);
+  const originalHasStableCellIds = hasStableCellIds(notebook);
   const targetIndex = resolveTargetIndex(notebook, params.cell_id, mode);
   const language = getNotebookLanguage(notebook);
+  const buildResult = (
+    updatedNotebook: ReturnType<typeof parseNotebook>,
+    result: Omit<
+      NotebookEditResult,
+      'updatedContent' | 'requiresReadAfterWrite'
+    >,
+  ): NotebookEditResult => {
+    const structuralEdit = mode === 'insert' || mode === 'delete';
+    return {
+      ...result,
+      updatedContent: serializeNotebook(updatedNotebook),
+      requiresReadAfterWrite:
+        structuralEdit &&
+        !(originalHasStableCellIds && hasStableCellIds(updatedNotebook)),
+    };
+  };
 
   switch (mode) {
     case 'insert': {
@@ -181,24 +217,22 @@ export function applyNotebookEdit(
       const newCell = createNotebookCell(notebook, cellType, source);
       const insertAt = targetIndex === -1 ? 0 : targetIndex + 1;
       notebook.cells.splice(insertAt, 0, newCell);
-      return {
-        updatedContent: serializeNotebook(notebook),
+      return buildResult(notebook, {
         editedCellId: displayCellId(newCell, insertAt),
         editedCellType: cellType,
         language,
         mode,
-      };
+      });
     }
 
     case 'delete': {
       const [removed] = notebook.cells.splice(targetIndex, 1);
-      return {
-        updatedContent: serializeNotebook(notebook),
+      return buildResult(notebook, {
         editedCellId: displayCellId(removed, targetIndex),
         editedCellType: removed?.cell_type,
         language,
         mode,
-      };
+      });
     }
 
     case 'replace': {
@@ -213,13 +247,12 @@ export function applyNotebookEdit(
       const finalType = params.cell_type ?? target.cell_type;
       target.source = toNotebookSource(source, Array.isArray(target.source));
       normalizeEditedCell(target, finalType);
-      return {
-        updatedContent: serializeNotebook(notebook),
+      return buildResult(notebook, {
         editedCellId: displayCellId(target, targetIndex),
         editedCellType: finalType,
         language,
         mode,
-      };
+      });
     }
 
     default:
@@ -228,6 +261,33 @@ export function applyNotebookEdit(
         ToolErrorType.INVALID_TOOL_PARAMS,
       );
   }
+}
+
+function prepareModifiedNotebookContent(
+  originalContent: string,
+  modifiedContent: string,
+  params: NotebookEditToolParams,
+): NotebookEditResult {
+  let notebook: ReturnType<typeof parseNotebook>;
+  try {
+    notebook = parseNotebook(modifiedContent);
+  } catch (error) {
+    throw new NotebookEditError(
+      error instanceof Error ? error.message : String(error),
+      ToolErrorType.NOTEBOOK_INVALID_JSON,
+    );
+  }
+
+  return {
+    updatedContent: modifiedContent,
+    editedCellId: params.cell_id ?? 'user-modified-notebook',
+    editedCellType: undefined,
+    language: getNotebookLanguage(notebook),
+    mode: params.edit_mode ?? 'replace',
+    requiresReadAfterWrite:
+      !hasStableCellIds(parseNotebook(originalContent)) ||
+      !hasStableCellIds(notebook),
+  };
 }
 
 async function checkPriorNotebookRead(
@@ -421,6 +481,20 @@ class NotebookEditInvocation extends BaseToolInvocation<
     }
 
     try {
+      if (this.params.modified_notebook_content !== undefined) {
+        return {
+          ...prepareModifiedNotebookContent(
+            originalContent,
+            this.params.modified_notebook_content,
+            this.params,
+          ),
+          originalContent,
+          bom,
+          encoding,
+          lineEnding,
+        };
+      }
+
       return {
         ...applyNotebookEdit(originalContent, this.params),
         originalContent,
@@ -486,13 +560,24 @@ class NotebookEditInvocation extends BaseToolInvocation<
         },
       });
 
+      if (!this.params.modified_by_user) {
+        CommitAttributionService.getInstance().recordEdit(
+          this.params.notebook_path,
+          prepared.originalContent,
+          prepared.updatedContent,
+        );
+      }
+
       try {
         const postWriteStats = fs.statSync(this.params.notebook_path);
-        this.config
-          .getFileReadCache()
-          .recordWrite(this.params.notebook_path, postWriteStats, {
+        const cache = this.config.getFileReadCache();
+        if (prepared.requiresReadAfterWrite) {
+          cache.invalidate(postWriteStats);
+        } else {
+          cache.recordWrite(this.params.notebook_path, postWriteStats, {
             cacheable: false,
           });
+        }
       } catch {
         // Non-fatal: the write succeeded. A subsequent read will re-stat and
         // refresh the cache if this best-effort cache update failed.
@@ -510,7 +595,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
       const diffStat = getDiffStat(
         fileName,
         prepared.originalContent,
-        prepared.updatedContent,
+        this.params.ai_proposed_content ?? prepared.updatedContent,
         prepared.updatedContent,
       );
 
@@ -535,9 +620,11 @@ class NotebookEditInvocation extends BaseToolInvocation<
       };
 
       const sourcePreview =
-        prepared.mode === 'delete'
-          ? ''
-          : `\n\nUpdated source:\n\n---\n\n${normalizeSource(this.params.new_source ?? '')}`;
+        this.params.modified_notebook_content !== undefined
+          ? '\n\nNotebook content was modified by the user before approval.'
+          : prepared.mode === 'delete'
+            ? ''
+            : `\n\nUpdated source:\n\n---\n\n${normalizeSource(this.params.new_source ?? '')}`;
       return {
         llmContent: `Notebook ${this.params.notebook_path} has been updated. ${prepared.mode} cell ${prepared.editedCellId}.${sourcePreview}`,
         returnDisplay: displayResult,
@@ -557,10 +644,10 @@ class NotebookEditInvocation extends BaseToolInvocation<
   }
 }
 
-export class NotebookEditTool extends BaseDeclarativeTool<
-  NotebookEditToolParams,
-  ToolResult
-> {
+export class NotebookEditTool
+  extends BaseDeclarativeTool<NotebookEditToolParams, ToolResult>
+  implements ModifiableDeclarativeTool<NotebookEditToolParams>
+{
   static readonly Name = ToolNames.NOTEBOOK_EDIT;
 
   constructor(private readonly config: Config) {
@@ -650,5 +737,52 @@ export class NotebookEditTool extends BaseDeclarativeTool<
     params: NotebookEditToolParams,
   ): ToolInvocation<NotebookEditToolParams, ToolResult> {
     return new NotebookEditInvocation(this.config, params);
+  }
+
+  getModifyContext(
+    _abortSignal: AbortSignal,
+  ): ModifyContext<NotebookEditToolParams> {
+    return {
+      getFilePath: (params: NotebookEditToolParams) => params.notebook_path,
+      getCurrentContent: async (
+        params: NotebookEditToolParams,
+      ): Promise<string> => {
+        const { content } = await this.config
+          .getFileSystemService()
+          .readTextFile({ path: params.notebook_path });
+        return content;
+      },
+      getProposedContent: async (
+        params: NotebookEditToolParams,
+      ): Promise<string> => {
+        const { content } = await this.config
+          .getFileSystemService()
+          .readTextFile({ path: params.notebook_path });
+        return applyNotebookEdit(content, params).updatedContent;
+      },
+      createUpdatedParams: (
+        oldContent: string,
+        modifiedProposedContent: string,
+        originalParams: NotebookEditToolParams,
+      ): NotebookEditToolParams => {
+        let aiProposedContent = originalParams.ai_proposed_content;
+        if (aiProposedContent === undefined) {
+          try {
+            aiProposedContent = applyNotebookEdit(
+              oldContent,
+              originalParams,
+            ).updatedContent;
+          } catch {
+            aiProposedContent = modifiedProposedContent;
+          }
+        }
+        return {
+          ...originalParams,
+          ai_proposed_content: aiProposedContent,
+          modified_by_user: true,
+          modified_notebook_content: modifiedProposedContent,
+        };
+      },
+    };
   }
 }

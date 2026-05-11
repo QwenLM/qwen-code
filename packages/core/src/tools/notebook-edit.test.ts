@@ -13,6 +13,7 @@ import { ApprovalMode } from '../config/config.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { ToolErrorType } from './tool-error.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -30,6 +31,7 @@ describe('NotebookEditTool', () => {
   const abortSignal = new AbortController().signal;
 
   beforeEach(() => {
+    CommitAttributionService.resetInstance();
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-edit-test-'));
     fileReadCache = new FileReadCache();
     config = {
@@ -67,6 +69,7 @@ describe('NotebookEditTool', () => {
   });
 
   afterEach(() => {
+    CommitAttributionService.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -215,8 +218,39 @@ describe('NotebookEditTool', () => {
     expect(updated.cells).toHaveLength(3);
     expect(updated.cells[1].cell_type).toBe('markdown');
     expect(updated.cells[1].source).toEqual(['## Inserted']);
-    expect(updated.cells[1].id).toBe('cell-3');
-    expect(result.editedCellId).toBe('cell-3');
+    expect(updated.cells[1].id).toBe('qwen-cell-1');
+    expect(result.editedCellId).toBe('qwen-cell-1');
+  });
+
+  it('rejects ambiguous fallback-like cell IDs', async () => {
+    const filePath = writeNotebook('ambiguous.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [
+        {
+          cell_type: 'markdown',
+          id: 'cell-1',
+          source: ['real id'],
+          metadata: {},
+        },
+        {
+          cell_type: 'markdown',
+          source: ['fallback id'],
+          metadata: {},
+        },
+      ],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'cell-1',
+      new_source: 'updated',
+    }).execute(abortSignal);
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+    expect(result.llmContent).toContain('ambiguous');
   });
 
   it('inserts at the beginning when no cell_id is provided', async () => {
@@ -264,6 +298,57 @@ describe('NotebookEditTool', () => {
     expect(updated.cells.map((cell: { id: string }) => cell.id)).toEqual([
       'keep',
     ]);
+  });
+
+  it('requires a fresh read after structural edits when fallback IDs can shift', async () => {
+    const filePath = writeNotebook('fallback-shift.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [
+        { cell_type: 'markdown', source: ['A'], metadata: {} },
+        { cell_type: 'markdown', source: ['B'], metadata: {} },
+      ],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      edit_mode: 'insert',
+      cell_type: 'markdown',
+      new_source: 'inserted',
+    }).execute(abortSignal);
+
+    expect(result.error).toBeUndefined();
+    expect(fileReadCache.check(fs.statSync(filePath)).state).toBe('unknown');
+  });
+
+  it('preserves fresh read state after structural edits when all IDs are stable', async () => {
+    const filePath = writeNotebook('stable-ids.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [
+        { cell_type: 'markdown', id: 'a', source: ['A'], metadata: {} },
+        { cell_type: 'markdown', id: 'b', source: ['B'], metadata: {} },
+      ],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      edit_mode: 'insert',
+      cell_id: 'a',
+      cell_type: 'markdown',
+      new_source: 'inserted',
+    }).execute(abortSignal);
+
+    expect(result.error).toBeUndefined();
+    const cacheState = fileReadCache.check(fs.statSync(filePath));
+    expect(cacheState.state).toBe('fresh');
+    if (cacheState.state === 'fresh') {
+      expect(cacheState.entry.lastReadWasFull).toBe(true);
+    }
   });
 
   it('requires a fresh full notebook read before editing', async () => {
@@ -396,5 +481,64 @@ describe('NotebookEditTool', () => {
     expect((editDetails as { originalContent: string }).originalContent).toBe(
       fs.readFileSync(filePath, 'utf-8'),
     );
+  });
+
+  it('applies IDE or inline modified full-notebook content instead of the original cell proposal', async () => {
+    const filePath = writeNotebook('modified-content.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+
+    const originalParams = {
+      notebook_path: filePath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    };
+    const modifyContext = tool.getModifyContext(abortSignal);
+    const currentContent =
+      await modifyContext.getCurrentContent(originalParams);
+    const proposedContent =
+      await modifyContext.getProposedContent(originalParams);
+    const modifiedContent = proposedContent.replace('x = 2', 'x = 99');
+    const updatedParams = modifyContext.createUpdatedParams(
+      currentContent,
+      modifiedContent,
+      originalParams,
+    );
+
+    const result = await buildInvocation(updatedParams).execute(abortSignal);
+
+    expect(result.error).toBeUndefined();
+    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    expect(updated.cells[0].source).toEqual(['x = 99']);
+    expect(result.llmContent).toContain('modified by the user');
+    expect(
+      CommitAttributionService.getInstance().getFileAttribution(filePath),
+    ).toBeUndefined();
+  });
+
+  it('records AI-originated notebook writes for commit attribution', async () => {
+    const filePath = writeNotebook('attribution.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    }).execute(abortSignal);
+
+    expect(result.error).toBeUndefined();
+    const attribution =
+      CommitAttributionService.getInstance().getFileAttribution(filePath);
+    expect(attribution).toBeDefined();
+    expect(attribution!.aiContribution).toBeGreaterThan(0);
   });
 });

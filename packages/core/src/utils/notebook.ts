@@ -117,25 +117,44 @@ export function parseCellId(cellId: string): number | undefined {
   return Number.isNaN(index) ? undefined : index;
 }
 
+export function getCellDisplayId(cell: NotebookCell, index: number): string {
+  return typeof cell.id === 'string' && cell.id.length > 0
+    ? cell.id
+    : `cell-${index}`;
+}
+
+export function hasStableCellIds(notebook: NotebookContent): boolean {
+  return notebook.cells.every(
+    (cell) => typeof cell.id === 'string' && cell.id.length > 0,
+  );
+}
+
+export function findCellIndexesByDisplayId(
+  notebook: NotebookContent,
+  cellId: string,
+): number[] {
+  const indexes: number[] = [];
+  notebook.cells.forEach((cell, index) => {
+    if (getCellDisplayId(cell, index) === cellId) {
+      indexes.push(index);
+    }
+  });
+  return indexes;
+}
+
+export function isAmbiguousCellId(
+  notebook: NotebookContent,
+  cellId: string,
+): boolean {
+  return findCellIndexesByDisplayId(notebook, cellId).length > 1;
+}
+
 export function findCellIndex(
   notebook: NotebookContent,
   cellId: string,
 ): number {
-  const idIndex = notebook.cells.findIndex((cell) => cell.id === cellId);
-  if (idIndex !== -1) {
-    return idIndex;
-  }
-
-  const parsedIndex = parseCellId(cellId);
-  if (
-    parsedIndex !== undefined &&
-    parsedIndex >= 0 &&
-    parsedIndex < notebook.cells.length
-  ) {
-    return parsedIndex;
-  }
-
-  return -1;
+  const indexes = findCellIndexesByDisplayId(notebook, cellId);
+  return indexes.length === 1 ? indexes[0]! : -1;
 }
 
 export function getNotebookLanguage(notebook: NotebookContent): string {
@@ -158,17 +177,15 @@ export function makeCellId(notebook: NotebookContent): string | undefined {
     return undefined;
   }
 
-  const existingIds = new Set(
-    notebook.cells
-      .map((cell) => cell.id)
-      .filter((id): id is string => typeof id === 'string'),
+  const existingDisplayIds = new Set(
+    notebook.cells.map((cell, index) => getCellDisplayId(cell, index)),
   );
 
   let fallbackIndex = 1;
-  let fallback = `cell-${fallbackIndex}`;
-  while (existingIds.has(fallback)) {
+  let fallback = `qwen-cell-${fallbackIndex}`;
+  while (existingDisplayIds.has(fallback)) {
     fallbackIndex++;
-    fallback = `cell-${fallbackIndex}`;
+    fallback = `qwen-cell-${fallbackIndex}`;
   }
   return fallback;
 }
@@ -277,7 +294,7 @@ function processCell(
   index: number,
   language: string,
 ): string {
-  const cellId = cell.id ?? `cell-${index}`;
+  const cellId = getCellDisplayId(cell, index);
   const source = normalizeSource(cell.source);
   const parts: string[] = [];
 

@@ -1388,12 +1388,12 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('registers structured_output in bare mode when jsonSchema is set', async () => {
-      // Bare mode strips the toolset to READ_FILE/EDIT/SHELL, but the
+      // Bare mode strips the toolset to READ_FILE/EDIT/NOTEBOOK_EDIT/SHELL, but the
       // synthetic structured_output tool is the terminal contract for
       // --json-schema runs. Without it the model loops until
       // maxSessionTurns and exits via the "plain text" failure path —
       // expensive in tokens for what's almost always a CI use case. The
-      // synthetic tool must be registered alongside the bare three.
+      // synthetic tool must be registered alongside the bare toolset.
       const config = new Config({
         ...baseParams,
         bareMode: true,
@@ -1412,6 +1412,7 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
         ToolNames.STRUCTURED_OUTPUT,
       ]);
@@ -1440,8 +1441,8 @@ describe('Server Config (config.ts)', () => {
           ToolRegistry: { prototype: { registerFactory: Mock } };
         }
       ).ToolRegistry.prototype.registerFactory;
-      // Initial bare init registers READ_FILE / EDIT / SHELL /
-      // STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
+      // Initial bare init registers READ_FILE / EDIT / NOTEBOOK_EDIT /
+      // SHELL / STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
       // observe ONLY the forSubAgent rebuild's calls.
       (registerToolMock as Mock).mockClear();
 
@@ -1455,10 +1456,11 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0],
       );
       expect(registeredNames).not.toContain(ToolNames.STRUCTURED_OUTPUT);
-      // The bare three still register so the subagent has its toolset.
+      // The bare tools still register so the subagent has its toolset.
       expect(registeredNames).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
     });

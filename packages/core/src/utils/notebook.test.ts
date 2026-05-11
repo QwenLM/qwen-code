@@ -7,6 +7,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   findCellIndex,
+  getCellDisplayId,
+  hasStableCellIds,
+  isAmbiguousCellId,
   makeCellId,
   parseCellId,
   parseNotebook,
@@ -412,21 +415,38 @@ describe('notebook utilities', () => {
     expect(parseCellId('cell-nope')).toBeUndefined();
   });
 
-  it('should find cells by real ID before cell-N fallback', () => {
+  it('should find cells by the same IDs read_file displays', () => {
     const notebook = parseNotebook(
       JSON.stringify({
         cells: [
-          { cell_type: 'code', id: 'cell-1', source: '', metadata: {} },
-          { cell_type: 'code', id: 'target', source: '', metadata: {} },
+          { cell_type: 'code', id: 'real-id', source: '', metadata: {} },
+          { cell_type: 'code', source: '', metadata: {} },
         ],
         metadata: {},
       }),
     );
 
-    expect(findCellIndex(notebook, 'cell-1')).toBe(0);
-    expect(findCellIndex(notebook, 'cell-0')).toBe(0);
-    expect(findCellIndex(notebook, 'target')).toBe(1);
+    expect(getCellDisplayId(notebook.cells[0]!, 0)).toBe('real-id');
+    expect(getCellDisplayId(notebook.cells[1]!, 1)).toBe('cell-1');
+    expect(findCellIndex(notebook, 'real-id')).toBe(0);
+    expect(findCellIndex(notebook, 'cell-1')).toBe(1);
+    expect(findCellIndex(notebook, 'cell-0')).toBe(-1);
     expect(findCellIndex(notebook, 'missing')).toBe(-1);
+  });
+
+  it('should reject ambiguous displayed cell IDs', () => {
+    const notebook = parseNotebook(
+      JSON.stringify({
+        cells: [
+          { cell_type: 'code', id: 'cell-1', source: '', metadata: {} },
+          { cell_type: 'code', source: '', metadata: {} },
+        ],
+        metadata: {},
+      }),
+    );
+
+    expect(isAmbiguousCellId(notebook, 'cell-1')).toBe(true);
+    expect(findCellIndex(notebook, 'cell-1')).toBe(-1);
   });
 
   it('should preserve newline boundaries when converting source to arrays', () => {
@@ -436,27 +456,28 @@ describe('notebook utilities', () => {
     expect(toNotebookSource('a\nb\n', false)).toBe('a\nb\n');
   });
 
-  it('should generate deterministic non-conflicting cell IDs for nbformat 4.5+', () => {
+  it('should generate deterministic cell IDs that cannot collide with cell-N fallbacks', () => {
     const notebook = parseNotebook(
       JSON.stringify({
         nbformat: 4,
         nbformat_minor: 5,
         cells: [
-          { cell_type: 'code', id: 'cell-1', source: '', metadata: {} },
-          { cell_type: 'code', id: 'cell-3', source: '', metadata: {} },
+          { cell_type: 'code', id: 'qwen-cell-1', source: '', metadata: {} },
+          { cell_type: 'code', source: '', metadata: {} },
         ],
         metadata: {},
       }),
     );
 
-    expect(makeCellId(notebook)).toBe('cell-2');
+    expect(hasStableCellIds(notebook)).toBe(false);
+    expect(makeCellId(notebook)).toBe('qwen-cell-2');
     notebook.cells.push({
       cell_type: 'code',
-      id: 'cell-2',
+      id: 'qwen-cell-2',
       source: '',
       metadata: {},
     });
-    expect(makeCellId(notebook)).toBe('cell-4');
+    expect(makeCellId(notebook)).toBe('qwen-cell-3');
   });
 
   it('should not generate cell IDs for old notebook formats', () => {
