@@ -1408,11 +1408,23 @@ export const AppContainer = (props: AppContainerProps) => {
       // history, including any INFO/pending item just appended by
       // cancelOngoingRequest, and slices them all off together with the user
       // item. No flicker because React batches with the same render pass.
-      if (
-        !draftWasEmpty ||
-        popped !== null ||
-        pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))
-      ) {
+      // Each bail-out below is silent in production; toggle DEBUG=1 to
+      // diagnose "ESC pressed but my prompt didn't return to the input box"
+      // by reading which guard fired.
+      if (!draftWasEmpty) {
+        debugLogger.debug('auto-restore bail: buffer was non-empty');
+        return;
+      }
+      if (popped !== null) {
+        debugLogger.debug(
+          'auto-restore bail: queue had items (drained to buffer)',
+        );
+        return;
+      }
+      if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
+        debugLogger.debug(
+          'auto-restore bail: pending stream item has meaningful content',
+        );
         return;
       }
 
@@ -1422,21 +1434,47 @@ export const AppContainer = (props: AppContainerProps) => {
       // followed only by synthetic content must NOT be wrongly auto-
       // restored on top of those turns.
       const cancelledTurnUserText = info?.lastTurnUserItem?.text;
-      if (cancelledTurnUserText == null) return;
+      if (cancelledTurnUserText == null) {
+        debugLogger.debug(
+          'auto-restore bail: cancelled turn did not add a user history item',
+        );
+        return;
+      }
 
       const history = historyRef.current;
       const lastUserIdx = findLastUserItemIndex(history);
-      if (lastUserIdx === -1) return;
-      if (!itemsAfterAreOnlySynthetic(history, lastUserIdx)) return;
+      if (lastUserIdx === -1) {
+        debugLogger.debug('auto-restore bail: no user item in history');
+        return;
+      }
+      if (!itemsAfterAreOnlySynthetic(history, lastUserIdx)) {
+        debugLogger.debug(
+          'auto-restore bail: meaningful content committed after last user item',
+        );
+        return;
+      }
 
       const lastUserItem = history[lastUserIdx];
-      if (lastUserItem.type !== 'user') return;
+      if (lastUserItem.type !== 'user') {
+        debugLogger.debug(
+          'auto-restore bail: lastUserItem type narrowing failed (unexpected)',
+        );
+        return;
+      }
       // Identity match: the user item we're rewinding has to be the one
       // this turn added. Text equality is sufficient because
       // useGeminiStream sets lastTurnUserItemRef synchronously next to
       // the addItem call, and no concurrent turn can interleave —
       // submitQuery is serialized on isSubmittingQueryRef.
-      if (lastUserItem.text !== cancelledTurnUserText) return;
+      if (lastUserItem.text !== cancelledTurnUserText) {
+        debugLogger.debug(
+          'auto-restore bail: lastUserItem text does not match cancelled-turn text',
+        );
+        return;
+      }
+      debugLogger.debug(
+        'auto-restore: rewinding cancelled turn and restoring prompt',
+      );
       historyManager.truncateToItem(lastUserItem.id);
       buffer.setText(lastUserItem.text);
       // Also undo the cross-session ↑-history disk entry written by
