@@ -83,6 +83,29 @@ function isDeepSeekAnthropicProvider(
 }
 
 /**
+ * Resolve the baseURL the Anthropic SDK will actually use, mirroring the
+ * SDK's own destructuring-default order: explicit config first, then
+ * `ANTHROPIC_BASE_URL` env, then the SDK default. Returns the SDK default
+ * literal when nothing is configured so callers can do hostname matching
+ * without a special case for the empty path.
+ *
+ * The env read mirrors the SDK's `readEnv` helper (whitespace-trim,
+ * treat empty as missing). Without this, a user who configures the proxy
+ * purely through `ANTHROPIC_BASE_URL` while leaving qwen-code's `baseUrl`
+ * unset would route the request to the proxy but ship the native identity
+ * bundle, defeating the proxy gate.
+ */
+function resolveEffectiveBaseUrl(
+  contentGeneratorConfig: ContentGeneratorConfig,
+): string {
+  const fromConfig = contentGeneratorConfig.baseUrl;
+  if (fromConfig) return fromConfig;
+  const fromEnv = process.env['ANTHROPIC_BASE_URL']?.trim();
+  if (fromEnv) return fromEnv;
+  return 'https://api.anthropic.com';
+}
+
+/**
  * Whether the resolved baseURL is Anthropic's native API (or the SDK default
  * when no baseURL is set). Used to gate IdeaLab-style proxy workarounds —
  * `Authorization: Bearer` auth and the `claude-cli` User-Agent — so that
@@ -93,10 +116,10 @@ function isDeepSeekAnthropicProvider(
 function isAnthropicNativeBaseUrl(
   contentGeneratorConfig: ContentGeneratorConfig,
 ): boolean {
-  const baseUrl = contentGeneratorConfig.baseUrl;
-  if (!baseUrl) return true;
   try {
-    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    const hostname = new URL(
+      resolveEffectiveBaseUrl(contentGeneratorConfig),
+    ).hostname.toLowerCase();
     return (
       hostname === 'api.anthropic.com' || hostname.endsWith('.anthropic.com')
     );
@@ -161,10 +184,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // when targeting a non-Anthropic-native baseURL — direct
     // `api.anthropic.com` users keep the SDK-default `apiKey` (`x-api-key`)
     // path so they don't break against the Anthropic API itself.
+    //
+    // Pass `null` on the unused side rather than omitting it: the SDK
+    // destructures with defaults (`apiKey = readEnv('ANTHROPIC_API_KEY') ?? null`,
+    // same for `authToken`), and destructuring defaults fire ONLY for
+    // `undefined`. Omitting the field would let `ANTHROPIC_API_KEY` /
+    // `ANTHROPIC_AUTH_TOKEN` env back-fill it; the SDK's auth resolver
+    // then prefers `apiKey` over `authToken`, so a user with
+    // `ANTHROPIC_API_KEY=sk-ant-…` exported (common for anyone who also
+    // runs Claude Code in the same shell) would ship their real Anthropic
+    // key as `X-Api-Key` to the IdeaLab proxy — leaking the credential to
+    // a third-party endpoint. Explicit `null` suppresses the back-fill
+    // and forces the intended auth path.
     this.client = new Anthropic({
       ...(useProxyIdentity
-        ? { authToken: contentGeneratorConfig.apiKey }
-        : { apiKey: contentGeneratorConfig.apiKey }),
+        ? { authToken: contentGeneratorConfig.apiKey, apiKey: null }
+        : { apiKey: contentGeneratorConfig.apiKey, authToken: null }),
       baseURL,
       timeout: contentGeneratorConfig.timeout || DEFAULT_TIMEOUT,
       maxRetries: contentGeneratorConfig.maxRetries,

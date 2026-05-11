@@ -130,7 +130,7 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['User-Agent']).toContain('(external, cli)');
     expect(headers['x-app']).toBe('cli');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
-    expect(anthropicState.constructorOptions?.['apiKey']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
   });
 
   it('uses QwenCode identity + apiKey auth when baseURL is api.anthropic.com', async () => {
@@ -157,7 +157,7 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['User-Agent']).not.toContain('claude-cli');
     expect(headers['x-app']).toBeUndefined();
     expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
-    expect(anthropicState.constructorOptions?.['authToken']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
   });
 
   it('treats unset baseURL as Anthropic-native (SDK default targets api.anthropic.com)', async () => {
@@ -179,7 +179,7 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
     expect(headers['x-app']).toBeUndefined();
     expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
-    expect(anthropicState.constructorOptions?.['authToken']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
   });
 
   it('treats *.anthropic.com subdomains as Anthropic-native', async () => {
@@ -205,7 +205,7 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
     expect(headers['x-app']).toBeUndefined();
     expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
-    expect(anthropicState.constructorOptions?.['authToken']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
   });
 
   it('treats malformed baseURL as proxy (URL parse failure falls through to claude-cli identity)', async () => {
@@ -231,7 +231,7 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
     expect(headers['x-app']).toBe('cli');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
-    expect(anthropicState.constructorOptions?.['apiKey']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
   });
 
   it('pins DeepSeek anthropic-compatible baseURL onto the proxy auth/identity path', async () => {
@@ -261,7 +261,7 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
     expect(headers['x-app']).toBe('cli');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
-    expect(anthropicState.constructorOptions?.['apiKey']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
   });
 
   it('does not match spoofed anthropic.com.evil.com hostnames', async () => {
@@ -288,7 +288,174 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
     expect(headers['x-app']).toBe('cli');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
-    expect(anthropicState.constructorOptions?.['apiKey']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
+  });
+
+  // Regression coverage for #4020 review: the SDK destructures with
+  // defaults (`apiKey = readEnv('ANTHROPIC_API_KEY') ?? null`), which only
+  // fire for `undefined`. Spreading `{ authToken }` alone — without an
+  // explicit `apiKey: null` — used to let the env back-fill `apiKey`, and
+  // the SDK's auth resolver then preferred `apiKey` over `authToken`, so a
+  // user with `ANTHROPIC_API_KEY=sk-ant-…` exported alongside an IdeaLab
+  // proxy `baseUrl` shipped their real Anthropic key to the proxy as
+  // `X-Api-Key`. These tests pin the explicit-null suppression on both
+  // branches, plus the matching baseURL-env resolution.
+  describe('env back-fill suppression and baseURL env resolution', () => {
+    const ENV_KEYS = [
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+    ];
+    const savedEnv: Record<string, string | undefined> = {};
+    beforeEach(() => {
+      for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+    });
+    afterEach(() => {
+      for (const k of ENV_KEYS) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
+
+    it('suppresses ANTHROPIC_API_KEY back-fill on the proxy branch (prevents credential leak)', async () => {
+      // Scenario: user runs Claude Code in the same shell so
+      // ANTHROPIC_API_KEY is exported with their real Anthropic key, and
+      // separately configures qwen-code with an IdeaLab proxy + IdeaLab
+      // token. Pre-fix, the SDK's destructuring default would back-fill
+      // `apiKey` from the env, then the auth resolver would prefer it
+      // over our `authToken` and ship `X-Api-Key: <real Anthropic key>`
+      // to the third-party proxy.
+      process.env['ANTHROPIC_API_KEY'] = 'sk-ant-secret-do-not-leak';
+      const { AnthropicContentGenerator } = await importGenerator();
+      void new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'idealab-token',
+          baseUrl: 'https://idealab.example/anthropic',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      // The constructor must receive an explicit `null` so the SDK
+      // destructuring default for ANTHROPIC_API_KEY does NOT fire.
+      expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
+      expect(anthropicState.constructorOptions?.['authToken']).toBe(
+        'idealab-token',
+      );
+    });
+
+    it('suppresses ANTHROPIC_AUTH_TOKEN back-fill on the Anthropic-native branch', async () => {
+      // Inverse of the leak: if the user has ANTHROPIC_AUTH_TOKEN set
+      // (an Anthropic-supported alt) and routes to api.anthropic.com,
+      // we should still ship our explicit `apiKey` rather than letting
+      // the env back-fill `authToken` and risk the SDK picking the wrong
+      // one if precedence flips in a future SDK version.
+      process.env['ANTHROPIC_AUTH_TOKEN'] = 'env-bearer-token';
+      const { AnthropicContentGenerator } = await importGenerator();
+      void new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-7',
+          apiKey: 'config-api-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      expect(anthropicState.constructorOptions?.['apiKey']).toBe(
+        'config-api-key',
+      );
+      expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
+    });
+
+    it('applies proxy identity when ANTHROPIC_BASE_URL env points to a proxy and config.baseUrl is unset', async () => {
+      // Symmetric concern: pre-fix, `isAnthropicNativeBaseUrl` only read
+      // `config.baseUrl`, so a user who set ANTHROPIC_BASE_URL only via
+      // env (leaving qwen-code's baseUrl unset) had the SDK route to the
+      // proxy while our predicate thought it was Anthropic-native — wrong
+      // UA, wrong auth shape, and the cache-scope beta + scope:'global'
+      // shipped to a proxy that likely doesn't recognize them.
+      process.env['ANTHROPIC_BASE_URL'] = 'https://idealab.example/anthropic';
+      const { AnthropicContentGenerator } = await importGenerator();
+      void new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'idealab-token',
+          // baseUrl intentionally omitted; SDK uses ANTHROPIC_BASE_URL env.
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+        {}) as Record<string, string>;
+      expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
+      expect(headers['x-app']).toBe('cli');
+      expect(anthropicState.constructorOptions?.['authToken']).toBe(
+        'idealab-token',
+      );
+      expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
+    });
+
+    it('keeps Anthropic-native identity when ANTHROPIC_BASE_URL is unset (SDK default applies)', async () => {
+      // With no config.baseUrl and no env, the SDK defaults to
+      // api.anthropic.com — our predicate must agree and ship the native
+      // identity bundle (so the SDK default isn't silently misclassified
+      // as a proxy).
+      delete process.env['ANTHROPIC_BASE_URL'];
+      const { AnthropicContentGenerator } = await importGenerator();
+      void new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-7',
+          apiKey: 'config-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+        {}) as Record<string, string>;
+      expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
+      expect(headers['x-app']).toBeUndefined();
+      expect(anthropicState.constructorOptions?.['apiKey']).toBe('config-key');
+      expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
+    });
+
+    it('config.baseUrl wins over ANTHROPIC_BASE_URL when both are set', async () => {
+      // Mirror the SDK's own resolution: explicit config beats env. A
+      // user who deliberately points qwen-code at api.anthropic.com
+      // shouldn't have a stray ANTHROPIC_BASE_URL silently flip them
+      // onto the proxy path.
+      process.env['ANTHROPIC_BASE_URL'] = 'https://idealab.example/anthropic';
+      const { AnthropicContentGenerator } = await importGenerator();
+      void new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-7',
+          apiKey: 'config-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+        {}) as Record<string, string>;
+      expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
+      expect(headers['x-app']).toBeUndefined();
+      expect(anthropicState.constructorOptions?.['apiKey']).toBe('config-key');
+      expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
+    });
   });
 
   it('merges customHeaders into defaultHeaders (does not replace defaults)', async () => {
