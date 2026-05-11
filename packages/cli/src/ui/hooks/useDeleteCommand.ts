@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { t } from '../../i18n/index.js';
@@ -36,6 +36,14 @@ export function useDeleteCommand(
   }, []);
 
   const { config, addItem } = options ?? {};
+
+  // Drop re-entrant /delete invocations while a batch is in flight.
+  // closeDeleteDialog() runs synchronously before the await, so without
+  // this guard the user can immediately re-open /delete and queue an
+  // overlapping batch. Two batches racing on overlapping ids produce
+  // contradictory toasts ("Deleted 5" + "Failed to delete 3"); a ref
+  // avoids that without forcing a re-render.
+  const isDeletingManyRef = useRef(false);
 
   const handleDelete = useCallback(
     async (sessionId: string) => {
@@ -97,44 +105,65 @@ export function useDeleteCommand(
       if (!config) {
         return;
       }
+      if (isDeletingManyRef.current) {
+        // Already deleting — silently drop. The earlier batch's result
+        // toast will land shortly; surfacing a "another delete is in
+        // progress" message would just compete with it.
+        return;
+      }
+      isDeletingManyRef.current = true;
 
-      // Close dialog immediately so feedback lands in the main scrollback,
-      // matching the single-delete UX.
-      closeDeleteDialog();
+      try {
+        // Close dialog immediately so feedback lands in the main scrollback,
+        // matching the single-delete UX.
+        closeDeleteDialog();
 
-      // Strip the active session if the picker somehow forwarded it.
-      // The picker's `disabledIds` already prevents selection, but defending
-      // here keeps the contract tight and avoids surprises if a future
-      // caller forgets to pass disabledIds.
-      const currentId = config.getSessionId();
-      const filtered = sessionIds.filter((id) => id !== currentId);
+        // Strip the active session if the picker somehow forwarded it.
+        // The picker's `disabledIds` already prevents selection, but defending
+        // here keeps the contract tight and avoids surprises if a future
+        // caller forgets to pass disabledIds.
+        const currentId = config.getSessionId();
+        const filtered = sessionIds.filter((id) => id !== currentId);
 
-      if (filtered.length === 0) {
+        if (filtered.length === 0) {
+          addItem?.(
+            {
+              type: 'info',
+              text: t('Cannot delete the current active session.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // If anything was stripped, tell the user — otherwise the
+        // progress toast lies ("Deleting 2 session(s)..." while they
+        // checked 3) and they're left wondering whether the current
+        // session was deleted, retried, or just dropped.
+        if (filtered.length < sessionIds.length) {
+          addItem?.(
+            {
+              type: 'info',
+              text: t('Current active session skipped.'),
+            },
+            Date.now(),
+          );
+        }
+
+        // Surface progress before awaiting the batch — N sequential unlinkSync
+        // calls can take a while on slow filesystems, and without this the
+        // user sees nothing between dialog-close and the result toast (and
+        // may re-run /delete, queueing a second concurrent batch).
         addItem?.(
           {
             type: 'info',
-            text: t('Cannot delete the current active session.'),
+            text: t('Deleting {{count}} session(s)...', {
+              count: String(filtered.length),
+            }),
           },
           Date.now(),
         );
-        return;
-      }
 
-      // Surface progress before awaiting the batch — N sequential unlinkSync
-      // calls can take a while on slow filesystems, and without this the
-      // user sees nothing between dialog-close and the result toast (and
-      // may re-run /delete, queueing a second concurrent batch).
-      addItem?.(
-        {
-          type: 'info',
-          text: t('Deleting {{count}} session(s)...', {
-            count: String(filtered.length),
-          }),
-        },
-        Date.now(),
-      );
-
-      try {
         const sessionService = config.getSessionService();
         const result = await sessionService.removeSessions(filtered);
 
@@ -144,6 +173,19 @@ export function useDeleteCommand(
           ...result.errors.map((e) => e.sessionId),
         ];
         const failedCount = failedIds.length;
+
+        // Shared failure formatting — the partial- and full-failure
+        // branches both want id samples and the first underlying error.
+        // Hoisted so a future tweak to either format can't drift the
+        // two branches out of sync. Cheap when failedCount === 0
+        // (success branch ignores these).
+        const sampleIds = failedIds
+          .slice(0, 3)
+          .map((id) => id.slice(0, 8))
+          .join(', ');
+        const overflow = failedCount > 3 ? `, +${failedCount - 3} more` : '';
+        const firstError = result.errors[0]?.error.message;
+        const reason = firstError ? ` — ${firstError}` : '';
 
         if (removedCount > 0 && failedCount === 0) {
           addItem?.(
@@ -160,13 +202,6 @@ export function useDeleteCommand(
           // the user can act on it — the bare aggregate count makes
           // filesystem issues invisible. Use type='error' so partial
           // success is visually distinct from a clean delete.
-          const sampleIds = failedIds
-            .slice(0, 3)
-            .map((id) => id.slice(0, 8))
-            .join(', ');
-          const overflow = failedCount > 3 ? `, +${failedCount - 3} more` : '';
-          const firstError = result.errors[0]?.error.message;
-          const reason = firstError ? ` — ${firstError}` : '';
           addItem?.(
             {
               type: 'error',
@@ -188,13 +223,6 @@ export function useDeleteCommand(
           // and the first error so a user staring at "Failed to delete N
           // sessions" still has something to grep for. Generic message
           // alone hides filesystem permissions / disk-full / corruption.
-          const sampleIds = failedIds
-            .slice(0, 3)
-            .map((id) => id.slice(0, 8))
-            .join(', ');
-          const overflow = failedCount > 3 ? `, +${failedCount - 3} more` : '';
-          const firstError = result.errors[0]?.error.message;
-          const reason = firstError ? ` — ${firstError}` : '';
           addItem?.(
             {
               type: 'error',
@@ -226,6 +254,12 @@ export function useDeleteCommand(
           },
           Date.now(),
         );
+      } finally {
+        // Always release the guard, even on early-returns (e.g. only
+        // current session selected) or on throw — otherwise the next
+        // /delete invocation gets silently dropped for the rest of the
+        // session.
+        isDeletingManyRef.current = false;
       }
     },
     [closeDeleteDialog, config, addItem],

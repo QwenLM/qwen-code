@@ -406,21 +406,27 @@ export function useSessionPicker({
           return;
         }
         if (enableMultiSelect && checkedIds.size > 0 && onConfirmMulti) {
-          // Preserve list order so the receiver can present "Deleted N
-          // sessions" feedback in the same order the user saw them.
-          const orderedIds = filteredSessions
+          // Commit *every* checked id (minus disabled), not just the
+          // currently-filtered ones. If the user checked A-E and then
+          // typed a search matching only C-E, intersecting with the
+          // visible set would silently drop A and B — a partial-delete
+          // the user never asked for. Filter is a navigation aid; the
+          // commit set is whatever the user explicitly checked.
+          //
+          // Order by the full session list so the receiver can present
+          // "Deleted N sessions" feedback in display order, even for
+          // items that were filtered out at commit time.
+          const orderedIds = sessionState.sessions
             .map((s) => s.sessionId)
             .filter((id) => checkedIds.has(id) && !disabledIdSet.has(id));
           if (orderedIds.length > 0) {
             onConfirmMulti(orderedIds);
             return;
           }
-          // Multi-selection is in progress but every checked item is hidden
-          // by the current filter (or disabled). Falling through to
-          // single-select on the cursor row would silently delete a
-          // different session — exactly the opposite of what the footer's
-          // "N selected" hint promised. Stay in multi-select mode and let
-          // the user adjust the filter or selection.
+          // Commit set ended up empty — every checked id is disabled.
+          // Don't fall through to single-select on the cursor row, that
+          // would silently delete a different session than the one the
+          // footer's "N selected" hint promised.
           return;
         }
         const session = filteredSessions[selectedIndex];

@@ -434,23 +434,23 @@ export function SessionPicker(props: SessionPickerProps) {
                 )}
                 {enableMultiSelect &&
                   (() => {
-                    // Count only checked items that are currently visible *and*
-                    // committable (i.e. not disabled). This is the exact set
-                    // Enter would commit — so the footer can't say "3 selected"
-                    // while Enter is about to delete 0.
-                    const visibleCheckedCount = picker.filteredSessions.reduce(
-                      (n, s) =>
-                        picker.checkedIds.has(s.sessionId) &&
-                        !picker.disabledIdSet.has(s.sessionId)
-                          ? n + 1
-                          : n,
-                      0,
-                    );
+                    // Count every checked id that's also committable
+                    // (not disabled) — regardless of whether the current
+                    // filter happens to hide it. This is the exact set
+                    // Enter will commit, so the footer can't drift from
+                    // it (no more "0 selected" while the user has 3
+                    // checks hidden by a search).
+                    let committableCheckedCount = 0;
+                    for (const id of picker.checkedIds) {
+                      if (!picker.disabledIdSet.has(id)) {
+                        committableCheckedCount++;
+                      }
+                    }
                     return (
                       <Text color={theme.text.secondary}>
-                        {picker.checkedIds.size > 0
+                        {committableCheckedCount > 0
                           ? t('Space to toggle · {{count}} selected · ', {
-                              count: String(visibleCheckedCount),
+                              count: String(committableCheckedCount),
                             })
                           : t('Space to select multiple · ')}
                       </Text>

@@ -163,6 +163,38 @@ describe('useDeleteCommand', () => {
       expect(removeSessions).toHaveBeenCalledWith(['a']);
     });
 
+    it('surfaces an info toast when the active session is stripped', async () => {
+      // Without this toast the progress message ("Deleting 1 session(s)...")
+      // contradicts the input the user submitted (2 ids) and they're left
+      // unsure whether the current session was just refused, retried, or
+      // silently absorbed by the batch.
+      const removeSessions = vi.fn().mockResolvedValue({
+        removed: ['a'],
+        notFound: [],
+        errors: [],
+      });
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['a', 'current']);
+        await flushAsync();
+      });
+
+      const texts = addItem.mock.calls.map(
+        (c) => (c[0] as { text: string }).text,
+      );
+      expect(texts.some((t) => /current active session skipped/i.test(t))).toBe(
+        true,
+      );
+    });
+
     it('shows an info message when only the current session was selected', async () => {
       const removeSessions = vi.fn();
       const { config } = createConfig({
@@ -303,6 +335,82 @@ describe('useDeleteCommand', () => {
       expect(item.text).toContain('n2');
       expect(item.text).toContain('n3');
       expect(item.text).toContain('+2 more');
+    });
+
+    it('drops a re-entrant call while a batch is in flight', async () => {
+      // closeDeleteDialog() runs synchronously before removeSessions
+      // resolves, so the user can re-open /delete and trigger a second
+      // batch. Without the in-flight guard, two batches race on
+      // potentially overlapping ids — guard must drop the second call.
+      let resolveRemove: (value: RemoveSessionsResult) => void = () => {};
+      const removeSessions = vi.fn(
+        () =>
+          new Promise<RemoveSessionsResult>((resolve) => {
+            resolveRemove = resolve;
+          }),
+      );
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      // Kick off the first batch — it stays pending on removeSessions.
+      await act(async () => {
+        result.current.handleDeleteMany(['a']);
+        await flushAsync();
+      });
+      expect(removeSessions).toHaveBeenCalledTimes(1);
+
+      // Second invocation while the first is still in flight — must
+      // be silently dropped (no extra removeSessions call, no extra
+      // toast beyond the first batch's progress).
+      await act(async () => {
+        result.current.handleDeleteMany(['b']);
+        await flushAsync();
+      });
+      expect(removeSessions).toHaveBeenCalledTimes(1);
+
+      // Resolve the first batch and verify the guard releases so a
+      // subsequent /delete works normally.
+      await act(async () => {
+        resolveRemove({ removed: ['a'], notFound: [], errors: [] });
+        await flushAsync();
+      });
+      await act(async () => {
+        result.current.handleDeleteMany(['b']);
+        await flushAsync();
+      });
+      expect(removeSessions).toHaveBeenCalledTimes(2);
+      expect(removeSessions).toHaveBeenLastCalledWith(['b']);
+    });
+
+    it('releases the in-flight guard even when only the current session was selected', async () => {
+      // Early-return path (filtered.length === 0) must still release
+      // the guard — otherwise the next /delete invocation gets dropped
+      // for the rest of the session.
+      const { config, sessionService } = createConfig({
+        currentSessionId: 'current',
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['current']);
+        await flushAsync();
+      });
+
+      // Subsequent normal batch should go through.
+      await act(async () => {
+        result.current.handleDeleteMany(['x']);
+        await flushAsync();
+      });
+      expect(sessionService.removeSessions).toHaveBeenCalledWith(['x']);
     });
 
     it('reports an error when the call throws', async () => {
