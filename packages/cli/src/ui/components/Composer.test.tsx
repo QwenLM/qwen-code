@@ -241,7 +241,7 @@ describe('Composer', () => {
 
       const output = lastFrame();
       expect(output).not.toContain('LoadingIndicator');
-      expect(output).toContain('esc to cancel');
+      expect(output).toContain('Esc to cancel');
     });
 
     it('does not render the esc fallback once the full indicator is visible', () => {
@@ -256,7 +256,7 @@ describe('Composer', () => {
       expect(output).toContain('LoadingIndicator');
       // The minimal fallback string only appears when the full indicator is
       // suppressed — when LoadingIndicator renders, it owns the cancel hint.
-      expect(output).not.toContain('esc to cancel');
+      expect(output).not.toContain('Esc to cancel');
     });
 
     it('shows LoadingIndicator when Responding on a 31-col terminal', () => {
