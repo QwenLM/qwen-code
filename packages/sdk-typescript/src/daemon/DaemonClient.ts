@@ -371,8 +371,16 @@ export function abortTimeout(ms: number): AbortSignal {
   // Also clear the timer when the controller aborts via another path
   // (the composed callerSignal aborts first) so we don't accumulate
   // pending timers across many fast calls in the polyfill path.
+  // Native `AbortSignal.timeout()` aborts with a DOMException whose
+  // `name === 'TimeoutError'` (per WHATWG). Constructor signature is
+  // `new DOMException(message, name)` — calling `new DOMException(
+  // 'TimeoutError')` would set the *message* to "TimeoutError" and
+  // leave `name` at its default ("Error"), so callers doing
+  // `if (err.name === 'TimeoutError')` would see the polyfill
+  // differently from the native runtime.
   const handle = setTimeout(
-    () => ctrl.abort(new DOMException('TimeoutError')),
+    () =>
+      ctrl.abort(new DOMException('The operation timed out', 'TimeoutError')),
     ms,
   );
   if (typeof handle === 'object' && handle && 'unref' in handle) {

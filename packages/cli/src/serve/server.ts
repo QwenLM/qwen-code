@@ -333,9 +333,21 @@ export function createServeApp(
           resolve();
           return;
         }
-        const ok = res.write(chunk, (err) => {
-          if (err) reject(err);
-        });
+        // `res.write` can throw synchronously when the socket is
+        // already destroyed (typical EPIPE shape). Wrap in try/catch
+        // so that surfaces as a rejection on this promise instead of
+        // escaping the executor and turning into an unhandled
+        // exception. Async failures still arrive via the `'error'`
+        // event handler below — Node's Writable.write callback isn't
+        // documented to receive an error argument (errors come on
+        // the event), so we don't rely on it.
+        let ok: boolean;
+        try {
+          ok = res.write(chunk);
+        } catch (err) {
+          reject(err);
+          return;
+        }
         if (ok) {
           resolve();
           return;
