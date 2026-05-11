@@ -722,6 +722,8 @@ is_qwen_standalone_install_dir() {
     local manifest_path="${install_dir}/manifest.json"
 
     [[ -f "${manifest_path}" ]] || return 1
+    # Manifest format is produced by writeManifest in create-standalone-package.js.
+    # Keep these grep checks in sync if that JSON layout changes.
     grep -Eq '"name"[[:space:]]*:[[:space:]]*"@qwen-code/qwen-code"' "${manifest_path}" 2>/dev/null || return 1
     grep -Eq '"target"[[:space:]]*:[[:space:]]*"(darwin|linux)-(arm64|x64)"' "${manifest_path}" 2>/dev/null || return 1
     [[ -f "${install_dir}/bin/qwen" && ! -L "${install_dir}/bin/qwen" && -x "${install_dir}/bin/qwen" ]] || return 1

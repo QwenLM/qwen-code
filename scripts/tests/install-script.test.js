@@ -121,6 +121,7 @@ describe('installation scripts', () => {
     expect(script).toContain('Archive contains symlinks; refusing to install');
     expect(script).toContain('not a Qwen Code standalone install');
     expect(script).toContain('is_qwen_standalone_install_dir()');
+    expect(script).toContain('Manifest format is produced by writeManifest');
     expect(script).toContain(
       '"name"[[:space:]]*:[[:space:]]*"@qwen-code/qwen-code"',
     );
@@ -190,6 +191,11 @@ describe('installation scripts', () => {
     expect(script).toContain('qwen-code-win-x64.zip');
     expect(script).toContain(':ValidateArchiveContents');
     expect(script).toContain('Archive contains unsafe path entries');
+    expect(script).toContain(
+      'Archive could not be inspected before extraction',
+    );
+    expect(script).toContain('if %PS_STATUS% EQU 1');
+    expect(script).toContain('if %PS_STATUS% EQU 2');
     expect(script).toContain('System.IO.Compression.FileSystem');
     expect(script).toContain('[IO.Compression.ZipFile]::OpenRead');
     expect(script).toContain('[IO.Path]::GetRandomFileName()');
@@ -287,6 +293,7 @@ describe('standalone release packaging', () => {
     );
     expect(packageScript).toContain('validateNodeRuntime');
     expect(packageScript).toContain('copyNodeRuntimeEntry');
+    expect(packageScript).toContain('TARGETS must stay in sync with');
     expect(packageScript).toContain('symlink cycle');
     expect(packageScript).toContain('refusing to write empty SHA256SUMS');
     expect(packageScript).toContain('--skip-checksums');
@@ -320,6 +327,10 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain('expectedArchiveNames');
     expect(releaseScript).toContain('standaloneArchiveName(qwenTarget)');
     expect(releaseScript).toContain('TARGETS.get(qwenTarget)');
+    expect(releaseScript).toContain(
+      'RELEASE_TARGETS must stay in sync with TARGETS',
+    );
+    expect(releaseScript).toContain('cleanOutputDirectory(outDir)');
     expect(releaseScript).toContain('scripts/create-standalone-package.js');
     expect(releaseScript).toContain('--skip-checksums');
     expect(releaseScript).toContain('writeSha256Sums(outDir)');
@@ -536,6 +547,19 @@ describe('standalone release packaging', () => {
     expect(checksums.get('node-v22.0.0-win-x64.zip')).toBe('b'.repeat(64));
   });
 
+  it('rejects malformed SHA256SUMS entries', async () => {
+    const { parseSha256Sums } = await import(releaseScriptUtilsUrl);
+
+    expect(() =>
+      parseSha256Sums(
+        [
+          `${'a'.repeat(64)}  qwen-code-linux-x64.tar.gz`,
+          `${'b'.repeat(63)}  qwen-code-win-x64.zip`,
+        ].join('\n'),
+      ),
+    ).toThrow(/Malformed SHA256SUMS line 2/);
+  });
+
   it('validates standalone release checksum output', async () => {
     const { assertStandaloneOutput, RELEASE_TARGETS } = await import(
       standaloneReleaseScriptUrl
@@ -546,7 +570,7 @@ describe('standalone release packaging', () => {
     try {
       const lines = RELEASE_TARGETS.map(({ qwenTarget }) => {
         const extension = TARGETS.get(qwenTarget).outputExtension;
-        return `${'a'.repeat(64)}  qwen-code-${qwenTarget}.${extension}`;
+        return `${'A'.repeat(64)}  qwen-code-${qwenTarget}.${extension}`;
       });
       writeFileSync(path.join(tmpDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
 
@@ -798,6 +822,23 @@ describe('standalone release packaging', () => {
       await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
         /Unexpected release asset: qwen-code-stale\.tar\.gz/,
       );
+      rmSync(path.join(tmpDir, 'qwen-code-stale.tar.gz'), { force: true });
+
+      writeStandaloneReleaseAssets(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES);
+      writeFileSync(path.join(tmpDir, 'payload.bin'), 'unexpected');
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /Unexpected release asset: payload\.bin/,
+      );
+      rmSync(path.join(tmpDir, 'payload.bin'), { force: true });
+
+      writeStandaloneReleaseAssets(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES);
+      appendFileSync(
+        path.join(tmpDir, 'SHA256SUMS'),
+        `${'c'.repeat(64)}  payload.bin\n`,
+      );
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /Unexpected release asset checksum: payload\.bin/,
+      );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -825,18 +866,26 @@ describe('standalone release packaging', () => {
       EXPECTED_STANDALONE_ARCHIVE_NAMES,
     );
     const fetchedUrls = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    await expect(
-      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
-        fetchImpl: async (url, options = {}) => {
-          fetchedUrls.push([url, options.method || 'GET']);
-          if (url.endsWith('/SHA256SUMS')) {
-            return new Response(checksumContent);
-          }
-          return new Response(null, { status: 200 });
-        },
-      }),
-    ).resolves.not.toThrow();
+    try {
+      await expect(
+        verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+          fetchImpl: async (url, options = {}) => {
+            fetchedUrls.push([url, options.method || 'GET']);
+            if (url.endsWith('/SHA256SUMS')) {
+              return new Response(checksumContent);
+            }
+            return new Response(null, { status: 200 });
+          },
+        }),
+      ).resolves.not.toThrow();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('checks URL reachability only'),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
 
     expect(fetchedUrls).toContainEqual([
       'https://example.com/qwen-code/v0.0.0/SHA256SUMS',
@@ -863,23 +912,28 @@ describe('standalone release packaging', () => {
       EXPECTED_STANDALONE_ARCHIVE_NAMES,
     );
     const observedMethods = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    await expect(
-      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
-        fetchImpl: async (url, options = {}) => {
-          if (url.endsWith('/SHA256SUMS')) {
-            return new Response(checksumContent);
-          }
-          const method = options.method || 'GET';
-          observedMethods.push(method);
-          if (method === 'HEAD') {
-            return new Response(null, { status: 405 });
-          }
-          // Ranged GET fallback succeeds.
-          return new Response(null, { status: 206 });
-        },
-      }),
-    ).resolves.not.toThrow();
+    try {
+      await expect(
+        verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+          fetchImpl: async (url, options = {}) => {
+            if (url.endsWith('/SHA256SUMS')) {
+              return new Response(checksumContent);
+            }
+            const method = options.method || 'GET';
+            observedMethods.push(method);
+            if (method === 'HEAD') {
+              return new Response(null, { status: 405 });
+            }
+            // Ranged GET fallback succeeds.
+            return new Response(null, { status: 206 });
+          },
+        }),
+      ).resolves.not.toThrow();
+    } finally {
+      warnSpy.mockRestore();
+    }
 
     expect(observedMethods).toContain('HEAD');
     expect(observedMethods).toContain('GET');
@@ -891,17 +945,22 @@ describe('standalone release packaging', () => {
     const checksumContent = placeholderChecksumContent(
       EXPECTED_STANDALONE_ARCHIVE_NAMES,
     );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    await expect(
-      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
-        fetchImpl: async (url) => {
-          if (url.endsWith('/SHA256SUMS')) {
-            return new Response(checksumContent);
-          }
-          return new Response(null, { status: 404 });
-        },
-      }),
-    ).rejects.toThrow(/Release asset URL is not available/);
+    try {
+      await expect(
+        verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+          fetchImpl: async (url) => {
+            if (url.endsWith('/SHA256SUMS')) {
+              return new Response(checksumContent);
+            }
+            return new Response(null, { status: 404 });
+          },
+        }),
+      ).rejects.toThrow(/All 5 release asset URLs are unavailable/);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('rejects a release base URL that is not https', async () => {

@@ -73,16 +73,17 @@ function parseCliArgs(argv, options, defaults = {}) {
 
 function parseSha256Sums(content) {
   const checksums = new Map();
-  for (const line of content.split(/\r?\n/)) {
+  for (const [index, line] of content.split(/\r?\n/).entries()) {
     const trimmed = line.trim();
     if (!trimmed) {
       continue;
     }
 
     const match = /^([0-9a-fA-F]{64})\s+\*?(.+)$/.exec(trimmed);
-    if (match) {
-      checksums.set(match[2], match[1].toLowerCase());
+    if (!match) {
+      fail(`Malformed SHA256SUMS line ${index + 1}: ${trimmed}`);
     }
+    checksums.set(match[2], match[1].toLowerCase());
   }
   return checksums;
 }

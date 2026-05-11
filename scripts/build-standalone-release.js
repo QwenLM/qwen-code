@@ -27,6 +27,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
+// RELEASE_TARGETS must stay in sync with TARGETS in create-standalone-package.js;
+// every release qwenTarget should map to a package target and output extension.
 const RELEASE_TARGETS = [
   {
     qwenTarget: 'darwin-arm64',
@@ -98,7 +100,7 @@ async function main() {
   const nodeDistUrl = `https://nodejs.org/dist/v${nodeVersion}`;
 
   try {
-    fs.mkdirSync(outDir, { recursive: true });
+    cleanOutputDirectory(outDir);
     const checksumsPath = path.join(runtimeDir, 'SHASUMS256.txt');
     await downloadFile(`${nodeDistUrl}/SHASUMS256.txt`, checksumsPath);
     const checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
@@ -186,6 +188,11 @@ function formatErrorReason(reason) {
   return String(reason);
 }
 
+function cleanOutputDirectory(outDir) {
+  fs.rmSync(outDir, { recursive: true, force: true });
+  fs.mkdirSync(outDir, { recursive: true });
+}
+
 async function downloadFile(url, destination) {
   console.log(`Downloading ${url}`);
   const response = await fetch(url);
@@ -227,12 +234,9 @@ function assertStandaloneOutput(outDir) {
     fail(`Standalone SHA256SUMS was not created at ${checksumPath}`);
   }
 
-  const archiveNames = fs
-    .readFileSync(checksumPath, 'utf8')
-    .split(/\r?\n/)
-    .filter((line) => /^[0-9a-f]{64}\s+/.test(line))
-    .map((line) => line.trim().split(/\s+/, 2)[1]?.replace(/^\*/, ''))
-    .filter(Boolean)
+  const archiveNames = Array.from(
+    parseSha256Sums(fs.readFileSync(checksumPath, 'utf8')).keys(),
+  )
     .filter(isStandaloneArchiveName)
     .sort();
   const expectedArchiveNames = RELEASE_TARGETS.map(({ qwenTarget }) =>

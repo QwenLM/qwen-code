@@ -13,7 +13,6 @@ import {
   RELEASE_TARGETS,
   standaloneArchiveName,
 } from './build-standalone-release.js';
-import { isStandaloneArchiveName } from './release-asset-config.js';
 import {
   fail,
   isMainModule,
@@ -26,6 +25,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
+// This import-time computation intentionally asserts release/package target
+// consistency via standaloneArchiveName(); keep RELEASE_TARGETS backed by TARGETS.
 const EXPECTED_STANDALONE_ARCHIVE_NAMES = RELEASE_TARGETS.map(
   ({ qwenTarget }) => standaloneArchiveName(qwenTarget),
 );
@@ -120,13 +121,11 @@ async function verifyReleaseBaseUrl(baseUrl, options = {}) {
   const checksumUrl = new URL('SHA256SUMS', normalizedBaseUrl).toString();
   const checksums = parseSha256Sums(await fetchText(checksumUrl, fetchImpl));
   assertExpectedChecksumEntries(checksums);
+  console.warn(
+    'WARNING: Remote release verification checks URL reachability only; it does not download archive bodies or verify archive hashes. Run --dir against downloaded assets for checksum verification.',
+  );
 
-  for (const assetName of EXPECTED_STANDALONE_ARCHIVE_NAMES) {
-    await assertRemoteAssetAvailable(
-      new URL(assetName, normalizedBaseUrl).toString(),
-      fetchImpl,
-    );
-  }
+  await assertRemoteAssetsAvailable(normalizedBaseUrl, fetchImpl);
 
   console.log(
     `Verified ${EXPECTED_RELEASE_ASSET_NAMES.length} installation release asset URLs at ${baseUrl}`,
@@ -148,8 +147,7 @@ function assertExpectedChecksumEntries(checksums) {
     (assetName) => !checksums.has(assetName),
   );
   const extra = Array.from(checksums.keys()).filter(
-    (assetName) =>
-      isStandaloneArchiveName(assetName) && !expected.has(assetName),
+    (assetName) => !expected.has(assetName),
   );
 
   if (missing.length > 0) {
@@ -161,16 +159,51 @@ function assertExpectedChecksumEntries(checksums) {
 }
 
 function assertExpectedArchiveFiles(dir) {
-  const expected = new Set(EXPECTED_STANDALONE_ARCHIVE_NAMES);
+  const expected = new Set(EXPECTED_RELEASE_ASSET_NAMES);
   const extra = fs
     .readdirSync(dir)
-    .filter(isStandaloneArchiveName)
     .filter((assetName) => !expected.has(assetName))
     .sort();
 
   if (extra.length > 0) {
     fail(`Unexpected release asset: ${extra.join(', ')}`);
   }
+}
+
+async function assertRemoteAssetsAvailable(normalizedBaseUrl, fetchImpl) {
+  const results = await Promise.allSettled(
+    EXPECTED_STANDALONE_ARCHIVE_NAMES.map(async (assetName) => {
+      await assertRemoteAssetAvailable(
+        new URL(assetName, normalizedBaseUrl).toString(),
+        fetchImpl,
+      );
+      return assetName;
+    }),
+  );
+  const failures = results.flatMap((result, index) =>
+    result.status === 'rejected'
+      ? [
+          {
+            assetName: EXPECTED_STANDALONE_ARCHIVE_NAMES[index],
+            reason: formatErrorReason(result.reason),
+          },
+        ]
+      : [],
+  );
+
+  if (failures.length === 0) {
+    return;
+  }
+  if (failures.length === EXPECTED_STANDALONE_ARCHIVE_NAMES.length) {
+    fail(
+      `All ${failures.length} release asset URLs are unavailable; check --base-url: ${normalizedBaseUrl}`,
+    );
+  }
+  fail(
+    `Unavailable release asset URL(s): ${failures
+      .map(({ assetName, reason }) => `${assetName} (${reason})`)
+      .join('; ')}`,
+  );
 }
 
 async function assertRemoteAssetAvailable(url, fetchImpl) {
@@ -193,6 +226,13 @@ async function assertRemoteAssetAvailable(url, fetchImpl) {
     fail(`Release asset URL is not available: ${url}`);
   }
   await response.body?.cancel?.();
+}
+
+function formatErrorReason(reason) {
+  if (reason instanceof Error) {
+    return reason.message.replace(/^ERROR:\s*/, '');
+  }
+  return String(reason);
 }
 
 async function fetchText(url, fetchImpl) {

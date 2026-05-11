@@ -24,6 +24,8 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
 
+// TARGETS must stay in sync with RELEASE_TARGETS in build-standalone-release.js;
+// every release target should have a package target and output extension here.
 const TARGETS = new Map([
   [
     'darwin-arm64',

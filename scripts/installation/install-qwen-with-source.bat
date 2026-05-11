@@ -699,10 +699,19 @@ REM with backslash separators even though the ZIP spec requires '/'. We
 REM accept either separator and reject only entries that, after
 REM normalization, are empty, absolute, drive-rooted, or contain a '..'
 REM segment.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); try { foreach ($entry in $archive.Entries) { $name = $entry.FullName -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { Write-Error ('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } finally { $archive.Dispose() }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $archive = $null; try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); foreach ($entry in $archive.Entries) { $name = $entry.FullName -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { [Console]::Error.WriteLine('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 } finally { if ($null -ne $archive) { $archive.Dispose() } }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_ARCHIVE_FILE="
-if %PS_STATUS% NEQ 0 echo ERROR: Archive contains unsafe path entries.
+if %PS_STATUS% EQU 0 exit /b 0
+if %PS_STATUS% EQU 1 (
+    echo ERROR: Archive contains unsafe path entries.
+    exit /b 1
+)
+if %PS_STATUS% EQU 2 (
+    echo ERROR: Archive could not be inspected before extraction.
+    exit /b 1
+)
+echo ERROR: Archive validation failed before extraction.
 exit /b %PS_STATUS%
 
 :RemoveInstalledDirWithWarning
