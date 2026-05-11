@@ -32,13 +32,16 @@ describe('monitor-tool', () => {
     rig = new TestRig();
     await rig.setup('monitor-tool-call');
 
-    const result = await rig.run(
+    const resultPromise = rig.run(
       'Use the monitor tool to watch this command: for i in 1 2 3; do echo "EVENT_$i"; sleep 0.3; done. ' +
         'Set description to "test events". After starting the monitor, just say "Monitor launched."',
     );
 
-    const foundMonitor = await rig.waitForToolCall('monitor');
+    const [result, foundMonitor] = await Promise.all([
+      resultPromise,
+      rig.waitForToolCall('monitor'),
+    ]);
     expect(foundMonitor).toBeTruthy();
     validateModelOutput(result, null, 'monitor tool call');
-  }, 30000);
+  }, 60000);
 });
