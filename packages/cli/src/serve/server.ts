@@ -159,7 +159,14 @@ export function createServeApp(
     }
     if (
       !prompt.every(
-        (item: unknown) => typeof item === 'object' && item !== null,
+        (item: unknown) =>
+          // `typeof item === 'object'` is true for arrays too, so an
+          // exclude-arrays check is needed to keep the contract
+          // ("ACP content block, like {type: 'text', text: '...'}")
+          // honest. Without `!Array.isArray(item)`, `prompt: [[]]`
+          // passes validation and a confusing 500 surfaces from the
+          // ACP SDK layer.
+          typeof item === 'object' && item !== null && !Array.isArray(item),
       )
     ) {
       res.status(400).json({

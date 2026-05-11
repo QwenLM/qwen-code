@@ -291,11 +291,11 @@ Events are emitted as standard EventSource frames. The daemon writes one `data:`
 
 ## Error frames during streaming
 
-If the bridge iterator throws while serving an SSE subscriber, the daemon emits a terminal `stream_error` frame (no `id`):
+If the bridge iterator throws while serving an SSE subscriber, the daemon emits a terminal `stream_error` frame (no `id`). The `data:` line is the full envelope (same shape as every other SSE frame in this doc); the actual error message lives under `envelope.data.error`:
 
 ```
 event: stream_error
-data: {"error":"<message>"}
+data: {"v":1,"type":"stream_error","data":{"error":"<message>"}}
 ```
 
 The connection then closes.

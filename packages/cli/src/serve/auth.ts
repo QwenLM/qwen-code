@@ -85,17 +85,36 @@ export function bearerAuth(token: string | undefined): RequestHandler {
       return;
     }
     // Per RFC 7235 §2.1 / RFC 7230 §3.2.6 the auth scheme token is
-    // case-insensitive — `Bearer` / `bearer` / `BEARER` all valid.
-    // Use a tolerant split that also accepts runs of whitespace
-    // between scheme and credentials, then lowercase the scheme
-    // before comparing. The token value itself stays case-sensitive
-    // (it's user-defined opaque material).
-    const match = /^(\S+)\s+(.+)$/.exec(header);
-    if (!match || match[1].toLowerCase() !== 'bearer') {
+    // case-insensitive — `Bearer` / `bearer` / `BEARER` are all valid.
+    // Lowercase the scheme before comparing; the token value itself
+    // stays case-sensitive (it's user-defined opaque material).
+    //
+    // Hand-rolled split rather than a regex like `^(\S+)\s+(.+)$`
+    // because CodeQL flags the latter as a polynomial-regex risk on
+    // user-controlled input (the `\s+` / `.+` overlap can backtrack
+    // on adversarial whitespace-heavy headers). Two indexOf calls
+    // are O(n) total with no backtracking.
+    const schemeEnd = header.indexOf(' ');
+    if (schemeEnd <= 0) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const candidate = createHash('sha256').update(match[2], 'utf8').digest();
+    const scheme = header.slice(0, schemeEnd).toLowerCase();
+    if (scheme !== 'bearer') {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    // Skip any extra whitespace between scheme and credentials.
+    let credStart = schemeEnd + 1;
+    while (credStart < header.length && header.charCodeAt(credStart) === 0x20) {
+      credStart++;
+    }
+    const credentials = header.slice(credStart);
+    if (credentials.length === 0) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const candidate = createHash('sha256').update(credentials, 'utf8').digest();
     if (!timingSafeEqual(candidate, expected)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;

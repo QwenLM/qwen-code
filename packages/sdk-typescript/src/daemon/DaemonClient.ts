@@ -343,8 +343,19 @@ export class DaemonClient {
     // with JSON/HTML. Without this check `parseSseStream` would
     // silently produce zero frames — a confusing "no events" symptom
     // that's easy to misdiagnose. Fail fast with the actual mime type.
+    //
+    // Cancel the body before throwing so undici doesn't keep the
+    // underlying socket pinned waiting for the consumer. Same
+    // reasoning as `respondToPermission` — long-running clients
+    // hitting this path repeatedly would otherwise exhaust the
+    // connection pool.
     const ct = res.headers.get('content-type') ?? '';
     if (!ct.toLowerCase().includes('text/event-stream')) {
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* body already consumed or no body */
+      }
       throw new DaemonHttpError(
         res.status,
         ct,
