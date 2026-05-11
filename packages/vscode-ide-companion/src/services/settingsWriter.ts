@@ -63,6 +63,11 @@ export interface QwenSettingsForVSCode {
   codingPlanRegion: 'china' | 'global';
 }
 
+const SUBSCRIPTION_PROVIDER_METADATA_KEYS = [
+  'coding-plan',
+  'token-plan',
+] as const;
+
 // ---------------------------------------------------------------------------
 // Low-level read/write helpers
 // ---------------------------------------------------------------------------
@@ -286,6 +291,41 @@ function findOpenaiModels(
   return [];
 }
 
+function clearInactiveSubscriptionPlanState(
+  settings: Record<string, unknown>,
+  active: {
+    envKey: string;
+    legacyMetadataKey: string;
+    providerMetadataKey: (typeof SUBSCRIPTION_PROVIDER_METADATA_KEYS)[number];
+  },
+): void {
+  const env = settings.env as Record<string, unknown> | undefined;
+  if (env) {
+    for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
+      if (plan.envKey !== active.envKey) {
+        delete env[plan.envKey];
+      }
+    }
+  }
+
+  for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
+    if (plan.metadataKey !== active.legacyMetadataKey) {
+      delete settings[plan.metadataKey];
+    }
+  }
+
+  const providerMetadata = settings.providerMetadata as
+    | Record<string, unknown>
+    | undefined;
+  if (providerMetadata) {
+    for (const key of SUBSCRIPTION_PROVIDER_METADATA_KEYS) {
+      if (key !== active.providerMetadataKey) {
+        delete providerMetadata[key];
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Write: VSCode Settings → ~/.qwen/settings.json
 // ---------------------------------------------------------------------------
@@ -313,6 +353,11 @@ export function writeCodingPlanConfig(
   // API key
   const env = ensureNestedObject(settings, 'env');
   env[CODING_PLAN_ENV_KEY] = apiKey;
+  clearInactiveSubscriptionPlanState(settings, {
+    envKey: CODING_PLAN_ENV_KEY,
+    legacyMetadataKey: planConfig.metadataKey,
+    providerMetadataKey: 'coding-plan',
+  });
 
   // Model providers — merge Coding Plan templates with existing non-CP entries
   const providers = ensureNestedObject(settings, 'modelProviders');
@@ -369,6 +414,11 @@ export function writeTokenPlanConfig(apiKey: string): VSCodeModelProviders {
   // API key
   const env = ensureNestedObject(settings, 'env');
   env[TOKEN_PLAN_ENV_KEY] = apiKey;
+  clearInactiveSubscriptionPlanState(settings, {
+    envKey: TOKEN_PLAN_ENV_KEY,
+    legacyMetadataKey: planConfig.metadataKey,
+    providerMetadataKey: 'token-plan',
+  });
 
   // Model providers — merge Token Plan templates with existing non-TP entries
   const providers = ensureNestedObject(settings, 'modelProviders');

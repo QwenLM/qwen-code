@@ -21,6 +21,7 @@ const {
   mockOpenExternal,
   mockReadQwenSettingsForVSCode,
   mockWriteCodingPlanConfig,
+  mockWriteTokenPlanConfig,
   mockWriteModelProvidersConfig,
   mockClearPersistedAuth,
   mockApplyProviderInstallPlanToFile,
@@ -72,12 +73,13 @@ const {
   mockOpenExternal: vi.fn(),
   mockReadQwenSettingsForVSCode: vi.fn<
     () => {
-      provider: 'coding-plan' | 'api-key';
+      provider: 'coding-plan' | 'token-plan' | 'api-key';
       apiKey: string;
       codingPlanRegion: 'china' | 'global';
     } | null
   >(() => null),
   mockWriteCodingPlanConfig: vi.fn(() => ({})),
+  mockWriteTokenPlanConfig: vi.fn(() => ({})),
   mockWriteModelProvidersConfig: vi.fn(),
   mockClearPersistedAuth: vi.fn(),
   mockApplyProviderInstallPlanToFile: vi.fn().mockResolvedValue(undefined),
@@ -176,6 +178,7 @@ vi.mock('vscode', () => ({
 
 vi.mock('../../services/settingsWriter.js', () => ({
   writeCodingPlanConfig: mockWriteCodingPlanConfig,
+  writeTokenPlanConfig: mockWriteTokenPlanConfig,
   writeModelProvidersConfig: mockWriteModelProvidersConfig,
   readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
   clearPersistedAuth: mockClearPersistedAuth,
@@ -1049,6 +1052,35 @@ describe('WebViewProvider settings sync', () => {
     ).syncVSCodeSettingsToQwenConfig();
 
     expect(synced).toBe(false);
+    expect(mockWriteCodingPlanConfig).not.toHaveBeenCalled();
+    expect(mockWriteTokenPlanConfig).not.toHaveBeenCalled();
+    expect(mockWriteModelProvidersConfig).not.toHaveBeenCalled();
+  });
+
+  it('syncs Token Plan VS Code settings to Qwen config', async () => {
+    mockConfigGet.mockImplementation((key: string, defaultValue: unknown) => {
+      if (key === 'apiKey') {
+        return 'token-plan-key';
+      }
+      if (key === 'provider') {
+        return 'token-plan';
+      }
+      return defaultValue;
+    });
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    const synced = await (
+      provider as unknown as {
+        syncVSCodeSettingsToQwenConfig: () => Promise<boolean>;
+      }
+    ).syncVSCodeSettingsToQwenConfig();
+
+    expect(synced).toBe(true);
+    expect(mockWriteTokenPlanConfig).toHaveBeenCalledWith('token-plan-key');
     expect(mockWriteCodingPlanConfig).not.toHaveBeenCalled();
     expect(mockWriteModelProvidersConfig).not.toHaveBeenCalled();
   });

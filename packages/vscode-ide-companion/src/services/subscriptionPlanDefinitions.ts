@@ -106,6 +106,14 @@ const ALIBABA_SUBSCRIPTION_MODELS = [
   { id: 'glm-4.7', contextWindowSize: 202752, enableThinking: true },
 ] as const satisfies readonly SubscriptionPlanModelSpec[];
 
+// keep in sync with packages/cli/src/auth/providers/alibaba/tokenPlan.ts TOKEN_PLAN_MODELS
+const TOKEN_PLAN_MODELS = [
+  { id: 'qwen3.6-plus', contextWindowSize: 1000000, enableThinking: true },
+  { id: 'deepseek-v3.2', contextWindowSize: 131072, enableThinking: true },
+  { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
+  { id: 'MiniMax-M2.5', contextWindowSize: 196608, enableThinking: true },
+] as const satisfies readonly SubscriptionPlanModelSpec[];
+
 const CODING_PLAN: SubscriptionPlanDefinition<'coding'> = {
   id: 'coding',
   option: 'CODING_PLAN',
@@ -153,7 +161,7 @@ const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
     'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
   usageDocumentationUrl:
     'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
-  models: ALIBABA_SUBSCRIPTION_MODELS,
+  models: TOKEN_PLAN_MODELS,
 };
 
 const SUBSCRIPTION_PLANS = {
