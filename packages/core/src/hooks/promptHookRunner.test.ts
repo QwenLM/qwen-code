@@ -389,6 +389,28 @@ describe('PromptHookRunner', () => {
       expect(systemInstruction?.parts?.[0]?.text).toContain('ok');
     });
 
+    it('should pass deterministic generation config (temperature 0, capped output, no thoughts)', async () => {
+      const mockResponse = createMockResponse('{"ok": true}');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+
+      const config = createMockConfig();
+      const input = createMockInput();
+
+      await promptRunner.execute(config, HookEventName.PreToolUse, input);
+
+      const callArg = mockGenerateContent.mock.calls[0][0];
+      // Allow/block decisions must be deterministic to keep security
+      // gating reliable across identical inputs.
+      expect(callArg.config?.temperature).toBe(0);
+      // Output is a tiny JSON object — cap tokens to avoid runaway
+      // generations and unnecessary cost.
+      expect(callArg.config?.maxOutputTokens).toBe(500);
+      // Thoughts are stripped post-hoc; don't pay to generate them.
+      expect(callArg.config?.thinkingConfig).toEqual({
+        includeThoughts: false,
+      });
+    });
+
     it('should track duration correctly', async () => {
       const mockResponse = createMockResponse('{"ok": true}');
       mockGenerateContent.mockImplementation(
@@ -426,6 +448,33 @@ describe('PromptHookRunner', () => {
 
       // Both placeholders should be replaced
       expect(promptText).toContain('/test/path');
+      expect(promptText).not.toContain('$ARGUMENTS');
+    });
+
+    it('should handle special $ patterns in JSON without corruption', async () => {
+      const mockResponse = createMockResponse('{"ok": true}');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+
+      const config = createMockConfig({
+        prompt: 'Input: $ARGUMENTS',
+      });
+      // Create input with special $ patterns that would be misinterpreted by replace()
+      // Use the cwd field which contains the special patterns
+      const input = createMockInput({
+        cwd: "/path/$& matched $` before $' after $$ dollar",
+      });
+
+      await promptRunner.execute(config, HookEventName.PreToolUse, input);
+
+      const callArg = mockGenerateContent.mock.calls[0][0];
+      const promptText = callArg.contents?.[0]?.parts?.[0]?.text as string;
+
+      // Verify special patterns are preserved literally (not interpreted)
+      expect(promptText).toContain('$&');
+      expect(promptText).toContain('$`');
+      expect(promptText).toContain("$'");
+      expect(promptText).toContain('$$');
+      expect(promptText).toContain('matched');
       expect(promptText).not.toContain('$ARGUMENTS');
     });
 

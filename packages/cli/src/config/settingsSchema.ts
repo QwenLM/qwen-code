@@ -158,7 +158,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
           model: {
             type: 'string',
             description:
-              'Optional model override for "prompt" type hooks. Defaults to fastModel.',
+              'Optional model override for "prompt" type hooks. Defaults to your current model.',
           },
           headers: {
             type: 'object',

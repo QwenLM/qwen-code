@@ -179,7 +179,7 @@ export class PromptHookRunner {
     prompt: string,
     jsonInput: string,
   ): string {
-    return prompt.replace(/\$ARGUMENTS/g, jsonInput);
+    return prompt.replace(/\$ARGUMENTS/g, () => jsonInput);
   }
 
   /**
@@ -247,6 +247,16 @@ export class PromptHookRunner {
               systemInstruction: {
                 parts: [{ text: LLM_HOOK_SYSTEM_PROMPT }],
               },
+              // Deterministic allow/block decisions — same input must
+              // produce the same gating outcome to keep security checks
+              // reliable.
+              temperature: 0,
+              // Responses are tiny JSON objects; cap output to avoid
+              // runaway generations on misbehaving models.
+              maxOutputTokens: 500,
+              // Thoughts are filtered out post-hoc anyway; skip generating
+              // them so we don't pay for reasoning tokens we discard.
+              thinkingConfig: { includeThoughts: false },
             },
           },
           'prompt_hook',
