@@ -801,6 +801,30 @@ describe('Logger', () => {
       expect(onDisk.map((e) => e.message)).toEqual(['kept']);
     });
 
+    it('updates the in-memory logs cache synchronously so consumers see the removal without awaiting', async () => {
+      // Regression: AppContainer's `userMessages` effect calls
+      // `getPreviousUserMessages()` (which reads `this.logs`) on the
+      // same render that history truncation fires. Without sync
+      // optimistic removal, the effect would surface the cancelled
+      // prompt until the disk write completed and some unrelated
+      // future render forced the effect to re-run.
+      await logger.logMessage(MessageSenderType.USER, 'cancelled prompt');
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+
+      // Fire-and-forget the undo; do NOT await.
+      const undoPromise = logger.removeLastUserMessage();
+
+      // The very next read must already reflect the removal — that's
+      // what AppContainer's effect relies on.
+      expect(await logger.getPreviousUserMessages()).toEqual([]);
+
+      // Background disk reconciliation still completes successfully.
+      expect(await undoPromise).toBe(true);
+      expect(await readLogFile()).toEqual([]);
+    });
+
     it('preserves the USER undo target when a non-USER write (MODEL_SWITCH) fails', async () => {
       // Regression: blanket-clearing the tracker in the catch branch
       // would discard a still-valid undo target whenever an unrelated

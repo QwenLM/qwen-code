@@ -343,12 +343,30 @@ export class Logger {
     if (!this.initialized || !this.logFilePath) {
       return false;
     }
+    const target = this.lastLoggedUserEntry;
+    if (!target) return false;
+    this.lastLoggedUserEntry = null;
+    const matchesTarget = (e: LogEntry): boolean =>
+      e.sessionId === target.sessionId &&
+      e.messageId === target.messageId &&
+      e.timestamp === target.timestamp &&
+      e.message === target.message &&
+      e.type === target.type;
+    // Optimistic in-memory removal BEFORE the async serialize queue runs.
+    // AppContainer's userMessages effect reads `getPreviousUserMessages()`
+    // (which reads `this.logs`) on the same render that history truncation
+    // fires. Without this sync update, ↑-history in the current session
+    // would still surface the cancelled prompt until some unrelated
+    // future history change forced the effect to re-run.
+    const optimisticIdx = this.logs.findIndex(matchesTarget);
+    if (optimisticIdx >= 0) {
+      this.logs = [
+        ...this.logs.slice(0, optimisticIdx),
+        ...this.logs.slice(optimisticIdx + 1),
+      ];
+    }
     const logFilePath = this.logFilePath;
     return this.serialize(async () => {
-      const target = this.lastLoggedUserEntry;
-      if (!target) return false;
-      this.lastLoggedUserEntry = null;
-
       let currentLogsOnDisk: LogEntry[];
       try {
         currentLogsOnDisk = await this._readLogFile();
@@ -360,17 +378,11 @@ export class Logger {
         return false;
       }
 
-      const idx = currentLogsOnDisk.findIndex(
-        (e) =>
-          e.sessionId === target.sessionId &&
-          e.messageId === target.messageId &&
-          e.timestamp === target.timestamp &&
-          e.message === target.message &&
-          e.type === target.type,
-      );
+      const idx = currentLogsOnDisk.findIndex(matchesTarget);
       if (idx === -1) {
-        // Entry already gone (concurrent rotation/clear). Sync the in-memory
-        // cache with disk so callers don't see a stale row.
+        // Entry already gone from disk (concurrent rotation/clear).
+        // Adopt disk state as truth so the in-memory cache doesn't
+        // diverge from a freshly-rotated file.
         this.logs = currentLogsOnDisk;
         return false;
       }
