@@ -35,7 +35,16 @@ const CLI_BIN = path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'streaming-integ-secret';
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
-const SKIP = process.env['SKIP_LLM_TESTS'] === '1';
+// Skip when:
+//   - explicit `SKIP_LLM_TESTS=1` (CI envs without provider API keys), OR
+//   - Windows: this suite shells out to `pgrep` / `kill -KILL` to
+//     simulate child-process crashes for the SIGKILL → `session_died`
+//     test, and those binaries are POSIX-only. A Windows-equivalent
+//     (`taskkill`) would need different test scaffolding; deferred to
+//     a follow-up rather than smuggling shell-shape divergence into
+//     the existing assertions.
+const SKIP =
+  process.env['SKIP_LLM_TESTS'] === '1' || process.platform === 'win32';
 const describeLLM = SKIP ? describe.skip : describe;
 
 let daemon: ChildProcess;

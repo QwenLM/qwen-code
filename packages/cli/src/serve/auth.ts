@@ -84,12 +84,18 @@ export function bearerAuth(token: string | undefined): RequestHandler {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const parts = header.split(' ');
-    if (parts.length !== 2 || parts[0] !== 'Bearer') {
+    // Per RFC 7235 §2.1 / RFC 7230 §3.2.6 the auth scheme token is
+    // case-insensitive — `Bearer` / `bearer` / `BEARER` all valid.
+    // Use a tolerant split that also accepts runs of whitespace
+    // between scheme and credentials, then lowercase the scheme
+    // before comparing. The token value itself stays case-sensitive
+    // (it's user-defined opaque material).
+    const match = /^(\S+)\s+(.+)$/.exec(header);
+    if (!match || match[1].toLowerCase() !== 'bearer') {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const candidate = createHash('sha256').update(parts[1], 'utf8').digest();
+    const candidate = createHash('sha256').update(match[2], 'utf8').digest();
     if (!timingSafeEqual(candidate, expected)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
