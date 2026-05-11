@@ -43,9 +43,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(baseUrl);
 
     // Check if proxy is configured and matches
+    const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
+      ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
+      : DASHSCOPE_PROXY_BASE_URL;
+
     const isProxyConfigured = Boolean(
-      DASHSCOPE_PROXY_BASE_URL &&
-        normalizedBaseUrl === DASHSCOPE_PROXY_BASE_URL,
+      normalizedProxyUrl && normalizedBaseUrl === normalizedProxyUrl,
     );
 
     return isDashscopeOrigin || isProxyConfigured;
