@@ -290,18 +290,25 @@ function schemaRootAcceptsObject(
     notSchema !== null &&
     !Array.isArray(notSchema)
   ) {
-    const notType = (notSchema as Record<string, unknown>)['type'];
+    const notRecord = notSchema as Record<string, unknown>;
+    const notType = notRecord['type'];
     if (notType !== undefined) {
       const types = Array.isArray(notType) ? notType : [notType];
-      // If `not.type` *only* lists types that include "object", every
-      // object value matches `not.type`, so the negation rejects every
-      // object. The simplest sound check: if "object" is in the list at
-      // all and there's no sibling positive constraint that would allow
-      // an object some other way, reject. We've already validated the
-      // sibling type / anyOf / oneOf / allOf above — at this point we
-      // know they at least permit objects, so a `not.type` containing
-      // "object" still excludes them.
-      if (types.includes('object')) return false;
+      // If `not` is JUST `{type: "object"[…]}` (no additional keywords),
+      // every object value matches the `not` subschema and so gets
+      // excluded — schema is unsatisfiable for objects, reject.
+      //
+      // If `not` has additional constraints alongside `type` (e.g.
+      // `{not:{type:"object",required:["error"]}}`), those constraints
+      // NARROW what `not` excludes: only objects matching ALL of `not`'s
+      // keywords are rejected, so objects that fail any of the
+      // narrowing constraints survive. Example: `{}` satisfies
+      // `{not:{type:"object",required:["error"]}}` because the value
+      // lacks the `error` key. Rejecting at parse time would be a
+      // false positive — defer to Ajv at runtime.
+      if (types.includes('object') && Object.keys(notRecord).length === 1) {
+        return false;
+      }
     }
   }
 

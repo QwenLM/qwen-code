@@ -283,6 +283,30 @@ describe('resolveJsonSchemaArg', () => {
     expect(schema).toBeDefined();
   });
 
+  it('accepts root `not:{type:"object", ...narrowing}` because narrowing keywords leave some objects satisfiable', () => {
+    // `not:{type:"object",required:["error"]}` only excludes objects
+    // that have an `error` key. An object like `{}` is NOT excluded
+    // (it doesn't match the `required` constraint), so the schema is
+    // satisfiable for at least one object value.
+    //
+    // The previous parse-time check looked only at `not.type` and
+    // rejected this as "must accept object-typed values" — a false
+    // positive. The fix: only reject when `not` is exactly
+    // `{type: ...}` with no narrowing siblings; otherwise defer to
+    // Ajv at runtime.
+    expect(
+      resolveJsonSchemaArg('{"not":{"type":"object","required":["error"]}}'),
+    ).toBeDefined();
+    expect(
+      resolveJsonSchemaArg(
+        '{"not":{"type":"object","properties":{"k":{"type":"string"}},"required":["k"]}}',
+      ),
+    ).toBeDefined();
+    expect(
+      resolveJsonSchemaArg('{"not":{"type":"object","minProperties":1}}'),
+    ).toBeDefined();
+  });
+
   it('rejects a root `const` whose value is not an object', () => {
     expect(() => resolveJsonSchemaArg('{"const":1}')).toThrow(
       /must accept object-typed values/,
