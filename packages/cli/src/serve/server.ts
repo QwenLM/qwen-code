@@ -365,7 +365,7 @@ export function createServeApp(
     // Disable proxy buffering (nginx); event-stream content type alone
     // doesn't always reach the client through every proxy.
     res.setHeader('X-Accel-Buffering', 'no');
-    // Always present in Node >= 20, which `engines` requires.
+    // Always present on the supported Node versions (engines.node >=22).
     res.flushHeaders();
 
     // Backpressure helper: `res.write` returns false when the kernel send

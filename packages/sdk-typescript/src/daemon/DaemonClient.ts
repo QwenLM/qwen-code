@@ -129,12 +129,30 @@ export class DaemonClient {
     if (!this.fetchTimeoutMs || !Number.isFinite(this.fetchTimeoutMs)) {
       return await this._fetch(url, init);
     }
-    const timeoutSignal = abortTimeout(this.fetchTimeoutMs);
+    // Use AbortController + cancellable setTimeout instead of
+    // `AbortSignal.timeout()` (the polyfill `abortTimeout` is the
+    // same shape — fires once, never disarms). On a fast-resolving
+    // request with a long `fetchTimeoutMs` (e.g. 30s default), the
+    // pending timer keeps the event loop registration alive even
+    // after the fetch already returned. High request volume × long
+    // timeout = accumulating timers + retained closures. Clearing
+    // in `finally` releases each timer the moment its fetch settles.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      ctrl.abort(new DOMException('The operation timed out', 'TimeoutError'));
+    }, this.fetchTimeoutMs);
+    if (typeof timer === 'object' && timer && 'unref' in timer) {
+      (timer as { unref: () => void }).unref();
+    }
     const callerSignal = init.signal ?? undefined;
     const signal = callerSignal
-      ? composeAbortSignals([callerSignal, timeoutSignal])
-      : timeoutSignal;
-    return await this._fetch(url, { ...init, signal });
+      ? composeAbortSignals([callerSignal, ctrl.signal])
+      : ctrl.signal;
+    try {
+      return await this._fetch(url, { ...init, signal });
+    } finally {
+      clearTimeout(timer as Parameters<typeof clearTimeout>[0]);
+    }
   }
 
   // -- Plumbing -----------------------------------------------------------
@@ -417,14 +435,17 @@ export class DaemonClient {
 }
 
 /**
- * `AbortSignal.timeout` is in Node 17.3+ — within our `>=18` engines floor —
- * but exposed as `static` on `AbortSignal`, so cautious feature-detect plus
- * a polyfill keeps us honest if a runtime ships a stripped-down `AbortSignal`.
+ * `AbortSignal.timeout` is in every Node version this package supports
+ * (`engines.node >=22.0.0` ships it natively). The feature-detect below
+ * is defensive against non-Node runtimes — browsers / edge workers /
+ * stripped-down V8 hosts that may consume the SDK and ship an
+ * incomplete `AbortSignal` shape.
  */
 // Exported solely for direct unit testing — production callers go
-// through `fetchWithTimeout` above, but the polyfill paths only fire
-// on Node 18.0–20.2 (where `AbortSignal.any` is missing) and that
-// runtime can't easily be exercised from the public API surface.
+// through `fetchWithTimeout` above. The polyfill branch only fires on
+// runtimes where `AbortSignal.timeout` isn't natively available
+// (non-Node hosts), which can't easily be exercised from the public
+// API surface in unit tests.
 export function abortTimeout(ms: number): AbortSignal {
   const tFn = (
     AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal }
@@ -461,10 +482,13 @@ export function abortTimeout(ms: number): AbortSignal {
 }
 
 /**
- * `AbortSignal.any` was added in Node 20.3, but the SDK declares
- * `engines.node >=18.0.0`. Without this polyfill, every non-streaming call
- * would throw `TypeError: AbortSignal.any is not a function` on Node 18.0–
- * 20.2 and the SDK would be unusable on its own declared minimum runtime.
+ * `AbortSignal.any` is available natively in every Node version this
+ * package supports (`engines.node >=22.0.0` ships it). The polyfill
+ * branch below is defensive against non-Node runtimes (browsers /
+ * edge workers / stripped-down V8 hosts) that may consume the SDK
+ * and lack `AbortSignal.any` — without it those callers would throw
+ * `TypeError: AbortSignal.any is not a function` on every
+ * non-streaming method.
  *
  * The polyfill creates a fresh controller and forwards the first abort
  * from any input signal, including any that are already aborted at call

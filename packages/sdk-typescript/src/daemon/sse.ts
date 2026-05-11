@@ -54,12 +54,33 @@ export async function* parseSseStream(
   const decoder = new TextDecoder();
   let buf = '';
 
+  // Wire abort to `reader.cancel()` so an idle/stalled upstream
+  // doesn't trap the generator inside `await reader.read()`. Polling
+  // `signal.aborted` between reads (the previous behavior) is fine
+  // when frames are flowing, but if the stream sits silent and
+  // somebody calls `controller.abort()`, the generator stays parked
+  // on the pending `read()` until the upstream eventually closes —
+  // contradicting this function's "AbortSignal cancellation cleans
+  // up cleanly" contract. `reader.cancel()` is a no-op if already
+  // cancelled, so racing the listener with the finally cleanup is
+  // safe.
+  let onAbort: (() => void) | undefined;
+  if (signal) {
+    onAbort = () => {
+      reader.cancel().catch(() => {
+        /* already cancelled or detached */
+      });
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+
   try {
     while (true) {
-      // Stop pulling more bytes if the caller aborted after the
-      // initial fetch resolved. Without this, the generator keeps
-      // reading + buffering indefinitely until the upstream closes,
-      // even though no consumer is iterating us anymore.
+      // Pre-read fast-path check: if abort already fired, return
+      // without entering `read()`. The listener-driven cancel above
+      // covers the parked-read case; this covers the
+      // already-aborted-when-loop-iterates case.
       if (signal?.aborted) {
         return;
       }
@@ -70,9 +91,22 @@ export async function* parseSseStream(
         // character of the last frame can be silently dropped.
         buf += decoder.decode();
         if (buf.length > 0) {
-          // Normalize CRLF in any trailing fragment too.
-          for (const raw of splitFrames(buf)) {
+          // Use the same `consumeFrames` walker as the main loop
+          // so a multi-byte split that completed multiple frame
+          // separators in the trailing decode flush still yields
+          // every frame instead of being merged into one parse.
+          // The previous `splitFrames(buf)` returned `[buf]` (a
+          // single-frame fallback) which silently dropped events.
+          const consumed = consumeFrames(buf);
+          for (const raw of consumed.frames) {
             const frame = parseFrame(raw);
+            if (frame) yield frame;
+          }
+          // Anything left over after the last separator is a
+          // legitimate trailing fragment (no `\n\n` ever arrived);
+          // try to parse it once as a final attempt.
+          if (consumed.tail.length > 0) {
+            const frame = parseFrame(consumed.tail);
             if (frame) yield frame;
           }
         }
@@ -96,6 +130,9 @@ export async function* parseSseStream(
       buf = consumed.tail;
     }
   } finally {
+    if (signal && onAbort) {
+      signal.removeEventListener('abort', onAbort);
+    }
     // `reader.cancel()` does both the release-lock work AND signals the
     // upstream that we don't want any more data — closing the underlying
     // HTTP body stream when the consumer breaks out early. Using only
@@ -138,12 +175,6 @@ function consumeFrames(buf: string): { frames: string[]; tail: string } {
     cursor = sepIdx + sepLen;
   }
   return { frames, tail: buf.slice(cursor) };
-}
-
-/** Used for trailing fragments that lack a separator but contain a frame. */
-function splitFrames(raw: string): string[] {
-  // No more separators expected; the whole tail is at most one frame.
-  return [raw];
 }
 
 function parseFrame(raw: string): DaemonEvent | undefined {

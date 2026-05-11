@@ -247,8 +247,17 @@ export class EventBus {
     // `this.subs` until somebody called `next()`/`return()`. Idempotent
     // through `disposed`, so a double-abort or race with `return()` is
     // safe.
+    //
+    // `{ drain: false }` so the consumer doesn't keep yielding
+    // already-queued events after the abort — the subscribe doc says
+    // abort closes the iterator "promptly". Draining first contradicts
+    // that contract and adds post-abort work to the SSE route (each
+    // drained event ends up serialized over a socket nobody is
+    // listening to). The eviction path keeps default (drain=true) so
+    // the synthetic `client_evicted` terminal frame still reaches the
+    // consumer.
     const onAbort = () => {
-      queue.close();
+      queue.close({ drain: false });
       dispose();
     };
     if (opts.signal) {
@@ -360,9 +369,29 @@ class BoundedAsyncQueue<T> {
     this.forcedInBuf += 1;
   }
 
-  close(): void {
+  /**
+   * Mark the queue closed. By default `next()` continues to drain
+   * any items already in `buf` before returning `done: true` —
+   * that's what the eviction path relies on (the synthetic
+   * `client_evicted` frame is force-pushed THEN close is called,
+   * and we want the consumer to see the terminal frame before the
+   * iterator unwinds).
+   *
+   * Pass `{ drain: false }` to drop buffered items immediately
+   * (the AbortSignal-driven unsubscribe path uses this — the
+   * subscribe docstring says abort should close the iterator
+   * promptly, but draining hundreds of queued events first
+   * contradicts that and adds post-abort work to the SSE route).
+   */
+  close(opts: { drain?: boolean } = {}): void {
     if (this.closed) return;
     this.closed = true;
+    if (opts.drain === false) {
+      // Truncate the buffer so subsequent `next()` calls see the
+      // closed sentinel immediately.
+      this.buf.length = 0;
+      this.forcedInBuf = 0;
+    }
     while (this.resolvers.length > 0) {
       this.resolvers.shift()!({
         value: undefined as unknown as T,
