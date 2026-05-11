@@ -76,11 +76,13 @@ export class Logger {
   private initialized = false;
   private logs: LogEntry[] = []; // In-memory cache, ideally reflects the last known state of the file
   private lastLoggedUserEntry: LogEntry | null = null; // Tracks the most recently persisted USER entry for cancel-undo (mirrors claude-code's lastAddedEntry).
-  // Per-instance write queue. Every disk-mutating op chains here so that
-  // logMessage/removeLastUserMessage can never observe a stale snapshot
-  // produced by a concurrent op on the same Logger (read → splice/append
-  // → writeFile is otherwise non-atomic; a fast cancel + resubmit could
-  // make removeLast clobber the just-appended entry).
+  // Per-instance write queue for the log-history file (logs.json).
+  // Only `logMessage` and `removeLastUserMessage` chain on this queue;
+  // their read → splice/append → writeFile cycle is otherwise non-atomic
+  // and a fast cancel + resubmit could make removeLast clobber the
+  // just-appended entry. Checkpoint ops (saveCheckpoint /
+  // deleteCheckpoint / loadCheckpoint) write to *separate* files and are
+  // intentionally not serialized on this queue.
   private writeQueue: Promise<unknown> = Promise.resolve();
   private debugLogger: DebugLogger;
 
@@ -93,11 +95,13 @@ export class Logger {
   }
 
   /**
-   * Run `op` after every previously enqueued op on this Logger settles.
-   * Errors propagate to the caller but do NOT poison the queue (the next
-   * op runs regardless). Single-instance only — a separate Logger pointing
-   * at the same file would have its own queue, which is why callers should
-   * share one Logger per session.
+   * Serializes a log-history mutation against every previously enqueued
+   * op on this Logger. Errors propagate to the caller but do NOT poison
+   * the queue (the next op runs regardless). Scope: only `logMessage`
+   * and `removeLastUserMessage` go through here — checkpoint ops touch
+   * separate files and don't share this queue. Single-instance only:
+   * a separate Logger pointing at the same file would have its own
+   * queue, which is why callers should share one Logger per session.
    */
   private serialize<T>(op: () => Promise<T>): Promise<T> {
     const next = this.writeQueue.then(op, op);
