@@ -309,10 +309,12 @@ export const directoryCommand: SlashCommand = {
       completion: async (context: CommandContext) => {
         const { services } = context;
         if (!services.config) return [];
+        if (services.config.isRestrictiveSandbox()) return [];
         const dirs = services.config.getWorkspaceContext().getDirectories();
-        const initialDirs =
-          services.config.getWorkspaceContext().getInitialDirectories?.() ?? [];
-        return dirs.filter((d) => !initialDirs.includes(d));
+        const initialSet = new Set(
+          services.config.getWorkspaceContext().getInitialDirectories(),
+        );
+        return dirs.filter((d) => !initialSet.has(d));
       },
       action: async (context: CommandContext, args: string) => {
         const {
@@ -371,10 +373,7 @@ export const directoryCommand: SlashCommand = {
             : path.resolve(expandedDir);
         }
 
-        if (
-          workspaceContext.isInitialDirectory(expandedDir) ||
-          workspaceContext.getInitialDirectories().includes(expandedDir)
-        ) {
+        if (workspaceContext.isInitialDirectory(expandedDir)) {
           addItem(
             {
               type: MessageType.ERROR,
@@ -388,54 +387,97 @@ export const directoryCommand: SlashCommand = {
           return;
         }
 
-        // Persist removal to settings.  If setValue throws partway through
-        // the multi-scope loop we roll back all in-memory mutations so
-        // settings stay consistent with what is on disk.
+        // Persist removal to settings using a two-phase approach:
+        // Phase 1 — compute new directory lists for each scope (async
+        // parallel realpath resolution to avoid N+1 sync I/O).
+        // Phase 2 — commit all scopes atomically so partial failures
+        // can be rolled back cleanly.
         const targetDir = canonicalDirectory;
         let found = false;
 
-        // Snapshot in-memory state for rollback.
+        // Phase 1: compute pending changes for each scope.
+        const pendingChanges: Array<{
+          scope: SettingScope;
+          dirs: string[];
+        }> = [];
+        for (const scope of [
+          SettingScope.Workspace,
+          SettingScope.User,
+        ] as const) {
+          const scopeDirs =
+            settings.forScope(scope).originalSettings.context
+              ?.includeDirectories ?? [];
+          // Resolve all paths in parallel using async realpath to avoid
+          // blocking the event loop with N+1 sync I/O.
+          const resolutions = await Promise.all(
+            scopeDirs.map(async (d: string) => {
+              try {
+                return {
+                  original: d,
+                  resolved: await fs.promises.realpath(expandHomeDir(d)),
+                };
+              } catch {
+                return { original: d, resolved: null };
+              }
+            }),
+          );
+          const includeDirectories = resolutions
+            .filter((r) => r.resolved !== targetDir && r.original !== targetDir)
+            .map((r) => r.original);
+          if (includeDirectories.length < scopeDirs.length) {
+            found = true;
+            pendingChanges.push({ scope, dirs: includeDirectories });
+          }
+        }
+
+        if (!found) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Directory not found in workspace: {{directory}}', {
+                directory,
+              }),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // Snapshot deep copies for rollback before any mutations.
         const workspaceBefore = {
-          settings: { ...settings.workspace.settings },
-          originalSettings: { ...settings.workspace.originalSettings },
+          settings: structuredClone(settings.workspace.settings),
+          originalSettings: structuredClone(
+            settings.workspace.originalSettings,
+          ),
         };
         const userBefore = {
-          settings: { ...settings.user.settings },
-          originalSettings: { ...settings.user.originalSettings },
+          settings: structuredClone(settings.user.settings),
+          originalSettings: structuredClone(settings.user.originalSettings),
         };
 
+        // Phase 2: commit all scopes atomically.
+        const committed: SettingScope[] = [];
         try {
-          for (const scope of [
-            SettingScope.Workspace,
-            SettingScope.User,
-          ] as const) {
-            const scopeDirs =
-              settings.forScope(scope).originalSettings.context
-                ?.includeDirectories ?? [];
-            const includeDirectories = scopeDirs.filter((d: string) => {
-              try {
-                const resolved = fs.realpathSync(expandHomeDir(d));
-                return resolved !== targetDir;
-              } catch {
-                return expandHomeDir(d) !== targetDir && d !== targetDir;
-              }
-            });
-            if (includeDirectories.length < scopeDirs.length) {
-              found = true;
-              settings.setValue(
-                scope,
-                'context.includeDirectories',
-                includeDirectories,
-              );
-            }
+          for (const change of pendingChanges) {
+            settings.setValue(
+              change.scope,
+              'context.includeDirectories',
+              change.dirs,
+            );
+            committed.push(change.scope);
           }
         } catch (error) {
-          // Roll back any in-memory mutations that already happened.
-          settings.workspace.settings = workspaceBefore.settings;
-          settings.workspace.originalSettings =
-            workspaceBefore.originalSettings;
-          settings.user.settings = userBefore.settings;
-          settings.user.originalSettings = userBefore.originalSettings;
+          // Roll back any scopes that were already committed.
+          for (const scope of committed) {
+            if (scope === SettingScope.Workspace) {
+              settings.workspace.settings = workspaceBefore.settings;
+              settings.workspace.originalSettings =
+                workspaceBefore.originalSettings;
+            } else {
+              settings.user.settings = userBefore.settings;
+              settings.user.originalSettings = userBefore.originalSettings;
+            }
+          }
           settings.recomputeMerged();
           addItem(
             {
@@ -452,21 +494,6 @@ export const directoryCommand: SlashCommand = {
         // Now remove from memory — persisted settings are already updated.
         const removed = workspaceContext.removeDirectory(expandedDir);
         if (!removed) {
-          if (!found) {
-            addItem(
-              {
-                type: MessageType.ERROR,
-                text: t('Directory not found in workspace: {{directory}}', {
-                  directory,
-                }),
-              },
-              Date.now(),
-            );
-            return;
-          }
-          // Persisted entry was removed from settings but the directory
-          // is still present in the active workspace.  Report as error
-          // so the user knows it was not fully removed.
           addItem(
             {
               type: MessageType.ERROR,
@@ -477,18 +504,6 @@ export const directoryCommand: SlashCommand = {
             Date.now(),
           );
           return;
-        }
-
-        if (!found) {
-          addItem(
-            {
-              type: MessageType.WARNING,
-              text: t(
-                'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.',
-              ),
-            },
-            Date.now(),
-          );
         }
 
         // Refresh hierarchical memory to drop QWEN.md content and
@@ -523,6 +538,7 @@ export const directoryCommand: SlashCommand = {
               },
               Date.now(),
             );
+            return;
           }
         }
 

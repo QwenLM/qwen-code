@@ -12,13 +12,30 @@ import { MessageType } from '../types.js';
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { loadServerHierarchicalMemory } from '@qwen-code/qwen-code-core';
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
+      memoryContent: 'mock memory',
+      fileCount: 0,
+      conditionalRules: [],
+      projectRoot: '/test',
+    }),
+    ConditionalRulesRegistry: vi.fn(),
+  };
+});
 
 describe('directoryCommand', () => {
   let mockContext: CommandContext;
   let mockConfig: Config;
   let mockWorkspaceContext: WorkspaceContext;
   let mockWorkspaceDirectories: string[];
-  let mockSettings: Record<string, unknown>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockSettings: any;
   const addCommand = directoryCommand.subCommands?.find(
     (c) => c.name === 'add',
   );
@@ -78,11 +95,13 @@ describe('directoryCommand', () => {
       },
       setValue: vi.fn(),
       recomputeMerged: vi.fn(),
+      forScope: vi.fn((scope: string) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (scope === 'User') return (mockSettings as any).user;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (mockSettings as any).workspace;
+      }),
     };
-    mockSettings.forScope = vi.fn((scope: string) => {
-      if (scope === 'User') return mockSettings.user;
-      return mockSettings.workspace;
-    });
 
     mockContext = {
       services: {
@@ -91,6 +110,7 @@ describe('directoryCommand', () => {
       },
       ui: {
         addItem: vi.fn(),
+        setGeminiMdFileCount: vi.fn(),
       },
     } as unknown as CommandContext;
   });
@@ -441,7 +461,8 @@ describe('directoryCommand', () => {
       } as unknown as Config;
 
       const settingsError = new Error('write failed');
-      const newSettings: Record<string, unknown> = {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const newSettings: any = {
         ...mockSettings,
         workspace: {
           settings: {},
@@ -707,6 +728,249 @@ describe('directoryCommand', () => {
         }),
         expect.any(Number),
       );
+    });
+
+    it('should show error in sandbox mode and not mutate settings', async () => {
+      const removableDir = path.normalize('/home/user/project2');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        isInitialDirectory: vi.fn().mockReturnValue(false),
+        getInitialDirectories: vi
+          .fn()
+          .mockReturnValue([path.normalize('/home/user/project1')]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+        isRestrictiveSandbox: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+
+      mockContext = {
+        ...mockContext,
+        services: {
+          ...mockContext.services,
+          config: mockConfig,
+        },
+      } as unknown as CommandContext;
+
+      mockSettings.workspace = {
+        settings: {},
+        originalSettings: {
+          context: {
+            includeDirectories: [
+              path.normalize('/home/user/project1'),
+              removableDir,
+            ],
+          },
+        },
+      };
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, removableDir);
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('not supported in restrictive sandbox'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(mockWorkspaceContext.removeDirectory).not.toHaveBeenCalled();
+    });
+
+    it('should refresh memory after successful removal', async () => {
+      const removableDir = path.normalize('/home/user/project2');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        isInitialDirectory: vi.fn().mockReturnValue(false),
+        getInitialDirectories: vi
+          .fn()
+          .mockReturnValue([path.normalize('/home/user/project1')]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+        shouldLoadMemoryFromIncludeDirectories: () => true,
+        getFileService: () => ({}),
+        getExtensionContextFilePaths: () => [],
+        getFolderTrust: () => true,
+        getContextRuleExcludes: () => [],
+        setUserMemory: vi.fn(),
+        setGeminiMdFileCount: vi.fn(),
+        setConditionalRulesRegistry: vi.fn(),
+      } as unknown as Config;
+
+      mockContext = {
+        ...mockContext,
+        services: {
+          ...mockContext.services,
+          config: mockConfig,
+        },
+      } as unknown as CommandContext;
+
+      mockSettings.workspace = {
+        settings: {},
+        originalSettings: {
+          context: {
+            includeDirectories: [
+              path.normalize('/home/user/project1'),
+              removableDir,
+            ],
+          },
+        },
+      };
+      mockSettings.merged = { context: { importFormat: 'tree' } };
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, removableDir);
+
+      expect(mockConfig.setUserMemory).toHaveBeenCalled();
+      expect(mockConfig.setGeminiMdFileCount).toHaveBeenCalled();
+      expect(mockConfig.setConditionalRulesRegistry).toHaveBeenCalled();
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: `Removed directory: ${removableDir}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should show error and not success message when memory refresh fails', async () => {
+      const removableDir = path.normalize('/home/user/project2');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        isInitialDirectory: vi.fn().mockReturnValue(false),
+        getInitialDirectories: vi
+          .fn()
+          .mockReturnValue([path.normalize('/home/user/project1')]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+        shouldLoadMemoryFromIncludeDirectories: () => true,
+        getFileService: () => ({}),
+        getExtensionContextFilePaths: () => [],
+        getFolderTrust: () => true,
+        getContextRuleExcludes: () => [],
+        setUserMemory: vi.fn(),
+        setGeminiMdFileCount: vi.fn(),
+        setConditionalRulesRegistry: vi.fn(),
+      } as unknown as Config;
+
+      mockContext = {
+        ...mockContext,
+        services: {
+          ...mockContext.services,
+          config: mockConfig,
+        },
+      } as unknown as CommandContext;
+
+      mockSettings.workspace = {
+        settings: {},
+        originalSettings: {
+          context: {
+            includeDirectories: [
+              path.normalize('/home/user/project1'),
+              removableDir,
+            ],
+          },
+        },
+      };
+      mockSettings.merged = { context: { importFormat: 'tree' } };
+
+      // Make loadServerHierarchicalMemory throw for this test
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (loadServerHierarchicalMemory as any).mockRejectedValueOnce(
+        new Error('memory load failed'),
+      );
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, removableDir);
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('Error refreshing memory'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockContext.ui.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: `Removed directory: ${removableDir}`,
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should roll back committed scopes when later scope fails', async () => {
+      const removableDir = path.normalize('/home/user/project2');
+      mockWorkspaceContext = {
+        ...mockWorkspaceContext,
+        removeDirectory: vi.fn().mockReturnValue(true),
+        isInitialDirectory: vi.fn().mockReturnValue(false),
+        getInitialDirectories: vi
+          .fn()
+          .mockReturnValue([path.normalize('/home/user/project1')]),
+      } as unknown as WorkspaceContext;
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => mockWorkspaceContext,
+      } as unknown as Config;
+
+      const originalWorkspaceDirs = [
+        path.normalize('/home/user/project1'),
+        removableDir,
+      ];
+      const originalUserDirs = [removableDir];
+
+      mockSettings.workspace = {
+        settings: {
+          context: { includeDirectories: [...originalWorkspaceDirs] },
+        },
+        originalSettings: {
+          context: { includeDirectories: [...originalWorkspaceDirs] },
+        },
+      };
+      mockSettings.user = {
+        settings: {
+          context: { includeDirectories: [...originalUserDirs] },
+        },
+        originalSettings: {
+          context: { includeDirectories: [...originalUserDirs] },
+        },
+      };
+
+      let callCount = 0;
+      mockSettings.setValue = vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 2) {
+          throw new Error('user scope write failed');
+        }
+      });
+
+      if (!removeCommand?.action) throw new Error('No action');
+      await removeCommand.action(mockContext, removableDir);
+
+      // Should have rolled back and shown error.
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: 'Error updating settings: user scope write failed',
+        }),
+        expect.any(Number),
+      );
+      // Directory should NOT have been removed from memory.
+      expect(mockWorkspaceContext.removeDirectory).not.toHaveBeenCalled();
     });
   });
 
