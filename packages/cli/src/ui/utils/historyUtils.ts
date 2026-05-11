@@ -15,11 +15,18 @@ import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
  * Mirrors claude-code's `messagesAfterAreOnlySynthetic` (MessageSelector.tsx):
  * thoughts/info/error/etc. are non-meaningful; assistant text and tool runs
  * are meaningful.
+ *
+ * Every member of the {@link HistoryItemWithoutId} union must appear in
+ * exactly one branch — the trailing `_exhaustive: never` line gives a
+ * compile-time error when a new history item type is added without
+ * being explicitly classified, so auto-restore can't silently break.
  */
 export function isSyntheticHistoryItem(
   item: HistoryItem | HistoryItemWithoutId,
 ): boolean {
   switch (item.type) {
+    // Synthetic: system-generated notices that don't represent meaningful
+    // model output or user action. Safe to wipe on auto-restore.
     case 'info':
     case 'error':
     case 'warning':
@@ -29,9 +36,51 @@ export function isSyntheticHistoryItem(
     case 'tool_use_summary':
     case 'gemini_thought':
     case 'gemini_thought_content':
+    case 'away_recap':
+    case 'insight_progress':
+    case 'user_prompt_submit_blocked':
+    case 'stop_hook_loop':
+    case 'stop_hook_system_message':
       return true;
-    default:
+
+    // Meaningful: user input, model text, tool runs, slash-command
+    // results the user explicitly asked for. Auto-restore must bail
+    // when any of these appear after the candidate user prompt.
+    case 'user':
+    case 'user_shell':
+    case 'gemini':
+    case 'gemini_content':
+    case 'tool_group':
+    case 'btw':
+    case 'memory_saved':
+    case 'about':
+    case 'help':
+    case 'stats':
+    case 'model_stats':
+    case 'tool_stats':
+    case 'quit':
+    case 'compression':
+    case 'summary':
+    case 'extensions_list':
+    case 'tools_list':
+    case 'skills_list':
+    case 'mcp_status':
+    case 'context_usage':
+    case 'doctor':
+    case 'diff_stats':
+    case 'arena_agent_complete':
+    case 'arena_session_complete':
       return false;
+
+    default: {
+      // Compile-time exhaustiveness — adding a new HistoryItem variant
+      // without classifying it here triggers a TS2322 on this line.
+      // At runtime any genuinely unknown type defaults to "meaningful"
+      // (safe — auto-restore bails rather than wiping content).
+      const _exhaustive: never = item;
+      void _exhaustive;
+      return false;
+    }
   }
 }
 

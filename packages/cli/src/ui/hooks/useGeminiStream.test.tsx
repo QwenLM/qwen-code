@@ -1582,6 +1582,71 @@ describe('useGeminiStream', () => {
       expect(setShellInputFocusedSpy).toHaveBeenCalledWith(false);
     });
 
+    it('still resets streamingState to Idle when onCancelSubmit throws', async () => {
+      // Regression: a throw in AppContainer's cancel handler must not
+      // strand the stream in Responding (which would lock the UI — Esc
+      // would no-op afterwards). The try/finally around onCancelSubmit
+      // guarantees setIsResponding(false) and setShellInputFocused(false)
+      // both run.
+      const setShellInputFocusedSpy = vi.fn();
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {}); // keep stream open
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          mockConfig.getGeminiClient(),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {
+            throw new Error('boom');
+          },
+          setShellInputFocusedSpy,
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        result.current.submitQuery('test query');
+      });
+
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+      // act() re-throws, but the state setters queued in the finally
+      // block still get scheduled. Catch the throw, then flush with a
+      // second act() so React applies the queued setIsResponding(false).
+      let caught: unknown;
+      try {
+        act(() => {
+          result.current.cancelOngoingRequest();
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as Error)?.message).toBe('boom');
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(setShellInputFocusedSpy).toHaveBeenCalledWith(false);
+    });
+
     it('should not do anything if cancelOngoingRequest is called when not responding', () => {
       const { result } = renderTestHook();
 

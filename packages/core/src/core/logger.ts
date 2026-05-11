@@ -304,12 +304,18 @@ export class Logger {
         }
       }
     } catch (_error) {
-      // Persist failed — drop the undo target so a later
-      // removeLastUserMessage doesn't delete an unrelated earlier entry
-      // by mistake (e.g., logMessage("A") succeeds, logMessage("B")
-      // throws on a transient disk error, the user cancels B → tracker
-      // would otherwise still point at A's row and remove it).
-      this.lastLoggedUserEntry = null;
+      // Persist failed. Only invalidate the undo tracker when the FAILED
+      // attempt was itself a USER write — that's the case where the
+      // tracker would otherwise lie about the most recent user entry
+      // (logMessage("A" USER) succeeds, logMessage("B" USER) throws,
+      // user cancels B → without this guard removeLastUserMessage would
+      // delete A's row). A failed non-USER write (e.g., MODEL_SWITCH
+      // disk error) doesn't change which row was the last user prompt,
+      // so leave the tracker alone — the prior USER undo target is
+      // still valid.
+      if (type === MessageSenderType.USER) {
+        this.lastLoggedUserEntry = null;
+      }
       // Error already logged by _updateLogFile or _readLogFile
     }
   }

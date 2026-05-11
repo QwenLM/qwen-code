@@ -617,9 +617,26 @@ export const useGeminiStream = (
     );
     setPendingHistoryItem(null);
     clearRetryCountdown();
-    onCancelSubmit({ pendingItem: pendingItemAtCancel });
-    setIsResponding(false);
-    setShellInputFocused(false);
+    // Wrap the consumer callback so a throw in AppContainer's cancel
+    // handler can't strand the stream in `Responding` (which would lock
+    // the UI — Esc would no-op, the user would have to restart). State
+    // resets always run.
+    //
+    // Coupling note: AppContainer's auto-restore guard reads
+    // `historyRef.current` which does NOT yet contain the INFO/pending
+    // items we just enqueued via addItem above (React batches updates).
+    // That guard's correctness depends on the items added here staying
+    // synthetic (info/error/etc.) so the trailing-only-synthetic check
+    // returns the same answer with or without them. If you ever add a
+    // non-synthetic item here (e.g., a meaningful assistant block),
+    // either move the auto-restore check to read functional setState
+    // or revisit isSyntheticHistoryItem.
+    try {
+      onCancelSubmit({ pendingItem: pendingItemAtCancel });
+    } finally {
+      setIsResponding(false);
+      setShellInputFocused(false);
+    }
   }, [
     streamingState,
     addItem,

@@ -800,5 +800,24 @@ describe('Logger', () => {
       const onDisk = await readLogFile();
       expect(onDisk.map((e) => e.message)).toEqual(['kept']);
     });
+
+    it('preserves the USER undo target when a non-USER write (MODEL_SWITCH) fails', async () => {
+      // Regression: blanket-clearing the tracker in the catch branch
+      // would discard a still-valid undo target whenever an unrelated
+      // non-USER write hits a transient error. Only USER-write failures
+      // should invalidate the tracker.
+      await logger.logMessage(MessageSenderType.USER, 'still cancellable');
+      const trackedAfterUser = logger['lastLoggedUserEntry'];
+      expect(trackedAfterUser).not.toBeNull();
+
+      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      await logger.logMessage(MessageSenderType.MODEL_SWITCH, 'qwen→qwen-max');
+
+      // Tracker is unchanged — the non-USER failure didn't shift which
+      // row was the most recent user prompt.
+      expect(logger['lastLoggedUserEntry']).toBe(trackedAfterUser);
+      expect(await logger.removeLastUserMessage()).toBe(true);
+      expect(await readLogFile()).toEqual([]);
+    });
   });
 });
