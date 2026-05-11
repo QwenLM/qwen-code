@@ -27,6 +27,19 @@ export function isSyntheticHistoryItem(
   switch (item.type) {
     // Synthetic: system-generated notices that don't represent meaningful
     // model output or user action. Safe to wipe on auto-restore.
+    //
+    // `gemini_thought` / `gemini_thought_content` are deliberately
+    // CLASSIFIED AS SYNTHETIC even though they're visible to the user:
+    // (1) Claude Code's auto-restore behavior treats <thinking> output
+    // identically — auto-restore fires when the model emitted thoughts
+    // but no real `gemini_content` (i.e. the model was still reasoning
+    // when the user cancelled);
+    // (2) Promoting thoughts to MEANINGFUL would block restore on every
+    // cancel-during-thinking case, which is exactly the case where
+    // restore is most valuable (user wanted to abandon the in-flight
+    // turn before any committed text). The user can still see the
+    // thoughts in scrollback if the terminal preserves them; the
+    // restore only affects the next ↑-history pull and prompt buffer.
     case 'info':
     case 'error':
     case 'warning':

@@ -825,6 +825,32 @@ describe('Logger', () => {
       expect(await readLogFile()).toEqual([]);
     });
 
+    it('rolls back the optimistic in-memory removal when the disk write fails', async () => {
+      // Regression for the copilot review on #4023: removeLastUserMessage
+      // optimistically removes from `this.logs` BEFORE the disk write.
+      // If writeFile fails, the contract MUST hold: returning false has
+      // to mean the entry is still observable in-memory (otherwise
+      // callers see a `false` return AND a removed entry — the
+      // worst-of-both inconsistency the JSDoc forbids).
+      await logger.logMessage(MessageSenderType.USER, 'cancelled prompt');
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+
+      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(false);
+
+      // In-memory state restored: the cancelled prompt is observable
+      // again (so AppContainer's userMessages effect doesn't show a
+      // false-removed state).
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+      // Tracker also restored so a follow-up retry can find the target.
+      expect(logger['lastLoggedUserEntry']).not.toBeNull();
+    });
+
     it('preserves the USER undo target when a non-USER write (MODEL_SWITCH) fails', async () => {
       // Regression: blanket-clearing the tracker in the catch branch
       // would discard a still-valid undo target whenever an unrelated

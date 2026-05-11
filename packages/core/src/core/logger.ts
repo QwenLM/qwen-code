@@ -375,6 +375,11 @@ export class Logger {
     // fires. Without this sync update, ↑-history in the current session
     // would still surface the cancelled prompt until some unrelated
     // future history change forced the effect to re-run.
+    //
+    // If the disk path fails (read or write), restore the removed entry
+    // from the snapshot so the in-memory state stays consistent with
+    // disk — without rollback the caller gets `false` but the in-memory
+    // logs show the entry already removed, contract-violating drift.
     const optimisticIdx = this.logs.findIndex(matchesTarget);
     if (optimisticIdx >= 0) {
       this.logs = [
@@ -382,6 +387,29 @@ export class Logger {
         ...this.logs.slice(optimisticIdx + 1),
       ];
     }
+    const restoreOptimistic = () => {
+      // Restore the removed entry back into `this.logs` if (a) we
+      // actually performed the optimistic removal AND (b) the entry
+      // is no longer present (i.e. concurrent code didn't re-add it
+      // by some other path). Re-insert at the original index when
+      // possible, otherwise append (insertion order isn't a
+      // load-bearing invariant downstream — `getPreviousUserMessages`
+      // sorts by timestamp / index).
+      if (optimisticIdx >= 0 && this.logs.findIndex(matchesTarget) === -1) {
+        const insertAt = Math.min(optimisticIdx, this.logs.length);
+        this.logs = [
+          ...this.logs.slice(0, insertAt),
+          target,
+          ...this.logs.slice(insertAt),
+        ];
+      }
+      // Always restore `lastLoggedUserEntry` so a follow-up retry has
+      // a target to find. (This survives reentrant retry but doesn't
+      // resurrect a target that another path legitimately replaced.)
+      if (this.lastLoggedUserEntry === null) {
+        this.lastLoggedUserEntry = target;
+      }
+    };
     const logFilePath = this.logFilePath;
     return this.serialize(async () => {
       let currentLogsOnDisk: LogEntry[];
@@ -392,6 +420,7 @@ export class Logger {
           'Failed to read log file while undoing last user entry:',
           error,
         );
+        restoreOptimistic();
         return false;
       }
 
@@ -427,6 +456,7 @@ export class Logger {
           'Failed to write log file while undoing last user entry:',
           error,
         );
+        restoreOptimistic();
         return false;
       }
     });
