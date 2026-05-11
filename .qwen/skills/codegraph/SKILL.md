@@ -50,6 +50,11 @@ export CODESCOPE_DB_DIR="/path/to/.linux_db"
 
 # Offline mode for HuggingFace models
 export HF_HUB_OFFLINE="1"
+
+# Fallback when HuggingFace is unreachable (e.g., network issues in China)
+# Use HF mirror or ModelScope for sentence-transformers models:
+export HF_ENDPOINT="https://hf-mirror.com"
+# https://www.modelscope.cn/models/sentence-transformers/all-MiniLM-L6-v2
 ```
 
 ### Check Index Status
