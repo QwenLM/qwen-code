@@ -346,15 +346,17 @@ export class Logger {
    *      The returned Promise resolves to whether *the disk write*
    *      succeeded (not whether the in-memory removal happened).
    *
-   * Failure handling: when the disk read or write throws, the in-memory
-   * removal is intentionally NOT rolled back. The user just hit ESC
-   * expecting the cancelled prompt to disappear from ↑-history; rolling
-   * back would resurrect it on the next render — worse UX than a
-   * temporary disk/cache divergence. The cache resyncs from disk on the
-   * next successful op or on the next session via `initialize()`.
+   * Failure handling: when the disk read or write throws, the optimistic
+   * in-memory removal is ROLLED BACK so the cache stays consistent with
+   * disk. The target entry is re-inserted at its original index (when
+   * still absent) and `lastLoggedUserEntry` is restored so a follow-up
+   * retry has a target. This preserves the contract `return === false ⟹
+   * entry observable in-memory` — callers (e.g. AppContainer's
+   * userMessages effect) won't see a "false-but-removed" state.
    *
-   * @returns true when the disk row was removed; false otherwise. The
-   *   in-memory cache is updated optimistically regardless.
+   * @returns true when the disk row was removed; false otherwise. On
+   *   `false`, the in-memory cache reflects the same state as disk
+   *   (entry restored on failure).
    */
   async removeLastUserMessage(): Promise<boolean> {
     if (!this.initialized || !this.logFilePath) {
