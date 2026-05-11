@@ -4,34 +4,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * Deprecated since v0.15.8: the `qwen auth` CLI subcommand has been removed.
- *
- * Interactive users should use the richer /auth TUI dialog instead.
- * CI/headless users should configure authentication via env vars or CLI flags.
- */
+import type { Argv, CommandModule } from 'yargs';
+import { t } from '../i18n/index.js';
 
-import type { CommandModule } from 'yargs';
-import { writeStdoutLine } from '../utils/stdioHelpers.js';
+const shouldUseColor = () =>
+  Boolean(process.stdout.isTTY && !process.env['NO_COLOR']);
 
-const printRemovalNotice = () => {
-  writeStdoutLine(
-    '\n' +
-      '\x1b[33m⚠  qwen auth has been removed since v0.15.8\x1b[0m\n' +
-      '\n' +
-      '  \x1b[36mInteractive\x1b[0m   →  run qwen and use /auth to configure (8+ providers, guided setup)\n' +
-      '  \x1b[36mCI / Headless\x1b[0m →  set OPENAI_API_KEY + OPENAI_BASE_URL + OPENAI_MODEL env vars\n' +
-      '                     or pass --openai-api-key, --openai-base-url, --model\n' +
-      '  \x1b[36mScripted\x1b[0m      →  edit \x1b[36m~/.qwen/settings.json\x1b[0m, or run qwen interactively once\n' +
-      '\n' +
-      '  Check auth status → \x1b[36m/doctor\x1b[0m\n',
-  );
-  process.exit(0);
+const color = (value: string, code: string) =>
+  shouldUseColor() ? `\x1b[${code}m${value}\x1b[0m` : value;
+
+const cyan = (value: string) => color(value, '36');
+const yellow = (value: string) => color(value, '33');
+
+export const buildRemovalNotice = (): string =>
+  [
+    '',
+    yellow(t('⚠  qwen auth has been removed.')),
+    '',
+    `  ${cyan(t('Interactive'))}   →  ${t('run qwen and use /auth to configure providers')}`,
+    `  ${cyan(t('CI / Headless'))} →  ${t('set provider environment variables, for example OPENAI_API_KEY + OPENAI_BASE_URL + OPENAI_MODEL')}`,
+    `                     ${t('or pass --openai-api-key, --openai-base-url, --model')}`,
+    `  ${cyan(t('Coding Plan'))}   →  ${t('set BAILIAN_CODING_PLAN_API_KEY and use the Coding Plan base URL for your region')}`,
+    `                     ${t('China: https://coding.dashscope.aliyuncs.com/v1')}`,
+    `                     ${t('International: https://coding-intl.dashscope.aliyuncs.com/v1')}`,
+    `  ${cyan(t('OpenRouter'))}    →  ${t('set OPENROUTER_API_KEY and OPENAI_BASE_URL=https://openrouter.ai/api/v1')}`,
+    `  ${cyan(t('Qwen OAuth'))}    →  ${t('run qwen interactively and use /auth; OAuth cannot be configured with env vars alone')}`,
+    `  ${cyan(t('Scripted'))}      →  ${t('edit ~/.qwen/settings.json, or run qwen interactively once')}`,
+    '',
+    `  ${t('Check auth status')} → ${cyan('/doctor')}`,
+    '',
+  ].join('\n');
+
+export const printRemovalNotice = () => {
+  process.stdout.write(buildRemovalNotice(), () => process.exit(0));
 };
 
-// Redirect old subcommands to the removal notice so users who run
-// `qwen auth status` / `qwen auth coding-plan` etc. aren't met with
-// a raw yargs "Unknown argument" error.
 const legacySubcommands = [
   'status',
   'coding-plan',
@@ -42,13 +49,14 @@ const legacySubcommands = [
 
 export const authCommand: CommandModule = {
   command: 'auth',
-  describe: 'Configure authentication (removed since v0.15.8)',
-  builder: (yargs) => {
-    let y = yargs.version(false);
+  describe: t('Configure authentication (removed)'),
+  builder: (yargs: Argv) => {
+    let y = yargs.version(false).strict(false);
     for (const name of legacySubcommands) {
       y = y.command({
-        command: name,
-        describe: '',
+        command: `${name} [legacyArgs..]`,
+        describe: false,
+        builder: (subYargs: Argv) => subYargs.strict(false),
         handler: printRemovalNotice,
       });
     }

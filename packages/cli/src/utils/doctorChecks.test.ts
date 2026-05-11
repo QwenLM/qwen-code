@@ -10,9 +10,18 @@ import { type CommandContext } from '../ui/commands/types.js';
 import { createMockCommandContext } from '../test-utils/mockCommandContext.js';
 import * as systemInfoUtils from './systemInfo.js';
 import * as authModule from '../config/auth.js';
+import * as allProviders from '../auth/allProviders.js';
 
 vi.mock('./systemInfo.js');
 vi.mock('../config/auth.js');
+vi.mock('../auth/allProviders.js', async (importOriginal) => {
+  const actual =
+    (await importOriginal()) as typeof import('../auth/allProviders.js');
+  return {
+    ...actual,
+    findProviderByCredentials: vi.fn(actual.findProviderByCredentials),
+  };
+});
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     (await importOriginal()) as typeof import('@qwen-code/qwen-code-core');
@@ -40,6 +49,11 @@ describe('runDoctorChecks', () => {
             isInitialized: vi.fn().mockReturnValue(true),
           }),
           getModel: vi.fn().mockReturnValue('gpt-4'),
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'openrouter/auto',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            apiKeyEnvKey: 'OPENROUTER_API_KEY',
+          }),
           getMcpServers: vi.fn().mockReturnValue({}),
           getToolRegistry: vi.fn().mockReturnValue({
             getAllTools: vi.fn().mockReturnValue([{ name: 'tool1' }]),
@@ -61,6 +75,7 @@ describe('runDoctorChecks', () => {
   });
 
   afterEach(() => {
+    delete process.env['OPENROUTER_API_KEY'];
     vi.clearAllMocks();
   });
 
@@ -126,6 +141,79 @@ describe('runDoctorChecks', () => {
     const results = await runDoctorChecks(mockContext);
     const authCheck = results.find((r) => r.name === 'API key');
     expect(authCheck!.status).toBe('pass');
+  });
+
+  it('should show provider detail when credentials match a known provider', async () => {
+    process.env['OPENROUTER_API_KEY'] = 'test-key';
+
+    const results = await runDoctorChecks(mockContext);
+    const authCheck = results.find((r) => r.name === 'API key');
+
+    expect(authCheck!.detail).toContain('Provider: OpenRouter');
+    expect(authCheck!.detail).toContain(
+      'Base URL: https://openrouter.ai/api/v1',
+    );
+    expect(authCheck!.detail).toContain('Model: openrouter/auto');
+    expect(authCheck!.detail).toContain(
+      'API key: configured (OPENROUTER_API_KEY)',
+    );
+  });
+
+  it('should show a missing API key in provider detail', async () => {
+    delete process.env['OPENROUTER_API_KEY'];
+
+    const results = await runDoctorChecks(mockContext);
+    const authCheck = results.find((r) => r.name === 'API key');
+
+    expect(authCheck!.detail).toContain('API key: OPENROUTER_API_KEY not set');
+  });
+
+  it('should treat an empty API key environment variable as not set', async () => {
+    process.env['OPENROUTER_API_KEY'] = '';
+
+    const results = await runDoctorChecks(mockContext);
+    const authCheck = results.find((r) => r.name === 'API key');
+
+    expect(authCheck!.detail).toContain('API key: OPENROUTER_API_KEY not set');
+  });
+
+  it('should omit provider detail when credentials do not match a known provider', async () => {
+    vi.mocked(allProviders.findProviderByCredentials).mockReturnValueOnce(
+      undefined,
+    );
+
+    const results = await runDoctorChecks(mockContext);
+    const authCheck = results.find((r) => r.name === 'API key');
+
+    expect(authCheck!.detail).not.toContain('Provider:');
+    expect(authCheck!.detail).toContain(
+      'Base URL: https://openrouter.ai/api/v1',
+    );
+  });
+
+  it('should fall back to config model when content generator config is missing', async () => {
+    const config = mockContext.services.config;
+    vi.mocked(config!.getContentGeneratorConfig).mockImplementationOnce(
+      () => undefined as never,
+    );
+
+    const results = await runDoctorChecks(mockContext);
+    const authCheck = results.find((r) => r.name === 'API key');
+
+    expect(authCheck!.detail).toBe('Model: gpt-4');
+  });
+
+  it('should omit detail when no enriched auth fields are available', async () => {
+    const config = mockContext.services.config;
+    vi.mocked(config!.getModel).mockReturnValueOnce(undefined as never);
+    vi.mocked(config!.getContentGeneratorConfig).mockReturnValueOnce(
+      {} as never,
+    );
+
+    const results = await runDoctorChecks(mockContext);
+    const authCheck = results.find((r) => r.name === 'API key');
+
+    expect(authCheck!.detail).toBeUndefined();
   });
 
   it('should pass tool registry check when registry is loaded', async () => {
