@@ -342,6 +342,7 @@ export function createServeApp(
         res.flushHeaders();
         res.write(
           formatSseFrame({
+            v: 1,
             type: 'stream_error',
             data: {
               error: err.message,
