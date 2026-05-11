@@ -35,6 +35,7 @@ import {
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
@@ -85,9 +86,7 @@ export function redactStructuredOutputArgsForRecording(
   return {
     functionCall: {
       ...part.functionCall,
-      args: {
-        __redacted: 'structured_output payload (see stdout result)',
-      },
+      args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS },
     },
   };
 }

@@ -17,6 +17,29 @@ The arguments you pass MUST validate against the tool's parameter schema. If val
 export type StructuredOutputParams = Record<string, unknown>;
 
 /**
+ * Placeholder that replaces a `structured_output` tool call's `args` on
+ * every surface that would otherwise persist or re-broadcast the user's
+ * structured payload.
+ *
+ * Two on-device surfaces redact via this constant:
+ *   1. `ToolCallEvent` in `telemetry/types.ts` — keeps the payload out
+ *      of OTLP exports / QwenLogger / ui-telemetry stream / chat-recording
+ *      UI event mirror.
+ *   2. `redactStructuredOutputArgsForRecording` in `core/geminiChat.ts`
+ *      — keeps the payload out of the on-disk chat-recording JSONL
+ *      (which gets re-fed into model context on `--continue` /
+ *      `--resume`).
+ *
+ * Shared so both sites can't drift. The args ARE the user's final
+ * structured payload; they're already on stdout via `result` /
+ * `structured_result`, so persisting them again is duplication that
+ * leaks payload data into long-lived storage.
+ */
+export const STRUCTURED_OUTPUT_REDACTED_ARGS = {
+  __redacted: 'structured_output payload (see stdout result)',
+} as const;
+
+/**
  * Synthetic tool that is registered only when the user passes --json-schema.
  * The parameter schema of the tool IS the user-provided JSON Schema, so the
  * model's tool invocation must conform to it — validation is handled by
