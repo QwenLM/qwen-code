@@ -118,6 +118,11 @@ export default {
   'Restored {{count}} file(s).': '{{count}} Datei(en) wiederhergestellt.',
   'Failed to restore files: {{error}}':
     'Fehler beim Wiederherstellen der Dateien: {{error}}',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ navigieren · Enter auswählen · Esc zurück',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ navigieren · Enter auswählen · Esc abbrechen',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y bestätigen · Esc/N zurück',
   'change the theme': 'Design ändern',
   'Select Theme': 'Design auswählen',
   Preview: 'Vorschau',

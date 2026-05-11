@@ -142,6 +142,11 @@ export default {
   'Restored {{count}} file(s).': 'Восстановлено файлов: {{count}}.',
   'Failed to restore files: {{error}}':
     'Не удалось восстановить файлы: {{error}}',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ навигация · Enter выбор · Esc назад',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ навигация · Enter выбор · Esc отмена',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y подтвердить · Esc/N назад',
   'change the theme': 'Изменение темы',
   'Select Theme': 'Выбор темы',
   Preview: 'Предпросмотр',

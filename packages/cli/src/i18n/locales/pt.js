@@ -133,6 +133,11 @@ export default {
   'Restored {{count}} file(s).': '{{count}} arquivo(s) restaurado(s).',
   'Failed to restore files: {{error}}':
     'Falha ao restaurar arquivos: {{error}}',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ navegar · Enter selecionar · Esc voltar',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ navegar · Enter selecionar · Esc cancelar',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y confirmar · Esc/N voltar',
   'change the theme': 'alterar o tema',
   'Select Theme': 'Selecionar Tema',
   Preview: 'Visualizar',

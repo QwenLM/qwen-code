@@ -138,6 +138,11 @@ export default {
   'Restored {{count}} file(s).': '{{count}} fichier(s) restauré(s).',
   'Failed to restore files: {{error}}':
     'Échec de la restauration des fichiers : {{error}}',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ naviguer · Enter sélectionner · Esc retour',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ naviguer · Enter sélectionner · Esc annuler',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y confirmer · Esc/N retour',
   'change the theme': 'changer le thème',
   'Select Theme': 'Sélectionner un thème',
   Preview: 'Aperçu',

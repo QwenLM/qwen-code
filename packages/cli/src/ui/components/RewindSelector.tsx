@@ -103,9 +103,7 @@ function getRestoreOptions(
   diffStats: DiffStats | undefined,
 ): RestoreOptionItem[] {
   const hasChanges =
-    diffStats &&
-    diffStats.filesChanged &&
-    diffStats.filesChanged.length > 0;
+    diffStats && diffStats.filesChanged && diffStats.filesChanged.length > 0;
 
   const options: RestoreOptionItem[] = [];
 
@@ -279,6 +277,8 @@ export function RewindSelector({
         return;
       }
 
+      if (loadingDiff) return;
+
       if (name === 'return') {
         const option = restoreOptions[restoreOptionIndex];
         if (option) {
@@ -304,7 +304,7 @@ export function RewindSelector({
         return;
       }
     },
-    { isActive: restoreItem !== null && !loadingDiff },
+    { isActive: restoreItem !== null },
   );
 
   // Legacy confirm key handler

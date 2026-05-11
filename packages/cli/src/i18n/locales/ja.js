@@ -99,6 +99,11 @@ export default {
   'Restored {{count}} file(s).': '{{count}} 個のファイルを復元しました。',
   'Failed to restore files: {{error}}':
     'ファイルの復元に失敗しました：{{error}}',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ 移動 · Enter 選択 · Esc 戻る',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ 移動 · Enter 選択 · Esc キャンセル',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y 確認 · Esc/N 戻る',
   'change the theme': 'テーマを変更',
   'Select Theme': 'テーマを選択',
   Preview: 'プレビュー',

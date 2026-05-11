@@ -139,6 +139,12 @@ export default {
   'Restored {{count}} file(s).': "S'han restaurat {{count}} fitxer(s).",
   'Failed to restore files: {{error}}':
     'Error en restaurar els fitxers: {{error}}',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ per navegar · Enter per seleccionar · Esc per tornar',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ per navegar · Enter per seleccionar · Esc per cancel·lar',
+  'Enter/Y to confirm · Esc/N to go back':
+    'Enter/Y per confirmar · Esc/N per tornar',
   'change the theme': 'canviar el tema',
   'Select Theme': 'Seleccionar tema',
   Preview: 'Previsualització',

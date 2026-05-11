@@ -133,6 +133,11 @@ export default {
   'Computing file changes...': '正在计算文件变更...',
   'Restored {{count}} file(s).': '已恢复 {{count}} 个文件。',
   'Failed to restore files: {{error}}': '恢复文件失败：{{error}}',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ 导航 · Enter 选择 · Esc 返回',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ 导航 · Enter 选择 · Esc 取消',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y 确认 · Esc/N 返回',
   'change the theme': '更改主题',
   'Select Theme': '选择主题',
   Preview: '预览',

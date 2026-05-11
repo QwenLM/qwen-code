@@ -120,6 +120,11 @@ export default {
   'Computing file changes...': '正在計算檔案變更...',
   'Restored {{count}} file(s).': '已恢復 {{count}} 個檔案。',
   'Failed to restore files: {{error}}': '恢復檔案失敗：{{error}}',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ 導覽 · Enter 選取 · Esc 返回',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ 導覽 · Enter 選取 · Esc 取消',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y 確認 · Esc/N 返回',
   'change the theme': '更改主題',
   'Select Theme': '選擇主題',
   Preview: '預覽',

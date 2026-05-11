@@ -139,6 +139,12 @@ export default {
   'Computing file changes...': 'Computing file changes...',
   'Restored {{count}} file(s).': 'Restored {{count}} file(s).',
   'Failed to restore files: {{error}}': 'Failed to restore files: {{error}}',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ to navigate · Enter to select · Esc to go back',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ to navigate · Enter to select · Esc to cancel',
+  'Enter/Y to confirm · Esc/N to go back':
+    'Enter/Y to confirm · Esc/N to go back',
   'change the theme': 'change the theme',
   'Select Theme': 'Select Theme',
   Preview: 'Preview',
