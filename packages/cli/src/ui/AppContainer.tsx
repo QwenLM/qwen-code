@@ -842,10 +842,19 @@ export const AppContainer = (props: AppContainerProps) => {
     setHistoryRemountKey((prev) => prev + 1);
   }, []);
 
+  // In VP mode (ui.useTerminalBuffer) the React tree fully owns the visible
+  // region via ink 7 native overflow clipping, so writing clearTerminal /
+  // cursorTo+eraseDown to the host terminal is a wasted flash and corrupts
+  // the in-app scroll position. Skip the physical write and only bump the
+  // remount key — the VP path ignores the key (uses state-driven scroll
+  // reset), but the legacy `<Static>` path still needs it.
+  const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
   const refreshStatic = useCallback(() => {
-    stdout.write(ansiEscapes.clearTerminal);
+    if (!useTerminalBuffer) {
+      stdout.write(ansiEscapes.clearTerminal);
+    }
     remountStaticHistory();
-  }, [remountStaticHistory, stdout]);
+  }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
   // Targeted repaint for resize events: move cursor to top-left and erase
   // downward instead of a full clearTerminal, avoiding the full-screen
@@ -853,10 +862,14 @@ export const AppContainer = (props: AppContainerProps) => {
   // changes (tmux split, fullscreen toggle, font size change) we must
   // explicitly re-emit the static history at the new width — otherwise
   // header content stays at the old width and visibly tears.
+  // VP mode handles resize via ink's reflow + its own overflow clipping, so
+  // the physical write is unnecessary there too.
   const repaintStaticViewport = useCallback(() => {
-    stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
+    if (!useTerminalBuffer) {
+      stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
+    }
     remountStaticHistory();
-  }, [remountStaticHistory, stdout]);
+  }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
   // Track previous terminal width across renders so we only repaint when
   // the width actually changes. Initialized to the current width to avoid
@@ -2240,7 +2253,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
     refreshStatic();
   }, [renderMode, refreshStatic]);
-  const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);

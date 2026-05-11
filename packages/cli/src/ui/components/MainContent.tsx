@@ -441,8 +441,8 @@ export const MainContent = () => {
             isStaticItem={virtualIsStaticItem}
             containerHeight={uiState.availableTerminalHeight}
           />
+          <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </OverflowProvider>
-        <ShowMoreLines constrainHeight={uiState.constrainHeight} />
       </>
     );
   }
