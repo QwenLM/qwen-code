@@ -340,8 +340,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * `scope: 'global'` field) should be active for this request.
    * Requires both `enableCacheControl !== false` AND an Anthropic-native
    * baseURL — these two outputs always travel together. Computed per
-   * request because `Config.setModel()` mutates `enableCacheControl` /
-   * `baseUrl` in place.
+   * request because `Config.handleModelChange()` hot-updates
+   * `enableCacheControl` in-place on the qwen-oauth path (without
+   * recreating the ContentGenerator); for non-qwen-oauth providers a
+   * model change goes through the refresh path which DOES recreate
+   * the ContentGenerator (so `baseUrl` is captured fresh at construct
+   * time, not mutated). Either way reading both fields each request
+   * is the right defensive choice — cheap and avoids stale-cache
+   * surprises if the hot-update list ever expands.
    */
   private useGlobalCacheScope(): boolean {
     return (
