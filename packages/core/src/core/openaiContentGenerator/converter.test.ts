@@ -2159,7 +2159,11 @@ describe('OpenAIContentConverter', () => {
       expect(emitted[2]).toBe(' there, how are you today?');
     });
 
-    it('should normalize cumulative reasoning_content deltas to suffixes', () => {
+    it('should normalize cumulative reasoning_content deltas across multi-line growth (newline-prefixed suffixes)', () => {
+      // Distinct from the single-line cumulative reasoning test above:
+      // this case grows the accumulated text across newline boundaries so the
+      // emitted suffixes themselves begin with '\n', exercising the slice
+      // arithmetic at the newline.
       const ctx = withStreamParser();
       const chunks = [
         'Let me reason step by step.',
@@ -2528,6 +2532,88 @@ describe('OpenAIContentConverter', () => {
       expect(emitted[2]).toBe('');
       // Chunk 4: extension resumes from 'Hello World' → emits '!'
       expect(emitted[3]).toBe('!');
+    });
+
+    it('should still call into convertOpenAITextToParts on finish_reason when the cumulative-mode normalized delta is empty', () => {
+      // Targets the `normalizedContent || choice.finish_reason` guard on the
+      // content path: in cumulative mode an exact-repeat final chunk yields a
+      // normalized delta of '' but must still flush buffered tagged-thinking
+      // content (and any other finish-time side effects) via
+      // convertOpenAITextToParts. The earlier cumulative tests all use
+      // `finish_reason: null`, so this exercises the empty-normalized +
+      // non-null finish_reason path in a cumulative context.
+      const ctx = withStreamParser();
+      // 1) Prefix-extension chunk pair establishes cumulative mode and primes
+      //    `emittedText` so the next exact-repeat is the cumulative branch.
+      converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-cum-empty-finish-0',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'Answer: forty-two' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'gpt-test',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        ctx,
+      );
+      converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-cum-empty-finish-1',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'Answer: forty-two and more.' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'gpt-test',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        ctx,
+      );
+
+      // 2) Final chunk: re-sends the accumulated string verbatim along with
+      //    `finish_reason: 'stop'`. The normalized delta is '' (cumulative
+      //    suffix-of-self), but the finish_reason must still drive
+      //    convertOpenAITextToParts.
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-cum-empty-finish-2',
+          created: 458,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'Answer: forty-two and more.' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'gpt-test',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        ctx,
+      );
+
+      // The cumulative-suppressed empty delta produces no text part, but
+      // because finish_reason is set, the converter still reaches the parts
+      // pipeline; on a clean (no buffered tag) state this yields parts: [].
+      // The crucial invariant: no exception thrown, finishReason propagates,
+      // and no spurious duplicate text emerges.
+      expect(finalChunk.candidates?.[0]?.finishReason).toBe('STOP');
+      const finalText =
+        finalChunk.candidates?.[0]?.content?.parts
+          ?.filter((p) => 'text' in p)
+          ?.map((p) => (p as { text: string }).text)
+          ?.join('') ?? '';
+      expect(finalText).toBe('');
     });
 
     it('should handle a single chunk delta with both reasoning_content and content simultaneously', () => {
