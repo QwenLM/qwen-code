@@ -74,9 +74,12 @@ const external = [
 
 esbuild
   .build({
-    entryPoints: ['packages/cli/index.ts'],
+    entryPoints: { cli: 'packages/cli/index.ts' },
     bundle: true,
-    outfile: 'dist/cli.js',
+    outdir: 'dist',
+    entryNames: '[name]',
+    chunkNames: 'chunks/[name]-[hash]',
+    splitting: true,
     platform: 'node',
     format: 'esm',
     target: 'node22',
@@ -103,6 +106,11 @@ esbuild
       'process.env.CLI_VERSION': JSON.stringify(pkg.version),
       // Make global available for compatibility
       global: 'globalThis',
+      // Redirect free __dirname/__filename references to the shim so that
+      // vendored libraries that emit their own `var __dirname` locals don't
+      // collide with our injected bindings when code-splitting is enabled.
+      __dirname: '__qwen_dirname',
+      __filename: '__qwen_filename',
     },
     loader: { '.node': 'file' },
     plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],

@@ -5,25 +5,27 @@
  */
 
 /**
- * Shims for esbuild ESM bundles to support require() calls
- * This file is injected into the bundle via esbuild's inject option
+ * Shims for esbuild ESM bundles.
+ *
+ * With code-splitting enabled, the inject is applied per-chunk and the
+ * exported bindings cannot collide with `var __dirname` polyfills that
+ * vendored libraries (e.g. yargs) emit in their own ESM compat layers.
+ * To stay collision-free, this file exposes prefixed names; the build
+ * config uses esbuild `define` to rewrite free `__dirname` / `__filename`
+ * references in source to these prefixed identifiers, while leaving
+ * vendor-declared locals untouched.
  */
 
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 
-// Create require function for the current module and make it global
 const _require = createRequire(import.meta.url);
 
-// Make require available globally for dynamic requires
 if (typeof globalThis.require === 'undefined') {
   globalThis.require = _require;
 }
 
-// Export for esbuild injection
 export const require = _require;
-
-// Setup __filename and __dirname for compatibility
-export const __filename = fileURLToPath(import.meta.url);
-export const __dirname = dirname(__filename);
+export const __qwen_filename = fileURLToPath(import.meta.url);
+export const __qwen_dirname = dirname(__qwen_filename);

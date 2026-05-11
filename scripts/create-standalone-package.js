@@ -39,6 +39,7 @@ const TARGETS = new Map([
 const DIST_REQUIRED_PATHS = ['cli.js', 'vendor', 'bundled/qc-helper/docs'];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  'chunks',
   'vendor',
   'bundled',
   'package.json',
