@@ -2,21 +2,22 @@
 # ──────────────────────────────────────────────────────────
 # deploy-qwen.sh
 #
-# 一键部署 / 升级 qwen-code standalone 到 Linux 服务器。
+# 一键部署 / 升级 qwen-code 到 Linux 服务器。
 #
 # 全流程：
-#   1. 从 OSS 下载指定版本的 standalone 包
+#   1. 从 OSS 下载指定版本的 bundle 包
 #   2. 校验 SHA256
 #   3. 解压到安装目录
 #   4. 创建 /usr/local/bin/qwen 软链接
 #   5. 验证安装
 #
+# 前提条件：系统已安装 Node.js >= 20
+#
 # 用法:
 #   curl -fsSL <oss_url>/deploy-qwen.sh | bash
-#   curl -fsSL <oss_url>/deploy-qwen.sh | bash -s -- --version 0.14.3-preview.20260414120000
-#   bash deploy-qwen.sh --version 0.14.3
-#   bash deploy-qwen.sh --version 0.14.3 --arch arm64
-#   bash deploy-qwen.sh --version 0.14.3 --install-dir /opt/qwen-code
+#   curl -fsSL <oss_url>/deploy-qwen.sh | bash -s -- --version 0.14.8-dataworks.3
+#   bash deploy-qwen.sh --version 0.14.8-dataworks.3
+#   bash deploy-qwen.sh --install-dir /opt/qwen-code
 #
 # 环境变量 (均可通过命令行参数覆盖):
 #   QWEN_VERSION      - 版本号（可通过 --version 传入）
@@ -65,6 +66,19 @@ fi
 info()  { echo -e "${GREEN}>>>${NC} $*"; }
 warn()  { echo -e "${YELLOW}>>> WARNING:${NC} $*"; }
 error() { echo -e "${RED}>>> ERROR:${NC} $*" >&2; }
+
+# ── 检查 Node.js ──
+if ! command -v node &>/dev/null; then
+  error "Node.js not found. Please install Node.js >= 20 first."
+  exit 1
+fi
+
+NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
+if [ "${NODE_MAJOR}" -lt 20 ]; then
+  error "Node.js >= 20 required, current: $(node --version)"
+  exit 1
+fi
+info "Node.js $(node --version) detected"
 
 # ── 自动检测架构 ──
 if [ -z "${ARCH}" ]; then
@@ -166,7 +180,7 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# Step 3: 解压到 staging 目录并验证
+# Step 3: 解压并验证
 # ════════════════════════════════════════════════════════════
 echo ""
 info "Step 3: Extracting and verifying..."
@@ -175,20 +189,10 @@ mkdir -p "${STAGE_DIR}"
 tar -xzf "${ARCHIVE_TMP}" -C "${STAGE_DIR}" --strip-components=1
 
 chmod +x "${STAGE_DIR}/bin/qwen"
-chmod +x "${STAGE_DIR}/node/bin/node"
-
-# 验证嵌入的 Node.js 能运行
-if ! "${STAGE_DIR}/node/bin/node" --version >/dev/null 2>&1; then
-  error "Embedded Node.js binary verification failed"
-  ldd "${STAGE_DIR}/node/bin/node" 2>/dev/null || true
-  exit 1
-fi
-info "Node.js $(${STAGE_DIR}/node/bin/node --version) verified"
 
 # 验证 qwen 命令能运行
-NODE_PATH="${STAGE_DIR}/native_modules/node_modules" \
-  "${STAGE_DIR}/node/bin/node" "${STAGE_DIR}/dist/cli.js" --version 2>/dev/null \
-  && info "qwen binary verified" \
+"${STAGE_DIR}/bin/qwen" --version 2>/dev/null \
+  && info "qwen verified" \
   || warn "qwen --version check did not succeed (non-fatal for initial install)"
 
 # 下载 metadata 到 staging
@@ -238,7 +242,6 @@ if [ "${CREATE_SYMLINK}" = "true" ]; then
   # 查找所有已存在的 qwen 命令并逐个替换
   ALL_QWEN_PATHS=""
   if command -v qwen &>/dev/null; then
-    # 使用 which -a 或遍历 PATH 来找到所有 qwen
     ALL_QWEN_PATHS=$(which -a qwen 2>/dev/null || true)
   fi
 
@@ -255,38 +258,37 @@ ${ALL_QWEN_PATHS}"
 
     OLD_DIR=$(dirname "${OLD_PATH}")
 
-    # 如果已经是指向 standalone 的 symlink，跳过
+    # 如果已经是指向当前版本的 symlink，跳过
     if [ -L "${OLD_PATH}" ]; then
       LINK_TARGET=$(readlink -f "${OLD_PATH}" 2>/dev/null || true)
       EXPECTED_TARGET=$(readlink -f "${STANDALONE_TARGET}" 2>/dev/null || true)
       if [ "${LINK_TARGET}" = "${EXPECTED_TARGET}" ]; then
-        info "已是最新: ${OLD_PATH}"
+        info "Already up to date: ${OLD_PATH}"
         continue
       fi
     fi
 
     # 检查目录是否可写
     if [ ! -w "${OLD_DIR}" ]; then
-      warn "无写入权限，跳过: ${OLD_PATH}"
+      warn "No write permission, skipping: ${OLD_PATH}"
       continue
     fi
 
     # 备份旧文件（非 symlink 才备份）
     if [ -f "${OLD_PATH}" ] && [ ! -L "${OLD_PATH}" ]; then
       mv "${OLD_PATH}" "${OLD_PATH}.old-backup" 2>/dev/null || true
-      info "备份旧版本: ${OLD_PATH} -> ${OLD_PATH}.old-backup"
+      info "Backed up: ${OLD_PATH} -> ${OLD_PATH}.old-backup"
     fi
 
     # 创建 symlink
     ln -sf "${STANDALONE_TARGET}" "${OLD_PATH}" 2>/dev/null \
-      && info "已替换: ${OLD_PATH} -> ${STANDALONE_TARGET}" \
-      || warn "替换失败: ${OLD_PATH}"
+      && info "Linked: ${OLD_PATH} -> ${STANDALONE_TARGET}" \
+      || warn "Failed to link: ${OLD_PATH}"
   done
 
-  # 也创建 metadata 软链接便于升级脚本读取
+  # metadata 软链接便于升级脚本读取
   ln -sfn "current/metadata.json" "${INSTALL_DIR}/metadata.json" 2>/dev/null || true
 
-  # 刷新 shell hash 缓存
   hash -r 2>/dev/null || true
 fi
 
@@ -299,6 +301,7 @@ echo "  Qwen Code Deploy Complete"
 echo ""
 echo "  Version:  ${VERSION}"
 echo "  Arch:     ${ARCH}"
+echo "  Node.js:  $(node --version)"
 echo "  Binary:   ${INSTALL_DIR}/current/bin/qwen"
 echo ""
 echo "  Usage:"
@@ -320,11 +323,11 @@ if [ -n "${FINAL_QWEN}" ]; then
   FINAL_REAL="$(readlink -f "${FINAL_QWEN}" 2>/dev/null || echo "${FINAL_QWEN}")"
   EXPECTED_REAL="$(readlink -f "${INSTALL_DIR}/current/bin/qwen" 2>/dev/null || true)"
   if [ "${FINAL_REAL}" != "${EXPECTED_REAL}" ]; then
-    echo "  ⚠️  警告: 当前 qwen 仍指向旧版本!"
-    echo "     当前: ${FINAL_QWEN} -> ${FINAL_REAL}"
-    echo "     期望: ${EXPECTED_REAL}"
+    echo "  WARNING: qwen still points to old version!"
+    echo "     Current: ${FINAL_QWEN} -> ${FINAL_REAL}"
+    echo "     Expected: ${EXPECTED_REAL}"
     echo ""
-    echo "  修复方法:"
+    echo "  Fix:"
     echo "    npm uninstall -g @qwen-code/qwen-code && hash -r"
     echo ""
   fi

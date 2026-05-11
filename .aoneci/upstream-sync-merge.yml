@@ -12,7 +12,7 @@
 #   CI_DINGTALK_WEBHOOK_SECRET              - 钉钉机器人加签密钥（可选）
 #
 # 触发方式：
-#   1. 手动推送到 trigger/upstream-sync 分支
+#   1. 手动推送到 feat/upstream-sync-automation 分支
 #   2. 在 Aone CI 平台手动触发
 
 name: Upstream Sync 合并
@@ -119,6 +119,8 @@ jobs:
           TARGET_BRANCH="${CI_DEFAULT_BRANCH:-main}"
 
           git remote add upstream https://github.com/QwenLM/qwen-code.git 2>/dev/null || true
+          # CI 默认 shallow clone，需要 unshallow 才能让 merge-base 找到共同祖先
+          git fetch --unshallow origin 2>/dev/null || true
           git fetch upstream main --tags
           git fetch origin "$TARGET_BRANCH" 2>/dev/null || true
 
@@ -164,7 +166,8 @@ jobs:
           MERGE_BASE=$(git merge-base "$SYNC_REF" upstream/main 2>/dev/null || echo "")
           if [ -z "$MERGE_BASE" ]; then
             echo "⚠️ 无法计算 merge-base（$SYNC_REF 与 upstream/main 无共同祖先），视为全量同步"
-            NEW_COMMITS=$(git log --oneline upstream/main --no-merges | wc -l | tr -d ' ')
+            # 用 cherry 精确统计对方独有的提交数，避免把整个 upstream 历史都算进去
+            NEW_COMMITS=$(git cherry "$SYNC_REF" upstream/main 2>/dev/null | grep -c '^+' || git rev-list --count "$SYNC_REF..upstream/main" 2>/dev/null || echo "unknown")
           else
             NEW_COMMITS=$(git log --oneline "$MERGE_BASE..upstream/main" --no-merges | wc -l | tr -d ' ')
             echo "📊 merge-base: $(git rev-parse --short $MERGE_BASE) | upstream/main: $(git rev-parse --short upstream/main) | 新提交数: $NEW_COMMITS"
@@ -203,6 +206,7 @@ jobs:
 
           if git show-ref --verify --quiet "refs/remotes/origin/$SYNC_BRANCH"; then
             if git merge-base --is-ancestor upstream/main "$REMOTE_SYNC_REF"; then
+              # ── 情况 A：sync 分支已包含最新 upstream/main → 直接复用 ──
               echo "♻️ 检测到远端已有当天 sync 分支且已包含最新 upstream/main，直接复用"
               git checkout -B "$SYNC_BRANCH" "$REMOTE_SYNC_REF"
               echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
@@ -220,17 +224,35 @@ jobs:
               echo "   当前 HEAD: $(git log --oneline -1 HEAD)"
               echo "============================================================"
               exit 0
+            else
+              # ── 情况 B：sync 分支已存在但 upstream/main 有新提交 → 增量合并 ──
+              STALE_NEW_COUNT=$(git log --oneline "$REMOTE_SYNC_REF..upstream/main" --no-merges | wc -l | tr -d ' ')
+              echo "🔄 远端已有当天 sync 分支，但 upstream/main 有 $STALE_NEW_COUNT 个新提交"
+              echo "   将在现有 sync 分支上增量合并，保留已有评审上下文..."
+              echo "   现有 sync HEAD: $(git log --oneline -1 "$REMOTE_SYNC_REF")"
+              git checkout -B "$SYNC_BRANCH" "$REMOTE_SYNC_REF"
             fi
-          fi
-
-          if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
-            git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
           else
-            git checkout -B "$TARGET_BRANCH"
+            # ── 情况 C：sync 分支不存在 → 从 target 分支新建 ──
+            echo "📦 创建新的 sync 分支（基于 $TARGET_BRANCH）"
+            if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
+              git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+            else
+              git checkout -B "$TARGET_BRANCH"
+            fi
+            git checkout -B "$SYNC_BRANCH"
           fi
 
-          git checkout -B "$SYNC_BRANCH"
-          git tag "sync-checkpoint-$(date +%Y%m%d)" HEAD
+          SYNC_CHECKPOINT=$(git rev-parse HEAD)
+          git tag "sync-checkpoint-$(date +%Y%m%d)" HEAD 2>/dev/null || true
+
+          # 计算 merge-base，用于合并后的 fork 定制校验
+          MERGE_BASE_REF=$(git merge-base HEAD upstream/main 2>/dev/null || echo "")
+          if [ -n "$MERGE_BASE_REF" ]; then
+            echo "📌 merge-base: $(git rev-parse --short $MERGE_BASE_REF)"
+          else
+            echo "⚠️ 无法计算 merge-base，合并后校验将跳过"
+          fi
 
           # 状态文件：记录冲突信息供后续步骤使用
           echo "clean" > "$CONFLICT_STATUS_FILE"
@@ -249,7 +271,36 @@ jobs:
           MERGE_OUTPUT=$(git merge upstream/main --no-edit 2>&1) || MERGE_EXIT=$?
 
           if [ "$MERGE_EXIT" -eq 0 ]; then
-            echo "✅ 合并成功，无冲突"
+            echo "✅ git merge 完成，无冲突标记"
+
+            # 合并后校验：检查 fork 定制是否被静默回退
+            # 原理：对比合并结果与 merge 前的 origin/main，
+            # 如果合并结果中丢失了 origin/main 独有的修改（即 merge 前有、merge 后没有），
+            # 说明 merge 错误地采用了 upstream 版本
+            FORK_PRE_MERGE_DIFF=$(git diff --name-only "$MERGE_BASE_REF" "$SYNC_CHECKPOINT" 2>/dev/null | wc -l | tr -d ' ')
+            FORK_POST_MERGE_DIFF=$(git diff --name-only "$MERGE_BASE_REF" HEAD 2>/dev/null | wc -l | tr -d ' ')
+            REVERTED_COUNT=0
+            if [ "$FORK_PRE_MERGE_DIFF" -gt 0 ] && [ "$FORK_POST_MERGE_DIFF" -lt "$FORK_PRE_MERGE_DIFF" ]; then
+              REVERTED_FILES=$(comm -23 \
+                <(git diff --name-only "$MERGE_BASE_REF" "$SYNC_CHECKPOINT" 2>/dev/null | sort) \
+                <(git diff --name-only "$MERGE_BASE_REF" HEAD 2>/dev/null | sort))
+              REVERTED_COUNT=$(echo "$REVERTED_FILES" | grep -c . || true)
+            fi
+
+            if [ "$REVERTED_COUNT" -gt 0 ]; then
+              echo "❌ 合并后校验失败：检测到 $REVERTED_COUNT 个文件的 fork 定制被静默回退"
+              echo "$REVERTED_FILES" | head -20
+              echo ""
+              echo "可能原因：shallow clone 导致 merge-base 不准确"
+              echo "建议：确认 git fetch --unshallow 是否生效"
+              abort_merge_if_active
+              echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
+              echo "$REVERTED_FILES" > "$CONFLICT_FILES_FILE"
+              # 中止合并，回到合并前状态
+              git reset --hard "$SYNC_CHECKPOINT"
+            else
+              echo "✅ 合并后校验通过：fork 定制完整保留"
+            fi
           elif echo "$MERGE_OUTPUT" | grep -q "unrelated histories"; then
             echo "⚠️ 检测到 unrelated histories，使用 --allow-unrelated-histories 重试"
             MERGE_OUTPUT=$(git merge upstream/main --no-edit --allow-unrelated-histories 2>&1) || MERGE_EXIT=$?
