@@ -158,8 +158,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     // Prefer a real active span context when OTel logs provide one, preserving
     // direct parentage. Otherwise derive traceId from session.id so all events
     // in one session appear under a single trace.  Fall back to
-    // getCurrentSessionId() when the OTel Resource session.id is stale after
-    // a session change (/clear, /resume).
+    // getCurrentSessionId() when the log record has no session.id attribute
+    // (e.g. after a session change via /clear or /resume).
     const parentSpanContext = getValidParentSpanContext(logRecord.spanContext);
     const sessionId =
       logRecord.attributes?.['session.id'] ?? getCurrentSessionId();

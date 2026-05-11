@@ -408,6 +408,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let terminalStatusAttempted = false;
+    let spanEnded = false;
 
     // Helper to run code within the span context during iteration.
     // This ensures debug log lines emitted during stream processing
@@ -427,6 +428,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             code: SpanStatusCode.ERROR,
             message: 'Stream span timed out',
           });
+          spanEnded = true;
           span.end();
         } catch {
           // OTel errors must not interrupt the consumer.
@@ -507,15 +509,17 @@ export class LoggingContentGenerator implements ContentGenerator {
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
       }
-      if (!terminalStatusAttempted) {
-        if (span) {
-          safeSetStatus(span, { code: SpanStatusCode.OK });
+      if (!spanEnded) {
+        if (!terminalStatusAttempted) {
+          if (span) {
+            safeSetStatus(span, { code: SpanStatusCode.OK });
+          }
         }
-      }
-      try {
-        span?.end();
-      } catch {
-        // OTel errors must not mask the original API error
+        try {
+          span?.end();
+        } catch {
+          // OTel errors must not mask the original API error
+        }
       }
     }
   }

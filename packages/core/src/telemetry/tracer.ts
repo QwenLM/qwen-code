@@ -221,7 +221,8 @@ export function startSpanWithContext(
  * In that case we use NONE so the sampler evaluates each span independently.
  */
 function shouldForceSampled(): boolean {
-  const sampler = process.env['OTEL_TRACES_SAMPLER']?.toLowerCase() ?? '';
+  const sampler =
+    process.env['OTEL_TRACES_SAMPLER']?.trim().toLowerCase() ?? '';
   return (
     !sampler || sampler === 'parentbased_always_on' || sampler === 'always_on'
   );

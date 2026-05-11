@@ -23,8 +23,8 @@ export function getSessionContext(): Context | undefined {
 
 /**
  * Returns the most recent session ID passed to setSessionContext.
- * Used by LogToSpanProcessor to derive the correct traceId even when
- * the OTel Resource session.id attribute is stale after a session change.
+ * Used by LogToSpanProcessor as a fallback to derive the correct traceId
+ * when a log record has no session.id attribute (e.g. after /clear or /resume).
  */
 export function getCurrentSessionId(): string | undefined {
   return currentSessionId;
