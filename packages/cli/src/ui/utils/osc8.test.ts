@@ -311,6 +311,53 @@ describe('osc8 helpers', () => {
       expect(supportsHyperlinks()).toBe(true);
     });
 
+    it('Konsole ≥ 21.04 is enabled via KONSOLE_VERSION', () => {
+      setTTY(true);
+      process.env['KONSOLE_VERSION'] = '230400';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('Alacritty is enabled via TERM=alacritty', () => {
+      setTTY(true);
+      process.env['TERM'] = 'alacritty';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('JetBrains JediTerm is enabled via TERMINAL_EMULATOR', () => {
+      setTTY(true);
+      process.env['TERMINAL_EMULATOR'] = 'JetBrains-JediTerm';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('Warp Terminal is enabled via TERM_PROGRAM=WarpTerminal', () => {
+      setTTY(true);
+      process.env['TERM_PROGRAM'] = 'WarpTerminal';
+      // Warp's TERM_PROGRAM_VERSION is set but not consulted — Warp has
+      // supported OSC 8 since launch.
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('mintty is enabled via TERM_PROGRAM=mintty', () => {
+      setTTY(true);
+      process.env['TERM_PROGRAM'] = 'mintty';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('Hyper is intentionally not auto-detected (requires FORCE_HYPERLINK)', () => {
+      setTTY(true);
+      process.env['TERM_PROGRAM'] = 'Hyper';
+      expect(supportsHyperlinks()).toBe(false);
+      process.env['FORCE_HYPERLINK'] = '1';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('Apple Terminal is not auto-detected (no OSC 8 support)', () => {
+      setTTY(true);
+      process.env['TERM_PROGRAM'] = 'Apple_Terminal';
+      process.env['TERM_PROGRAM_VERSION'] = '447';
+      expect(supportsHyperlinks()).toBe(false);
+    });
+
     it('honors FORCE_HYPERLINK=1 even inside tmux and even when isTTY=false', () => {
       setTTY(false);
       process.env['TMUX'] = '/tmp/x,1,0';

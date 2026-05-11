@@ -161,6 +161,14 @@ export function supportsHyperlinks(
   if (env['GHOSTTY_RESOURCES_DIR'] || env['TERM'] === 'xterm-ghostty') {
     return true;
   }
+  // Konsole ≥ 21.04 ships OSC 8 and sets KONSOLE_VERSION on every session.
+  if (env['KONSOLE_VERSION']) return true;
+  // Alacritty ≥ 0.11 supports OSC 8. It doesn't set a distinctive env var,
+  // so identify it through the terminfo entry instead.
+  if (env['TERM'] === 'alacritty') return true;
+  // JetBrains IDEs set TERMINAL_EMULATOR on their integrated terminal; the
+  // JediTerm backend has supported OSC 8 since 2022.3.
+  if (env['TERMINAL_EMULATOR'] === 'JetBrains-JediTerm') return true;
 
   if (env['TERM_PROGRAM']) {
     const version = parseVersion(env['TERM_PROGRAM_VERSION']);
@@ -176,8 +184,16 @@ export function supportsHyperlinks(
         );
       case 'ghostty':
         return true;
-      // Hyper historically advertised OSC 8 but rendered it inconsistently;
-      // require an explicit FORCE_HYPERLINK opt-in.
+      case 'WarpTerminal':
+        // Warp has supported OSC 8 since its public launch.
+        return true;
+      case 'mintty':
+        // mintty ≥ 3.3 supports OSC 8; older installs are extremely rare
+        // and still degrade safely (terminal just prints the visible bytes).
+        return true;
+      // Hyper exposes OSC 8 in recent versions but plugin chains have a
+      // history of breaking escape passthrough — gate on FORCE_HYPERLINK
+      // so users who know their setup works can opt in explicitly.
       default:
         break;
     }
@@ -328,6 +344,8 @@ export const HYPERLINK_ENV_KEYS = [
   'VTE_VERSION',
   'DOMTERM',
   'GHOSTTY_RESOURCES_DIR',
+  'KONSOLE_VERSION',
+  'TERMINAL_EMULATOR',
   'TERM',
   'TEAMCITY_VERSION',
   'FORCE_HYPERLINK',
