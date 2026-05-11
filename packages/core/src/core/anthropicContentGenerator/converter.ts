@@ -77,6 +77,16 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * spawned with `thinkingConfig.includeThoughts: false`).
    */
   stripAssistantThinking?: boolean;
+  /**
+   * Per-call override for `enableCacheControl`. Falls back to the value
+   * captured at construction. The generator passes the live
+   * `contentGeneratorConfig.enableCacheControl` here so a hot
+   * `Config.setModel()` flip is reflected on the next request — otherwise
+   * the converter's body-side `cache_control` and the generator's
+   * per-request `prompt-caching-scope-2026-01-05` beta header (which reads
+   * the live config directly) can disagree.
+   */
+  enableCacheControl?: boolean;
 }
 
 export class AnthropicContentConverter {
@@ -121,11 +131,17 @@ export class AnthropicContentConverter {
       this.injectEmptyThinkingOnToolUseTurns(messages);
     }
 
-    // Add cache_control to enable prompt caching (if enabled)
-    const system = this.enableCacheControl
+    // Add cache_control to enable prompt caching (if enabled). Prefer the
+    // per-call override when the caller (typically the generator) passes
+    // one — that path latches the live config value alongside the
+    // per-request beta-header decision so the two stay in sync after
+    // `Config.setModel()` mutates `enableCacheControl` mid-session.
+    const enableCacheControl =
+      options.enableCacheControl ?? this.enableCacheControl;
+    const system = enableCacheControl
       ? this.buildSystemWithCacheControl(systemText)
       : systemText;
-    if (this.enableCacheControl) {
+    if (enableCacheControl) {
       this.addCacheControlToMessages(messages);
     }
 
@@ -137,6 +153,7 @@ export class AnthropicContentConverter {
 
   async convertGeminiToolsToAnthropic(
     geminiTools: ToolListUnion,
+    options: { enableCacheControl?: boolean } = {},
   ): Promise<AnthropicToolParam[]> {
     const tools: AnthropicToolParam[] = [];
 
@@ -188,7 +205,13 @@ export class AnthropicContentConverter {
     // sessions — tools tend to be the largest, slowest-changing prefix
     // (often 5K+ tokens), so cross-session reuse is where most of the
     // hit-rate improvement under `prompt-caching-scope-2026-01-05` shows up.
-    if (this.enableCacheControl && tools.length > 0) {
+    // Per-call override mirrors the request-shape gate in
+    // `convertGeminiRequestToAnthropic` so a hot `Config.setModel()` flip of
+    // `enableCacheControl` doesn't leave the tool body and the beta header
+    // out of sync.
+    const enableCacheControl =
+      options.enableCacheControl ?? this.enableCacheControl;
+    if (enableCacheControl && tools.length > 0) {
       const lastToolIndex = tools.length - 1;
       tools[lastToolIndex] = {
         ...tools[lastToolIndex],

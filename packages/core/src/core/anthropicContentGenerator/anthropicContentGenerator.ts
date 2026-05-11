@@ -375,6 +375,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
 
+    // Sample the live cache-control flag once per request and forward it
+    // to both the converter (body-side `cache_control`) and the
+    // per-request beta-header builder. `Config.setModel()` mutates
+    // `enableCacheControl` in place, so the converter's constructor-time
+    // value can otherwise diverge from the generator's per-request read.
+    const enableCacheControl =
+      this.contentGeneratorConfig.enableCacheControl !== false;
+
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
       {
@@ -384,11 +392,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         stripAssistantThinking,
+        enableCacheControl,
       },
     );
 
     const tools = request.config?.tools
-      ? await this.converter.convertGeminiToolsToAnthropic(request.config.tools)
+      ? await this.converter.convertGeminiToolsToAnthropic(
+          request.config.tools,
+          { enableCacheControl },
+        )
       : undefined;
 
     return {

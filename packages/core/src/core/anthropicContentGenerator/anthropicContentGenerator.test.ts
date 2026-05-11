@@ -182,6 +182,85 @@ describe('AnthropicContentGenerator', () => {
     expect(anthropicState.constructorOptions?.['authToken']).toBeUndefined();
   });
 
+  it('treats *.anthropic.com subdomains as Anthropic-native', async () => {
+    // Anthropic's own subdomains (regional endpoints, internal routes) all
+    // share the native auth/identity contract — none of them want the
+    // proxy-flavored Bearer auth or claude-cli UA.
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: 'https://eu.api.anthropic.com',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
+    expect(headers['x-app']).toBeUndefined();
+    expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
+    expect(anthropicState.constructorOptions?.['authToken']).toBeUndefined();
+  });
+
+  it('treats malformed baseURL as proxy (URL parse failure falls through to claude-cli identity)', async () => {
+    // A bogus baseUrl string trips `new URL()`. The detector's catch
+    // branch must fall through to the proxy path rather than throw or
+    // silently treat the broken value as Anthropic-native.
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-test',
+        apiKey: 'test-key',
+        baseUrl: 'not a valid url',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
+    expect(headers['x-app']).toBe('cli');
+    expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
+    expect(anthropicState.constructorOptions?.['apiKey']).toBeUndefined();
+  });
+
+  it('does not match spoofed anthropic.com.evil.com hostnames', async () => {
+    // Mirror of the DeepSeek hostname-spoof test: a suffix like
+    // `anthropic.com.evil.com` must NOT be classified as Anthropic-native —
+    // otherwise an attacker controlling DNS could route real Anthropic
+    // credentials with `x-api-key` to their endpoint.
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-test',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com.evil.com',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
+    expect(headers['x-app']).toBe('cli');
+    expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
+    expect(anthropicState.constructorOptions?.['apiKey']).toBeUndefined();
+  });
+
   it('merges customHeaders into defaultHeaders (does not replace defaults)', async () => {
     const { AnthropicContentGenerator } = await importGenerator();
     void new AnthropicContentGenerator(
@@ -308,6 +387,64 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).not.toContain(
         'prompt-caching-scope-2026-01-05',
       );
+    });
+
+    it('reflects hot enableCacheControl flips between requests (no stale converter cache)', async () => {
+      // `Config.setModel()` mutates `contentGeneratorConfig.enableCacheControl`
+      // in place. A constructor-time cache on the converter would let the
+      // body-side `cache_control` and the per-request `prompt-caching-scope`
+      // beta header drift apart on a hot flip. Verify both reads sample the
+      // same live value so the wire shape stays coherent.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const config: ContentGeneratorConfig = {
+        ...baseConfig,
+        reasoning: false,
+      };
+      const generator = new AnthropicContentGenerator(config, mockConfig);
+
+      // 1st request: cache on (default). Beta header AND body cache_control
+      // both present.
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: { systemInstruction: 'sys' },
+      } as unknown as GenerateContentParameters);
+      let [req, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      let reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(reqHeaders['anthropic-beta']).toBe(
+        'prompt-caching-scope-2026-01-05',
+      );
+      expect((req as { system?: unknown }).system).toEqual([
+        {
+          type: 'text',
+          text: 'sys',
+          cache_control: { type: 'ephemeral', scope: 'global' },
+        },
+      ]);
+
+      // Hot-flip enableCacheControl off (Config.setModel mutates in place).
+      config.enableCacheControl = false;
+
+      // 2nd request: beta header dropped AND body cache_control gone, in
+      // lockstep — the converter must not be reading a stale constructor
+      // value.
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: { systemInstruction: 'sys' },
+      } as unknown as GenerateContentParameters);
+      [req, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(reqHeaders['anthropic-beta']).toBeUndefined();
+      expect((req as { system?: unknown }).system).toBe('sys');
     });
 
     it('merges user-supplied customHeaders[anthropic-beta] with computed flags (no overwrite)', async () => {
@@ -463,6 +600,9 @@ describe('AnthropicContentGenerator', () => {
       expect(reqHeaders['anthropic-beta']).toContain(
         'interleaved-thinking-2025-05-14',
       );
+      expect(reqHeaders['anthropic-beta']).toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
     });
 
     it('also sends the computed beta header on streaming requests', async () => {
@@ -496,6 +636,9 @@ describe('AnthropicContentGenerator', () => {
         'interleaved-thinking-2025-05-14',
       );
       expect(headers['anthropic-beta']).toContain('effort-2025-11-24');
+      expect(headers['anthropic-beta']).toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
     });
   });
 
