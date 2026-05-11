@@ -1487,10 +1487,8 @@ function createWindowsTraversalStandaloneArchive(tmpDir) {
       '  $writer = [System.IO.StreamWriter]::new($entry.Open())',
       '  try { $writer.Write($content) } finally { $writer.Dispose() }',
       '}',
-      '$zip = [System.IO.Compression.ZipFile]::Open(',
-      '  $env:QWEN_TEST_ZIP_ARCHIVE,',
-      '  [System.IO.Compression.ZipArchiveMode]::Create',
-      ')',
+      'if (Test-Path -LiteralPath $env:QWEN_TEST_ZIP_ARCHIVE) { Remove-Item -LiteralPath $env:QWEN_TEST_ZIP_ARCHIVE -Force }',
+      '$zip = [System.IO.Compression.ZipFile]::Open($env:QWEN_TEST_ZIP_ARCHIVE, [System.IO.Compression.ZipArchiveMode]::Create)',
       'try {',
       "  Add-ZipEntry $zip '../qwen-slip' 'path traversal'",
       '  Add-ZipEntry $zip \'qwen-code/bin/qwen.cmd\' "@echo off`r`necho 0.0.0-smoke`r`n"',
@@ -1509,7 +1507,7 @@ function createWindowsTraversalStandaloneArchive(tmpDir) {
         ...process.env,
         QWEN_TEST_ZIP_ARCHIVE: archive,
       },
-      stdio: 'ignore',
+      stdio: 'pipe',
     },
   );
   writeChecksumFile(outDir, path.basename(archive));

@@ -679,13 +679,15 @@ exit /b 0
 
 :EnsureDir
 set "REQUIRED_DIR=%~1"
-if exist "!REQUIRED_DIR!\NUL" exit /b 0
-if exist "!REQUIRED_DIR!" (
+set "QWEN_REQUIRED_DIR=!REQUIRED_DIR!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $path = $env:QWEN_REQUIRED_DIR; if (Test-Path -LiteralPath $path -PathType Container) { exit 0 }; if (Test-Path -LiteralPath $path) { exit 2 }; New-Item -ItemType Directory -Path $path -Force | Out-Null; exit 0"
+set "PS_STATUS=!ERRORLEVEL!"
+set "QWEN_REQUIRED_DIR="
+if !PS_STATUS! EQU 0 exit /b 0
+if !PS_STATUS! EQU 2 (
     echo ERROR: Path exists but is not a directory: !REQUIRED_DIR!
     exit /b 1
 )
-mkdir "!REQUIRED_DIR!" >nul 2>&1
-if !ERRORLEVEL! EQU 0 exit /b 0
 echo ERROR: Failed to create directory: !REQUIRED_DIR!
 exit /b 1
 
