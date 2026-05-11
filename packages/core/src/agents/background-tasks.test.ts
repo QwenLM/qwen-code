@@ -1318,15 +1318,16 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('fg-unregister-order')).toBeUndefined();
     });
 
-    it('default flavor (absent) behaves as background for emitNotification', () => {
-      // Older callers omit the flavor field. Backwards compatibility:
-      // missing flavor is treated as background everywhere.
+    it('background entries fire a task-notification on complete', () => {
+      // Counterpart to the foreground "does not emit" cases above —
+      // background entries deliver their result through the XML envelope,
+      // so the notification callback must fire on complete.
       const callback = vi.fn();
       registry.setNotificationCallback(callback);
 
       registry.register({
-        agentId: 'legacy-1',
-        description: 'legacy agent',
+        agentId: 'bg-notify-1',
+        description: 'async agent',
         status: 'running',
         startTime: Date.now(),
         abortController: new AbortController(),
@@ -1334,7 +1335,7 @@ describe('BackgroundTaskRegistry', () => {
         outputFile: '/tmp/test.jsonl',
       });
 
-      registry.complete('legacy-1', 'done');
+      registry.complete('bg-notify-1', 'done');
 
       expect(callback).toHaveBeenCalledOnce();
     });
