@@ -1323,6 +1323,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );
+        // Register before writing the meta sidecar — see the matching
+        // foreground call below for the full rationale. Keeping the
+        // order symmetric here guards the background path against the
+        // same orphaned-meta hazard if register() ever grows a throw.
+        registry.register({
+          agentId: hookOpts.agentId,
+          description: this.params.description,
+          subagentType: subagentConfig.name,
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: bgAbortController,
+          toolUseId: this.callId,
+          prompt: this.params.prompt,
+          outputFile: jsonlPath,
+          metaPath,
+        });
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
           agentType: hookOpts.agentType,
@@ -1339,19 +1356,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
-        });
-        registry.register({
-          agentId: hookOpts.agentId,
-          description: this.params.description,
-          subagentType: subagentConfig.name,
-          isBackgrounded: true,
-          status: 'running',
-          startTime: Date.now(),
-          abortController: bgAbortController,
-          toolUseId: this.callId,
-          prompt: this.params.prompt,
-          outputFile: jsonlPath,
-          metaPath,
         });
 
         // Subscribe to the subagent's tool-call event stream so the
@@ -1803,11 +1807,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // `running` for every completed foreground run.
         const fgTerminateMode = subagent.getTerminateMode();
         const fgTerminalStatus =
-          fgTerminateMode === AgentTerminateMode.ERROR
-            ? 'failed'
+          fgTerminateMode === AgentTerminateMode.GOAL
+            ? 'completed'
             : fgTerminateMode === AgentTerminateMode.CANCELLED
               ? 'cancelled'
-              : 'completed';
+              : 'failed';
         patchAgentMeta(fgMetaPath, {
           status: fgTerminalStatus,
           lastUpdatedAt: new Date().toISOString(),
