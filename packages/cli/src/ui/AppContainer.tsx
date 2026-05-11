@@ -1424,10 +1424,16 @@ export const AppContainer = (props: AppContainerProps) => {
       historyManager.truncateToItem(lastUserItem.id);
       buffer.setText(lastUserItem.text);
       // Also undo the cross-session ↑-history disk entry written by
-      // useGeminiStream's `logger.logMessage` — otherwise getPreviousUserMessages
-      // would resurrect the cancelled prompt next session. Fire-and-forget;
-      // the UI restore must not block on disk I/O.
-      void logger?.removeLastUserMessage();
+      // useGeminiStream's `logger.logMessage` — otherwise
+      // getPreviousUserMessages would resurrect the cancelled prompt next
+      // session. Fire-and-forget; the UI restore must not block on disk
+      // I/O. Logger.removeLastUserMessage already swallows internal
+      // errors and returns false, but attach a .catch as defence so a
+      // future code path that throws doesn't surface as an
+      // UnhandledPromiseRejection.
+      void logger?.removeLastUserMessage().catch((err) => {
+        debugLogger.debug('Failed to undo cancelled prompt from log:', err);
+      });
     },
     [
       buffer,

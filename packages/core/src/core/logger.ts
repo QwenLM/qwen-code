@@ -337,7 +337,24 @@ export class Logger {
    * appended a different entry between log and undo will not silently
    * remove the wrong row.
    *
-   * @returns true when an entry was removed; false otherwise.
+   * Two-phase semantics:
+   *   1. Synchronous in-memory removal of the entry from `this.logs` —
+   *      runs before this method even returns its Promise. Consumers
+   *      that read `getPreviousUserMessages()` on the same render
+   *      observe the removal immediately.
+   *   2. Async serialized disk reconciliation — read, splice, writeFile.
+   *      The returned Promise resolves to whether *the disk write*
+   *      succeeded (not whether the in-memory removal happened).
+   *
+   * Failure handling: when the disk read or write throws, the in-memory
+   * removal is intentionally NOT rolled back. The user just hit ESC
+   * expecting the cancelled prompt to disappear from ↑-history; rolling
+   * back would resurrect it on the next render — worse UX than a
+   * temporary disk/cache divergence. The cache resyncs from disk on the
+   * next successful op or on the next session via `initialize()`.
+   *
+   * @returns true when the disk row was removed; false otherwise. The
+   *   in-memory cache is updated optimistically regardless.
    */
   async removeLastUserMessage(): Promise<boolean> {
     if (!this.initialized || !this.logFilePath) {
