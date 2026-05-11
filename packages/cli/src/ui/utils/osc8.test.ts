@@ -40,6 +40,13 @@ describe('osc8 helpers', () => {
       configurable: true,
       value: savedPlatform,
     });
+    // Symmetric isTTY reset — the early describes (sanitizer, scheme, trim)
+    // don't call setTTY() themselves, so without this they would inherit
+    // whatever the previous test left behind.
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: savedIsTTY,
+    });
   });
 
   afterEach(() => {
@@ -146,6 +153,12 @@ describe('osc8 helpers', () => {
     it('preserves a trailing close-paren when balanced inside the URL', () => {
       const url = 'https://en.wikipedia.org/wiki/Foo_(bar)';
       expect(trimTrailingUrlPunctuation(url)).toBe(url);
+    });
+
+    it('trims a trailing `>` (CommonMark autolink delimiter)', () => {
+      expect(trimTrailingUrlPunctuation('https://example.com>')).toBe(
+        'https://example.com',
+      );
     });
 
     it('trims an unbalanced trailing close-paren', () => {
@@ -320,6 +333,21 @@ describe('osc8 helpers', () => {
     it('Alacritty is enabled via TERM=alacritty', () => {
       setTTY(true);
       process.env['TERM'] = 'alacritty';
+      expect(supportsHyperlinks()).toBe(true);
+    });
+
+    it('Alacritty fallback: ALACRITTY_LOG/WINDOW_ID/SOCKET when terminfo missing', () => {
+      setTTY(true);
+      // Simulate Alacritty falling back to TERM=xterm-256color because the
+      // alacritty terminfo isn't installed on this host.
+      process.env['TERM'] = 'xterm-256color';
+      process.env['ALACRITTY_LOG'] = '/tmp/Alacritty-12345.log';
+      expect(supportsHyperlinks()).toBe(true);
+      delete process.env['ALACRITTY_LOG'];
+      process.env['ALACRITTY_WINDOW_ID'] = '12345';
+      expect(supportsHyperlinks()).toBe(true);
+      delete process.env['ALACRITTY_WINDOW_ID'];
+      process.env['ALACRITTY_SOCKET'] = '/tmp/alacritty.sock';
       expect(supportsHyperlinks()).toBe(true);
     });
 

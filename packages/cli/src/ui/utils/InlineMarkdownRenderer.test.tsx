@@ -201,6 +201,32 @@ describe('<RenderInline />', () => {
       expect(out.replace(/\s+/g, ' ')).toContain('https://x.com path');
     });
 
+    it('does not wrap a URL containing NBSP / Unicode whitespace', () => {
+      // `/\s/` in JavaScript matches U+00A0 NBSP and other Unicode spaces,
+      // so model output that smuggles them into the URL still falls through
+      // to the legacy rendering.
+      enableHyperlinks();
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`[a](https://x.com\u00a0b)`} />,
+      );
+      const out = lastFrame() ?? '';
+      expect(out).not.toContain('\x1b]8;;');
+    });
+
+    it('trims a trailing `>` from a CommonMark autolink URL target', () => {
+      // `<https://x.com>` in the markdown source surfaces as the bare URL
+      // `https://x.com>` after the regex matches; the trim function strips
+      // the `>` from the OSC 8 target while the visible text keeps it.
+      enableHyperlinks();
+      const url = 'https://example.com/auto';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`see <${url}> ok`} />,
+      );
+      const out = lastFrame() ?? '';
+      expect(out).toContain(`\x1b]8;;${url}\x07`);
+      expect(out).not.toContain(`\x1b]8;;${url}>\x07`);
+    });
+
     it('mid-stream unclosed-link state emits a well-formed envelope, not a half-envelope', () => {
       // Streaming chunks arrive faster than the human eye; MarkdownDisplay
       // re-renders the whole line on each tick. While a chunk is in flight

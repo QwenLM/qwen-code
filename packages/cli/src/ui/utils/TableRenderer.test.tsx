@@ -4,13 +4,40 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import stringWidth from 'string-width';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
+import { HYPERLINK_ENV_KEYS } from './osc8.js';
 
 describe('<TableRenderer />', () => {
+  // Force OSC 8 detection off for every test in this file so cell rendering
+  // is deterministic regardless of the developer's terminal. Without this,
+  // running the suite from iTerm2 / WezTerm / Kitty leaks escape bytes into
+  // table output and any future strict assertion would flake.
+  const savedEnv = { ...process.env };
+  const savedIsTTY = process.stdout.isTTY;
+
+  beforeEach(() => {
+    process.env = { ...savedEnv };
+    for (const key of HYPERLINK_ENV_KEYS) {
+      delete process.env[key];
+    }
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: false,
+    });
+  });
+
+  afterEach(() => {
+    process.env = { ...savedEnv };
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: savedIsTTY,
+    });
+  });
+
   const renderTable = (
     headers: string[],
     rows: string[][],

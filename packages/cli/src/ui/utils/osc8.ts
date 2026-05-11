@@ -15,7 +15,9 @@
  */
 
 import { wrapForMultiplexer } from '../../utils/osc.js';
-export { wrapForMultiplexer } from '../../utils/osc.js';
+// Re-export so MCP `AuthenticateStep` (the one remaining inline caller) can
+// pick the helper up from a single OSC-8-aware namespace.
+export { wrapForMultiplexer };
 
 /**
  * Strip C0 control characters and DEL so an untrusted string can be safely
@@ -59,6 +61,12 @@ export function osc8Close(): string {
  * `javascript:` / `data:` / `file:` trap whose target is hidden behind the
  * link label. Anything outside this set falls back to legacy rendering so
  * the user sees the suspicious URL before any click.
+ *
+ * Note: the renderer keeps the visible `(url)` suffix on every link, even
+ * on capable terminals — this is a deliberate security property. The user
+ * can always read the destination before clicking, so even an allowlisted
+ * `https://attacker.example.com` link that masquerades as something else
+ * is still visible in the rendered output.
  */
 const SAFE_OSC8_SCHEMES = new Set([
   'http:',
@@ -163,9 +171,20 @@ export function supportsHyperlinks(
   }
   // Konsole ≥ 21.04 ships OSC 8 and sets KONSOLE_VERSION on every session.
   if (env['KONSOLE_VERSION']) return true;
-  // Alacritty ≥ 0.11 supports OSC 8. It doesn't set a distinctive env var,
-  // so identify it through the terminfo entry instead.
-  if (env['TERM'] === 'alacritty') return true;
+  // Alacritty ≥ 0.11 supports OSC 8. Identify it via TERM=alacritty (set
+  // when the alacritty terminfo is installed) or the ALACRITTY_LOG /
+  // ALACRITTY_WINDOW_ID env vars that Alacritty 0.12+ sets unconditionally.
+  // Note: on hosts without alacritty terminfo Alacritty falls back to
+  // TERM=xterm-256color and the TERM heuristic alone won't fire — the
+  // env-var fallbacks catch those cases.
+  if (
+    env['TERM'] === 'alacritty' ||
+    env['ALACRITTY_LOG'] !== undefined ||
+    env['ALACRITTY_WINDOW_ID'] !== undefined ||
+    env['ALACRITTY_SOCKET'] !== undefined
+  ) {
+    return true;
+  }
   // JetBrains IDEs set TERMINAL_EMULATOR on their integrated terminal; the
   // JediTerm backend has supported OSC 8 since 2022.3.
   if (env['TERMINAL_EMULATOR'] === 'JetBrains-JediTerm') return true;
@@ -254,7 +273,8 @@ export function trimTrailingUrlPunctuation(url: string): string {
   let end = url.length;
   while (end > 0) {
     const c = url.charCodeAt(end - 1);
-    // .,;:!?'"`
+    // .,;:!?'"`> — `>` covers CommonMark autolinks (`<https://x.com>`)
+    // where the inline regex greedily eats the trailing `>` into `\S+`.
     if (
       c === 0x2e ||
       c === 0x2c ||
@@ -264,7 +284,8 @@ export function trimTrailingUrlPunctuation(url: string): string {
       c === 0x3f ||
       c === 0x27 ||
       c === 0x22 ||
-      c === 0x60
+      c === 0x60 ||
+      c === 0x3e
     ) {
       end--;
       continue;
@@ -346,6 +367,9 @@ export const HYPERLINK_ENV_KEYS = [
   'GHOSTTY_RESOURCES_DIR',
   'KONSOLE_VERSION',
   'TERMINAL_EMULATOR',
+  'ALACRITTY_LOG',
+  'ALACRITTY_WINDOW_ID',
+  'ALACRITTY_SOCKET',
   'TERM',
   'TEAMCITY_VERSION',
   'FORCE_HYPERLINK',
