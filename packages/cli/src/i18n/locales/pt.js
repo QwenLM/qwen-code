@@ -125,6 +125,14 @@ export default {
     'Renomear a conversa atual. --auto permite que o modelo rápido escolha um título.',
   'Rewind conversation to a previous turn':
     'Voltar a conversa para um turno anterior',
+  'Restore code and conversation': 'Restaurar código e conversa',
+  'Restore conversation only': 'Restaurar apenas a conversa',
+  'Restore code only': 'Restaurar apenas o código',
+  'Never mind': 'Deixa pra lá',
+  'Computing file changes...': 'Calculando alterações de arquivo...',
+  'Restored {{count}} file(s).': '{{count}} arquivo(s) restaurado(s).',
+  'Failed to restore files: {{error}}':
+    'Falha ao restaurar arquivos: {{error}}',
   'change the theme': 'alterar o tema',
   'Select Theme': 'Selecionar Tema',
   Preview: 'Visualizar',

@@ -3140,6 +3140,7 @@ describe('useGeminiStream', () => {
       {
         type: MessageType.USER,
         text: rawQuery,
+        promptId: expect.any(String),
       },
       userMessageTimestamp,
     );

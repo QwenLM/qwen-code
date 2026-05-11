@@ -91,6 +91,14 @@ export default {
   'Rename the current conversation. --auto lets the fast model pick a title.':
     '現在の会話の名前を変更する。--auto を使うと高速モデルがタイトルを決めます。',
   'Rewind conversation to a previous turn': '会話を前のターンまで巻き戻す',
+  'Restore code and conversation': 'コードと会話を復元',
+  'Restore conversation only': '会話のみ復元',
+  'Restore code only': 'コードのみ復元',
+  'Never mind': 'やめる',
+  'Computing file changes...': 'ファイルの変更を計算中...',
+  'Restored {{count}} file(s).': '{{count}} 個のファイルを復元しました。',
+  'Failed to restore files: {{error}}':
+    'ファイルの復元に失敗しました：{{error}}',
   'change the theme': 'テーマを変更',
   'Select Theme': 'テーマを選択',
   Preview: 'プレビュー',

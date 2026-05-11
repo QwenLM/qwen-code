@@ -130,6 +130,14 @@ export default {
     'Renommer la conversation en cours. --auto laisse le modèle rapide choisir un titre.',
   'Rewind conversation to a previous turn':
     'Revenir à un tour précédent de la conversation',
+  'Restore code and conversation': 'Restaurer le code et la conversation',
+  'Restore conversation only': 'Restaurer la conversation uniquement',
+  'Restore code only': 'Restaurer le code uniquement',
+  'Never mind': 'Annuler',
+  'Computing file changes...': 'Calcul des modifications de fichiers...',
+  'Restored {{count}} file(s).': '{{count}} fichier(s) restauré(s).',
+  'Failed to restore files: {{error}}':
+    'Échec de la restauration des fichiers : {{error}}',
   'change the theme': 'changer le thème',
   'Select Theme': 'Sélectionner un thème',
   Preview: 'Aperçu',

@@ -131,6 +131,14 @@ export default {
     'Canviar el nom de la conversa actual. --auto permet que el model ràpid triï un títol.',
   'Rewind conversation to a previous turn':
     'Rebobinar la conversa fins a un torn anterior',
+  'Restore code and conversation': 'Restaura el codi i la conversa',
+  'Restore conversation only': 'Restaura només la conversa',
+  'Restore code only': 'Restaura només el codi',
+  'Never mind': 'Tant és',
+  'Computing file changes...': "S'estan calculant els canvis als fitxers...",
+  'Restored {{count}} file(s).': "S'han restaurat {{count}} fitxer(s).",
+  'Failed to restore files: {{error}}':
+    'Error en restaurar els fitxers: {{error}}',
   'change the theme': 'canviar el tema',
   'Select Theme': 'Seleccionar tema',
   Preview: 'Previsualització',

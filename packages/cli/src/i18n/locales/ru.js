@@ -134,6 +134,14 @@ export default {
     'Переименовать текущий разговор. --auto позволит быстрой модели выбрать заголовок.',
   'Rewind conversation to a previous turn':
     'Откатить разговор к предыдущему ходу',
+  'Restore code and conversation': 'Восстановить код и беседу',
+  'Restore conversation only': 'Восстановить только беседу',
+  'Restore code only': 'Восстановить только код',
+  'Never mind': 'Неважно',
+  'Computing file changes...': 'Вычисление изменений файлов...',
+  'Restored {{count}} file(s).': 'Восстановлено файлов: {{count}}.',
+  'Failed to restore files: {{error}}':
+    'Не удалось восстановить файлы: {{error}}',
   'change the theme': 'Изменение темы',
   'Select Theme': 'Выбор темы',
   Preview: 'Предпросмотр',

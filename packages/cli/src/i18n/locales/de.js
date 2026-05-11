@@ -110,6 +110,14 @@ export default {
     'Die aktuelle Unterhaltung umbenennen. Mit --auto lässt du das schnelle Modell einen Titel wählen.',
   'Rewind conversation to a previous turn':
     'Die Unterhaltung auf einen früheren Gesprächsschritt zurücksetzen',
+  'Restore code and conversation': 'Code und Unterhaltung wiederherstellen',
+  'Restore conversation only': 'Nur Unterhaltung wiederherstellen',
+  'Restore code only': 'Nur Code wiederherstellen',
+  'Never mind': 'Egal',
+  'Computing file changes...': 'Dateiänderungen werden berechnet...',
+  'Restored {{count}} file(s).': '{{count}} Datei(en) wiederhergestellt.',
+  'Failed to restore files: {{error}}':
+    'Fehler beim Wiederherstellen der Dateien: {{error}}',
   'change the theme': 'Design ändern',
   'Select Theme': 'Design auswählen',
   Preview: 'Vorschau',
