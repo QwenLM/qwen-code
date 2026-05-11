@@ -18,12 +18,20 @@ const INTERNAL_PROMPT_IDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Prefix for IDs minted by `runSideQuery`. Recognised as internal so new
+ * side-query call sites don't have to opt in to filtering one-by-one.
+ */
+const SIDE_QUERY_PROMPT_PREFIX = 'side-query:';
+
+/**
  * Returns true if the prompt_id belongs to an internal background operation
  * whose events should not be recorded to the chatRecordingService,
  * OpenAI logs, or other persistent stores visible in the UI.
- *
- * Known internal IDs: `'prompt_suggestion'`, `'forked_query'`, `'speculation'`.
  */
-export function isInternalPromptId(promptId: string): boolean {
-  return INTERNAL_PROMPT_IDS.has(promptId);
+export function isInternalPromptId(promptId: string | undefined): boolean {
+  if (!promptId) return false;
+  return (
+    INTERNAL_PROMPT_IDS.has(promptId) ||
+    promptId.startsWith(SIDE_QUERY_PROMPT_PREFIX)
+  );
 }

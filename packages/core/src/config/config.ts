@@ -1490,10 +1490,7 @@ export class Config {
     // sidecar that happens to share the outgoing session id —
     // mirrors kimi-cli PR #2082's "write only when a session is
     // established for this process" rule.
-    if (
-      this.runtimeStatusEnabled &&
-      previousSessionId !== this.sessionId
-    ) {
+    if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
       const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
       const cliVersion = this.cliVersion ?? null;

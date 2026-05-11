@@ -45,9 +45,9 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "@qwen-code/channel-base": "file:../channels/base",
+    "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
-    "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
     "@qwen-code/qwen-code-core": "file:../core",
     "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",
@@ -59,7 +59,7 @@
     "fzf": "^0.5.2",
     "glob": "^10.5.0",
     "highlight.js": "^11.11.1",
-    "ink": "^6.2.3",
+    "ink": "^7.0.2",
     "ink-gradient": "^3.0.0",
     "ink-link": "^4.1.0",
     "ink-spinner": "^5.0.0",
@@ -67,7 +67,7 @@
     "open": "^10.1.2",
     "p-limit": "^7.3.0",
     "prompts": "^2.4.2",
-    "react": "^19.1.0",
+    "react": "19.2.4",
     "read-package-up": "^11.0.0",
     "shell-quote": "^1.8.3",
     "simple-git": "^3.28.0",
@@ -76,7 +76,7 @@
     "strip-json-comments": "^3.1.1",
     "undici": "^6.22.0",
     "update-notifier": "^7.3.1",
-    "wrap-ansi": "9.0.2",
+    "wrap-ansi": "^10.0.0",
     "yargs": "^17.7.2",
     "zod": "^3.23.8"
   },
@@ -98,7 +98,7 @@
     "ink-testing-library": "^4.0.0",
     "jsdom": "^26.1.0",
     "pretty-format": "^30.0.2",
-    "react-dom": "^19.1.0",
+    "react-dom": "19.2.4",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"
   },
@@ -112,6 +112,6 @@
     "@teddyzhu/clipboard-win32-x64-msvc": "0.0.5"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

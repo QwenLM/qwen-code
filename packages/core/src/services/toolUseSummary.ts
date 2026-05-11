@@ -19,7 +19,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Config } from '../config/config.js';
-import { getResponseText } from '../utils/partUtils.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TOOL_USE_SUMMARY');
@@ -137,36 +137,36 @@ export async function generateToolUseSummary(
 
     const userPrompt = `${contextPrefix}Tools completed:\n\n${toolSummaries}\n\nLabel:`;
 
-    const geminiClient = config.getGeminiClient();
-    if (!geminiClient) {
+    if (!config.getGeminiClient()) {
       debugLogger.debug('No gemini client available — skipping');
       return null;
     }
 
-    const response = await geminiClient.generateContent(
-      [{ role: 'user', parts: [{ text: userPrompt }] }],
-      {
-        systemInstruction: TOOL_USE_SUMMARY_SYSTEM_PROMPT,
-        tools: [],
+    const result = await runSideQuery(config, {
+      purpose: 'tool-use-summary',
+      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+      systemInstruction: TOOL_USE_SUMMARY_SYSTEM_PROMPT,
+      config: {
         maxOutputTokens: 60,
         temperature: 0.3,
       },
-      signal,
+      abortSignal: signal,
       model,
-      'tool_use_summary_generation',
-    );
+      // Tool-use labels are best-effort cosmetic; firing once per turn means
+      // 7 retries on a transient outage would spike traffic for no benefit.
+      maxAttempts: 1,
+    });
 
     if (signal.aborted) return null;
 
-    const raw = getResponseText(response)?.trim();
-    if (!raw) {
+    if (!result.text) {
       debugLogger.debug('Summary generation returned empty result');
       return null;
     }
 
-    const cleaned = cleanSummary(raw);
+    const cleaned = cleanSummary(result.text);
     if (!cleaned) {
-      debugLogger.debug(`Summary cleaned to empty: raw="${raw}"`);
+      debugLogger.debug(`Summary cleaned to empty: raw="${result.text}"`);
       return null;
     }
 
