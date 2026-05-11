@@ -9,6 +9,7 @@ import type {
   Content,
   GenerateContentConfig,
   GenerateContentResponse,
+  PartUnion,
   PartListUnion,
   Tool,
 } from '@google/genai';
@@ -22,6 +23,9 @@ import { microcompactHistory } from '../services/microcompaction/microcompact.js
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
+import type { ContentGenerator } from './contentGenerator.js';
+import type { ResolvedModelConfig } from '../models/types.js';
+import { AuthType, createContentGenerator } from './contentGenerator.js';
 import { GeminiChat } from './geminiChat.js';
 import {
   getArenaSystemReminder,
@@ -45,6 +49,9 @@ import {
 } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+
+// Models
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -84,6 +91,7 @@ import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { flatMapTextParts } from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import { escapeClosingSystemReminderTags } from '../utils/xml.js';
 
 // Hook types and utilities
 import {
@@ -136,6 +144,48 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
   selectedDocs: [],
   strategy: 'none',
 };
+
+function wrapIdeContext(contextText: string): string {
+  const safeContextText = escapeClosingSystemReminderTags(contextText);
+  return `<system-reminder>\n${safeContextText}\n</system-reminder>`;
+}
+
+function prependToFirstTextPart(
+  parts: PartUnion[],
+  textToPrepend: string,
+): PartUnion[] {
+  if (!textToPrepend) {
+    return parts;
+  }
+
+  if (parts.length === 0) {
+    return [{ text: textToPrepend }];
+  }
+
+  const textPartIndex = parts.findIndex(
+    (part) =>
+      typeof part === 'string' ||
+      (typeof part === 'object' && part !== null && 'text' in part),
+  );
+
+  if (textPartIndex === -1) {
+    return [{ text: textToPrepend }, ...parts];
+  }
+
+  const updatedParts = [...parts];
+  const textPart = updatedParts[textPartIndex];
+
+  if (typeof textPart === 'string') {
+    updatedParts[textPartIndex] = `${textToPrepend}\n\n${textPart}`;
+  } else {
+    updatedParts[textPartIndex] = {
+      ...textPart,
+      text: `${textToPrepend}\n\n${textPart.text ?? ''}`,
+    };
+  }
+
+  return updatedParts;
+}
 
 /**
  * Resolve the auto-memory recall promise with a hard deadline.
@@ -192,6 +242,14 @@ export class GeminiClient {
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
   private pendingRecallAbortController: AbortController | undefined;
+
+  /**
+   * Cache of per-model ContentGenerators keyed by model ID.
+   * Avoids rebuilding the generator (SDK instantiation, config resolution)
+   * on every side query (recap, title, tool summary).
+   * Cleared on session reset (resetChat) to pick up config changes.
+   */
+  private perModelGeneratorCache = new Map<string, Promise<ContentGenerator>>();
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -264,6 +322,13 @@ export class GeminiClient {
         debugLogger.warn('Failed to restore attribution snapshot');
       }
     }
+  }
+
+  private getContentGeneratorOrFail(): ContentGenerator {
+    if (!this.config.getContentGenerator()) {
+      throw new Error('Content generator not initialized');
+    }
+    return this.config.getContentGenerator();
   }
 
   async addHistory(content: Content) {
@@ -352,7 +417,7 @@ export class GeminiClient {
     // pointing at content the model can no longer retrieve.
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
-    this.config.getBaseLlmClient().clearPerModelGeneratorCache();
+    this.perModelGeneratorCache.clear();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
     if (this.pendingRecallAbortController) {
@@ -547,7 +612,7 @@ export class GeminiClient {
       }
 
       const contextParts = [
-        "Here is the user's editor context. This is for your information only.",
+        "Here is the user's current editor context. Use it when relevant, including to answer questions about the active file, open files, cursor, or selected text.",
         contextLines.join('\n'),
       ];
 
@@ -677,7 +742,7 @@ export class GeminiClient {
       }
 
       const contextParts = [
-        "Here is a summary of changes in the user's editor context. This is for your information only.",
+        "Here is a summary of changes in the user's current editor context. Use it with the previous editor context when relevant, including to answer questions about the active file, open files, cursor, or selected text.",
         changeLines.join('\n'),
       ];
 
@@ -1083,19 +1148,19 @@ export class GeminiClient {
       !!lastMessage &&
       lastMessage.role === 'model' &&
       (lastMessage.parts?.some((p) => 'functionCall' in p) || false);
+    let ideContextText: string | undefined;
+    let nextIdeContext: IdeContext | undefined;
+    let shouldUpdateIdeContextState = false;
 
     if (this.config.getIdeMode() && !hasPendingToolCall) {
       const { contextParts, newIdeContext } = this.getIdeContextParts(
         this.forceFullIdeContext || history.length === 0,
       );
       if (contextParts.length > 0) {
-        this.getChat().addHistory({
-          role: 'user',
-          parts: [{ text: contextParts.join('\n') }],
-        });
+        ideContextText = wrapIdeContext(contextParts.join('\n'));
+        nextIdeContext = newIdeContext;
+        shouldUpdateIdeContextState = true;
       }
-      this.lastSentIdeContext = newIdeContext;
-      this.forceFullIdeContext = false;
     }
 
     // Check for arena control signal before starting a new turn
@@ -1119,7 +1184,10 @@ export class GeminiClient {
     const model = options?.modelOverride ?? this.config.getModel();
 
     // append system reminders to the request
-    let requestToSent = await flatMapTextParts(request, async (text) => [text]);
+    let requestToSend = await flatMapTextParts(request, async (text) => [text]);
+    if (ideContextText) {
+      requestToSend = prependToFirstTextPart(requestToSend, ideContextText);
+    }
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron
@@ -1171,10 +1239,15 @@ export class GeminiClient {
         }
       }
 
-      requestToSent = [...systemReminders, ...requestToSent];
+      requestToSend = [...systemReminders, ...requestToSend];
     }
 
-    const resultStream = turn.run(model, requestToSent, signal);
+    if (shouldUpdateIdeContextState) {
+      this.lastSentIdeContext = nextIdeContext;
+      this.forceFullIdeContext = false;
+    }
+
+    const resultStream = turn.run(model, requestToSend, signal);
     for await (const event of resultStream) {
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {
@@ -1198,13 +1271,14 @@ export class GeminiClient {
 
       // Re-send a full IDE context blob on the next regular message — auto
       // compaction inside chat.sendMessageStream may have summarized away
-      // the previous IDE-context turn.
+      // the previous merged IDE context.
       if (event.type === GeminiEventType.ChatCompressed) {
         this.forceFullIdeContext = true;
       }
 
       yield event;
       if (event.type === GeminiEventType.Error) {
+        this.forceFullIdeContext = true;
         if (arenaAgentClient) {
           const errorMsg =
             event.value instanceof Error
@@ -1437,13 +1511,23 @@ export class GeminiClient {
           // side queries for session recap / title / summary), resolve the target
           // model's own ContentGeneratorConfig so that per-model settings like
           // extra_body, samplingParams, and reasoning are not inherited from the
-          // main model's config. The retry authType is resolved alongside so that
-          // provider-specific checks (e.g. QWEN_OAUTH quota detection) reference
-          // the target model's provider.
-          const { contentGenerator, retryAuthType } = await this.config
-            .getBaseLlmClient()
-            .resolveForModel(model);
+          // main model's config.
+          const mainModel = this.config.getModel() ?? model;
+          const isPerModel = model !== mainModel;
 
+          // Resolve the authType for retry logic. When using a per-model content
+          // generator (e.g. fast model side queries), the retry authType must match
+          // the target model's provider, not the main session's provider. This
+          // ensures QWEN_OAUTH quota detection checks against the right provider.
+          const retryAuthType = isPerModel
+            ? (this.createRetryAuthTypeForModel(model) ??
+              this.config.getContentGeneratorConfig()?.authType ??
+              AuthType.USE_OPENAI)
+            : this.config.getContentGeneratorConfig()?.authType;
+
+          const contentGenerator = isPerModel
+            ? await this.createContentGeneratorForModel(model)
+            : this.getContentGeneratorOrFail();
           const apiCall = () => {
             currentAttemptModel = model;
 
@@ -1495,6 +1579,111 @@ export class GeminiClient {
         }
       },
     );
+  }
+
+  /**
+   * Resolve a model across all authTypes. Handles the case where the target
+   * model is registered under a different authType than the main model
+   * (e.g. main=QWEN_OAUTH, fast=USE_ANTHROPIC).
+   *
+   * TODO: Move cross-authType resolution to ModelRegistry for a cleaner
+   * data-layer solution. Follow-up PR.
+   */
+
+  private resolveModelAcrossAuthTypes(
+    model: string,
+  ): ResolvedModelConfig | undefined {
+    const modelsConfig = this.config.getModelsConfig();
+    const allAuthTypes: AuthType[] = [
+      AuthType.QWEN_OAUTH,
+      AuthType.USE_OPENAI,
+      AuthType.USE_VERTEX_AI,
+      AuthType.USE_ANTHROPIC,
+      AuthType.USE_GEMINI,
+    ];
+
+    // Try the main authType first for early exit
+    const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
+    if (mainAuthType) {
+      const resolved = modelsConfig.getResolvedModel(mainAuthType, model);
+      if (resolved) return resolved;
+    }
+
+    for (const authType of allAuthTypes) {
+      if (authType === mainAuthType) continue;
+      const resolved = modelsConfig.getResolvedModel(authType, model);
+      if (resolved) return resolved;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Resolve the authType for a given model without creating a full generator.
+   * Used by retry logic to ensure provider-specific checks (e.g. QWEN_OAUTH
+   * quota detection) reference the correct provider.
+   */
+  private createRetryAuthTypeForModel(model: string): string | undefined {
+    return this.resolveModelAcrossAuthTypes(model)?.authType;
+  }
+
+  /**
+   * Return a ContentGenerator for a specific model (e.g. the fast model) with
+   * its own per-model settings from modelProviders.  This prevents the main
+   * model's extra_body / samplingParams / reasoning from leaking into side
+   * queries that target a different model.
+   *
+   * Falls back to the main content generator when the target model is not in
+   * the registry or when creating a dedicated generator fails (e.g. in test
+   * environments without full auth setup).
+   *
+   * Results are cached by model ID to avoid rebuilding the generator
+   * (SDK instantiation, config resolution) on every side query.
+   */
+  private async createContentGeneratorForModel(
+    model: string,
+  ): Promise<ContentGenerator> {
+    // Check cache first (Promise coalescing to prevent redundant SDK instantiations)
+    const cached = this.perModelGeneratorCache.get(model);
+    if (cached) return cached;
+
+    const generatorPromise = (async () => {
+      try {
+        const resolvedModel = this.resolveModelAcrossAuthTypes(model);
+
+        if (!resolvedModel) {
+          debugLogger.warn(
+            `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
+          );
+          return this.getContentGeneratorOrFail();
+        }
+
+        const targetConfig = buildAgentContentGeneratorConfig(
+          this.config,
+          model,
+          {
+            authType: resolvedModel.authType,
+            apiKey: resolvedModel.envKey
+              ? (process.env[resolvedModel.envKey] ?? undefined)
+              : undefined,
+            baseUrl: resolvedModel.baseUrl,
+          },
+        );
+
+        return await createContentGenerator(targetConfig, this.config);
+      } catch (err: unknown) {
+        debugLogger.warn(
+          `Failed to create content generator for model "${model}", falling back to main generator.`,
+          err instanceof Error ? err.message : String(err),
+        );
+        // On failure, delete from cache so subsequent attempts can retry.
+        this.perModelGeneratorCache.delete(model);
+        return this.getContentGeneratorOrFail();
+      }
+    })();
+
+    this.perModelGeneratorCache.set(model, generatorPromise);
+    return generatorPromise;
   }
 
   /**

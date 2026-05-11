@@ -27,3 +27,45 @@ export function escapeXml(text: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
 }
+
+const XML_TAG_CANDIDATE_RE = /<[^>]*>/g;
+
+function isSystemReminderTagIgnorable(char: string): boolean {
+  const codePoint = char.codePointAt(0);
+  return (
+    char.trim() === '' ||
+    codePoint === 0x00ad ||
+    codePoint === 0xfeff ||
+    (codePoint !== undefined &&
+      ((codePoint >= 0x0000 && codePoint <= 0x001f) ||
+        (codePoint >= 0x007f && codePoint <= 0x009f) ||
+        (codePoint >= 0x200b && codePoint <= 0x200f) ||
+        (codePoint >= 0x202a && codePoint <= 0x202e) ||
+        (codePoint >= 0x2060 && codePoint <= 0x206f) ||
+        (codePoint >= 0xfe00 && codePoint <= 0xfe0f)))
+  );
+}
+
+function normalizeSystemReminderCandidateTag(tag: string): string {
+  let normalized = '';
+  for (const char of tag) {
+    if (!isSystemReminderTagIgnorable(char)) {
+      normalized += char;
+    }
+  }
+  return normalized.toLowerCase();
+}
+
+/**
+ * Escape closing `<system-reminder>` tag variants in model-facing reminder
+ * bodies without XML-escaping the whole body. This keeps markdown/code blocks
+ * readable while preventing untrusted content, including visually hidden
+ * format/control characters inside the tag, from ending the reminder envelope.
+ */
+export function escapeClosingSystemReminderTags(text: string): string {
+  return text.replace(XML_TAG_CANDIDATE_RE, (tag) =>
+    normalizeSystemReminderCandidateTag(tag) === '</system-reminder>'
+      ? '<\\/system-reminder>'
+      : tag,
+  );
+}
