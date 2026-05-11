@@ -41,6 +41,7 @@ const releaseScriptUtilsUrl = pathToFileURL(
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
+const WINDOWS_INSTALLER_TEST_TIMEOUT = 15_000;
 
 describe('installation scripts', () => {
   it('keeps the Linux/macOS installer lightweight', () => {
@@ -1154,65 +1155,78 @@ describe('Windows installer end-to-end', () => {
         rmSync(tmpDir, { recursive: true, force: true });
       }
     },
+    WINDOWS_INSTALLER_TEST_TIMEOUT,
   );
 
-  itOnWindows('rejects a tampered local archive', () => {
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+  itOnWindows(
+    'rejects a tampered local archive',
+    () => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
-    try {
-      const archive = createFakeWindowsStandaloneArchive(tmpDir);
-      appendFileSync(archive, 'tamper');
+      try {
+        const archive = createFakeWindowsStandaloneArchive(tmpDir);
+        appendFileSync(archive, 'tamper');
 
-      expect(() =>
-        runWindowsInstaller(
-          archive,
-          path.join(tmpDir, 'install'),
-          path.join(tmpDir, 'home'),
-        ),
-      ).toThrow(/Checksum verification failed/);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+        expect(() =>
+          runWindowsInstaller(
+            archive,
+            path.join(tmpDir, 'install'),
+            path.join(tmpDir, 'home'),
+          ),
+        ).toThrow(/Checksum verification failed/);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+    WINDOWS_INSTALLER_TEST_TIMEOUT,
+  );
 
-  itOnWindows('rejects a local archive when SHA256SUMS is missing', () => {
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+  itOnWindows(
+    'rejects a local archive when SHA256SUMS is missing',
+    () => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
-    try {
-      const archive = createFakeWindowsStandaloneArchive(tmpDir);
-      rmSync(path.join(path.dirname(archive), 'SHA256SUMS'), { force: true });
+      try {
+        const archive = createFakeWindowsStandaloneArchive(tmpDir);
+        rmSync(path.join(path.dirname(archive), 'SHA256SUMS'), { force: true });
 
-      expect(() =>
-        runWindowsInstaller(
-          archive,
-          path.join(tmpDir, 'install'),
-          path.join(tmpDir, 'home'),
-        ),
-      ).toThrow(/SHA256SUMS not found; cannot verify archive/);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+        expect(() =>
+          runWindowsInstaller(
+            archive,
+            path.join(tmpDir, 'install'),
+            path.join(tmpDir, 'home'),
+          ),
+        ).toThrow(/SHA256SUMS not found; cannot verify archive/);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+    WINDOWS_INSTALLER_TEST_TIMEOUT,
+  );
 
-  itOnWindows('rejects a local archive missing required entries', () => {
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+  itOnWindows(
+    'rejects a local archive missing required entries',
+    () => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
-    try {
-      const archive = createFakeWindowsStandaloneArchive(tmpDir, {
-        includeNode: false,
-      });
+      try {
+        const archive = createFakeWindowsStandaloneArchive(tmpDir, {
+          includeNode: false,
+        });
 
-      expect(() =>
-        runWindowsInstaller(
-          archive,
-          path.join(tmpDir, 'install'),
-          path.join(tmpDir, 'home'),
-        ),
-      ).toThrow(/qwen-code\\node\\node.exe/);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+        expect(() =>
+          runWindowsInstaller(
+            archive,
+            path.join(tmpDir, 'install'),
+            path.join(tmpDir, 'home'),
+          ),
+        ).toThrow(/qwen-code\\node\\node.exe/);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+    WINDOWS_INSTALLER_TEST_TIMEOUT,
+  );
 
   itOnWindows(
     'rejects standalone archives containing path traversal entries',
@@ -1234,6 +1248,7 @@ describe('Windows installer end-to-end', () => {
         rmSync(tmpDir, { recursive: true, force: true });
       }
     },
+    WINDOWS_INSTALLER_TEST_TIMEOUT,
   );
 
   itOnWindows(
@@ -1262,31 +1277,36 @@ describe('Windows installer end-to-end', () => {
         rmSync(tmpDir, { recursive: true, force: true });
       }
     },
+    WINDOWS_INSTALLER_TEST_TIMEOUT,
   );
 
-  itOnWindows('rejects unsafe environment-derived install paths', () => {
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+  itOnWindows(
+    'rejects unsafe environment-derived install paths',
+    () => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
-    try {
-      const archive = createFakeWindowsStandaloneArchive(tmpDir);
-      const marker = path.join(tmpDir, 'pwned.txt');
+      try {
+        const archive = createFakeWindowsStandaloneArchive(tmpDir);
+        const marker = path.join(tmpDir, 'pwned.txt');
 
-      expect(() =>
-        runWindowsInstaller(
-          archive,
-          path.join(tmpDir, 'install'),
-          path.join(tmpDir, 'home'),
-          'standalone',
-          {
-            QWEN_INSTALL_ROOT: `${path.join(tmpDir, 'install')}" & echo pwned > "${marker}" & "`,
-          },
-        ),
-      ).toThrow(/unsafe command characters/);
-      expect(existsSync(marker)).toBe(false);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+        expect(() =>
+          runWindowsInstaller(
+            archive,
+            path.join(tmpDir, 'install'),
+            path.join(tmpDir, 'home'),
+            'standalone',
+            {
+              QWEN_INSTALL_ROOT: `${path.join(tmpDir, 'install')}" & echo pwned > "${marker}" & "`,
+            },
+          ),
+        ).toThrow(/unsafe command characters/);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+    WINDOWS_INSTALLER_TEST_TIMEOUT,
+  );
 });
 
 // Tracks pending dist/ backups so a crashed test cannot leave the working tree
