@@ -215,7 +215,7 @@ async def can_use_tool(tool_name, tool_input, context):
     if tool_name in {"read_file", "list_directory"}:
         return {"behavior": "allow", "updatedInput": tool_input}
 
-    if tool_name == "write_file" and tool_input.get("path", "").endswith(".md"):
+    if tool_name == "write_file" and tool_input.get("file_path", "").endswith(".md"):
         return {"behavior": "allow", "updatedInput": tool_input}
 
     return {
@@ -266,7 +266,7 @@ async def prompts():
         "session_id": SESSION_ID,
         "message": {
             "role": "user",
-            "content": "Convert that summary into three bullets.",
+            "content": "Also list the test files.",
         },
         "parent_tool_use_id": None,
     }
@@ -294,6 +294,11 @@ async def main():
 
 asyncio.run(main())
 ```
+
+All messages in the async iterable must be known upfront. The SDK sends them
+sequentially to the CLI but cannot feed a prior response back into the generator.
+If you need conversational turn-taking, manage each turn as a separate `query()`
+call.
 
 ## Runtime Controls
 
@@ -338,23 +343,52 @@ underlying process, and `get_session_id()` to persist a session id for later.
 ## Session Resume
 
 ```python
-from qwen_code_sdk import query
+import asyncio
 
-known = query(
-    "Continue from this session.",
-    {
-        "path_to_qwen_executable": "qwen",
-        "resume": "123e4567-e89b-12d3-a456-426614174000",
-    },
-)
+from qwen_code_sdk import is_sdk_result_message, query
 
-latest = query(
-    "Continue the latest session.",
-    {
-        "path_to_qwen_executable": "qwen",
-        "continue_session": True,
-    },
-)
+
+async def main():
+    # Resume a known session by its id.
+    known = query(
+        "Continue from this session.",
+        {
+            "path_to_qwen_executable": "qwen",
+            "resume": "123e4567-e89b-12d3-a456-426614174000",
+        },
+    )
+
+    async for message in known:
+        if is_sdk_result_message(message):
+            print(message.get("result", ""))
+
+
+asyncio.run(main())
+```
+
+To continue the latest session instead:
+
+```python
+import asyncio
+
+from qwen_code_sdk import is_sdk_result_message, query
+
+
+async def main():
+    latest = query(
+        "Continue the latest session.",
+        {
+            "path_to_qwen_executable": "qwen",
+            "continue_session": True,
+        },
+    )
+
+    async for message in latest:
+        if is_sdk_result_message(message):
+            print(message.get("result", ""))
+
+
+asyncio.run(main())
 ```
 
 `resume` is useful when your application stores session ids. `continue_session`
