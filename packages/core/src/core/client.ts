@@ -12,6 +12,7 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
+import { SpanStatusCode } from '@opentelemetry/api';
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
@@ -53,6 +54,12 @@ import { buildAgentContentGeneratorConfig } from '../models/content-generator-co
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
+import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import {
+  DEFAULT_AUTO_SKILL_MAX_TURNS,
+  DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+} from '../memory/skillReviewAgentPlanner.js';
+import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
@@ -97,6 +104,12 @@ import { createHookOutput } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
+import {
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+  safeSetStatus,
+  withSpan,
+} from '../telemetry/tracer.js';
 
 const MAX_TURNS = 100;
 
@@ -167,9 +180,17 @@ async function resolveAutoMemoryWithDeadline(
   }
 }
 
+/** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
+const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ToolNames.WRITE_FILE,
+  ToolNames.EDIT,
+]);
+
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
+  private toolCallCount = 0;
+  private skillsModifiedInSession = false;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
@@ -359,6 +380,12 @@ export class GeminiClient {
       this.pendingRecallAbortController.abort();
       this.pendingRecallAbortController = undefined;
     }
+    // Drop any deferred tools revealed this session so /clear really gives
+    // a clean slate. We don't clear inside startChat itself because that path
+    // is also taken by compression (which preserves the session), and
+    // compression should keep previously-revealed tools so the model can
+    // continue using them without re-running ToolSearch.
+    this.config.getToolRegistry().clearRevealedDeferredTools();
     await this.startChat();
   }
 
@@ -377,7 +404,9 @@ export class GeminiClient {
     });
   }
 
-  private getMainSessionSystemInstruction(): string {
+  private getMainSessionSystemInstruction(
+    deferredTools?: Array<{ name: string; description: string }>,
+  ): string {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
@@ -387,6 +416,7 @@ export class GeminiClient {
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
+        deferredTools,
       );
     }
 
@@ -394,6 +424,7 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
+      deferredTools,
     );
   }
 
@@ -405,7 +436,63 @@ export class GeminiClient {
     const history = await getInitialChatHistory(this.config, extraHistory);
 
     try {
-      const systemInstruction = this.getMainSessionSystemInstruction();
+      // Warm the tool registry before building the system prompt so we know
+      // which tools are marked `shouldDefer`. The deferred list is appended to
+      // the prompt so the model knows which tools are reachable via
+      // ToolSearch. warmAll() is idempotent — setTools() below reuses the
+      // warmed state. Revealed-deferred state is NOT cleared here because
+      // startChat is also taken by the compression path (which preserves the
+      // session); `/clear` clears the revealed set via resetChat() before
+      // calling us.
+      const toolRegistry = this.config.getToolRegistry();
+      await toolRegistry.warmAll();
+      const deferredSummary = toolRegistry.getDeferredToolSummary();
+      // Resume support: when a transcript contains prior calls to a deferred
+      // tool, re-reveal that tool so `setTools()` below sends its schema in
+      // the declaration list. Without this, the model sees history like
+      // "I called foo_tool, got result" but the API rejects a follow-up
+      // call to foo_tool because the schema is absent.
+      if (history.length > 0 && deferredSummary.length > 0) {
+        const deferredNames = new Set(deferredSummary.map((t) => t.name));
+        for (const entry of history) {
+          for (const part of entry.parts ?? []) {
+            const callName = part.functionCall?.name;
+            if (callName && deferredNames.has(callName)) {
+              toolRegistry.revealDeferredTool(callName);
+            }
+          }
+        }
+      }
+      // ToolSearch availability gates two things:
+      //   (a) Whether the deferred-tools discovery section appears in the
+      //       prompt (otherwise we'd be telling the model to call a tool
+      //       that isn't registered).
+      //   (b) Whether deferral itself makes sense at all — if the model
+      //       has no way to reveal a deferred tool, the tool is effectively
+      //       hidden + uncallable. Silent disappearance is the worst
+      //       failure mode (user sees no error, just thinks the tool
+      //       doesn't exist), so when ToolSearch is filtered out (e.g. via
+      //       `--exclude-tools tool_search` or a deny rule), reveal every
+      //       deferred tool eagerly so they all land in the declaration
+      //       list. The token-saving rationale of deferral was predicated
+      //       on the discovery surface being available.
+      const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
+      if (!toolSearchAvailable && deferredSummary.length > 0) {
+        for (const t of deferredSummary) {
+          toolRegistry.revealDeferredTool(t.name);
+        }
+      }
+      // Exclude any tools revealed by the resume scan (or the no-ToolSearch
+      // eager-reveal above): their schemas are already in the declaration
+      // list, so advertising them as "reachable via ToolSearch" would
+      // invite redundant lookup calls.
+      const deferredTools = toolSearchAvailable
+        ? deferredSummary.filter(
+            (t) => !toolRegistry.isDeferredToolRevealed(t.name),
+          )
+        : undefined;
+      const systemInstruction =
+        this.getMainSessionSystemInstruction(deferredTools);
 
       this.chat = new GeminiChat(
         this.config,
@@ -626,11 +713,73 @@ export class GeminiClient {
   private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
   ): void {
-    if (messageType !== SendMessageType.UserQuery) {
-      return;
+    // autoSkill counts tool calls and can trigger on both UserQuery and
+    // ToolResult turns so the threshold can fire mid-session.
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.ToolResult
+    ) {
+      const projectRoot = this.config.getProjectRoot();
+      const sessionId = this.config.getSessionId();
+      const history = this.getHistory();
+      const mgr = this.config.getMemoryManager();
+      const autoSkillEnabled = this.config.getAutoSkillEnabled();
+
+      if (autoSkillEnabled) {
+        const skillReviewResult = mgr.scheduleSkillReview({
+          projectRoot,
+          sessionId,
+          history,
+          config: this.config,
+          toolCallCount: this.toolCallCount,
+          skillsModified: this.skillsModifiedInSession,
+          enabled: autoSkillEnabled,
+          threshold: AUTO_SKILL_THRESHOLD,
+          maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
+          timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+        });
+        if (skillReviewResult.status === 'scheduled') {
+          // Reset tool-call counter when a review is dispatched so the next
+          // review only fires after a full new threshold worth of tool calls.
+          this.toolCallCount = 0;
+          if (skillReviewResult.promise) {
+            this.pendingMemoryTaskPromises.push(
+              skillReviewResult.promise
+                .then((record) => {
+                  const touched = record.metadata?.['touchedSkillFiles'];
+                  return Array.isArray(touched) ? touched.length : 0;
+                })
+                .catch((error: unknown) => {
+                  debugLogger.warn(
+                    'Failed to run managed skill review.',
+                    error,
+                  );
+                  return 0;
+                }),
+            );
+          }
+        } else if (
+          skillReviewResult.status === 'skipped' &&
+          skillReviewResult.skippedReason === 'already_running' &&
+          this.toolCallCount >= AUTO_SKILL_THRESHOLD
+        ) {
+          // A review is already in-flight; reset the counter so that when the
+          // current review completes the next call doesn't immediately trigger
+          // another review without accumulating a fresh threshold of tool calls.
+          this.toolCallCount = 0;
+        }
+        // Always reset the skills-modified flag after the scheduleSkillReview
+        // check, regardless of whether a review was dispatched. This prevents
+        // a deadlock where skillsModifiedInSession stays true forever: when
+        // the flag is set, scheduleSkillReview returns 'skipped' immediately
+        // (never 'scheduled'), so without this reset the flag can never clear.
+        this.skillsModifiedInSession = false;
+      }
     }
 
-    if (!this.config.getManagedAutoMemoryEnabled()) {
+    // extract and dream keep the original UserQuery-only gate to preserve
+    // the existing "once per user turn" semantics and avoid redundant work.
+    if (messageType !== SendMessageType.UserQuery) {
       return;
     }
 
@@ -638,6 +787,10 @@ export class GeminiClient {
     const sessionId = this.config.getSessionId();
     const history = this.getHistory();
     const mgr = this.config.getMemoryManager();
+
+    if (!this.config.getManagedAutoMemoryEnabled()) {
+      return;
+    }
 
     const extractPromise = mgr
       .scheduleExtract({
@@ -692,6 +845,22 @@ export class GeminiClient {
     const promises = this.pendingMemoryTaskPromises;
     this.pendingMemoryTaskPromises = [];
     return promises;
+  }
+
+  recordCompletedToolCall(
+    toolName: string,
+    args?: Record<string, unknown>,
+  ): void {
+    if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
+      const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
+      if (
+        typeof filePath === 'string' &&
+        isProjectSkillPath(filePath, this.config.getProjectRoot())
+      ) {
+        this.skillsModifiedInSession = true;
+      }
+    }
+    this.toolCallCount += 1;
   }
 
   async *sendMessageStream(
@@ -1261,84 +1430,102 @@ export class GeminiClient {
     model: string,
     promptIdOverride?: string,
   ): Promise<GenerateContentResponse> {
-    let currentAttemptModel: string = model;
     const promptId =
       promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
 
-    try {
-      const userMemory = this.config.getUserMemory();
-      const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
-        : this.getMainSessionSystemInstruction();
+    return withSpan(
+      'client.generateContent',
+      { model, prompt_id: promptId },
+      async (span) => {
+        let currentAttemptModel: string = model;
 
-      const requestConfig: GenerateContentConfig = {
-        abortSignal,
-        ...generationConfig,
-        systemInstruction: finalSystemInstruction,
-      };
+        try {
+          const userMemory = this.config.getUserMemory();
+          const finalSystemInstruction = generationConfig.systemInstruction
+            ? getCustomSystemPrompt(
+                generationConfig.systemInstruction,
+                userMemory,
+              )
+            : this.getMainSessionSystemInstruction();
 
-      // When the requested model differs from the main model (e.g. fast model
-      // side queries for session recap / title / summary), resolve the target
-      // model's own ContentGeneratorConfig so that per-model settings like
-      // extra_body, samplingParams, and reasoning are not inherited from the
-      // main model's config.
-      const mainModel = this.config.getModel() ?? model;
-      const isPerModel = model !== mainModel;
+          const requestConfig: GenerateContentConfig = {
+            abortSignal,
+            ...generationConfig,
+            systemInstruction: finalSystemInstruction,
+          };
 
-      // Resolve the authType for retry logic. When using a per-model content
-      // generator (e.g. fast model side queries), the retry authType must match
-      // the target model's provider, not the main session's provider. This
-      // ensures QWEN_OAUTH quota detection checks against the right provider.
-      const retryAuthType = isPerModel
-        ? (this.createRetryAuthTypeForModel(model) ??
-          this.config.getContentGeneratorConfig()?.authType ??
-          AuthType.USE_OPENAI)
-        : this.config.getContentGeneratorConfig()?.authType;
+          // When the requested model differs from the main model (e.g. fast model
+          // side queries for session recap / title / summary), resolve the target
+          // model's own ContentGeneratorConfig so that per-model settings like
+          // extra_body, samplingParams, and reasoning are not inherited from the
+          // main model's config.
+          const mainModel = this.config.getModel() ?? model;
+          const isPerModel = model !== mainModel;
 
-      const contentGenerator = isPerModel
-        ? await this.createContentGeneratorForModel(model)
-        : this.getContentGeneratorOrFail();
-      const apiCall = () => {
-        currentAttemptModel = model;
+          // Resolve the authType for retry logic. When using a per-model content
+          // generator (e.g. fast model side queries), the retry authType must match
+          // the target model's provider, not the main session's provider. This
+          // ensures QWEN_OAUTH quota detection checks against the right provider.
+          const retryAuthType = isPerModel
+            ? (this.createRetryAuthTypeForModel(model) ??
+              this.config.getContentGeneratorConfig()?.authType ??
+              AuthType.USE_OPENAI)
+            : this.config.getContentGeneratorConfig()?.authType;
 
-        return contentGenerator.generateContent(
-          {
-            model,
-            config: requestConfig,
-            contents,
-          },
-          promptId,
-        );
-      };
-      const result = await retryWithBackoff(apiCall, {
-        authType: retryAuthType,
-        persistentMode: isUnattendedMode(),
-        signal: abortSignal,
-        heartbeatFn: (info) => {
-          process.stderr.write(
-            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          const contentGenerator = isPerModel
+            ? await this.createContentGeneratorForModel(model)
+            : this.getContentGeneratorOrFail();
+          const apiCall = () => {
+            currentAttemptModel = model;
+
+            return contentGenerator.generateContent(
+              {
+                model,
+                config: requestConfig,
+                contents,
+              },
+              promptId,
+            );
+          };
+          const result = await retryWithBackoff(apiCall, {
+            authType: retryAuthType,
+            persistentMode: isUnattendedMode(),
+            signal: abortSignal,
+            heartbeatFn: (info) => {
+              process.stderr.write(
+                `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+              );
+            },
+          });
+          return result;
+        } catch (error: unknown) {
+          if (abortSignal.aborted) {
+            safeSetStatus(span, {
+              code: SpanStatusCode.ERROR,
+              message: API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
+            });
+            throw error;
+          }
+
+          safeSetStatus(span, {
+            code: SpanStatusCode.ERROR,
+            message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+          });
+          await reportError(
+            error,
+            `Error generating content via API with model ${currentAttemptModel}.`,
+            {
+              requestContents: contents,
+              requestConfig: generationConfig,
+            },
+            'generateContent-api',
           );
-        },
-      });
-      return result;
-    } catch (error: unknown) {
-      if (abortSignal.aborted) {
-        throw error;
-      }
-
-      await reportError(
-        error,
-        `Error generating content via API with model ${currentAttemptModel}.`,
-        {
-          requestContents: contents,
-          requestConfig: generationConfig,
-        },
-        'generateContent-api',
-      );
-      throw new Error(
-        `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
-      );
-    }
+          throw new Error(
+            `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
+          );
+        }
+      },
+    );
   }
 
   /**

@@ -10,7 +10,6 @@
  * when only the filename configuration is needed.
  */
 
-export const QWEN_CONFIG_DIR = '.qwen';
 export const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
 export const AGENT_CONTEXT_FILENAME = 'AGENTS.md';
 export const MEMORY_SECTION_HEADER = '## Qwen Added Memories';

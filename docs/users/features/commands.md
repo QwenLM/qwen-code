@@ -45,13 +45,14 @@ Commands for adjusting interface appearance and work environment.
 
 Commands specifically for controlling interface and output language.
 
-| Command               | Description                      | Usage Examples             |
-| --------------------- | -------------------------------- | -------------------------- |
-| `/language`           | View or change language settings | `/language`                |
-| → `ui [language]`     | Set UI interface language        | `/language ui zh-CN`       |
-| → `output [language]` | Set LLM output language          | `/language output Chinese` |
+| Command               | Description                                                                 | Usage Examples             |
+| --------------------- | --------------------------------------------------------------------------- | -------------------------- |
+| `/language`           | View or change language settings                                            | `/language`                |
+| → `ui [language]`     | Set UI interface language                                                   | `/language ui zh-CN`       |
+| → `output [language]` | Set LLM output language                                                     | `/language output Chinese` |
+| → `translate on/off`  | Toggle AI translation for dynamic slash command descriptions (default: off) | `/language translate on`   |
 
-- Available built-in UI languages: `zh-CN` (Simplified Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German)
+- Available built-in UI languages: `zh-CN` (Simplified Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German), `ja-JP` (Japanese), `pt-BR` (Portuguese - Brazil), `fr-FR` (French), `ca-ES` (Catalan)
 - Output language examples: `Chinese`, `English`, `Japanese`, etc.
 
 ### 1.4 Tool and Model Management
@@ -233,22 +234,18 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing           |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
 
-### 1.10 CLI Auth Subcommands
+### 1.10 Authentication Commands
 
-In addition to the in-session `/auth` slash command, Qwen Code provides standalone CLI subcommands for managing authentication directly from the terminal:
+Use `/auth` inside a Qwen Code session to configure authentication. Use `/doctor` to inspect the current authentication and environment status.
 
-| Command                                              | Description                                                   |
-| ---------------------------------------------------- | ------------------------------------------------------------- |
-| `qwen auth`                                          | Interactive authentication setup                              |
-| `qwen auth coding-plan`                              | Authenticate with Alibaba Cloud Coding Plan                   |
-| `qwen auth coding-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting)             |
-| `qwen auth api-key`                                  | Authenticate with an API key                                  |
-| `qwen auth qwen-oauth`                               | ~~Authenticate with Qwen OAuth~~ (discontinued on 2026-04-15) |
-| `qwen auth status`                                   | Show current authentication status                            |
+| Command   | Description                                |
+| --------- | ------------------------------------------ |
+| `/auth`   | Configure authentication interactively     |
+| `/doctor` | Show authentication and environment checks |
 
-> [!tip]
+> [!note]
 >
-> These commands run outside of a Qwen Code session. Use them to configure authentication before starting a session, or in scripts and CI environments. See the [Authentication](../configuration/auth) page for full details.
+> The standalone `qwen auth` CLI command has been removed. Legacy invocations such as `qwen auth status` print a removal notice with migration guidance. See the [Authentication](../configuration/auth) page for full details.
 
 ## 2. @ Commands (Introducing Files)
 

@@ -15,6 +15,8 @@ import type { AuthController } from '../auth/useAuth.js';
 import type { HistoryItem } from '../types.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 
+export type HelpTab = 'general' | 'commands' | 'custom-commands';
+
 export interface UIActions {
   openThemeDialog: () => void;
   openEditorDialog: () => void;
@@ -77,10 +79,16 @@ export interface UIActions {
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
   handleResume: (sessionId: string) => void;
+  // Branch (fork) session
+  handleBranch: (name?: string) => Promise<void>;
   // Delete session dialog
   openDeleteDialog: () => void;
   closeDeleteDialog: () => void;
   handleDelete: (sessionId: string) => void;
+  // Help dialog
+  openHelpDialog: () => void;
+  closeHelpDialog: () => void;
+  setHelpTab: (tab: HelpTab) => void;
   // Feedback dialog
   openFeedbackDialog: () => void;
   closeFeedbackDialog: () => void;

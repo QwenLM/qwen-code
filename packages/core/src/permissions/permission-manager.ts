@@ -427,7 +427,17 @@ export class PermissionManager {
 
   /**
    * Core tools that are subject to the coreTools allowlist check.
-   * Tools not in this set (MCP, Skill, Agent, etc.) bypass the check.
+   *
+   * Tools NOT in this set bypass the check. Two categories live outside:
+   * - Dynamically discovered tools (MCP, Skill).
+   * - Synthetic system tools that the framework injects when a feature is
+   *   opted into and that have no meaning when missing — `agent`,
+   *   `exit_plan_mode`, `ask_user_question`, `task_stop`, `send_message`,
+   *   `structured_output` (registered only when `--json-schema` is set).
+   *   Excluding `structured_output` from `--core-tools` would leave a
+   *   `--json-schema` run with no terminal contract, so the synthetic
+   *   tool stays available regardless of the allowlist (deny rules still
+   *   apply).
    */
   private static readonly CORE_TOOLS = new Set([
     'read_file',
