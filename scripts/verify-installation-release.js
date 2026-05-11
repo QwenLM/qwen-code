@@ -9,7 +9,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RELEASE_TARGETS } from './build-standalone-release.js';
+import {
+  RELEASE_TARGETS,
+  standaloneArchiveName,
+} from './build-standalone-release.js';
 import { isStandaloneArchiveName } from './release-asset-config.js';
 import {
   fail,
@@ -24,8 +27,7 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
 const EXPECTED_STANDALONE_ARCHIVE_NAMES = RELEASE_TARGETS.map(
-  ({ qwenTarget }) =>
-    `qwen-code-${qwenTarget}.${qwenTarget === 'win-x64' ? 'zip' : 'tar.gz'}`,
+  ({ qwenTarget }) => standaloneArchiveName(qwenTarget),
 );
 // Release artifacts that the installer chain expects in a GitHub Release.
 // Hosted installer scripts (install-qwen.sh / install-qwen.bat) are served

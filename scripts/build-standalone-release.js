@@ -295,4 +295,5 @@ export {
   normalizeNodeVersion,
   parseChecksums,
   RELEASE_TARGETS,
+  standaloneArchiveName,
 };
