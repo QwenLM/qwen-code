@@ -88,6 +88,7 @@ export * from './tools/sdk-control-client-transport.js';
 export * from './tools/modifiable-tool.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
+export type { WebSearchProviderConfig } from './tools/web-search/types.js';
 export { buildSkillLlmContent } from './tools/skill-utils.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
@@ -115,12 +116,19 @@ export type {
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
+export type { SwarmTool, SwarmParams, SwarmTask } from './tools/swarm.js';
 export type {
   TodoWriteTool,
   TodoItem,
   TodoWriteParams,
 } from './tools/todoWrite.js';
 export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
+export type {
+  WebSearchTool,
+  WebSearchToolParams,
+  WebSearchToolResult,
+  WebSearchConfig,
+} from './tools/web-search/index.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';

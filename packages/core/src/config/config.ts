@@ -494,6 +494,15 @@ export interface ConfigParameters {
   loadMemoryFromIncludeDirectories?: boolean;
   importFormat?: 'tree' | 'flat';
   chatRecording?: boolean;
+  // Web search providers
+  webSearch?: {
+    provider: Array<{
+      type: 'tavily' | 'google' | 'dashscope';
+      apiKey?: string;
+      searchEngineId?: string;
+    }>;
+    default: string;
+  };
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
   trustedFolder?: boolean;
@@ -747,6 +756,14 @@ export class Config {
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
   private readonly chatCompression: ChatCompressionSettings | undefined;
+  private readonly webSearch?: {
+    provider: Array<{
+      type: 'tavily' | 'google' | 'dashscope';
+      apiKey?: string;
+      searchEngineId?: string;
+    }>;
+    default: string;
+  };
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
   private readonly useRipgrep: boolean;
@@ -918,8 +935,8 @@ export class Config {
     this.warnings = params.warnings ?? [];
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
+    this.webSearch = params.webSearch;
 
-    // (web search removed)
     this.useRipgrep = params.useRipgrep ?? true;
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
     this.shouldUseNodePtyShell =
@@ -2487,6 +2504,10 @@ export class Config {
     return this.getNoBrowser() || !shouldAttemptBrowserLaunch();
   }
 
+  getWebSearchConfig() {
+    return this.getBareMode() ? undefined : this.webSearch;
+  }
+
   getIdeMode(): boolean {
     return this.ideMode;
   }
@@ -2990,6 +3011,10 @@ export class Config {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
     });
+    await registerLazy(ToolNames.SWARM, async () => {
+      const { SwarmTool } = await import('../tools/swarm.js');
+      return new SwarmTool(this);
+    });
     await registerLazy(ToolNames.TASK_STOP, async () => {
       const { TaskStopTool } = await import('../tools/task-stop.js');
       return new TaskStopTool(this);
@@ -3082,6 +3107,12 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
+    if (this.getWebSearchConfig()) {
+      await registerLazy(ToolNames.WEB_SEARCH, async () => {
+        const { WebSearchTool } = await import('../tools/web-search/index.js');
+        return new WebSearchTool(this);
+      });
+    }
     if (this.isLspEnabled() && this.getLspClient()) {
       await registerLazy(ToolNames.LSP, async () => {
         const { LspTool } = await import('../tools/lsp.js');
