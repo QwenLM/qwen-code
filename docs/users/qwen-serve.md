@@ -119,6 +119,19 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 - **Per-subscriber bounded SSE queues** — a slow client that overflows its queue gets a `client_evicted` terminal frame and is closed; one stuck consumer can't pin the daemon.
 - **Graceful shutdown** — SIGINT/SIGTERM drain the agent children before closing the listener (10s deadline per child).
 
+> ⚠️ **Stage 1 known gap — phantom SSE connections behind NAT.** The
+> daemon detects dead clients via TCP back-pressure on heartbeats
+> (15s interval). A client that vanishes WITHOUT a TCP RST (e.g. a
+> NAT box silently dropping idle flows) keeps the kernel-level socket
+> "alive" until Node's keepalive probes time out — typically ~2 hours
+> on Linux defaults. On `--hostname 0.0.0.0` deployments behind such
+> NATs, phantom SSE connections can accumulate and eventually hit the
+> 256 `server.maxConnections` ceiling. Stage 2 will add an
+> application-level idle deadline (last-byte-written tracking +
+> per-connection timeout). Until then, operators on networks that
+> swallow RSTs may want to lower `server.keepAliveTimeout` via a
+> reverse proxy or accept periodic daemon restarts.
+
 ## Multi-session & remote deployment
 
 A single `qwen serve` process can manage sessions for any workspace path passed via `cwd` on `POST /session` — under the default `sessionScope: 'single'` it keeps one ACP session per canonicalized workspace, sharing it across every client that posts the same `cwd`. So one daemon will happily host sessions for many workspaces at once.

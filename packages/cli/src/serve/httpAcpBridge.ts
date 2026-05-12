@@ -1060,6 +1060,18 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // `applyModelServiceId` (timeout) — the absence of either was an
       // attack surface for "POST /session/:id/model never returns".
       // See `getTransportClosedReject` for the single-listener invariant.
+      //
+      // FIXME(stage-2): we reuse `initTimeoutMs` (default 10s) as the
+      // model-switch deadline because the two values happen to share
+      // a sensible order of magnitude today. They're conceptually
+      // distinct (cold-start handshake vs in-flight model swap) and
+      // a Stage 2 split into `modelSwitchTimeoutMs` would let
+      // operators tune them independently — also a good time to
+      // remove the no-abort behavior of `withTimeout` (it rejects
+      // the promise but leaves the underlying ACP call running, so a
+      // late-arriving `model_switched` can race a previously-fired
+      // `model_switch_failed`). Both depend on ACP exposing a cancel
+      // signal for `unstable_setSessionModel`.
       const transportClosed = getTransportClosedReject(entry);
       const work = entry.modelChangeQueue.then(() =>
         Promise.race([
@@ -1269,6 +1281,14 @@ function sliceLineRange(
 function canonicalizeWorkspace(p: string): string {
   const resolved = path.resolve(p);
   try {
+    // FIXME(stage-2): switch to `fs.promises.realpath` once the
+    // bridge call sites become async-friendly. This sync syscall
+    // runs on the hot `spawnOrAttach` path and blocks the event
+    // loop for one filesystem stat per call. Single-user loopback
+    // (Stage 1's design target) doesn't notice; high-concurrency
+    // deployments will. Stage 2 in-process refactor removes the
+    // entire bridge-side path resolution anyway, but if Stage 2
+    // ever lands without that change, switch to the async version.
     return realpathSync.native(resolved);
   } catch {
     return resolved;

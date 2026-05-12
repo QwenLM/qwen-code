@@ -30,7 +30,16 @@ import {
 } from '@qwen-code/sdk';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_BIN = path.resolve(__dirname, '../../packages/cli/dist/index.js');
+// Match the rest of the integration suite: prefer the bundled CLI
+// path that `globalSetup.ts` configures via `TEST_CLI_PATH` (root
+// `dist/cli.js`), falling back to the per-package output for direct
+// `vitest run integration-tests/...` invocations that bypass
+// globalSetup. Without this two-tier resolution the suite became
+// sensitive to which build step (`npm run build` vs `npm run bundle`)
+// last ran.
+const CLI_BIN =
+  process.env['TEST_CLI_PATH'] ??
+  path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'integration-test-token';
 const REPO_ROOT = path.resolve(__dirname, '../..');
 

@@ -31,7 +31,13 @@ import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_BIN = path.resolve(__dirname, '../../packages/cli/dist/index.js');
+// Match the rest of the integration suite: prefer `TEST_CLI_PATH`
+// from `globalSetup.ts` (root `dist/cli.js` bundle), fall back to
+// the per-package output for direct vitest invocations. See the same
+// note in qwen-serve-routes.test.ts for full rationale.
+const CLI_BIN =
+  process.env['TEST_CLI_PATH'] ??
+  path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'streaming-integ-secret';
 const REPO_ROOT = path.resolve(__dirname, '../..');
 

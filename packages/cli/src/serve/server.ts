@@ -237,6 +237,17 @@ export function createServeApp(
     };
     res.once('close', onResClose);
     try {
+      // SECURITY NOTE: this `...(body as object)` passthrough is
+      // intentional — the bridge / ACP SDK ignores fields it
+      // doesn't recognize (ACP-spec `_meta` etc are forwarded
+      // wholesale to the agent, which is the documented behavior).
+      // `sessionId` and `prompt` are forced to the route's view to
+      // prevent body-spoofing of the routing key. If a future
+      // bridge version starts trusting an additional field by name,
+      // that field becomes a client-controlled input surface — at
+      // that point switch this to an explicit pick. The same
+      // pattern repeats on cancel / model below; review them all
+      // together when adding new bridge-trusted fields.
       const result = await bridge.sendPrompt(
         sessionId,
         {
