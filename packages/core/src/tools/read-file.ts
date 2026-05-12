@@ -434,6 +434,13 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return 'Limit must be a positive number';
     }
 
+    if (
+      (params.offset !== undefined || params.limit !== undefined) &&
+      path.extname(filePath).toLowerCase() === '.ipynb'
+    ) {
+      return 'offset and limit are not supported for Jupyter notebook (.ipynb) files. Notebooks are always read in full with structured cell output.';
+    }
+
     if (params.pages) {
       const parsed = parsePDFPageRange(params.pages);
       if (!parsed) {

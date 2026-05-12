@@ -158,6 +158,18 @@ describe('ReadFileTool', () => {
         'Limit must be a positive number',
       );
     });
+
+    it('should reject offset or limit for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        offset: 0,
+        limit: 10,
+      };
+
+      expect(() => tool.build(params)).toThrow(
+        'offset and limit are not supported for Jupyter notebook (.ipynb) files',
+      );
+    });
   });
 
   describe('getDefaultPermission', () => {

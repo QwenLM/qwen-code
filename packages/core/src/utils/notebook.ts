@@ -85,6 +85,11 @@ export interface NotebookReadResult {
   isTruncated: boolean;
 }
 
+export interface NotebookJsonFormat {
+  indent: number;
+  trailingNewline: boolean;
+}
+
 export function normalizeSource(source: string | string[]): string {
   return Array.isArray(source) ? source.join('') : source;
 }
@@ -103,8 +108,20 @@ export function parseNotebook(content: string): NotebookContent {
   return notebook;
 }
 
-export function serializeNotebook(notebook: NotebookContent): string {
-  return `${JSON.stringify(notebook, null, 1)}\n`;
+export function inferNotebookJsonFormat(content: string): NotebookJsonFormat {
+  const lineMatch = content.match(/\n( +)"/);
+  return {
+    indent: lineMatch?.[1]?.length ?? 0,
+    trailingNewline: content.endsWith('\n'),
+  };
+}
+
+export function serializeNotebook(
+  notebook: NotebookContent,
+  format: NotebookJsonFormat = { indent: 1, trailingNewline: true },
+): string {
+  const serialized = JSON.stringify(notebook, null, format.indent);
+  return format.trailingNewline ? `${serialized}\n` : serialized;
 }
 
 export function parseCellId(cellId: string): number | undefined {
@@ -195,6 +212,23 @@ export function inferNotebookSourceArrayStyle(
 ): boolean {
   const sourceCell = notebook.cells.find((cell) => cell.source !== undefined);
   return sourceCell ? Array.isArray(sourceCell.source) : true;
+}
+
+export function inferInsertedCellSourceArrayStyle(
+  notebook: NotebookContent,
+  insertAt: number,
+): boolean {
+  const previousCell = notebook.cells[insertAt - 1];
+  if (previousCell?.source !== undefined) {
+    return Array.isArray(previousCell.source);
+  }
+
+  const nextCell = notebook.cells[insertAt];
+  if (nextCell?.source !== undefined) {
+    return Array.isArray(nextCell.source);
+  }
+
+  return inferNotebookSourceArrayStyle(notebook);
 }
 
 export function toNotebookSource(

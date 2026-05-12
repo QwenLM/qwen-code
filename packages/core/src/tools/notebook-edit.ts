@@ -36,7 +36,8 @@ import {
   getCellDisplayId,
   getNotebookLanguage,
   hasStableCellIds,
-  inferNotebookSourceArrayStyle,
+  inferInsertedCellSourceArrayStyle,
+  inferNotebookJsonFormat,
   isAmbiguousCellId,
   makeCellId,
   normalizeEditedCell,
@@ -56,6 +57,9 @@ import type {
   ModifyContext,
 } from './modifiable-tool.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('NOTEBOOK_EDIT');
 
 export type NotebookEditMode = 'replace' | 'insert' | 'delete';
 
@@ -94,6 +98,20 @@ type NotebookPriorReadDecision =
       rawMessage: string;
       displayMessage: string;
     };
+
+function rejectNotebookPriorRead(
+  notebookPath: string,
+  reason: string,
+  decision: Exclude<NotebookPriorReadDecision, { ok: true }>,
+): NotebookPriorReadDecision {
+  debugLogger.debug('prior-read-rejected', {
+    path: notebookPath,
+    reason,
+    type: decision.type,
+    displayMessage: decision.displayMessage,
+  });
+  return decision;
+}
 
 class NotebookEditError extends Error {
   constructor(
@@ -161,11 +179,12 @@ function createNotebookCell(
   notebook: ReturnType<typeof parseNotebook>,
   cellType: EditableNotebookCellType,
   source: string,
+  preferSourceArray: boolean,
 ): NotebookCell {
   const cell: NotebookCell = {
     cell_type: cellType,
     metadata: {},
-    source: toNotebookSource(source, inferNotebookSourceArrayStyle(notebook)),
+    source: toNotebookSource(source, preferSourceArray),
   };
   const id = makeCellId(notebook);
   if (id) {
@@ -194,6 +213,7 @@ export function applyNotebookEdit(
   const originalHasStableCellIds = hasStableCellIds(notebook);
   const targetIndex = resolveTargetIndex(notebook, params.cell_id, mode);
   const language = getNotebookLanguage(notebook);
+  const jsonFormat = inferNotebookJsonFormat(rawContent);
   const buildResult = (
     updatedNotebook: ReturnType<typeof parseNotebook>,
     result: Omit<
@@ -204,7 +224,7 @@ export function applyNotebookEdit(
     const structuralEdit = mode === 'insert' || mode === 'delete';
     return {
       ...result,
-      updatedContent: serializeNotebook(updatedNotebook),
+      updatedContent: serializeNotebook(updatedNotebook, jsonFormat),
       requiresReadAfterWrite:
         structuralEdit &&
         !(originalHasStableCellIds && hasStableCellIds(updatedNotebook)),
@@ -214,8 +234,13 @@ export function applyNotebookEdit(
   switch (mode) {
     case 'insert': {
       const cellType = params.cell_type ?? 'code';
-      const newCell = createNotebookCell(notebook, cellType, source);
       const insertAt = targetIndex === -1 ? 0 : targetIndex + 1;
+      const newCell = createNotebookCell(
+        notebook,
+        cellType,
+        source,
+        inferInsertedCellSourceArrayStyle(notebook, insertAt),
+      );
       notebook.cells.splice(insertAt, 0, newCell);
       return buildResult(notebook, {
         editedCellId: displayCellId(newCell, insertAt),
@@ -306,40 +331,40 @@ async function checkPriorNotebookRead(
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
     if (code === 'ENOENT') {
       if (options.expectExisting) {
-        return {
+        return rejectNotebookPriorRead(notebookPath, 'missing-after-read', {
           ok: false,
           type: ToolErrorType.FILE_CHANGED_SINCE_READ,
           rawMessage: `Notebook ${notebookPath} disappeared after it was read. Re-read it with the ${ToolNames.READ_FILE} tool before editing it.`,
           displayMessage: `notebook disappeared after last read; re-run ${ToolNames.READ_FILE} first.`,
-        };
+        });
       }
       return { ok: true };
     }
 
-    return {
+    return rejectNotebookPriorRead(notebookPath, 'stat-failed', {
       ok: false,
       type: ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
       rawMessage: `Could not stat ${notebookPath} to verify prior notebook read (${code ?? 'unknown error'}). Re-read it with the ${ToolNames.READ_FILE} tool before editing it.`,
       displayMessage: `cannot verify prior read of ${notebookPath}; re-run ${ToolNames.READ_FILE} before editing this notebook.`,
-    };
+    });
   }
 
   if (stats.isDirectory()) {
-    return {
+    return rejectNotebookPriorRead(notebookPath, 'target-is-directory', {
       ok: false,
       type: ToolErrorType.TARGET_IS_DIRECTORY,
       rawMessage: `${notebookPath} is a directory. The NotebookEdit tool only operates on .ipynb files.`,
       displayMessage: 'path is a directory; cannot edit as a notebook.',
-    };
+    });
   }
 
   if (!stats.isFile()) {
-    return {
+    return rejectNotebookPriorRead(notebookPath, 'target-not-regular-file', {
       ok: false,
-      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      type: ToolErrorType.TARGET_NOT_REGULAR_FILE,
       rawMessage: `${notebookPath} is not a regular file. The NotebookEdit tool only operates on .ipynb files.`,
       displayMessage: 'special file; cannot edit as a notebook.',
-    };
+    });
   }
 
   const status = config.getFileReadCache().check(stats);
@@ -352,20 +377,20 @@ async function checkPriorNotebookRead(
   }
 
   if (status.state === 'stale') {
-    return {
+    return rejectNotebookPriorRead(notebookPath, 'stale-cache-entry', {
       ok: false,
       type: ToolErrorType.FILE_CHANGED_SINCE_READ,
       rawMessage: `Notebook ${notebookPath} has been modified since you last read it. Re-read it with the ${ToolNames.READ_FILE} tool before editing it.`,
       displayMessage: `notebook changed since last read; re-run ${ToolNames.READ_FILE} first.`,
-    };
+    });
   }
 
-  return {
+  return rejectNotebookPriorRead(notebookPath, `cache-${status.state}`, {
     ok: false,
     type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
     rawMessage: `Notebook ${notebookPath} has not been fully read in this session. Use the ${ToolNames.READ_FILE} tool first, without offset or limit, before editing cells.`,
     displayMessage: `${ToolNames.READ_FILE} required before editing this notebook.`,
-  };
+  });
 }
 
 class NotebookEditInvocation extends BaseToolInvocation<
@@ -578,9 +603,14 @@ class NotebookEditInvocation extends BaseToolInvocation<
             cacheable: false,
           });
         }
-      } catch {
+      } catch (error) {
         // Non-fatal: the write succeeded. A subsequent read will re-stat and
         // refresh the cache if this best-effort cache update failed.
+        debugLogger.warn(
+          `[NotebookEdit] post-write cache update failed for ${this.params.notebook_path}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
 
       const fileName = path.basename(this.params.notebook_path);
@@ -619,14 +649,16 @@ class NotebookEditInvocation extends BaseToolInvocation<
         diffStat,
       };
 
-      const sourcePreview =
+      const llmContent =
         this.params.modified_notebook_content !== undefined
-          ? '\n\nNotebook content was modified by the user before approval.'
-          : prepared.mode === 'delete'
-            ? ''
-            : `\n\nUpdated source:\n\n---\n\n${normalizeSource(this.params.new_source ?? '')}`;
+          ? `Notebook ${this.params.notebook_path} has been updated. Notebook content was modified by the user before approval; the final saved notebook may differ from the original ${prepared.mode} cell ${prepared.editedCellId} proposal.`
+          : `Notebook ${this.params.notebook_path} has been updated. ${prepared.mode} cell ${prepared.editedCellId}.${
+              prepared.mode === 'delete'
+                ? ''
+                : `\n\nUpdated source:\n\n---\n\n${normalizeSource(this.params.new_source ?? '')}`
+            }`;
       return {
-        llmContent: `Notebook ${this.params.notebook_path} has been updated. ${prepared.mode} cell ${prepared.editedCellId}.${sourcePreview}`,
+        llmContent,
         returnDisplay: displayResult,
         resultFilePaths: [this.params.notebook_path],
       };
@@ -742,22 +774,31 @@ export class NotebookEditTool
   getModifyContext(
     _abortSignal: AbortSignal,
   ): ModifyContext<NotebookEditToolParams> {
+    const currentContentSnapshots = new Map<string, string>();
+    const readCurrentContentSnapshot = async (
+      params: NotebookEditToolParams,
+    ): Promise<string> => {
+      const cached = currentContentSnapshots.get(params.notebook_path);
+      if (cached !== undefined) {
+        return cached;
+      }
+
+      const { content } = await this.config
+        .getFileSystemService()
+        .readTextFile({ path: params.notebook_path });
+      currentContentSnapshots.set(params.notebook_path, content);
+      return content;
+    };
+
     return {
       getFilePath: (params: NotebookEditToolParams) => params.notebook_path,
       getCurrentContent: async (
         params: NotebookEditToolParams,
-      ): Promise<string> => {
-        const { content } = await this.config
-          .getFileSystemService()
-          .readTextFile({ path: params.notebook_path });
-        return content;
-      },
+      ): Promise<string> => readCurrentContentSnapshot(params),
       getProposedContent: async (
         params: NotebookEditToolParams,
       ): Promise<string> => {
-        const { content } = await this.config
-          .getFileSystemService()
-          .readTextFile({ path: params.notebook_path });
+        const content = await readCurrentContentSnapshot(params);
         return applyNotebookEdit(content, params).updatedContent;
       },
       createUpdatedParams: (

@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -222,6 +223,63 @@ describe('NotebookEditTool', () => {
     expect(result.editedCellId).toBe('qwen-cell-1');
   });
 
+  it('preserves adjacent source style for inserted cells in mixed-format notebooks', async () => {
+    const raw = JSON.stringify({
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [
+        { cell_type: 'markdown', id: 'intro', source: '# Intro', metadata: {} },
+        {
+          cell_type: 'code',
+          id: 'code',
+          source: ['value = 1\n'],
+          metadata: {},
+        },
+      ],
+      metadata: {},
+    });
+
+    const result = applyNotebookEdit(raw, {
+      notebook_path: '/tmp/insert.ipynb',
+      edit_mode: 'insert',
+      cell_id: 'intro',
+      cell_type: 'markdown',
+      new_source: '## Inserted',
+    });
+
+    const updated = JSON.parse(result.updatedContent);
+    expect(updated.cells[1].source).toBe('## Inserted');
+  });
+
+  it('preserves notebook JSON indentation and trailing newline style on edit', () => {
+    const raw = JSON.stringify(
+      {
+        nbformat: 4,
+        nbformat_minor: 5,
+        cells: [
+          {
+            cell_type: 'markdown',
+            id: 'intro',
+            source: '# Intro',
+            metadata: {},
+          },
+        ],
+        metadata: {},
+      },
+      null,
+      2,
+    );
+
+    const result = applyNotebookEdit(raw, {
+      notebook_path: '/tmp/format.ipynb',
+      cell_id: 'intro',
+      new_source: '# Updated',
+    });
+
+    expect(result.updatedContent).toContain('\n  "cells"');
+    expect(result.updatedContent.endsWith('\n')).toBe(false);
+  });
+
   it('rejects ambiguous fallback-like cell IDs', async () => {
     const filePath = writeNotebook('ambiguous.ipynb', {
       nbformat: 4,
@@ -390,6 +448,23 @@ describe('NotebookEditTool', () => {
     expect(result.llmContent).toContain('has not been fully read');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'rejects non-regular notebook paths with a dedicated error type',
+    async () => {
+      const fifoPath = path.join(tempDir, 'notebook-fifo.ipynb');
+      execFileSync('mkfifo', [fifoPath]);
+
+      const result = await buildInvocation({
+        notebook_path: fifoPath,
+        cell_id: 'a',
+        new_source: 'x = 2',
+      }).execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.TARGET_NOT_REGULAR_FILE);
+      expect(result.llmContent).toContain('not a regular file');
+    },
+  );
+
   it('rejects stale notebook edits after an external change', async () => {
     const filePath = writeNotebook('stale.ipynb', {
       cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
@@ -518,6 +593,45 @@ describe('NotebookEditTool', () => {
     expect(
       CommitAttributionService.getInstance().getFileAttribution(filePath),
     ).toBeUndefined();
+  });
+
+  it('uses one current-content snapshot for notebook modify previews', async () => {
+    const filePath = writeNotebook('modify-snapshot.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+
+    const params = {
+      notebook_path: filePath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    };
+    const modifyContext = tool.getModifyContext(abortSignal);
+    const currentContent = await modifyContext.getCurrentContent(params);
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          nbformat: 4,
+          nbformat_minor: 5,
+          cells: [
+            { cell_type: 'code', id: 'a', source: ['x = 999'], metadata: {} },
+          ],
+          metadata: {},
+        },
+        null,
+        1,
+      ),
+      'utf-8',
+    );
+
+    const proposedContent = await modifyContext.getProposedContent(params);
+
+    expect(currentContent).toContain('x = 1');
+    expect(proposedContent).toContain('x = 2');
+    expect(proposedContent).not.toContain('x = 999');
   });
 
   it('records AI-originated notebook writes for commit attribution', async () => {

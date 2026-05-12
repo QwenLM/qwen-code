@@ -9,12 +9,15 @@ import {
   findCellIndex,
   getCellDisplayId,
   hasStableCellIds,
+  inferInsertedCellSourceArrayStyle,
+  inferNotebookJsonFormat,
   isAmbiguousCellId,
   makeCellId,
   parseCellId,
   parseNotebook,
   readNotebook,
   readNotebookWithMetadata,
+  serializeNotebook,
   toNotebookSource,
 } from './notebook.js';
 import path from 'node:path';
@@ -454,6 +457,46 @@ describe('notebook utilities', () => {
     expect(toNotebookSource('a\nb', true)).toEqual(['a\n', 'b']);
     expect(toNotebookSource('', true)).toEqual([]);
     expect(toNotebookSource('a\nb\n', false)).toBe('a\nb\n');
+  });
+
+  it('should preserve notebook JSON indentation and trailing newline style', () => {
+    const raw = JSON.stringify(
+      {
+        cells: [{ cell_type: 'markdown', source: '# Title', metadata: {} }],
+        metadata: {},
+      },
+      null,
+      2,
+    );
+    const notebook = parseNotebook(raw);
+    notebook.cells[0]!.source = '# Updated';
+
+    const format = inferNotebookJsonFormat(raw);
+    const serialized = serializeNotebook(notebook, format);
+
+    expect(format).toEqual({ indent: 2, trailingNewline: false });
+    expect(serialized).toContain('\n  "cells"');
+    expect(serialized.endsWith('\n')).toBe(false);
+  });
+
+  it('should infer inserted source style from adjacent cells', () => {
+    const notebook = parseNotebook(
+      JSON.stringify({
+        cells: [
+          { cell_type: 'markdown', source: '# string source', metadata: {} },
+          {
+            cell_type: 'code',
+            source: ['print("array source")'],
+            metadata: {},
+          },
+        ],
+        metadata: {},
+      }),
+    );
+
+    expect(inferInsertedCellSourceArrayStyle(notebook, 1)).toBe(false);
+    expect(inferInsertedCellSourceArrayStyle(notebook, 0)).toBe(false);
+    expect(inferInsertedCellSourceArrayStyle(notebook, 2)).toBe(true);
   });
 
   it('should generate deterministic cell IDs that cannot collide with cell-N fallbacks', () => {
