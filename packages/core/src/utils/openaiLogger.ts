@@ -12,6 +12,19 @@ import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('OPENAI_LOGGER');
 
+export interface OpenAILogInteractionOptions {
+  filenameTag?: string;
+  metadata?: Record<string, unknown>;
+}
+
+function sanitizeFilenameTag(tag: string | undefined): string | undefined {
+  if (!tag) return undefined;
+  const sanitized = tag
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return sanitized || undefined;
+}
+
 /**
  * Logger specifically for OpenAI API requests and responses
  */
@@ -70,6 +83,7 @@ export class OpenAILogger {
     request: unknown,
     response?: unknown,
     error?: Error,
+    options?: OpenAILogInteractionOptions,
   ): Promise<string> {
     if (!this.initialized) {
       await this.initialize();
@@ -77,11 +91,15 @@ export class OpenAILogger {
 
     const timestamp = new Date().toISOString().replace(/:/g, '-');
     const id = uuidv4().slice(0, 8);
-    const filename = `openai-${timestamp}-${id}.json`;
+    const filenameTag = sanitizeFilenameTag(options?.filenameTag);
+    const filename = filenameTag
+      ? `openai-${timestamp}-${id}-${filenameTag}.json`
+      : `openai-${timestamp}-${id}.json`;
     const filePath = path.join(this.logDir, filename);
 
     const logData = {
       timestamp: new Date().toISOString(),
+      ...(options?.metadata ? { metadata: options.metadata } : {}),
       request,
       response: response || null,
       error: error
