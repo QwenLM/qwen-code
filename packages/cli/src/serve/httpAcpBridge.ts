@@ -929,6 +929,16 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         // that case so the per-session FIFO doesn't poison the next
         // queued prompt with an unbounded await. See
         // `getTransportClosedReject` for the single-listener invariant.
+        //
+        // FIXME(stage-2): no absolute prompt deadline. A buggy agent
+        // that ignores `cancel()` while keeping the channel alive can
+        // hold this race open indefinitely — the abort path fires
+        // `cancel()` and resolves pending permissions, but the
+        // `promptPromise` itself only settles when the agent
+        // cooperates. Stage 2 should add a configurable per-prompt
+        // wall clock (e.g. `--prompt-deadline 30m`) into this race so
+        // a wedged agent can't slow-leak prompt promises. Tracked
+        // under #3803 follow-ups.
         const racedPromise = Promise.race([
           promptPromise,
           getTransportClosedReject(entry),
@@ -964,10 +974,19 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           // `cancel()` instead of letting the prompt run uncancellable.
           if (signal.aborted) onAbort();
           // Detach the listener once the prompt resolves so the
-          // AbortController can be GC'd.
-          racedPromise.finally(() =>
-            signal.removeEventListener('abort', onAbort),
-          );
+          // AbortController can be GC'd. The `.finally()` returns a
+          // promise chained on `racedPromise`; if `racedPromise`
+          // rejects, that returned promise rejects too — and we
+          // never await it, so under Node's default
+          // unhandled-rejection behavior the daemon could terminate
+          // even though the route's own catch handles the original
+          // rejection. Attach `.catch(() => {})` to the
+          // listener-cleanup chain only — the caller's reference to
+          // `racedPromise` (via `return racedPromise` below) still
+          // surfaces failures normally.
+          racedPromise
+            .finally(() => signal.removeEventListener('abort', onAbort))
+            .catch(() => {});
         }
         return racedPromise;
       });

@@ -55,7 +55,13 @@ export function createServeApp(
   deps: ServeAppDeps = {},
 ): Application {
   const app = express();
-  const bridge = deps.bridge ?? createHttpAcpBridge();
+  // Forward `maxSessions` into the default-constructed bridge so
+  // direct callers of `createServeApp` (tests, embeds) get the same
+  // cap they configured via `ServeOptions`. Previously the default
+  // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
+  // only the `runQwenServe` path piped the option through.
+  const bridge =
+    deps.bridge ?? createHttpAcpBridge({ maxSessions: opts.maxSessions });
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
