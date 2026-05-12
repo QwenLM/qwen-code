@@ -49,4 +49,29 @@ describe('parseSubagentModelSelection', () => {
       inherits: false,
     });
   });
+
+  it('parses the fast keyword', () => {
+    expect(parseSubagentModelSelection('fast')).toEqual({
+      inherits: false,
+      usesFastModel: true,
+    });
+  });
+
+  it('parses the fast keyword with surrounding whitespace', () => {
+    expect(parseSubagentModelSelection('  fast  ')).toEqual({
+      inherits: false,
+      usesFastModel: true,
+    });
+  });
+
+  it('treats model IDs that merely contain "fast" as bare IDs, not the keyword', () => {
+    expect(parseSubagentModelSelection('qwen3-coder-flash')).toEqual({
+      modelId: 'qwen3-coder-flash',
+      inherits: false,
+    });
+    expect(parseSubagentModelSelection('Fast')).toEqual({
+      modelId: 'Fast',
+      inherits: false,
+    });
+  });
 });
