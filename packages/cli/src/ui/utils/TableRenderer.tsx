@@ -17,6 +17,7 @@ import {
   isSafeOscScheme,
   osc8Close,
   osc8Open,
+  sanitizeForOsc,
   shouldWrapMarkdownLink,
   supportsHyperlinks,
   trimTrailingUrlPunctuation,
@@ -302,7 +303,11 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
         // byte-identical to today on unsupported terminals / unsafe
         // schemes / whitespace URLs.
         if (shouldWrapMarkdownLink(url, canHyperlink)) {
-          const visibleLabel = applyColor(labelText || url, theme.text.link);
+          // Strip bidi / C0 / C1 from the visible label too, not just the
+          // OSC target — otherwise a model-emitted U+202E in the label
+          // would still spoof the rendered text inside the clickable region.
+          const safeLabel = sanitizeForOsc(labelText);
+          const visibleLabel = applyColor(safeLabel || url, theme.text.link);
           rendered = `${osc8Open(url)}${visibleLabel}${osc8Close()}`;
         } else {
           rendered = `${labelText} ${applyColor(`(${url})`, theme.text.link)}`;

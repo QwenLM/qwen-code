@@ -16,6 +16,7 @@ import {
   isSafeOscScheme,
   osc8Close,
   osc8Open,
+  sanitizeForOsc,
   shouldWrapMarkdownLink,
   supportsHyperlinks,
   trimTrailingUrlPunctuation,
@@ -164,10 +165,17 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
           // When OSC 8 is NOT active (unsupported terminal, unsafe scheme,
           // whitespace in URL) we emit byte-identical legacy `label (url)`
           // rendering so the user can still read and copy the target.
+          // The label is rendered inside the clickable region, so any bidi /
+          // C0 / C1 byte the model embedded would still spoof the visible
+          // text even though the OSC target is sanitized. Run the same
+          // sanitizer over the visible label when OSC 8 is active. The
+          // legacy `label (url)` branch leaves the label intact so today's
+          // unsupported-terminal output stays byte-identical.
+          const safeLabel = wrapOsc8 ? sanitizeForOsc(linkText) : linkText;
           renderedNode = wrapOsc8 ? (
             <Text key={key} color={theme.text.link}>
               {osc8Open(url)}
-              {linkText || url}
+              {safeLabel || url}
               {osc8Close()}
             </Text>
           ) : (

@@ -276,5 +276,44 @@ describe('<RenderInline />', () => {
       expect(out).toContain('foo');
       expect(out).not.toContain(`(${url})`);
     });
+
+    it('sanitizes bidi controls in the visible label (anti-spoof)', () => {
+      // U+202E (RLO) injected into a label would visually reverse the
+      // trailing bytes, letting a "click [safe.com](https://evil.com)"
+      // render as a different host than the URL — a spoofing vector that
+      // OSC 8's clickable region makes more dangerous than the legacy
+      // `label (url)` rendering, because the user no longer sees the
+      // URL in plain text.
+      enableHyperlinks();
+      const url = 'https://example.com/page';
+      const spoofLabel = 'safe.com\u202emoc.live';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`click [${spoofLabel}](${url}) end`} />,
+      );
+      const out = lastFrame() ?? '';
+      expect(out).toContain(`\x1b]8;;${url}\x07`);
+      // The RLO byte must NOT survive into the rendered visible label.
+      expect(out).not.toContain('\u202e');
+    });
+
+    it('non-TTY fallback is byte-identical to the legacy `label (url)` form', () => {
+      // Pin the contract from the PR: when the terminal does not advertise
+      // OSC 8 support, output must contain no OSC 8 envelope bytes and the
+      // visible payload must be the legacy `label (url)` form. A regression
+      // that adds a stray escape on the off-path would slip past the
+      // `not.toContain('\x1b]8;;')` checks elsewhere if accompanied by
+      // other escapes, so anchor a stricter substring assertion here too.
+      // (isTTY=false from the suite-wide beforeEach disables hyperlinks.)
+      const url = 'https://example.com/page';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`see [docs](${url})`} />,
+      );
+      const out = lastFrame() ?? '';
+      // No OSC 8 envelope, no related escape introducer.
+      expect(out).not.toContain('\x1b]8');
+      // Exactly one occurrence of the legacy form, with the URL fully present.
+      expect(out).toContain(`docs`);
+      expect(out).toContain(`(${url})`);
+    });
   });
 });

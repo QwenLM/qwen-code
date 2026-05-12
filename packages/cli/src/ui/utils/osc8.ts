@@ -20,16 +20,32 @@ import { wrapForMultiplexer } from '../../utils/osc.js';
 export { wrapForMultiplexer };
 
 /**
- * Strip C0 + DEL + C1 control characters so an untrusted string can be safely
- * embedded inside an OSC escape. Without this a `\x07` (BEL) or `\x1b` (ESC)
- * in the input would prematurely terminate the OSC sequence and leak the
- * tail bytes to the terminal as interpretable escape codes. C1 bytes
- * (`\x80-\x9f`) include the 8-bit ST and OSC introducers, which terminals
- * that honor C1 controls treat the same as their two-byte ESC counterparts.
+ * Strip C0 + DEL + C1 control characters AND Unicode bidi / line-separator
+ * controls so an untrusted string can be safely embedded inside an OSC
+ * escape and rendered without spoofing the visible label.
+ *
+ * Bytes removed:
+ * - C0 + DEL (`\x00-\x1f\x7f`): a stray BEL (`\x07`) or ESC (`\x1b`) would
+ *   prematurely terminate the OSC sequence and leak the tail bytes as
+ *   interpretable escape codes.
+ * - C1 (`\x80-\x9f`): includes 8-bit ST and 8-bit OSC introducers, which
+ *   terminals that honor C1 controls treat the same as their two-byte ESC
+ *   counterparts.
+ * - Bidi controls (`U+200E`, `U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`):
+ *   a model-emitted `U+202E` (RLO) in a link label visually reverses the
+ *   trailing text, letting a label like `safe.com` actually read as a
+ *   different host after rendering. The scheme allowlist guards the *target*;
+ *   stripping bidi controls guards the visible *label* from the same class
+ *   of click-deception attack.
+ * - Line / paragraph separators (`U+2028`, `U+2029`): some terminals treat
+ *   these as line breaks inside an OSC payload, fracturing the envelope.
  */
 export function sanitizeForOsc(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/[\x00-\x1f\x7f\x80-\x9f]/g, '');
+  return s.replace(
+    // eslint-disable-next-line no-control-regex
+    /[\x00-\x1f\x7f\x80-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g,
+    '',
+  );
 }
 
 /**

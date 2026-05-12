@@ -18,7 +18,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { OAuthDisplayPayload } from '@qwen-code/qwen-code-core';
 import { appEvents, AppEvent } from '../../../../utils/events.js';
-import { osc8Hyperlink, wrapForMultiplexer } from '../../../utils/osc8.js';
+import {
+  osc8Hyperlink,
+  supportsHyperlinks,
+  wrapForMultiplexer,
+} from '../../../utils/osc8.js';
 
 type AuthState = 'idle' | 'authenticating' | 'success' | 'error';
 
@@ -248,7 +252,9 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
 
       {authUrl && (
         <Box>
-          <Text color={theme.text.accent}>{osc8Hyperlink(authUrl)}</Text>
+          <Text color={theme.text.accent}>
+            {supportsHyperlinks() ? osc8Hyperlink(authUrl) : authUrl}
+          </Text>
         </Box>
       )}
 

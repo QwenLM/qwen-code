@@ -73,6 +73,25 @@ describe('osc8 helpers', () => {
       expect(sanitizeForOsc('a\x80b\x9cc\x9dd\x9fe')).toBe('abcde');
     });
 
+    it('strips Unicode bidi controls (label spoofing)', () => {
+      // U+202E (RLO) in a link label would visually reverse the trailing
+      // bytes, letting `safe.com` render as a different host even though
+      // the OSC target is sanitized.
+      expect(sanitizeForOsc('safe.com\u202emoc.live')).toBe('safe.commoc.live');
+      // Every bidi control covered by the regex.
+      expect(
+        sanitizeForOsc(
+          'a\u200eb\u200fc\u202ad\u202be\u202cf\u202dg\u202eh\u2066i\u2067j\u2068k\u2069l',
+        ),
+      ).toBe('abcdefghijkl');
+    });
+
+    it('strips line / paragraph separators (envelope fracture)', () => {
+      // U+2028 / U+2029 are treated as line breaks inside an OSC payload
+      // by some terminals, fracturing the envelope.
+      expect(sanitizeForOsc('a\u2028b\u2029c')).toBe('abc');
+    });
+
     it('keeps printable ASCII and unicode intact', () => {
       expect(sanitizeForOsc('https://example.com/路径?q=v')).toBe(
         'https://example.com/路径?q=v',
