@@ -139,6 +139,8 @@ export default {
   'Restored {{count}} file(s).': "S'han restaurat {{count}} fitxer(s).",
   'Failed to restore files: {{error}}':
     'Error en restaurar els fitxers: {{error}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'No es poden restaurar els fitxers: aquest torn es va crear abans que el punt de control de fitxers estigués habilitat.',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ per navegar · Enter per seleccionar · Esc per tornar',
   '↑↓ to navigate · Enter to select · Esc to cancel':

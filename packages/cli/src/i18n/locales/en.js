@@ -139,6 +139,8 @@ export default {
   'Computing file changes...': 'Computing file changes...',
   'Restored {{count}} file(s).': 'Restored {{count}} file(s).',
   'Failed to restore files: {{error}}': 'Failed to restore files: {{error}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'Cannot restore files: this turn was created before file checkpointing was enabled.',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ to navigate · Enter to select · Esc to go back',
   '↑↓ to navigate · Enter to select · Esc to cancel':

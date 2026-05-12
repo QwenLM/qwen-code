@@ -1995,11 +1995,19 @@ export const AppContainer = (props: AppContainerProps) => {
               .getFileHistoryService()
               .rewind(promptId);
             if (filesChanged.length > 0) {
-              fileRestoreMessage = t('Restored {{count}} file(s).', { count: String(filesChanged.length) });
+              fileRestoreMessage = t('Restored {{count}} file(s).', {
+                count: String(filesChanged.length),
+              });
             }
           } catch (error) {
-            fileRestoreError = t('Failed to restore files: {{error}}', { error: error instanceof Error ? error.message : String(error) });
+            fileRestoreError = t('Failed to restore files: {{error}}', {
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
+        } else {
+          fileRestoreError = t(
+            'Cannot restore files: this turn was created before file checkpointing was enabled.',
+          );
         }
       }
 
@@ -2090,7 +2098,6 @@ export const AppContainer = (props: AppContainerProps) => {
           Date.now(),
         );
       }
-
     },
     [config, historyManager, refreshStatic, buffer],
   );

@@ -133,6 +133,8 @@ export default {
   'Computing file changes...': '正在计算文件变更...',
   'Restored {{count}} file(s).': '已恢复 {{count}} 个文件。',
   'Failed to restore files: {{error}}': '恢复文件失败：{{error}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    '无法恢复文件：该轮对话创建时尚未启用文件检查点功能。',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ 导航 · Enter 选择 · Esc 返回',
   '↑↓ to navigate · Enter to select · Esc to cancel':

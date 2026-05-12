@@ -120,6 +120,8 @@ export default {
   'Computing file changes...': '正在計算檔案變更...',
   'Restored {{count}} file(s).': '已恢復 {{count}} 個檔案。',
   'Failed to restore files: {{error}}': '恢復檔案失敗：{{error}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    '無法恢復檔案：該輪對話建立時尚未啟用檔案檢查點功能。',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ 導覽 · Enter 選取 · Esc 返回',
   '↑↓ to navigate · Enter to select · Esc to cancel':

@@ -142,6 +142,8 @@ export default {
   'Restored {{count}} file(s).': 'Восстановлено файлов: {{count}}.',
   'Failed to restore files: {{error}}':
     'Не удалось восстановить файлы: {{error}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'Невозможно восстановить файлы: этот ход был создан до включения контрольных точек файлов.',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ навигация · Enter выбор · Esc назад',
   '↑↓ to navigate · Enter to select · Esc to cancel':

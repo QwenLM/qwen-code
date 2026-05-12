@@ -38,7 +38,6 @@ export interface FileHistorySnapshot {
 export interface FileHistoryState {
   snapshots: FileHistorySnapshot[];
   trackedFiles: Set<string>;
-  snapshotSequence: number;
 }
 
 export interface DiffStats {
@@ -132,7 +131,7 @@ async function restoreBackup(
   filePath: string,
   backupFileName: string,
   sessionId: string,
-): Promise<void> {
+): Promise<boolean> {
   const backupPath = resolveBackupPath(backupFileName, sessionId);
 
   let backupStats: Stats;
@@ -141,7 +140,7 @@ async function restoreBackup(
   } catch (e: unknown) {
     if (isENOENT(e)) {
       debugLogger.error(`FileHistory: Backup file not found: ${backupPath}`);
-      return;
+      return false;
     }
     throw e;
   }
@@ -155,6 +154,7 @@ async function restoreBackup(
   }
 
   await chmod(filePath, backupStats.mode);
+  return true;
 }
 
 async function checkOriginFileChanged(
@@ -245,7 +245,6 @@ export class FileHistoryService {
   private state: FileHistoryState = {
     snapshots: [],
     trackedFiles: new Set(),
-    snapshotSequence: 0,
   };
 
   private currentPromptId = '';
@@ -290,7 +289,6 @@ export class FileHistoryService {
     this.state = {
       snapshots: migrated,
       trackedFiles,
-      snapshotSequence: migrated.length,
     };
   }
 
@@ -404,7 +402,6 @@ export class FileHistoryService {
     if (this.state.snapshots.length > MAX_SNAPSHOTS) {
       this.state.snapshots = this.state.snapshots.slice(-MAX_SNAPSHOTS);
     }
-    this.state.snapshotSequence++;
 
     debugLogger.debug(
       `FileHistory: Added snapshot for ${promptId}, tracking ${this.state.trackedFiles.size} files`,
@@ -423,11 +420,6 @@ export class FileHistoryService {
     const filesChanged = await this.applySnapshot(targetSnapshot);
     debugLogger.debug(`FileHistory: Finished rewinding to ${promptId}`);
     return filesChanged;
-  }
-
-  canRestore(promptId: string): boolean {
-    if (!this.enabled) return false;
-    return this.state.snapshots.some((s) => s.promptId === promptId);
   }
 
   async getDiffStats(promptId: string): Promise<DiffStats | undefined> {
@@ -481,36 +473,6 @@ export class FileHistoryService {
     return { filesChanged, insertions, deletions };
   }
 
-  async hasAnyChanges(promptId: string): Promise<boolean> {
-    if (!this.enabled) return false;
-
-    const targetSnapshot = this.findSnapshot(promptId);
-    if (!targetSnapshot) return false;
-
-    for (const trackingPath of this.state.trackedFiles) {
-      try {
-        const filePath = this.maybeExpandFilePath(trackingPath);
-        const targetBackup = targetSnapshot.trackedFileBackups[trackingPath];
-        const backupFileName: BackupFileName | undefined = targetBackup
-          ? targetBackup.backupFileName
-          : this.getBackupFileNameFirstVersion(trackingPath);
-
-        if (backupFileName === undefined) continue;
-        if (backupFileName === null) {
-          if (await pathExists(filePath)) return true;
-          continue;
-        }
-        if (
-          await checkOriginFileChanged(filePath, backupFileName, this.sessionId)
-        )
-          return true;
-      } catch (error) {
-        debugLogger.error(`FileHistory: Error checking changes: ${error}`);
-      }
-    }
-    return false;
-  }
-
   private findSnapshot(promptId: string): FileHistorySnapshot | undefined {
     for (let i = this.state.snapshots.length - 1; i >= 0; i--) {
       if (this.state.snapshots[i]!.promptId === promptId) {
@@ -554,11 +516,17 @@ export class FileHistoryService {
         if (
           await checkOriginFileChanged(filePath, backupFileName, this.sessionId)
         ) {
-          await restoreBackup(filePath, backupFileName, this.sessionId);
-          debugLogger.debug(
-            `FileHistory: Restored ${filePath} from ${backupFileName}`,
+          const restored = await restoreBackup(
+            filePath,
+            backupFileName,
+            this.sessionId,
           );
-          filesChanged.push(filePath);
+          if (restored) {
+            debugLogger.debug(
+              `FileHistory: Restored ${filePath} from ${backupFileName}`,
+            );
+            filesChanged.push(filePath);
+          }
         }
       } catch (error) {
         debugLogger.error(
