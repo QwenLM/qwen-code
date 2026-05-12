@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, useIsScreenReaderEnabled } from 'ink';
+import { Box, Text, useIsScreenReaderEnabled } from 'ink';
 import { useCallback, useState } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
@@ -15,6 +15,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { theme } from '../semantic-colors.js';
 import { StreamingState, type HistoryItemToolGroup } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
@@ -38,6 +39,13 @@ export const Composer = () => {
   const isStreaming =
     uiState.streamingState === StreamingState.Responding ||
     uiState.streamingState === StreamingState.WaitingForConfirmation;
+  // `isStreaming` covers Responding|WaitingForConfirmation, but we only
+  // suppress during Responding (active token output). A confirmation prompt
+  // must remain visible regardless of width. Drop the redundant `isStreaming`
+  // guard so future expansions of `isStreaming` don't silently widen suppression.
+  const suppressBottomLoadingIndicator =
+    uiState.streamingState === StreamingState.Responding &&
+    uiState.terminalWidth <= 30;
 
   // Aggregate agent tool tokens from executing tool calls. Only changes when
   // a subagent reports progress, so it doesn't drive the animation loop.
@@ -80,7 +88,7 @@ export const Composer = () => {
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      {!uiState.embeddedShellFocused && (
+      {!uiState.embeddedShellFocused && !suppressBottomLoadingIndicator && (
         <LoadingIndicator
           // Hide loading phrases when enableLoadingPhrases is explicitly false.
           // Using === false ensures phrases show by default when undefined.
@@ -101,6 +109,18 @@ export const Composer = () => {
           isStreaming={isStreaming}
           isReceivingContent={isReceivingContent}
         />
+      )}
+      {/*
+       * Narrow-terminal fallback: when the full LoadingIndicator is suppressed
+       * (≤30 cols, actively Responding) we still surface a minimal `esc to
+       * cancel` hint so users on ultra-narrow terminals retain the cancel
+       * affordance during long-running calls. The full timer/spinner/phrase
+       * UI is still suppressed to avoid layout breakage.
+       */}
+      {!uiState.embeddedShellFocused && suppressBottomLoadingIndicator && (
+        <Box paddingLeft={2}>
+          <Text color={theme.text.secondary}>({t('Esc to cancel')})</Text>
+        </Box>
       )}
 
       <QueuedMessageDisplay messageQueue={uiState.messageQueue} />

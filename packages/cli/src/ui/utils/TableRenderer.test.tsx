@@ -61,7 +61,7 @@ describe('<TableRenderer />', () => {
     const output = renderTable(
       ['项目', 'ANSI', 'Markdown'],
       [['中文内容', '\u001b[31mRed\u001b[0m Blue', '**bold** and `code`']],
-      42,
+      80,
       ['left', 'center', 'right'],
     );
     expectAllLinesToHaveSameVisibleWidth(output);
@@ -110,19 +110,27 @@ describe('<TableRenderer />', () => {
     expect(output).toContain('wrap');
   });
 
+  // Alignment tests use contentWidth ≥ 60 so horizontal mode is exercised
+  // (vertical mode renders key:value pairs and bypasses pad alignment).
+
   it('respects left alignment', () => {
-    const output = renderTable(['Header'], [['left']], 30, ['left']);
+    const output = renderTable(['Header'], [['left']], 60, ['left']);
     expect(output).toContain('left');
+    // Horizontal-mode guard so this test fails loudly if the threshold
+    // is bumped back above 60 and the test silently degrades to vertical.
+    expect(output).toContain('┌');
   });
 
   it('respects center alignment', () => {
-    const output = renderTable(['Header'], [['center']], 30, ['center']);
+    const output = renderTable(['Header'], [['center']], 60, ['center']);
     expect(output).toContain('center');
+    expect(output).toContain('┌');
   });
 
   it('respects right alignment', () => {
-    const output = renderTable(['Header'], [['right']], 30, ['right']);
+    const output = renderTable(['Header'], [['right']], 60, ['right']);
     expect(output).toContain('right');
+    expect(output).toContain('┌');
   });
 
   it('handles multiple columns with mixed alignment', () => {
@@ -456,6 +464,89 @@ describe('<TableRenderer />', () => {
     );
     expect(output).toContain('字段一');
     expect(output).toContain('很长的值一');
+  });
+
+  // ─── Narrow-terminal vertical fallback ───
+  describe('horizontal/vertical mode threshold', () => {
+    it('uses horizontal mode at ample width (60 cols, 2 short cols)', () => {
+      const output = renderTable(['A', 'B'], [['x', 'y']], 60);
+      // Horizontal markers must be present.
+      expect(output).toContain('┌');
+      expect(output).toContain('└');
+      expect(output).toContain('│');
+    });
+
+    it('falls back to vertical below the absolute floor (≤24 cols)', () => {
+      // ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH is 24.
+      const output = renderTable(['A', 'B'], [['x', 'y']], 20);
+      // No horizontal table border characters in vertical mode.
+      expect(output).not.toContain('┌');
+      expect(output).not.toContain('└');
+      // Vertical mode renders "label:" pairs.
+      expect(output).toContain('A:');
+      expect(output).toContain('B:');
+      expect(output).toContain('x');
+      expect(output).toContain('y');
+    });
+
+    it('promotes to horizontal once column-budget threshold is met (2 cols, ~30 cols)', () => {
+      // borderOverhead = 1 + 2*3 = 7; minHorizontal = max(24, 2*3 + 7 + 4) = 24
+      // so 30 cols comfortably fits horizontal.
+      const output = renderTable(['A', 'B'], [['x', 'y']], 30);
+      expect(output).toContain('┌');
+    });
+
+    // Boundary equality tests: the comparator is strict `<`, so the threshold
+    // value itself must still render horizontally. Without these, a future
+    // off-by-one change from `<` to `<=` would slip through the < / > pair.
+    it('renders horizontal at exact absolute floor (2 cols, contentWidth=24)', () => {
+      // ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH is 24. With strict `<`, equality
+      // means horizontal mode is selected.
+      const output = renderTable(['A', 'B'], [['x', 'y']], 24);
+      expect(output).toContain('┌');
+      expect(output).toContain('└');
+    });
+
+    it('falls back to vertical one below absolute floor (2 cols, contentWidth=23)', () => {
+      const output = renderTable(['A', 'B'], [['x', 'y']], 23);
+      expect(output).not.toContain('┌');
+      expect(output).toContain('A:');
+    });
+
+    it('renders horizontal at exact column-budget threshold (5 cols, contentWidth=35)', () => {
+      // 5 cols → minHorizontal = 5*3 + (1+5*3) + 4 = 35. Equality must still
+      // render horizontally under the strict `<` comparator.
+      const output = renderTable(
+        ['A', 'B', 'C', 'D', 'E'],
+        [['1', '2', '3', '4', '5']],
+        35,
+      );
+      expect(output).toContain('┌');
+    });
+
+    it('falls back to vertical one below column-budget threshold (5 cols, contentWidth=34)', () => {
+      const output = renderTable(
+        ['A', 'B', 'C', 'D', 'E'],
+        [['1', '2', '3', '4', '5']],
+        34,
+      );
+      expect(output).not.toContain('┌');
+      expect(output).toContain('A:');
+    });
+
+    it('forces vertical for many-column tables on narrow terminals', () => {
+      // 5 cols → minHorizontal = 5*3 + (1+5*3) + 4 = 35; 30 cols is below that.
+      const output = renderTable(
+        ['A', 'B', 'C', 'D', 'E'],
+        [['1', '2', '3', '4', '5']],
+        30,
+      );
+      expect(output).not.toContain('┌');
+      // Should still surface the data.
+      expect(output).toContain('A:');
+      expect(output).toContain('1');
+      expect(output).toContain('5');
+    });
   });
 
   it('stays stable across multiple content widths', () => {
