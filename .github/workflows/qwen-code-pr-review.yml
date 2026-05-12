@@ -103,8 +103,8 @@ jobs:
                 sed 's/.*@qwen \/review//' |
                 sed 's/^[[:space:]]*//'
             )"
-            # Hard-cap to 2KB to keep prompt-injection surface bounded; also strips quoted
-            # blocks the author may have copied in. Reviewers should keep instructions short.
+            # Hard-cap to 2KB to keep prompt-injection surface bounded.
+            # Reviewers should keep instructions short.
             additional_instructions="$(printf '%s' "$additional_instructions" | head -c 2048)"
           fi
 
