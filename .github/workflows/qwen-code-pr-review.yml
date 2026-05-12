@@ -63,9 +63,11 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     env:
+      # Job-level env is intentionally minimal. OPENAI_API_KEY and OPENAI_BASE_URL are
+      # scoped to the `Run bundled Qwen PR review` step only, so dependency-install
+      # postinstall scripts and the bundle build cannot read them. GITHUB_TOKEN stays
+      # job-level because gh-based size/comment steps need it.
       GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
       QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
       QWEN_SANDBOX: 'false'
@@ -249,6 +251,10 @@ jobs:
           REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
           SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
           QWEN_REVIEW_ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
+          # OpenAI credentials are step-scoped so the npm install / bundle step above
+          # cannot read them via dependency postinstall scripts.
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
         run: |-
           set -euo pipefail
 
