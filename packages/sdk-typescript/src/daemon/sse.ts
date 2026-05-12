@@ -27,13 +27,14 @@ import type { DaemonEvent } from './types.js';
  * AbortSignal cancellation both clean up cleanly.
  */
 /**
- * Hard cap on accumulated unread bytes before we abort the stream as
- * malformed. SSE frames are typically a few hundred bytes; even a
- * heavily-batched provider rarely crosses 64 KiB. A buffer that grows
- * past 16 MiB is a strong signal that the upstream is NOT SSE — e.g.
- * a misconfigured proxy returned a non-streaming body, or the server
- * never emits the `\n\n` separator. Without a cap, `buf` grows until
- * the consumer OOMs.
+ * Hard cap on accumulated unread UTF-16 code units (i.e. `buf.length`,
+ * NOT bytes — see the byte-equivalence note below) before we abort
+ * the stream as malformed. SSE frames are typically a few hundred
+ * bytes; even a heavily-batched provider rarely crosses 64 KiB. A
+ * buffer that grows past 16 Mi code units is a strong signal that
+ * the upstream is NOT SSE — e.g. a misconfigured proxy returned a
+ * non-streaming body, or the server never emits the `\n\n`
+ * separator. Without a cap, `buf` grows until the consumer OOMs.
  *
  * Cap is in UTF-16 code units (`buf.length`), NOT bytes — `buf` is a
  * decoded JS string. For mostly-ASCII content (the daemon's JSON
