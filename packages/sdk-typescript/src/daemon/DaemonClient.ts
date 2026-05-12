@@ -116,7 +116,16 @@ export class DaemonClient {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
     this.token = opts.token;
     this._fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
-    this.fetchTimeoutMs = opts.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+    // Coerce non-positive / non-finite to 0 (= disabled). Without this
+    // a caller passing `-1` or `NaN` would slip past the
+    // `Number.isFinite` check inside `fetchWithTimeout` (NaN fails
+    // isFinite, negatives pass) and either short-circuit timeout entirely
+    // or fire `setTimeout(-1)` → immediate abort, killing every request
+    // before it could complete. The `0` sentinel is the documented
+    // disable value, so we collapse all "doesn't make sense" inputs onto
+    // it instead of defending the math at every call site.
+    const raw = opts.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+    this.fetchTimeoutMs = Number.isFinite(raw) && raw > 0 ? raw : 0;
   }
 
   /**

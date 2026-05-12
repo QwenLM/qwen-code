@@ -120,7 +120,12 @@ async function* sseFrames(
     signal: opts.signal,
   });
   if (!res.ok) throw new Error(`SSE open failed: ${res.status}`);
-  yield* parseSseStream(res.body!);
+  // Forward the abort signal into parseSseStream so a post-connect
+  // abort stops iteration immediately. Without this, the parser
+  // stays parked on `reader.read()` until the upstream actually
+  // closes — fine for happy-path tests but flaky for any test that
+  // wants to abort mid-stream.
+  yield* parseSseStream(res.body!, opts.signal);
 }
 
 describeLLM('qwen serve — child-crash recovery (real SIGKILL)', () => {

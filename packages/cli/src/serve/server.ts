@@ -184,7 +184,7 @@ export function createServeApp(
       }
       res.status(200).json(session);
     } catch (err) {
-      sendBridgeError(res, err);
+      sendBridgeError(res, err, { route: 'POST /session' });
     }
   });
 
@@ -256,7 +256,10 @@ export function createServeApp(
       // plugin scrubbing a stuck prompt) would otherwise spam the
       // daemon log.
       if (err instanceof DOMException && err.name === 'AbortError') return;
-      sendBridgeError(res, err);
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/prompt',
+        sessionId,
+      });
     } finally {
       res.off('close', onResClose);
     }
@@ -275,7 +278,10 @@ export function createServeApp(
       } as Parameters<HttpAcpBridge['cancelSession']>[1]);
       res.status(204).end();
     } catch (err) {
-      sendBridgeError(res, err);
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/cancel',
+        sessionId,
+      });
     }
   });
 
@@ -315,7 +321,10 @@ export function createServeApp(
       } as Parameters<HttpAcpBridge['setSessionModel']>[1]);
       res.status(200).json(response);
     } catch (err) {
-      sendBridgeError(res, err);
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/model',
+        sessionId,
+      });
     }
   });
 
@@ -392,7 +401,10 @@ export function createServeApp(
         res.end();
         return;
       }
-      sendBridgeError(res, err);
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/events',
+        sessionId,
+      });
       return;
     }
 
@@ -657,7 +669,22 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
 
 type OmitId<T> = Omit<T, 'id'>;
 
-function sendBridgeError(res: import('express').Response, err: unknown): void {
+/**
+ * Map a thrown bridge error to an HTTP response.
+ *
+ * `ctx` is operator-facing: route + sessionId folded into the stderr
+ * log line so a bare `ECONNRESET` / `ENOMEM` stack trace is
+ * attributable to a specific session and request without having to
+ * timestamp-correlate against client logs. Pass via the route handlers
+ * — see how they call `sendBridgeError(res, err, { route: 'POST
+ * /session/:id/prompt', sessionId })`. Optional so test/dev call
+ * sites that don't care about the log can omit it.
+ */
+function sendBridgeError(
+  res: import('express').Response,
+  err: unknown,
+  ctx?: { route?: string; sessionId?: string },
+): void {
   if (err instanceof SessionNotFoundError) {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;
@@ -683,8 +710,13 @@ function sendBridgeError(res: import('express').Response, err: unknown): void {
   // logging lands (tracked under §10 follow-ups). Use the stdio helper
   // (not `console.error`) to keep the no-console lint rule happy and
   // route through the same writer the rest of the daemon uses.
+  const ctxParts = [
+    ctx?.route,
+    ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
+  ].filter(Boolean);
+  const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
   writeStderrLine(
-    `qwen serve: bridge error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
   );
   res.status(500).json(errorPayload(err));
 }

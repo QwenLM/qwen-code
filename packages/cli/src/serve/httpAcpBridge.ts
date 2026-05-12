@@ -724,7 +724,32 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     return work;
   }
 
-  /** Resolve every pending request belonging to one session as cancelled. */
+  /**
+   * Resolve every pending request belonging to one session as cancelled.
+   *
+   * **Scope contract (per ACP spec / live-collab default):**
+   * Permissions are issued by the agent inline DURING an active
+   * prompt — `requestPermission` returns a Promise the agent awaits
+   * before continuing. Per the bridge's per-session FIFO + ACP's
+   * "one active prompt per session" guarantee, ALL outstanding
+   * permissions at any moment belong to the **currently active
+   * prompt**. So "cancel all pending permissions for this session"
+   * is equivalent to "cancel the active prompt's permissions" — and
+   * that's exactly what ACP requires when a prompt is cancelled
+   * ("cancelling a prompt MUST resolve outstanding requestPermission
+   * calls with outcome.cancelled").
+   *
+   * **Multi-client live-collab caveat:** under `sessionScope: 'single'`
+   * Client B may have been about to vote on A's pending permission
+   * via SSE — when A disconnects mid-prompt, B's vote (if it arrives
+   * after the abort) gets `404`. This is the right behavior: A's
+   * prompt is being cancelled, so the permission belongs to a turn
+   * that no longer matters. From B's side they see
+   * `permission_resolved` with `outcome: cancelled` on the SSE
+   * stream, then the prompt's `cancelled` stop reason. Voting on a
+   * cancelled-prompt's permission was never going to drive the
+   * agent forward anyway.
+   */
   const cancelPendingForSession = (sessionId: string) => {
     const entry = byId.get(sessionId);
     if (!entry) return;
