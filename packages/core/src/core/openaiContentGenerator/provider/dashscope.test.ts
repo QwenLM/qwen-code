@@ -38,6 +38,16 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
+vi.mock('../constants.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    get DASHSCOPE_PROXY_BASE_URL() {
+      return process.env['DASHSCOPE_PROXY_BASE_URL'];
+    },
+  };
+});
+
 // Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value
 vi.mock('../constants.js', () => ({
   DEFAULT_TIMEOUT: 120000,
