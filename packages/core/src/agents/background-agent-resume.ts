@@ -602,6 +602,7 @@ export class BackgroundAgentResumeService {
             .getSubagentManager()
             .createAgentHeadless(target.subagentConfig!, bgConfig as Config, {
               eventEmitter: bgEventEmitter,
+              executionMode: 'background',
               promptConfigOverrides: {
                 initialMessages: resumeHistory,
               },
@@ -714,6 +715,7 @@ export class BackgroundAgentResumeService {
         registry.appendActivity(meta.agentId, {
           name: event.name,
           description: event.description,
+          agentDepth: event.agentDepth,
           at: event.timestamp,
         });
       };
@@ -935,6 +937,10 @@ export class BackgroundAgentResumeService {
       {} as RunConfig,
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      1,
+      'background',
     );
   }
 

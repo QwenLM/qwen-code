@@ -20,6 +20,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
 const debugLogger = createDebugLogger('CLIENT');
+const AGENT_DEPTH_LABEL = 'agent_depth';
 
 // Core modules
 import { GeminiChat } from './geminiChat.js';
@@ -45,6 +46,9 @@ import {
 } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+
+// Models
+import { getCurrentAgentDepth } from '../agents/runtime/agent-context.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -1431,6 +1435,10 @@ export class GeminiClient {
             abortSignal,
             ...generationConfig,
             systemInstruction: finalSystemInstruction,
+            labels: {
+              ...(generationConfig.labels ?? {}),
+              [AGENT_DEPTH_LABEL]: getCurrentAgentDepth().toString(),
+            },
           };
 
           // When the requested model differs from the main model (e.g. fast model

@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
+import { getExcludedToolsForAgentDepth } from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -42,7 +42,11 @@ import {
   runInForkContext,
 } from './fork-subagent.js';
 import {
+  type AgentExecutionMode,
   getCurrentAgentId,
+  getConfiguredAgentMaxDepth,
+  getCurrentAgentDepth,
+  getCurrentAgentExecutionMode,
   runWithAgentContext,
 } from '../../agents/runtime/agent-context.js';
 import {
@@ -619,6 +623,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         status: 'executing' as const,
         args: event.args,
         description: event.description,
+        agentDepth: event.agentDepth,
       };
       this.currentToolCalls!.push(newToolCall);
 
@@ -641,6 +646,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: event.success ? 'success' : 'failed',
           error: event.error,
           responseParts: event.responseParts,
+          ...(event.name === ToolNames.AGENT &&
+          event.resultDisplay !== undefined
+            ? { resultDisplay: event.resultDisplay }
+            : {}),
         };
 
         // When a tool result arrives for the tool that had a pending
@@ -719,6 +728,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           this.currentToolCalls![idx] = {
             ...this.currentToolCalls![idx],
             status: 'awaiting_approval',
+            agentDepth: event.agentDepth,
           };
         } else {
           this.currentToolCalls!.push({
@@ -726,6 +736,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             name: event.name,
             status: 'awaiting_approval',
             description: event.description,
+            agentDepth: event.agentDepth,
           });
         }
 
@@ -801,6 +812,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    */
   private async createForkSubagent(
     agentConfig: Config,
+    agentDepth: number,
+    executionMode: AgentExecutionMode,
     eventEmitter: AgentEventEmitter = this.eventEmitter,
   ): Promise<{
     subagent: AgentHeadless;
@@ -872,8 +885,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // the parent, not an isolated subagent, so the general subagent
       // exclusion list does not apply. Recursive forks are blocked by the
       // ALS-based `isInForkExecution()` guard.
-      // However, we still exclude tools that must never be available to
-      // any subagent (agent, cron tools).
+      // However, we still exclude control-plane tools, and only preserve
+      // agent when this child is still below the configured nesting limit.
+      const excludedTools = getExcludedToolsForAgentDepth(
+        agentDepth,
+        executionMode,
+      );
       const parentToolDecls: FunctionDeclaration[] =
         (
           generationConfig.tools as Array<{
@@ -881,9 +898,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           }>
         )
           ?.flatMap((t) => t.functionDeclarations ?? [])
-          .filter(
-            (d) => !(d.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(d.name)),
-          ) ?? [];
+          .filter((d) => !(d.name && excludedTools.has(d.name))) ?? [];
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
@@ -911,6 +926,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       {} as RunConfig,
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      agentDepth,
+      executionMode,
     );
 
     return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
@@ -1080,6 +1099,43 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     try {
+      const parentDepth = getCurrentAgentDepth();
+      const parentExecutionMode = getCurrentAgentExecutionMode();
+      const childDepth = parentDepth + 1;
+      if (parentExecutionMode === 'background') {
+        return {
+          llmContent:
+            'Error: Background agents cannot launch child agents. Please execute the work directly in the current background agent.',
+          returnDisplay: {
+            type: 'task_execution' as const,
+            subagentName: this.params.subagent_type || FORK_AGENT.name,
+            agentDepth: childDepth,
+            taskDescription: this.params.description,
+            taskPrompt: this.params.prompt,
+            status: 'failed' as const,
+            terminateReason: 'Background agents cannot launch child agents',
+          },
+        };
+      }
+
+      const maxDepth = getConfiguredAgentMaxDepth();
+      if (childDepth > maxDepth) {
+        return {
+          llmContent:
+            `Error: Cannot launch agent at depth ${childDepth}; ` +
+            `maximum configured depth is ${maxDepth}.`,
+          returnDisplay: {
+            type: 'task_execution' as const,
+            subagentName: this.params.subagent_type || FORK_AGENT.name,
+            agentDepth: childDepth,
+            taskDescription: this.params.description,
+            taskPrompt: this.params.prompt,
+            status: 'failed' as const,
+            terminateReason: `Maximum agent nesting depth (${maxDepth}) reached`,
+          },
+        };
+      }
+
       const isFork = !this.params.subagent_type;
       let subagentConfig: SubagentConfig;
 
@@ -1097,6 +1153,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             returnDisplay: {
               type: 'task_execution' as const,
               subagentName: FORK_AGENT.name,
+              agentDepth: childDepth,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
@@ -1114,6 +1171,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             returnDisplay: {
               type: 'task_execution' as const,
               subagentName: this.params.subagent_type!,
+              agentDepth: childDepth,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
@@ -1124,12 +1182,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagentConfig = loadedConfig;
       }
 
+      const shouldRunInBackground =
+        this.params.run_in_background === true ||
+        subagentConfig.background === true;
+      if (parentExecutionMode === 'foreground' && shouldRunInBackground) {
+        return {
+          llmContent:
+            'Error: Foreground subagents cannot launch background agents. Please run the child agent in the foreground or do the work directly.',
+          returnDisplay: {
+            type: 'task_execution' as const,
+            subagentName: subagentConfig.name,
+            agentDepth: childDepth,
+            taskDescription: this.params.description,
+            taskPrompt: this.params.prompt,
+            status: 'failed' as const,
+            terminateReason:
+              'Foreground subagents cannot launch background agents',
+          },
+        };
+      }
+
       // Initialize the current display state
       this.currentDisplay = {
         type: 'task_execution' as const,
         subagentName: subagentConfig.name,
         taskDescription: this.params.description,
         taskPrompt: this.params.prompt,
+        agentDepth: childDepth,
         status: 'running' as const,
         subagentColor: subagentConfig.color,
       };
@@ -1172,14 +1251,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let taskPrompt: string;
 
       if (isFork) {
-        const fork = await this.createForkSubagent(agentConfig);
+        const fork = await this.createForkSubagent(
+          agentConfig,
+          childDepth,
+          'foreground',
+        );
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
       } else {
         subagent = await this.subagentManager.createAgentHeadless(
           subagentConfig,
           agentConfig,
-          { eventEmitter: this.eventEmitter },
+          {
+            eventEmitter: this.eventEmitter,
+            agentDepth: childDepth,
+            executionMode: 'foreground',
+          },
         );
         taskPrompt = this.params.prompt;
       }
@@ -1200,10 +1287,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       // ── Background (async) execution path ──────────────────────
       // OR the tool parameter with the agent definition's background flag.
-      const shouldRunInBackground =
-        this.params.run_in_background === true ||
-        subagentConfig.background === true;
-
       if (shouldRunInBackground) {
         // Fire SubagentStart hook before background launch
         const hookSystem = this.config.getHookSystem();
@@ -1254,6 +1337,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         if (isFork) {
           const fork = await this.createForkSubagent(
             bgConfig as Config,
+            childDepth,
+            'background',
             bgEventEmitter,
           );
           bgSubagent = fork.subagent;
@@ -1265,7 +1350,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           bgSubagent = await this.subagentManager.createAgentHeadless(
             subagentConfig,
             bgConfig as Config,
-            { eventEmitter: bgEventEmitter },
+            {
+              eventEmitter: bgEventEmitter,
+              agentDepth: childDepth,
+              executionMode: 'background',
+            },
           );
           bgTaskPrompt = this.params.prompt;
         }
@@ -1369,6 +1458,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           registry.appendActivity(hookOpts.agentId, {
             name: event.name,
             description: event.description,
+            agentDepth: event.agentDepth,
             at: event.timestamp,
           });
         };
@@ -1660,6 +1750,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         registry.appendActivity(hookOpts.agentId, {
           name: event.name,
           description: event.description,
+          agentDepth: event.agentDepth,
           at: event.timestamp,
         });
       };

@@ -12,6 +12,7 @@ import type {
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
+import { runWithAgentDepth } from '../agents/runtime/agent-context.js';
 import {
   GeminiChat,
   InvalidStreamError,
@@ -187,6 +188,50 @@ describe('GeminiChat', async () => {
   }
 
   describe('sendMessageStream', () => {
+    it('adds agent_depth to request labels', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: 'ok' }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      await runWithAgentDepth(2, async () => {
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: 'test message',
+            config: { labels: { existing: 'label' } },
+          },
+          'prompt-id-depth-label',
+        );
+        for await (const _ of stream) {
+          /* consume stream */
+        }
+      });
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            labels: {
+              existing: 'label',
+              agent_depth: '2',
+            },
+          }),
+        }),
+        'prompt-id-depth-label',
+      );
+    });
+
     it('should succeed if a tool call is followed by an empty part', async () => {
       // 1. Mock a stream that contains a tool call, then an invalid (empty) part.
       const streamWithToolCall = (async function* () {
@@ -939,7 +984,11 @@ describe('GeminiChat', async () => {
               parts: [{ text: 'hello' }],
             },
           ],
-          config: {},
+          config: {
+            labels: {
+              agent_depth: '0',
+            },
+          },
         },
         'prompt-id-1',
       );

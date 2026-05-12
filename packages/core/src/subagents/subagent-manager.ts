@@ -35,7 +35,10 @@ import type {
 } from '../agents/runtime/agent-events.js';
 import type { Config } from '../config/config.js';
 import { APPROVAL_MODES } from '../config/config.js';
-import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import type {
+  AgentExecutionMode,
+  RuntimeContentGeneratorView,
+} from '../agents/runtime/agent-context.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
@@ -635,6 +638,8 @@ export class SubagentManager {
       modelConfigOverrides?: Partial<ModelConfig>;
       runConfigOverrides?: Partial<RunConfig>;
       toolConfigOverride?: ToolConfig;
+      agentDepth?: number;
+      executionMode?: AgentExecutionMode;
     },
   ): Promise<AgentHeadless> {
     try {
@@ -676,6 +681,8 @@ export class SubagentManager {
         options?.eventEmitter,
         options?.hooks,
         runtimeView,
+        options?.agentDepth,
+        options?.executionMode,
       );
     } catch (error) {
       if (error instanceof Error) {

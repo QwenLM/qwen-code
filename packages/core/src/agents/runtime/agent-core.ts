@@ -20,9 +20,13 @@ import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
 import {
+  type AgentExecutionMode,
   getCurrentAgentId,
+  getConfiguredAgentMaxDepth,
   getRuntimeContentGenerator,
   runWithAgentContext,
+  runWithAgentDepth,
+  runWithAgentExecutionMode,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
@@ -79,8 +83,8 @@ import { type ContextState, templateString } from './agent-headless.js';
  * Result of a single reasoning loop invocation.
  */
 /**
- * Tools that must never be available to subagents (including forked agents).
- * - AgentTool prevents recursive subagent spawning.
+ * Tools excluded from subagents at the default nesting limit.
+ * - AgentTool is re-enabled only while below QWEN_AGENT_MAX_DEPTH.
  * - Cron tools are session-scoped and should only run from the main session.
  * - TaskStop and SendMessage are parent-side control-plane tools for managing
  *   background subagents; subagents have no agent IDs to manage natively, so
@@ -95,6 +99,18 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
 ]);
+
+export function getExcludedToolsForAgentDepth(
+  agentDepth: number,
+  executionMode: AgentExecutionMode = 'foreground',
+  maxDepth = getConfiguredAgentMaxDepth(),
+): ReadonlySet<string> {
+  const excluded = new Set(EXCLUDED_TOOLS_FOR_SUBAGENTS);
+  if (executionMode === 'foreground' && agentDepth < maxDepth) {
+    excluded.delete(ToolNames.AGENT);
+  }
+  return excluded;
+}
 
 /**
  * Prefix applied to each external message injected into a background agent's
@@ -203,6 +219,8 @@ export class AgentCore {
    */
   readonly eventEmitter: AgentEventEmitter;
   readonly hooks?: AgentHooks;
+  readonly agentDepth: number;
+  readonly executionMode: AgentExecutionMode;
   readonly stats = new AgentStatistics();
   /**
    * When the agent runs with a model different from the parent session,
@@ -266,6 +284,8 @@ export class AgentCore {
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
+    agentDepth = 1,
+    executionMode: AgentExecutionMode = 'foreground',
   ) {
     const randomPart = Math.random().toString(36).slice(2, 8);
     this.subagentId = `${name}-${randomPart}`;
@@ -278,6 +298,8 @@ export class AgentCore {
     this.eventEmitter = eventEmitter ?? new AgentEventEmitter();
     this.hooks = hooks;
     this.runtimeView = runtimeView;
+    this.agentDepth = agentDepth;
+    this.executionMode = executionMode;
     this.setupStateListeners();
   }
 
@@ -383,11 +405,10 @@ export class AgentCore {
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
-    // When a subagent has an explicit tools list (not wildcard), only the
-    // recursive-spawn guard (AgentTool) is enforced.
-    const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
-
+    const excludedFromSubagents = getExcludedToolsForAgentDepth(
+      this.agentDepth,
+      this.executionMode,
+    );
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
         (t): t is string => typeof t === 'string',
@@ -425,7 +446,7 @@ export class AgentCore {
       // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
       toolsList.push(
         ...onlyInlineDecls.filter(
-          (d) => !(d.name && recursionGuardOnly.has(d.name)),
+          (d) => !(d.name && excludedFromSubagents.has(d.name)),
         ),
       );
     } else {
@@ -533,9 +554,13 @@ export class AgentCore {
   ): Promise<T> {
     return subagentNameContext.run(this.name, () => {
       const runWithView = () => this.withRuntimeView(fn, inheritedView);
+      const runWithDepth = () =>
+        runWithAgentDepth(this.agentDepth, () =>
+          runWithAgentExecutionMode(this.executionMode, runWithView),
+        );
       return inheritedAgentId
-        ? runWithAgentContext(inheritedAgentId, runWithView)
-        : runWithView();
+        ? runWithAgentContext(inheritedAgentId, runWithDepth)
+        : runWithDepth();
     });
   }
 
@@ -685,6 +710,7 @@ export class AgentCore {
               this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
                 subagentId: this.subagentId,
                 round: turnCounter,
+                agentDepth: this.agentDepth,
                 text: txt,
                 thought: isThought,
                 timestamp: Date.now(),
@@ -1022,6 +1048,7 @@ export class AgentCore {
         this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
           subagentId: this.subagentId,
           round: currentRound,
+          agentDepth: this.agentDepth,
           callId,
           name: toolName,
           args: fc.args ?? {},
@@ -1043,6 +1070,7 @@ export class AgentCore {
         this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
           subagentId: this.subagentId,
           round: currentRound,
+          agentDepth: this.agentDepth,
           callId,
           name: toolName,
           success: false,
@@ -1107,6 +1135,7 @@ export class AgentCore {
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
+            agentDepth: this.agentDepth,
             callId: call.request.callId,
             name: toolName,
             success,
@@ -1199,6 +1228,7 @@ export class AgentCore {
             this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
               subagentId: this.subagentId,
               round: currentRound,
+              agentDepth: this.agentDepth,
               callId: waiting.request.callId,
               name: waiting.request.name,
               description: this.getToolDescription(
@@ -1257,6 +1287,7 @@ export class AgentCore {
       this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
         subagentId: this.subagentId,
         round: currentRound,
+        agentDepth: this.agentDepth,
         callId,
         name: toolName,
         args,
@@ -1300,6 +1331,7 @@ export class AgentCore {
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
+            agentDepth: this.agentDepth,
             callId: req.callId,
             name: req.name,
             success: false,
@@ -1670,6 +1702,7 @@ Important Rules:
     this.eventEmitter?.emit(AgentEventType.USAGE_METADATA, {
       subagentId: this.subagentId,
       round: turnCounter,
+      agentDepth: this.agentDepth,
       usage,
       durationMs: Date.now() - roundStreamStart,
       timestamp: Date.now(),

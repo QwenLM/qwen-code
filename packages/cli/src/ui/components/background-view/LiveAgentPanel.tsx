@@ -137,12 +137,22 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
   ]),
 );
 
+function activityAgentDepth(activity: object): number | undefined {
+  if (!('agentDepth' in activity)) return undefined;
+  return typeof activity.agentDepth === 'number'
+    ? activity.agentDepth
+    : undefined;
+}
+
 function activityLabel(entry: AgentDialogEntry): string {
   const last = entry.recentActivities?.at(-1);
   if (!last) return '';
+  const agentDepth = activityAgentDepth(last);
   const display = TOOL_DISPLAY_BY_NAME[last.name] ?? last.name;
   const desc = last.description?.replace(/\s*\n\s*/g, ' ').trim();
-  return desc ? `${display} ${desc}` : display;
+  const nestedPrefix = agentDepth !== undefined && agentDepth > 1 ? '↳ ' : '';
+  const label = desc ? `${display} ${desc}` : display;
+  return `${nestedPrefix}${label}`;
 }
 
 /**

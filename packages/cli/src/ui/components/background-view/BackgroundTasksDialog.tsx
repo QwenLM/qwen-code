@@ -50,12 +50,26 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
   ]),
 );
 
-function formatActivityLabel(name: string, description: string | undefined) {
+function activityAgentDepth(activity: object): number | undefined {
+  if (!('agentDepth' in activity)) return undefined;
+  return typeof activity.agentDepth === 'number'
+    ? activity.agentDepth
+    : undefined;
+}
+
+function formatActivityLabel(
+  name: string,
+  description: string | undefined,
+  agentDepth?: number,
+) {
   const display = TOOL_DISPLAY_BY_NAME[name] ?? name;
   const singleLineDesc = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
-  return singleLineDesc ? `${display}(${singleLineDesc})` : display;
+  const nestedPrefix =
+    typeof agentDepth === 'number' && agentDepth > 1 ? '↳ ' : '';
+  const label = singleLineDesc ? `${display}(${singleLineDesc})` : display;
+  return `${nestedPrefix}${label}`;
 }
 
 function statusVerb(status: EntryStatus): string {
@@ -629,7 +643,7 @@ const AgentDetailBody: React.FC<{
             // broke alignment in some fonts.
             const prefix = isLast ? '> ' : '  ';
             const label = truncateToWidth(
-              formatActivityLabel(a.name, a.description),
+              formatActivityLabel(a.name, a.description, activityAgentDepth(a)),
               Math.max(0, maxWidth - stringWidth(prefix)),
             );
             return (

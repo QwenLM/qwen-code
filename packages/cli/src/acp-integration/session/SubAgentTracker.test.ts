@@ -324,6 +324,57 @@ describe('SubAgentTracker', () => {
       });
     });
 
+    it('preserves nested agent displays and includes agent depth metadata', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({
+          name: ToolNames.AGENT,
+          callId: 'nested-agent-call',
+          agentDepth: 1,
+          args: { description: 'inspect nested work' },
+        }),
+      );
+
+      const nestedDisplay = {
+        type: 'task_execution' as const,
+        subagentName: 'nested-reviewer',
+        agentDepth: 2,
+        taskDescription: 'inspect nested work',
+        taskPrompt: 'inspect',
+        status: 'completed' as const,
+      };
+
+      eventEmitter.emit(
+        AgentEventType.TOOL_RESULT,
+        createToolResultEvent({
+          name: ToolNames.AGENT,
+          callId: 'nested-agent-call',
+          agentDepth: 1,
+          success: true,
+          resultDisplay: nestedDisplay,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'nested-agent-call',
+            status: 'completed',
+            rawOutput: nestedDisplay,
+            _meta: expect.objectContaining({
+              toolName: ToolNames.AGENT,
+              parentToolCallId: 'parent-call-123',
+              subagentType: 'test-subagent',
+              agentDepth: 1,
+            }),
+          }),
+        );
+      });
+    });
+
     it('should emit failed status on unsuccessful result', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 
@@ -719,6 +770,32 @@ describe('SubAgentTracker', () => {
             type: 'text',
             text: 'Hello, this is a response from the model.',
           },
+        }),
+      );
+    });
+
+    it('should include agent depth metadata on nested STREAM_TEXT events', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const event = createStreamTextEvent({
+        text: 'Nested agent response.',
+        agentDepth: 2,
+      });
+
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          _meta: expect.objectContaining({
+            parentToolCallId: 'parent-call-123',
+            subagentType: 'test-subagent',
+            agentDepth: 2,
+          }),
         }),
       );
     });

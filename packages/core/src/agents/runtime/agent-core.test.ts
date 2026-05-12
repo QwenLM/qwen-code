@@ -4,12 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import type { FunctionDeclaration } from '@google/genai';
 import { AgentCore } from './agent-core.js';
 import {
+  type AgentExecutionMode,
   getCurrentAgentId,
+  getCurrentAgentDepth,
+  getCurrentAgentExecutionMode,
   getRuntimeContentGenerator,
+  runWithAgentDepth,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
@@ -26,6 +30,11 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
+import { ToolNames } from '../../tools/tool-names.js';
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe('AgentCore.runInAgentFrames', () => {
   // The deferred-approval `respond` callback that AgentCore hands to the
@@ -71,6 +80,8 @@ describe('AgentCore.runInAgentFrames', () => {
     await core.runInAgentFrames(async () => {
       observedView = getRuntimeContentGenerator();
       observedName = subagentNameContext.getStore();
+      expect(getCurrentAgentDepth()).toBe(1);
+      expect(getCurrentAgentExecutionMode()).toBe('foreground');
     });
 
     expect(observedView).toBe(view);
@@ -213,6 +224,30 @@ describe('AgentCore.runInAgentFrames', () => {
     expect(observedAgentId).toBe('agent-123');
   });
 
+  it('publishes the configured nesting depth in the agent frame', async () => {
+    const core = new AgentCore(
+      'nested-agent',
+      {} as unknown as Config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      2,
+    );
+
+    let observedDepth = -1;
+    await runWithAgentDepth(1, async () => {
+      await core.runInAgentFrames(async () => {
+        observedDepth = getCurrentAgentDepth();
+      });
+    });
+
+    expect(observedDepth).toBe(2);
+  });
+
   it("prefers the agent's own view over inheritedView when both are present", async () => {
     // Defensive: if a future caller wires both, the agent's explicit view
     // wins — we never want a captured snapshot to override the agent's
@@ -257,6 +292,8 @@ describe('AgentCore.prepareTools', () => {
   function buildAgentForTools(
     toolConfig: ToolConfig | undefined,
     fnDeclarations: FunctionDeclaration[],
+    agentDepth = 1,
+    executionMode: AgentExecutionMode = 'foreground',
   ): {
     core: AgentCore;
     getFunctionDeclarationsSpy: ReturnType<typeof vi.fn>;
@@ -277,6 +314,11 @@ describe('AgentCore.prepareTools', () => {
       { model: 'test-model' },
       { max_turns: 1 },
       toolConfig,
+      undefined,
+      undefined,
+      undefined,
+      agentDepth,
+      executionMode,
     );
     return { core, getFunctionDeclarationsSpy };
   }
@@ -337,5 +379,76 @@ describe('AgentCore.prepareTools', () => {
     await core.prepareTools();
 
     expect(getFunctionDeclarationsSpy).not.toHaveBeenCalled();
+  });
+
+  it('excludes agent at the default maximum subagent depth', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      { name: ToolNames.AGENT, description: 'agent' } as FunctionDeclaration,
+      { name: 'read_file', description: 'read' } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls, 1);
+
+    const tools = await core.prepareTools();
+
+    expect(tools.map((tool) => tool.name)).toEqual(['read_file']);
+  });
+
+  it('allows agent while below QWEN_AGENT_MAX_DEPTH', async () => {
+    vi.stubEnv('QWEN_AGENT_MAX_DEPTH', '2');
+    const fnDecls: FunctionDeclaration[] = [
+      { name: ToolNames.AGENT, description: 'agent' } as FunctionDeclaration,
+      {
+        name: ToolNames.CRON_CREATE,
+        description: 'cron',
+      } as FunctionDeclaration,
+      { name: 'read_file', description: 'read' } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls, 1);
+
+    const tools = await core.prepareTools();
+
+    expect(tools.map((tool) => tool.name)).toEqual([
+      ToolNames.AGENT,
+      'read_file',
+    ]);
+  });
+
+  it('allows inline agent declarations while below the nesting limit', async () => {
+    vi.stubEnv('QWEN_AGENT_MAX_DEPTH', '2');
+    const agentDecl = {
+      name: ToolNames.AGENT,
+      description: 'agent',
+    } as FunctionDeclaration;
+    const cronDecl = {
+      name: ToolNames.CRON_CREATE,
+      description: 'cron',
+    } as FunctionDeclaration;
+    const { core } = buildAgentForTools(
+      { tools: [agentDecl, cronDecl] },
+      [],
+      1,
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(tools.map((tool) => tool.name)).toEqual([ToolNames.AGENT]);
+  });
+
+  it('excludes agent in background execution mode even below the nesting limit', async () => {
+    vi.stubEnv('QWEN_AGENT_MAX_DEPTH', '2');
+    const fnDecls: FunctionDeclaration[] = [
+      { name: ToolNames.AGENT, description: 'agent' } as FunctionDeclaration,
+      { name: 'read_file', description: 'read' } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools(
+      { tools: ['*'] },
+      fnDecls,
+      1,
+      'background',
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(tools.map((tool) => tool.name)).toEqual(['read_file']);
   });
 });

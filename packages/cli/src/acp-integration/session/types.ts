@@ -43,6 +43,8 @@ export interface SubagentMeta {
   parentToolCallId?: string;
   /** Type of subagent (from AgentParams.subagent_type) */
   subagentType?: string;
+  /** Depth of the agent that emitted the nested update. */
+  agentDepth?: number;
 }
 
 /**

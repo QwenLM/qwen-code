@@ -87,6 +87,8 @@ export interface AgentRoundTextEvent {
 export interface AgentStreamTextEvent {
   subagentId: string;
   round: number;
+  /** 0 = main agent, 1 = first subagent layer, etc. */
+  agentDepth?: number;
   text: string;
   /** Whether this text is reasoning/thinking content (as opposed to regular output) */
   thought?: boolean;
@@ -96,6 +98,8 @@ export interface AgentStreamTextEvent {
 export interface AgentUsageEvent {
   subagentId: string;
   round: number;
+  /** 0 = main agent, 1 = first subagent layer, etc. */
+  agentDepth?: number;
   usage: GenerateContentResponseUsageMetadata;
   durationMs?: number;
   timestamp: number;
@@ -104,6 +108,8 @@ export interface AgentUsageEvent {
 export interface AgentToolCallEvent {
   subagentId: string;
   round: number;
+  /** Depth of the agent that invoked this tool call. */
+  agentDepth?: number;
   callId: string;
   name: string;
   args: Record<string, unknown>;
@@ -116,6 +122,8 @@ export interface AgentToolCallEvent {
 export interface AgentToolResultEvent {
   subagentId: string;
   round: number;
+  /** Depth of the agent that invoked this tool call. */
+  agentDepth?: number;
   callId: string;
   name: string;
   success: boolean;
@@ -149,6 +157,8 @@ export interface AgentToolOutputUpdateEvent {
 export interface AgentApprovalRequestEvent {
   subagentId: string;
   round: number;
+  /** Depth of the agent that requested this approval. */
+  agentDepth?: number;
   callId: string;
   name: string;
   description: string;

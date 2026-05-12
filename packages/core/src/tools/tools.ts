@@ -518,6 +518,8 @@ export interface AgentResultDisplay {
   type: 'task_execution';
   subagentName: string;
   subagentColor?: string;
+  /** 0 = main agent, 1 = first subagent layer, etc. */
+  agentDepth?: number;
   taskDescription: string;
   taskPrompt: string;
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
@@ -538,9 +540,11 @@ export interface AgentResultDisplay {
     error?: string;
     args?: Record<string, unknown>;
     result?: string;
-    resultDisplay?: string;
+    resultDisplay?: ToolResultDisplay;
     responseParts?: Part[];
     description?: string;
+    /** Depth of the agent that invoked this tool call. */
+    agentDepth?: number;
   }>;
 }
 

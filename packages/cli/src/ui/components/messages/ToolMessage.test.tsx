@@ -16,6 +16,7 @@ import { CompactModeProvider } from '../../contexts/CompactModeContext.js';
 import type {
   AnsiOutput,
   AnsiOutputDisplay,
+  AgentResultDisplay,
   Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
@@ -313,6 +314,8 @@ describe('<ToolMessage />', () => {
         taskDescription: string;
         taskPrompt: string;
         status: 'running' | 'completed' | 'failed' | 'cancelled';
+        agentDepth?: number;
+        toolCalls?: AgentResultDisplay['toolCalls'];
         pendingConfirmation?: object;
         terminateReason?: string;
       };
@@ -385,6 +388,45 @@ describe('<ToolMessage />', () => {
       // No approval prompt — completed subagents don't sit on the
       // focus lock.
       expect(output).not.toContain('MockApprovalPrompt');
+    });
+
+    it('terminal subagent summary renders nested agent hierarchy', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'parent-agent',
+              taskDescription: 'Coordinate review',
+              taskPrompt: 'Coordinate',
+              status: 'completed',
+              agentDepth: 1,
+              toolCalls: [
+                {
+                  callId: 'nested-agent-call',
+                  name: 'agent',
+                  status: 'success',
+                  resultDisplay: {
+                    type: 'task_execution',
+                    subagentName: 'child-agent',
+                    agentDepth: 2,
+                    taskDescription: 'Inspect focused file',
+                    taskPrompt: 'Inspect',
+                    status: 'completed',
+                  } satisfies AgentResultDisplay,
+                },
+              ],
+            },
+            isPending: false,
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('parent-agent');
+      expect(output).toContain('Coordinate review');
+      expect(output).toContain('↳');
+      expect(output).toContain('child-agent');
+      expect(output).toContain('Inspect focused file');
     });
 
     it('live (`isPending`) terminal subagent → renders summary inline (panel snapshot already dropped)', () => {

@@ -349,6 +349,38 @@ const SubagentExecutionRenderer: React.FC<{
   return null;
 };
 
+function isAgentResultDisplay(value: unknown): value is AgentResultDisplay {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'type' in value &&
+    (value as { type?: unknown }).type === 'task_execution'
+  );
+}
+
+interface NestedSubagentSummary {
+  data: AgentResultDisplay;
+  level: number;
+}
+
+function collectNestedSubagentSummaries(
+  data: AgentResultDisplay,
+  level = 1,
+  seen = new WeakSet<object>(),
+): NestedSubagentSummary[] {
+  if (seen.has(data)) return [];
+  seen.add(data);
+
+  const summaries: NestedSubagentSummary[] = [];
+  for (const toolCall of data.toolCalls ?? []) {
+    const nested = toolCall.resultDisplay;
+    if (!isAgentResultDisplay(nested)) continue;
+    summaries.push({ data: nested, level });
+    summaries.push(...collectNestedSubagentSummaries(nested, level + 1, seen));
+  }
+  return summaries;
+}
+
 /**
  * One-line summary that lands in scrollback when a subagent reaches a
  * terminal state. The verbose 15-row frame is retired (it caused
@@ -360,6 +392,25 @@ const SubagentExecutionRenderer: React.FC<{
 const SubagentScrollbackSummary: React.FC<{
   data: AgentResultDisplay;
 }> = ({ data }) => {
+  const nested = collectNestedSubagentSummaries(data);
+  return (
+    <Box flexDirection="column">
+      <SubagentSummaryLine data={data} />
+      {nested.map(({ data: nestedData, level }, index) => (
+        <SubagentSummaryLine
+          key={`${nestedData.subagentName}-${nestedData.taskDescription}-${index}`}
+          data={nestedData}
+          level={level}
+        />
+      ))}
+    </Box>
+  );
+};
+
+const SubagentSummaryLine: React.FC<{
+  data: AgentResultDisplay;
+  level?: number;
+}> = ({ data, level = 0 }) => {
   const { glyph, color } = (() => {
     switch (data.status) {
       case 'completed':
@@ -398,6 +449,7 @@ const SubagentScrollbackSummary: React.FC<{
   const typePrefix = data.subagentName
     ? `${escapeAnsiCtrlCodes(data.subagentName)}: `
     : '';
+  const indent = level > 0 ? `${'  '.repeat(Math.min(level, 4))}↳ ` : '';
   const safeDescription = escapeAnsiCtrlCodes(data.taskDescription ?? '');
   const reason =
     data.status !== 'completed' && data.terminateReason
@@ -406,6 +458,7 @@ const SubagentScrollbackSummary: React.FC<{
   return (
     <Box paddingLeft={1}>
       <Text wrap="truncate-end">
+        {indent && <Text color={theme.text.secondary}>{indent}</Text>}
         <Text color={color}>{`${glyph} `}</Text>
         <Text bold>{typePrefix}</Text>
         <Text color={theme.text.secondary}>{safeDescription}</Text>

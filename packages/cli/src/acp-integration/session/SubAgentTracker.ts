@@ -67,10 +67,15 @@ export class SubAgentTracker {
   /**
    * Gets the subagent metadata to attach to all events.
    */
-  private getSubagentMeta() {
+  private getSubagentMeta(event?: unknown) {
+    const agentDepth =
+      event && typeof event === 'object' && 'agentDepth' in event
+        ? (event as { agentDepth?: unknown }).agentDepth
+        : undefined;
     return {
       parentToolCallId: this.parentToolCallId,
       subagentType: this.subagentType,
+      ...(typeof agentDepth === 'number' ? { agentDepth } : {}),
     };
   }
 
@@ -146,7 +151,7 @@ export class SubAgentTracker {
         toolName: event.name,
         callId: event.callId,
         args: event.args,
-        subagentMeta: this.getSubagentMeta(),
+        subagentMeta: this.getSubagentMeta(event),
       });
     };
   }
@@ -171,7 +176,7 @@ export class SubAgentTracker {
         message: event.responseParts ?? [],
         resultDisplay: event.resultDisplay,
         args: state?.args,
-        subagentMeta: this.getSubagentMeta(),
+        subagentMeta: this.getSubagentMeta(event),
       });
 
       // Clean up state
@@ -255,7 +260,7 @@ export class SubAgentTracker {
         event.usage,
         '',
         event.durationMs,
-        this.getSubagentMeta(),
+        this.getSubagentMeta(event),
       );
     };
   }
@@ -276,6 +281,8 @@ export class SubAgentTracker {
         event.text,
         'assistant',
         event.thought ?? false,
+        undefined,
+        this.getSubagentMeta(event),
       );
     };
   }

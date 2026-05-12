@@ -99,6 +99,8 @@ export interface BackgroundActivity {
   name: string;
   /** Short one-line description — the tool's own render-friendly summary. */
   description: string;
+  /** Depth of the agent that emitted this activity. */
+  agentDepth?: number;
   /** Emission timestamp (ms). */
   at: number;
 }

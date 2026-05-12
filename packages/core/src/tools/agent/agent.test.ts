@@ -32,7 +32,11 @@ import type {
 import { partToString } from '../../utils/partUtils.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
-import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import {
+  runWithAgentContext,
+  runWithAgentDepth,
+  runWithAgentExecutionMode,
+} from '../../agents/runtime/agent-context.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -179,6 +183,7 @@ describe('AgentTool', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   describe('initialization', () => {
@@ -489,6 +494,85 @@ describe('AgentTool', () => {
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('failed');
       expect(display.subagentName).toBe('non-existent');
+    });
+
+    it('rejects nested agent launch at the configured maximum depth', async () => {
+      vi.stubEnv('QWEN_AGENT_MAX_DEPTH', '1');
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await runWithAgentDepth(1, () => invocation.execute());
+
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('maximum configured depth is 1');
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+      expect(display.terminateReason).toBe(
+        'Maximum agent nesting depth (1) reached',
+      );
+    });
+
+    it('rejects agent launches from background agents', async () => {
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await runWithAgentExecutionMode('background', () =>
+        invocation.execute(),
+      );
+
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Background agents cannot launch child agents');
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+      expect(display.terminateReason).toBe(
+        'Background agents cannot launch child agents',
+      );
+    });
+
+    it('rejects background launches from foreground agents', async () => {
+      vi.stubEnv('QWEN_AGENT_MAX_DEPTH', '2');
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: true,
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await runWithAgentDepth(1, () =>
+        runWithAgentExecutionMode('foreground', () => invocation.execute()),
+      );
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain(
+        'Foreground subagents cannot launch background agents',
+      );
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+      expect(display.terminateReason).toBe(
+        'Foreground subagents cannot launch background agents',
+      );
     });
 
     it('should handle execution errors gracefully', async () => {
@@ -1462,6 +1546,55 @@ describe('AgentTool', () => {
           ),
       );
       expect(resultSnapshot).toBeDefined();
+    });
+
+    it('preserves nested agent result displays in tool call snapshots', async () => {
+      let finalDisplay: AgentResultDisplay | undefined;
+      const nestedDisplay: AgentResultDisplay = {
+        type: 'task_execution',
+        subagentName: 'nested-reviewer',
+        agentDepth: 2,
+        taskDescription: 'review nested changes',
+        taskPrompt: 'review',
+        status: 'completed',
+      };
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          agentDepth: 1,
+          callId: 'call-agent-1',
+          name: ToolNames.AGENT,
+          args: { description: 'review nested changes' },
+          description: 'Launch nested reviewer',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'sub-1',
+          round: 1,
+          agentDepth: 1,
+          callId: 'call-agent-1',
+          name: ToolNames.AGENT,
+          success: true,
+          resultDisplay: nestedDisplay,
+          timestamp: Date.now(),
+        } satisfies AgentToolResultEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        finalDisplay = output as AgentResultDisplay;
+      });
+
+      expect(finalDisplay?.agentDepth).toBe(1);
+      expect(finalDisplay?.toolCalls?.[0]).toMatchObject({
+        callId: 'call-agent-1',
+        name: ToolNames.AGENT,
+        status: 'success',
+        agentDepth: 1,
+        resultDisplay: nestedDisplay,
+      });
     });
 
     it('should NOT clear pendingConfirmation when TOOL_RESULT is for a different tool', async () => {

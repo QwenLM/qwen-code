@@ -16,7 +16,10 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
-import type { RuntimeContentGeneratorView } from './agent-context.js';
+import type {
+  AgentExecutionMode,
+  RuntimeContentGeneratorView,
+} from './agent-context.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type {
   AgentEventEmitter,
@@ -171,6 +174,8 @@ export class AgentHeadless {
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
+    agentDepth = 1,
+    executionMode: AgentExecutionMode = 'foreground',
   ): Promise<AgentHeadless> {
     const core = new AgentCore(
       name,
@@ -182,6 +187,8 @@ export class AgentHeadless {
       eventEmitter,
       hooks,
       runtimeView,
+      agentDepth,
+      executionMode,
     );
     return new AgentHeadless(core);
   }
