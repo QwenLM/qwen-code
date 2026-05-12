@@ -688,11 +688,27 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         'newSession',
       );
 
-      // Late-shutdown re-check: shutdown() may have flipped while we
-      // were in `connection.newSession` (~1s on cold start). If we
-      // commit to the maps now, the snapshot in shutdown() already
-      // missed this entry — child leaks past `process.exit(0)`. Tear
-      // down what we have and surface to the caller.
+      // Late-shutdown re-check (BUy4U): shutdown() may have flipped
+      // while we were in `connection.initialize` or
+      // `connection.newSession` (the ACP handshake takes ~1s on cold
+      // start). If we commit to the maps now, the snapshot in
+      // shutdown() already missed this entry — child would leak past
+      // `process.exit(0)`. Tear down what we have and surface to the
+      // caller.
+      //
+      // This re-check is the LOAD-BEARING correctness contract, not
+      // a band-aid: `shutdown()` deliberately starts tearing down
+      // already-registered sessions in parallel with awaiting
+      // `inFlightSpawns` (faster fan-out), and relies on this
+      // re-check to catch any spawn whose `newSession` returns AFTER
+      // shutdown flipped the flag. The alternative — await all
+      // in-flight spawns to settle BEFORE snapshotting byId — is
+      // cleaner to reason about but serializes shutdown by
+      // up-to-`initTimeoutMs` (10s default) before any already-live
+      // session starts tearing down. We chose parallel + re-check.
+      // Both A and B coalesced callers see the same rejection
+      // because `doSpawn`'s promise (cached in `inFlightSpawns`) is
+      // what rejects.
       if (shuttingDown) {
         await channel.kill().catch(() => {});
         throw new Error('HttpAcpBridge is shutting down');
