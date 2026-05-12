@@ -8,6 +8,7 @@ export {
   DaemonClient,
   DaemonHttpError,
   parseSseStream,
+  SseFramingError,
   type CreateSessionRequest,
   type DaemonCapabilities,
   type DaemonClientOptions,

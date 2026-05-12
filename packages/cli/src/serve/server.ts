@@ -146,10 +146,7 @@ export function createServeApp(
   });
 
   app.post('/session', async (req, res) => {
-    const body =
-      typeof req.body === 'object' && req.body !== null
-        ? (req.body as Record<string, unknown>)
-        : {};
+    const body = safeBody(req);
     const cwd = typeof body['cwd'] === 'string' ? (body['cwd'] as string) : '';
     if (!cwd || !path.isAbsolute(cwd)) {
       res
@@ -225,10 +222,7 @@ export function createServeApp(
 
   app.post('/session/:id/prompt', async (req, res) => {
     const sessionId = req.params['id'];
-    const body =
-      typeof req.body === 'object' && req.body !== null
-        ? (req.body as Record<string, unknown>)
-        : {};
+    const body = safeBody(req);
     const prompt = body['prompt'];
     if (!Array.isArray(prompt) || prompt.length === 0) {
       res.status(400).json({
@@ -328,10 +322,7 @@ export function createServeApp(
 
   app.post('/session/:id/cancel', async (req, res) => {
     const sessionId = req.params['id'];
-    const body =
-      typeof req.body === 'object' && req.body !== null
-        ? (req.body as Record<string, unknown>)
-        : {};
+    const body = safeBody(req);
     try {
       await bridge.cancelSession(sessionId, {
         ...(body as object),
@@ -363,10 +354,7 @@ export function createServeApp(
 
   app.post('/session/:id/model', async (req, res) => {
     const sessionId = req.params['id'];
-    const body =
-      typeof req.body === 'object' && req.body !== null
-        ? (req.body as Record<string, unknown>)
-        : {};
+    const body = safeBody(req);
     const modelId = body['modelId'];
     if (typeof modelId !== 'string' || !modelId) {
       res.status(400).json({
@@ -391,10 +379,7 @@ export function createServeApp(
 
   app.post('/permission/:requestId', (req, res) => {
     const requestId = req.params['requestId'];
-    const body =
-      typeof req.body === 'object' && req.body !== null
-        ? (req.body as Record<string, unknown>)
-        : {};
+    const body = safeBody(req);
     const outcome = body['outcome'];
     if (!isValidOutcome(outcome)) {
       res.status(400).json({
@@ -432,34 +417,31 @@ export function createServeApp(
       iter = iterable[Symbol.asyncIterator]();
     } catch (err) {
       // `EventBus` throws `SubscriberLimitExceededError` when the
-      // per-session subscriber cap (default 64) is reached. Surface
-      // it as an SSE-shaped `stream_error` terminal frame rather
-      // than a generic 5xx so clients see a readable failure on the
-      // stream they were already trying to consume. Also log to
-      // stderr so an operator notices when a session is being
-      // attacked or has a connection leak.
+      // per-session subscriber cap (default 64) is reached.
+      //
+      // Bd1zJ: surface as `429 Too Many Requests` + `Retry-After`
+      // header rather than `200 + stream_error`. The previous
+      // SSE-shaped response triggered `EventSource`'s
+      // auto-reconnect (which honors the `retry:` directive AND
+      // default-reconnects on any closed stream). The reconnect hit
+      // the same cap, looped, amplifying the exact load the limit
+      // exists to prevent.
+      //
+      // `429` is the standard "back off" signal — browsers'
+      // `EventSource` treats `4xx` as terminal and does NOT
+      // auto-reconnect on it, unlike `200 + close` which DOES
+      // reconnect. Body shape mirrors the SSE frame's data field so
+      // a raw-fetch client gets the same structured error.
       if (err instanceof SubscriberLimitExceededError) {
         writeStderrLine(
-          `qwen serve: subscriber limit reached for session ${sessionId} (limit=${err.limit}); rejecting new SSE client`,
+          `qwen serve: subscriber limit reached for session ${sessionId} (limit=${err.limit}); rejecting new SSE client with 429`,
         );
-        res.status(200);
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache, no-transform');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-        res.flushHeaders();
-        res.write(
-          formatSseFrame({
-            v: 1,
-            type: 'stream_error',
-            data: {
-              error: err.message,
-              code: 'subscriber_limit_exceeded',
-              limit: err.limit,
-            },
-          }),
-        );
-        res.end();
+        res.setHeader('Retry-After', '5');
+        res.status(429).json({
+          error: err.message,
+          code: 'subscriber_limit_exceeded',
+          limit: err.limit,
+        });
         return;
       }
       sendBridgeError(res, err, {
@@ -677,6 +659,36 @@ export function createServeApp(
   );
 
   return app;
+}
+
+/**
+ * Coerce `req.body` into a safe `Record<string, unknown>` for route
+ * handlers. Replaces the 5-site copy-pasted preamble
+ * `typeof req.body === 'object' && req.body !== null ? ... : {}`
+ * (Bd10m).
+ *
+ * Also strips prototype-pollution keys (`__proto__`, `constructor`,
+ * `prototype`) before returning — see BZ9uv/va/vs/wD/Bd1zz. Routes
+ * downstream of this helper spread the result into objects passed to
+ * the bridge / ACP SDK; without this scrub, a client could set
+ * `{"__proto__": {"polluted": true}}` and pollute `Object.prototype`.
+ * Uses an `Object.create(null)` target so the returned object itself
+ * has no prototype either, blocking second-order spread-into-default-
+ * prototype attacks.
+ */
+function safeBody(req: import('express').Request): Record<string, unknown> {
+  const raw = req.body;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return Object.create(null) as Record<string, unknown>;
+  }
+  const out = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
 }
 
 function isValidOutcome(

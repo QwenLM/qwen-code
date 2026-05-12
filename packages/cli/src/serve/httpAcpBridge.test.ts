@@ -191,6 +191,13 @@ function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
       }
       resolveExited!();
     },
+    killSync: () => {
+      // Test fake: just mark killed; the async streams will close
+      // naturally on test cleanup. Mirrors the real spawn factory's
+      // SIGKILL semantics (fire-and-forget).
+      handle.killed = true;
+      resolveExited!();
+    },
   };
   return handle;
 }
@@ -593,6 +600,9 @@ describe('createHttpAcpBridge', () => {
           kill: async () => {
             handle.killed = true;
           },
+          killSync: () => {
+            handle.killed = true;
+          },
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
@@ -856,6 +866,7 @@ describe('createHttpAcpBridge', () => {
             | undefined
           >(() => {}),
           kill: async () => {},
+          killSync: () => {},
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
@@ -933,6 +944,7 @@ describe('createHttpAcpBridge', () => {
             | undefined
           >(() => {}),
           kill: async () => {},
+          killSync: () => {},
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
@@ -1129,6 +1141,7 @@ describe('createHttpAcpBridge', () => {
             | undefined
           >(() => {}),
           kill: async () => {},
+          killSync: () => {},
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
@@ -1208,6 +1221,7 @@ describe('createHttpAcpBridge', () => {
             | undefined
           >(() => {}),
           kill: async () => {},
+          killSync: () => {},
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
@@ -1276,6 +1290,7 @@ describe('createHttpAcpBridge', () => {
             | undefined
           >(() => {}),
           kill: async () => {},
+          killSync: () => {},
         };
       };
       return { factory, setModelCalls };
@@ -1377,6 +1392,7 @@ describe('createHttpAcpBridge', () => {
           stream: clientStream,
           exited,
           kill: async () => resolveExited!(),
+          killSync: () => resolveExited!(),
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
@@ -1509,6 +1525,7 @@ describe('createHttpAcpBridge', () => {
             | undefined
           >(() => {}),
           kill: async () => {},
+          killSync: () => {},
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
@@ -1870,6 +1887,7 @@ describe('createHttpAcpBridge', () => {
             | undefined
           >(() => {}),
           kill: async () => {},
+          killSync: () => {},
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });
@@ -1955,6 +1973,7 @@ describe('createHttpAcpBridge', () => {
             | undefined
           >(() => {}),
           kill: async () => {},
+          killSync: () => {},
         };
       };
       const bridge = createHttpAcpBridge({ channelFactory: factory });

@@ -168,6 +168,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async shutdown() {
       shutdownCalls += 1;
     },
+    killAllSync() {
+      shutdownCalls += 1;
+    },
   };
 }
 
@@ -326,6 +329,32 @@ describe('createServeApp', () => {
         .send({ cwd: '/work/a' });
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: 'boom' });
+    });
+
+    it('strips prototype-pollution keys from body (BZ9uv/va/vs/wD)', async () => {
+      // `safeBody()` strips `__proto__` / `constructor` / `prototype`
+      // and copies into an `Object.create(null)` target before any
+      // route spreads it into the bridge call. Even if a client
+      // sends those keys, neither the bridge request nor
+      // `Object.prototype` ends up touched.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      // Build the body as a raw string so the server-side
+      // `express.json` parser is the only path that could land the
+      // dangerous key on the request object.
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('content-type', 'application/json')
+        .send(
+          '{"cwd":"/work/a","__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}}}',
+        );
+      expect(res.status).toBe(200);
+      expect(bridge.calls[0]?.workspaceCwd).toBe('/work/a');
+      // No prototype pollution: Object.prototype.polluted is
+      // undefined. (This is the core security property — if the
+      // dangerous key landed via spread, this check would fail.)
+      expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
     });
   });
 

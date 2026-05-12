@@ -12,7 +12,7 @@ export {
   type PromptRequest,
   type SubscribeOptions,
 } from './DaemonClient.js';
-export { parseSseStream } from './sse.js';
+export { parseSseStream, SseFramingError } from './sse.js';
 export type {
   DaemonCapabilities,
   DaemonEvent,

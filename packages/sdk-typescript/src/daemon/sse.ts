@@ -7,6 +7,21 @@
 import type { DaemonEvent } from './types.js';
 
 /**
+ * Bd10T: typed error raised by `parseSseStream` on framing-level
+ * violations (today: buffer-overflow from a non-SSE upstream that
+ * never emits the `\n\n` separator). Lets SDK consumers distinguish
+ * "the upstream isn't an SSE stream" from generic network failures
+ * via `err instanceof SseFramingError` instead of fragile string
+ * matching on `err.message`.
+ */
+export class SseFramingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SseFramingError';
+  }
+}
+
+/**
  * Parse an SSE-encoded event-stream `Response.body` into a stream of
  * `DaemonEvent`s.
  *
@@ -121,7 +136,7 @@ export async function* parseSseStream(
       buf += decoder.decode(value, { stream: true });
       // Unbounded buffer is a memory-pressure vector — see MAX_BUF_CHARS.
       if (buf.length > MAX_BUF_CHARS) {
-        throw new Error(
+        throw new SseFramingError(
           `parseSseStream: unread buffer exceeded ${MAX_BUF_CHARS} ` +
             `UTF-16 code units without a frame separator — upstream likely not SSE`,
         );
@@ -175,8 +190,13 @@ function consumeFrames(buf: string): { frames: string[]; tail: string } {
       continue;
     }
     // An LF exists. If a CRLF appears earlier (mixed-encoding edge
-    // case), use it instead. Restrict the CRLF scan to `[cursor, lf)`
-    // — anything past `lf` doesn't matter since LF already terminates.
+    // case), use it instead. The CRLF scan runs over `[cursor, end)`
+    // (Node's `indexOf` doesn't accept an upper bound), but we only
+    // use the result if it falls before `lf` — anything past `lf`
+    // is ignored since LF already terminates the frame. BcRh_:
+    // comment fixed to match actual scan range. The cost is a
+    // single extra scan only when both LF and CRLF appear in the
+    // buffer (rare on a typical SSE stream).
     const crlf = buf.indexOf('\r\n\r\n', cursor);
     if (crlf !== -1 && crlf < lf) {
       frames.push(buf.slice(cursor, crlf));

@@ -207,9 +207,22 @@ export async function runQwenServe(
           // operator's reflexive `^C^C` would otherwise be dropped.
           // Match standard daemon behavior (nginx, redis, etc.):
           // first signal = graceful drain; second = hard exit.
+          //
+          // Bd1y6: synchronously SIGKILL every live `qwen --acp`
+          // child BEFORE `process.exit(1)`. Otherwise the daemon
+          // vanishes but its child processes keep running with
+          // dangling stdin/stdout pipes — visible as orphan
+          // `qwen` processes in the operator's `ps` output.
           writeStderrLine(
             `qwen serve: received ${signal} during drain — forcing exit`,
           );
+          try {
+            bridge.killAllSync();
+          } catch (err) {
+            writeStderrLine(
+              `qwen serve: force-kill error: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
           process.exit(1);
           return;
         }

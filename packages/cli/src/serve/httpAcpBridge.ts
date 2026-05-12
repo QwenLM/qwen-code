@@ -14,6 +14,7 @@ import {
   PROTOCOL_VERSION,
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   EventBus,
   type BridgeEvent,
@@ -190,6 +191,16 @@ export interface HttpAcpBridge {
   /** Test/inspection hook: number of permission requests awaiting a vote. */
   readonly pendingPermissionCount: number;
 
+  /**
+   * Bd1y6: synchronous force-kill of every live channel. Called by
+   * the runQwenServe SIGINT/SIGTERM handler when the operator
+   * double-taps — the second signal can't afford the async
+   * `shutdown()` Promise that the first signal is still in the
+   * middle of. Without this, `process.exit(1)` would leave agent
+   * children running after the daemon vanishes.
+   */
+  killAllSync(): void;
+
   /** Close all live child processes; called on daemon shutdown. */
   shutdown(): Promise<void>;
 }
@@ -231,6 +242,15 @@ export interface AcpChannel {
   stream: Stream;
   /** Best-effort terminate; resolves when teardown is complete. */
   kill(): Promise<void>;
+  /**
+   * Bd1y6: synchronous force-kill for the second-signal force-exit
+   * path. Fires SIGKILL on the underlying child (or equivalent
+   * in-process tear-down) and returns immediately — no Promise. The
+   * daemon's signal handler can call this before `process.exit(1)`
+   * so that double-Ctrl+C doesn't leave the agent child running
+   * after the daemon vanishes.
+   */
+  killSync(): void;
   /**
    * Resolves when the channel has terminated for any reason — planned
    * (`kill()` called) OR unexpected (child process crashed, stream closed).
@@ -302,6 +322,22 @@ export interface BridgeOptions {
    * `ServeOptions.maxSessions` for the rationale.
    */
   maxSessions?: number;
+  /**
+   * Bd1yh: per-`requestPermission` wall clock. After this many ms with
+   * no client vote, the agent's permission promise resolves as
+   * cancelled — the per-session FIFO can drain instead of poisoning
+   * forever on a missing SSE subscriber. Defaults to 5 minutes.
+   * `0` / `Infinity` / non-finite disable the timeout (matches
+   * legacy behavior, NOT recommended).
+   */
+  permissionResponseTimeoutMs?: number;
+  /**
+   * Bd1z5: per-session cap on pending permissions in flight. New
+   * `requestPermission` calls past this cap resolve as cancelled with
+   * a stderr warning. Defaults to 64. `0` / `Infinity` disable the
+   * cap.
+   */
+  maxPendingPermissionsPerSession?: number;
 }
 
 /**
@@ -443,6 +479,19 @@ class BridgeClient implements Client {
      * `respondToPermission` for this id returns 404 cleanly.
      */
     private readonly rollbackPending: (requestId: string) => void,
+    /**
+     * Bd1yh: wall-clock ms before `requestPermission` resolves as
+     * cancelled if no client vote arrives. 0 = disabled. Prevents
+     * the per-session FIFO `promptQueue` from poisoning forever
+     * when no SSE subscriber is connected.
+     */
+    private readonly permissionTimeoutMs: number,
+    /**
+     * Bd1z5: per-session cap on in-flight permissions. New requests
+     * past this cap resolve as cancelled with a stderr warning.
+     * Infinity = disabled.
+     */
+    private readonly maxPendingPerSession: number,
   ) {}
 
   // FIXME(stage-1.5, chiga0 finding 3):
@@ -462,12 +511,32 @@ class BridgeClient implements Client {
     const entry = this.resolveEntry(params.sessionId);
     if (!entry) return { outcome: { outcome: 'cancelled' } };
 
+    // Bd1z5: per-session cap. Reject before registering so we never
+    // grow `pendingPermissionIds` past the limit.
+    if (entry.pendingPermissionIds.size >= this.maxPendingPerSession) {
+      writeStderrLine(
+        `qwen serve: session ${entry.sessionId} exceeded ` +
+          `maxPendingPermissionsPerSession (${this.maxPendingPerSession}) — ` +
+          `resolving new permission as cancelled.`,
+      );
+      return { outcome: { outcome: 'cancelled' } };
+    }
+
     const requestId = randomUUID();
     return await new Promise<RequestPermissionResponse>((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const settleOnce = (response: RequestPermissionResponse) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(response);
+      };
+
       this.registerPending({
         requestId,
         sessionId: entry.sessionId,
-        resolve,
+        resolve: settleOnce,
       });
       // `publish()` returns `undefined` on a closed bus — the
       // shutdown path closes per-session buses BEFORE awaiting
@@ -496,6 +565,27 @@ class BridgeClient implements Client {
       if (!published) {
         // Roll back the pending registration and resolve cancelled.
         this.rollbackPending(requestId);
+        return;
+      }
+
+      // Bd1yh: arm the deadline AFTER publish so we don't fire-and-
+      // cancel a no-subscriber request before the bus even saw it.
+      // When the deadline fires, roll back the pending (so a late
+      // vote returns 404) and resolve as cancelled (unwinding the
+      // agent's awaiting promise so the per-session FIFO can drain).
+      if (this.permissionTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (settled) return;
+          writeStderrLine(
+            `qwen serve: session ${entry.sessionId} permission ` +
+              `${requestId} timed out after ${this.permissionTimeoutMs}ms ` +
+              `(no client voted) — resolving as cancelled.`,
+          );
+          this.rollbackPending(requestId);
+        }, this.permissionTimeoutMs);
+        if (typeof timer === 'object' && timer && 'unref' in timer) {
+          (timer as { unref: () => void }).unref();
+        }
       }
     });
   }
@@ -630,6 +720,23 @@ class BridgeClient implements Client {
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_SESSIONS = 20;
+// Bd1yh: per-permission-request wall clock. Without this, an agent
+// calling `requestPermission` while no SSE subscriber is connected
+// would hang the per-session FIFO promptQueue forever (the prompt
+// can't complete, every subsequent prompt is blocked behind it).
+// 5 minutes is generous for "human reads UI, decides, clicks
+// approve" while still bounded enough to recover from a wedged
+// state. Configurable via `BridgeOptions.permissionResponseTimeoutMs`.
+const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+// Bd1z5: per-session cap on pending permissions in flight. A chatty
+// agent making rapid `requestPermission` calls would otherwise grow
+// `pendingPermissions` unboundedly — each entry is a UUID + closure
+// + bus event. 64 mirrors `DEFAULT_MAX_SUBSCRIBERS` (one pending
+// per subscriber feels like a reasonable headroom). Excess requests
+// resolve as cancelled and emit a stderr warning so operators see
+// the limit being hit. Configurable via
+// `BridgeOptions.maxPendingPermissionsPerSession`.
+const DEFAULT_MAX_PENDING_PER_SESSION = 64;
 
 export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   const sessionScope = opts.sessionScope ?? 'single';
@@ -673,6 +780,21 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       `Invalid initializeTimeoutMs: ${initTimeoutMs}. Must be > 0.`,
     );
   }
+  // Bd1yh + Bd1z5: per-permission deadline + per-session pending cap.
+  // 0 / Infinity / non-finite (NaN, -1) all disable — same sentinel
+  // convention as maxSessions / maxConnections.
+  const permissionTimeoutRaw =
+    opts.permissionResponseTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
+  const permissionTimeoutMs =
+    permissionTimeoutRaw > 0 && Number.isFinite(permissionTimeoutRaw)
+      ? permissionTimeoutRaw
+      : 0; // 0 = disabled
+  const maxPendingRaw =
+    opts.maxPendingPermissionsPerSession ?? DEFAULT_MAX_PENDING_PER_SESSION;
+  const maxPendingPerSession =
+    maxPendingRaw > 0 && Number.isFinite(maxPendingRaw)
+      ? maxPendingRaw
+      : Infinity;
 
   // Single-scope reuse keyed by canonical workspace path. Tracks the
   // SessionEntry that a same-workspace attach should re-use. With
@@ -789,6 +911,8 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           // Roll back a register-then-publish-failed pending so the agent
           // doesn't hang waiting on a vote nobody can see.
           resolvePending(rid, { outcome: { outcome: 'cancelled' } }),
+        permissionTimeoutMs,
+        maxPendingPerSession,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -939,6 +1063,19 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           // Already published `model_switch_failed`; session stays
           // operational on the agent's default model.
         },
+      );
+    }
+
+    // Bd1zc: re-check that the entry is still live before returning.
+    // The model-switch call yields and races against
+    // `channel.exited` — if the child crashed during the model
+    // switch, the exited handler already removed the entry from
+    // byId. Without this check, the caller would get HTTP 200 with
+    // a sessionId that already 404s on every subsequent request.
+    if (!byId.has(entry.sessionId)) {
+      throw new Error(
+        `Session ${entry.sessionId} died during model-switch ` +
+          `initialization`,
       );
     }
 
@@ -1568,6 +1705,25 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       }
     },
 
+    killAllSync() {
+      // Bd1y6: synchronous best-effort SIGKILL on every live channel.
+      // Set `shuttingDown` so any racing async path fails fast.
+      // Iterate the deduplicated set of channels (multi-session per
+      // channel means one channel can back many entries).
+      shuttingDown = true;
+      const channels = Array.from(byWorkspaceChannel.values());
+      byWorkspaceChannel.clear();
+      byWorkspace.clear();
+      byId.clear();
+      for (const info of channels) {
+        try {
+          info.channel.killSync();
+        } catch {
+          /* best-effort — already-dead child / pid race */
+        }
+      }
+    },
+
     async shutdown() {
       // Set BEFORE the snapshot so any racing `spawnOrAttach` triggered
       // by an in-flight HTTP connection after `runQwenServe.close()`
@@ -1984,6 +2140,18 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   return {
     stream,
     kill: () => killChild(child),
+    killSync: () => {
+      // Bd1y6: synchronous SIGKILL for the double-signal force-exit
+      // path. Skip if child already exited (kill on a dead process
+      // raises an OS-level error that's noise here).
+      if (child.exitCode === null && child.signalCode === null) {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already dead / pid recycled — ignore */
+        }
+      }
+    },
     exited,
   };
 };
