@@ -2457,21 +2457,27 @@ describe('OpenAIContentConverter', () => {
       expect(emitted[2]).toBe(' extra');
     });
 
-    it('should not enter cumulative mode after the detection window cap is reached on a non-cumulative stream', () => {
-      // After CUMULATIVE_DETECTION_WINDOW_BYTES (1024) of incremental
-      // emittedText growth, the baseline freezes and prefix/exact-repeat
-      // detection becomes unsafe. The early-return guard ensures that a chunk
-      // arriving after the cap is reached is passed through verbatim instead
-      // of being misclassified against a stale baseline.
+    it('should pass incremental chunks through verbatim past the detection window cap (none of them overlap)', () => {
+      // Incremental providers send fresh, non-overlapping chunks. Even after
+      // emittedText growth exceeds CUMULATIVE_DETECTION_WINDOW_BYTES (1024)
+      // and the baseline stops growing, every subsequent chunk that lacks
+      // prefix overlap with the frozen baseline must still be emitted
+      // verbatim (i.e., it must fall through to the final passthrough
+      // branch). This guards against any future regression that would, e.g.,
+      // wrongly short-circuit the passthrough path once the cap is reached.
+      //
+      // Note: this test does NOT cover the (currently unhandled) case where a
+      // later chunk happens to start with the frozen baseline — that chunk
+      // would still trigger prefix-overlap detection against a stale
+      // baseline. Such a chunk is vanishingly unlikely on a true incremental
+      // stream (≥1024 bytes of exact-prefix coincidence) but is not
+      // explicitly defended against here.
       const ctx = withStreamParser();
-      // 100 incremental chunks of 20 chars = 2000 chars, well past the cap.
+      // 100 distinct incremental chunks of 20 chars = 2000 chars, well past the cap.
       const incrementalChunks = Array.from(
         { length: 100 },
         (_, i) => `chunk${String(i).padStart(3, '0')}-payload__`,
       );
-      // Trailing chunk that, by coincidence, starts with what *would* be the
-      // frozen 1024-char baseline. With the early-return guard, this MUST NOT
-      // enter cumulative mode and MUST emit the chunk verbatim.
       const allEmitted = incrementalChunks.map(
         (content, index) =>
           converter.convertOpenAIChunkToGemini(
@@ -2493,8 +2499,8 @@ describe('OpenAIContentConverter', () => {
           ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
       );
 
-      // Every chunk should pass through verbatim — none should be
-      // misclassified as cumulative.
+      // Every chunk should pass through verbatim — none of them overlap
+      // with prior emittedText, so prefix/exact-repeat detection never fires.
       expect(allEmitted).toEqual(incrementalChunks);
     });
 
