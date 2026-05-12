@@ -27,6 +27,7 @@ import type {
   FunctionHookCallback,
   CommandHookConfig,
   HttpHookConfig,
+  AgentHookConfig,
   PendingAsyncHook,
   PendingAsyncOutput,
   MessagesProvider,
@@ -54,13 +55,16 @@ export class HookSystem {
   /** Optional provider for automatically fetching conversation history */
   private messagesProvider?: MessagesProvider;
 
+  private readonly rootConfig: Config;
+
   constructor(config: Config) {
+    this.rootConfig = config;
     // Get allowed HTTP URLs from config
     const allowedHttpUrls = config.getAllowedHttpHookUrls();
 
     // Initialize components
     this.hookRegistry = new HookRegistry(config);
-    this.hookRunner = new HookRunner(allowedHttpUrls);
+    this.hookRunner = new HookRunner(allowedHttpUrls, config);
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
     this.sessionHooksManager = new SessionHooksManager();
@@ -131,9 +135,21 @@ export class HookSystem {
    * when no hooks are configured for a given event.
    */
   hasHooksForEvent(eventName: string): boolean {
-    return (
-      this.hookRegistry.getHooksForEvent(eventName as HookEventName).length > 0
-    );
+    const typedEvent = eventName as HookEventName;
+    if (this.hookRegistry.getHooksForEvent(typedEvent).length > 0) {
+      return true;
+    }
+    // Also check session hooks so that programmatically registered hooks
+    // (e.g. agent hook enforcement) are discoverable by client.ts's
+    // pre-flight guard before firing Stop events.
+    const sessionId = this.rootConfig.getSessionId();
+    if (
+      this.sessionHooksManager.getHooksForEvent(sessionId, typedEvent).length >
+      0
+    ) {
+      return true;
+    }
+    return false;
   }
 
   async fireUserPromptSubmitEvent(
@@ -457,7 +473,7 @@ export class HookSystem {
     sessionId: string,
     event: HookEventName,
     matcher: string,
-    hook: CommandHookConfig | HttpHookConfig,
+    hook: CommandHookConfig | HttpHookConfig | AgentHookConfig,
     options?: { sequential?: boolean },
   ): string {
     return this.sessionHooksManager.addSessionHook(

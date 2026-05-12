@@ -9,6 +9,7 @@ import type {
   HookEventName,
   CommandHookConfig,
   HttpHookConfig,
+  AgentHookConfig,
   FunctionHookConfig,
   FunctionHookCallback,
   HookConfig,
@@ -136,7 +137,7 @@ export class SessionHooksManager {
     sessionId: string,
     event: HookEventName,
     matcher: string,
-    hook: CommandHookConfig | HttpHookConfig,
+    hook: CommandHookConfig | HttpHookConfig | AgentHookConfig,
     options?: { sequential?: boolean; skillRoot?: string },
   ): string {
     const hookId = generateHookId();

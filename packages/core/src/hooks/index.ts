@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Export types
+// Export types and constants
 export * from './types.js';
 
 // Export core components
@@ -18,6 +18,19 @@ export { HookEventHandler } from './hookEventHandler.js';
 // Export new hook runners
 export { HttpHookRunner } from './httpHookRunner.js';
 export { FunctionHookRunner } from './functionHookRunner.js';
+export { AgentHookRunner } from './agentHookRunner.js';
+
+// Export agent hook utilities
+export {
+  VERDICT_TOOL_NAME,
+  buildReportVerdictFunctionDeclaration,
+} from './reportVerdictTool.js';
+export type { VerdictPayload } from './reportVerdictTool.js';
+export { AGENT_HOOK_DISALLOWED_TOOLS } from './agentHookDisallowedTools.js';
+export {
+  substituteHookArguments,
+  DEFAULT_AGENT_HOOK_PROMPT,
+} from './hookPromptUtils.js';
 
 // Export session and async hook management
 export { SessionHooksManager } from './sessionHooksManager.js';

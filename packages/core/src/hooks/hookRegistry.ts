@@ -277,7 +277,7 @@ export class HookRegistry {
   ): boolean {
     if (
       !config.type ||
-      !['command', 'http', 'function'].includes(config.type)
+      !['command', 'http', 'function', 'agent'].includes(config.type)
     ) {
       debugLogger.warn(
         `Invalid hook ${eventName} from ${source} type: ${config.type}`,
@@ -304,6 +304,31 @@ export class HookRegistry {
         `Function hook ${eventName} from ${source} missing or invalid callback`,
       );
       return false;
+    }
+
+    if (config.type === 'agent') {
+      // prompt is required for agent hooks (Claude Code compatible design)
+      if (
+        !('prompt' in config) ||
+        typeof (config as { prompt?: unknown }).prompt !== 'string' ||
+        !(config as { prompt?: string }).prompt
+      ) {
+        debugLogger.warn(
+          `Agent hook ${eventName} from ${source} missing or empty prompt field`,
+        );
+        return false;
+      }
+      // agent is optional; if provided, must be a string
+      if (
+        'agent' in config &&
+        config.agent !== undefined &&
+        typeof (config as { agent?: unknown }).agent !== 'string'
+      ) {
+        debugLogger.warn(
+          `Agent hook ${eventName} from ${source} has invalid agent field (must be string)`,
+        );
+        return false;
+      }
     }
 
     return true;

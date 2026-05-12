@@ -104,7 +104,7 @@ export type HookExecutionOutcome =
 export interface FunctionHookContext {
   /** Optional messages for conversation context */
   messages?: Array<Record<string, unknown>>;
-  /** Optional tool use ID for关联 to specific tool call */
+  /** Optional tool use ID to correlate with a specific tool call */
   toolUseID?: string;
   /** Optional abort signal for cancellation */
   signal?: AbortSignal;
@@ -144,10 +144,47 @@ export interface FunctionHookConfig {
  */
 export type MessagesProvider = () => Array<Record<string, unknown>> | undefined;
 
+/**
+ * Default subagent name used when agent hooks omit the `agent` field.
+ * Maps to the built-in `general-purpose` subagent in SubagentManager.
+ */
+export const DEFAULT_AGENT_HOOK_SUBAGENT = 'general-purpose';
+
+/**
+ * Hook configuration entry for agent hooks.
+ * Agent hooks execute a multi-turn LLM subagent to verify conditions
+ * (e.g., verifying task completion at Stop events).
+ *
+ * Following Claude Code's design, the user only needs to provide a `prompt` —
+ * there is no need to know internal subagent names. The `agent` field is
+ * optional and defaults to `general-purpose`.
+ */
+export interface AgentHookConfig {
+  type: HookType.Agent;
+  /** Prompt template (required). Supports $ARGUMENTS placeholder for JSON input injection. */
+  prompt: string;
+  /** SubagentManager resolvable name; defaults to 'general-purpose' */
+  agent?: string;
+  /** Wall-clock timeout in seconds; default 60 */
+  timeout?: number;
+  /** Model override; defaults to config.getModel() */
+  model?: string;
+  /** Maximum reasoning turns for the subagent; default 50 */
+  maxTurns?: number;
+  /** If true, blocking verdict only logs a warning (non-blocking) */
+  advisoryOnly?: boolean;
+  name?: string;
+  description?: string;
+  source?: HooksConfigSource;
+  /** Custom status message to display while hook is executing */
+  statusMessage?: string;
+}
+
 export type HookConfig =
   | CommandHookConfig
   | HttpHookConfig
-  | FunctionHookConfig;
+  | FunctionHookConfig
+  | AgentHookConfig;
 
 /**
  * Hook definition with matcher
@@ -165,6 +202,7 @@ export enum HookType {
   Command = 'command',
   Http = 'http',
   Function = 'function',
+  Agent = 'agent',
 }
 
 /**
@@ -181,6 +219,10 @@ export function getHookKey(hook: HookConfig): string {
       return name
         ? `${name}:${hook.id ?? 'function'}`
         : (hook.id ?? 'function');
+    case HookType.Agent:
+      return name
+        ? `${name}:agent:${hook.agent ?? DEFAULT_AGENT_HOOK_SUBAGENT}`
+        : `agent:${hook.agent ?? DEFAULT_AGENT_HOOK_SUBAGENT}`;
     default:
       return name || 'unknown';
   }

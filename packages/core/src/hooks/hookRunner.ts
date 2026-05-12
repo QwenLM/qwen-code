@@ -14,8 +14,10 @@ import type {
   PreToolUseInput,
   UserPromptSubmitInput,
   CommandHookConfig,
+  AgentHookConfig,
   FunctionHookContext,
 } from './types.js';
+import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   escapeShellArg,
@@ -25,6 +27,7 @@ import {
 } from '../utils/shell-utils.js';
 import { HttpHookRunner } from './httpHookRunner.js';
 import { FunctionHookRunner } from './functionHookRunner.js';
+import { AgentHookRunner } from './agentHookRunner.js';
 import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -52,11 +55,13 @@ const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 export class HookRunner {
   private readonly httpRunner: HttpHookRunner;
   private readonly functionRunner: FunctionHookRunner;
+  private readonly agentHookRunner: AgentHookRunner | null;
   private readonly asyncRegistry: AsyncHookRegistry;
 
-  constructor(allowedHttpUrls?: string[]) {
+  constructor(allowedHttpUrls?: string[], config?: Config) {
     this.httpRunner = new HttpHookRunner(allowedHttpUrls);
     this.functionRunner = new FunctionHookRunner();
+    this.agentHookRunner = config ? new AgentHookRunner(config) : null;
     this.asyncRegistry = new AsyncHookRegistry();
   }
 
@@ -149,6 +154,19 @@ export class HookRunner {
             functionContext,
           );
         }
+        case HookType.Agent: {
+          if (!this.agentHookRunner) {
+            throw new Error(
+              'Agent hook requires Config to be passed to HookRunner constructor',
+            );
+          }
+          return await this.agentHookRunner.execute(
+            hookConfig as AgentHookConfig,
+            eventName,
+            input,
+            signal,
+          );
+        }
         default:
           throw new Error(
             `Unknown hook type: ${(hookConfig as HookConfig).type}`,
@@ -191,6 +209,8 @@ export class HookRunner {
         return hookConfig.url || 'unknown-url';
       case HookType.Function:
         return hookConfig.id || 'unknown-function';
+      case HookType.Agent:
+        return `agent:${hookConfig.agent ?? 'general-purpose'}`;
       default:
         return 'unknown';
     }

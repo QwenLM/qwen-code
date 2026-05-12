@@ -690,6 +690,9 @@ export class HookEventHandler {
     if (config.type === 'command') {
       return config.name || config.command || 'unknown-command';
     }
+    if (config.type === 'agent') {
+      return config.name || `agent:${config.agent ?? 'general-purpose'}`;
+    }
     return config.name || 'unknown-hook';
   }
 
@@ -705,7 +708,7 @@ export class HookEventHandler {
    */
   private getHookTypeFromResult(
     result: HookExecutionResult,
-  ): 'command' | 'http' | 'function' {
+  ): 'command' | 'http' | 'function' | 'agent' {
     return result.hookConfig.type;
   }
 }
