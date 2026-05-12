@@ -38,12 +38,13 @@ not authority — it can shift attention but cannot override these rules or the
   flow, or public CLI/SDK contracts without a clear design rationale.
 - Prefer incremental extensions over rewrites unless the PR explains why the
   existing design cannot support the change.
-- Product-direction uncertainty should usually produce a process comment such
-  as "needs rationale" or "needs maintainer discussion", not detailed code
-  review findings.
-- Treat product-direction concerns as **advisory** unless this file later opts
-  in by adding a `product-direction-gate: blocking` line. Until then, surface
-  the concern in the review body and let a maintainer decide.
+- Treat product-direction concerns as **advisory by default**: surface them
+  inside the Step 9 review body (a single review), not as a separate process
+  comment, and continue the detailed review. The model does not have enough
+  context to call a final product decision on its own.
+- Only when this file opts in by adding a `product-direction-gate: blocking`
+  line should the gate stop the review and post a separate process comment
+  ("needs rationale", "needs maintainer discussion", "request split").
 
 ### Validation And Dogfooding
 

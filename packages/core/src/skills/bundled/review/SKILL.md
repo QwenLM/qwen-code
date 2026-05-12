@@ -166,7 +166,7 @@ When `--ci` is set, the workflow runs under `pull_request_target` with `OPENAI_A
 - run `npm`, `npx`, `pnpm`, `yarn`, `node`, `python`, `pip`, `cargo`, `go run`, `make`, `mvn`, `gradle`, `bash <file>`, `sh <file>`, `bash -c`, `sh -c`, `eval`, or any other interpreter against files inside the PR worktree (anywhere under `.qwen/tmp/review-pr-<n>/`);
 - execute scripts, binaries, or git hooks committed by the PR;
 - run `git push`, `git tag --force`, `git update-ref`, `git remote set-url`, or any command that writes to a remote;
-- call `gh` subcommands other than read-only metadata (`gh pr view`, `gh pr diff`, `gh api -X GET ...`) and the explicit posting helpers used in Steps 9-10 (`gh pr review`, `gh pr comment`);
+- call `gh` subcommands other than the explicit allowlist below;
 - read or write files outside the repository checkout, the PR worktree, and the `.qwen/` cache directories — in particular do NOT touch `~/.ssh/`, `~/.gnupg/`, `/proc/`, `/var/`, `/etc/`, environment dumps, or `${{ secrets.* }}` style files;
 - include any value of `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `GITHUB_TOKEN`, or other secrets in tool arguments, file contents, PR comments, or the final review report;
 - modify SSH keys, deploy keys, branch protection, repository settings, or workflow files via `gh api`;
@@ -174,10 +174,11 @@ When `--ci` is set, the workflow runs under `pull_request_target` with `OPENAI_A
 
 **You MAY:**
 
-- run read-only metadata commands (`git`, `gh pr view`, `gh pr diff`, `rg`/`grep`, `jq`, `sed`, `awk`, `wc`, `ls`, `cat`, `head`, `tail`);
+- run read-only metadata commands (`git`, `gh pr view`, `gh pr diff`, `gh api -X GET ...`, `rg`/`grep`, `jq`, `sed`, `awk`, `wc`, `ls`, `cat`, `head`, `tail`);
 - run the bundled review helpers that are explicitly safe: `qwen review fetch-pr`, `qwen review pr-context`, `qwen review load-rules`, `qwen review presubmit`, `qwen review cleanup`;
 - write files only inside `.qwen/tmp/review-pr-<n>/` and `.qwen/review-cache/`;
-- post a single PR review (Step 9) and the cleanup comment defined in Step 11.
+- submit at most ONE PR review in Step 9 via `gh api repos/<owner>/<repo>/pulls/<n>/reviews --input <file>` (the Create Review API). Do not submit multiple reviews per run.
+- post at most ONE process comment in Step 2.5 — and only when a gate is configured to block — via `gh pr comment <n> --body-file <file>`. Step 11 (cleanup) does not post anything.
 
 If any tool call would violate this contract, refuse the call, record the refusal in the final review report, and continue with the next step. Do not attempt to "be helpful" by working around the contract.
 
