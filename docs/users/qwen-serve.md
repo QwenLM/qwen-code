@@ -205,21 +205,38 @@ The full convergence roadmap is tracked on [#3803](https://github.com/QwenLM/qwe
 
 Two structural choices are explicit non-goals for the Stage 1 / 1.5 / 2 main-line roadmap. If your use case depends on either, plan around them rather than waiting for us.
 
-### TUI is a super-client, not a remote-client peer
+### Session state is local-mutation-only (per [LaZzyMan review #4270256721](https://github.com/QwenLM/qwen-code/pull/3889#pullrequestreview-4270256721))
 
-The Stage 1.5 plan describes TUI as an in-process EventBus subscriber. In practice **TUI UI is strictly larger than the wire protocol** (per [LaZzyMan's review](https://github.com/QwenLM/qwen-code/pull/3889#pullrequestreview-4270256721)):
+The Stage 1.5 plan describes TUI as an in-process EventBus subscriber. In practice **TUI UI is strictly larger than the wire protocol**:
 
-- **Local-only UI** — the ~15 Ink dialog components (`ModelDialog`, `MemoryDialog`, `PermissionsDialog`, `SessionPicker`, `WelcomeBackDialog`, `FolderTrustDialog`, …) and the `local-jsx` slash commands (`/ide`, `/auth`, `/init`, `/resume`, `/rename`, `/delete`, `/language`, `/arena`, …) render terminal-specific Ink JSX. Remote clients on HTTP/SSE cannot equivalently render Ink, and these flows do not emit any wire event.
-- **Session-state mutations without wire events** — `/approval-mode`, `/memory add`, `/mcp add-server`, `/agents`, `/tools enable/disable`, `/auth`, `/init` (writing `CLAUDE.md`) all change what the agent does, but only `/model` currently publishes an event (`model_switched`). A remote client attached to a TUI session has no way to learn that the approval policy flipped or that an MCP server was added.
+- **Local-only UI** — the ~15 Ink dialog components (`ModelDialog`, `MemoryDialog`, `PermissionsDialog`, `SessionPicker`, `WelcomeBackDialog`, `FolderTrustDialog`, …) and the `local-jsx` slash commands (`/ide`, `/auth`, `/init`, `/resume`, `/rename`, `/delete`, `/language`, `/arena`, …) render terminal-specific Ink JSX. Remote clients on HTTP/SSE can't equivalently render Ink, and these flows emit no wire event.
+- **Session-state mutations without wire events** — `/approval-mode`, `/memory add`, `/mcp add-server`, `/agents`, `/tools enable/disable`, `/auth`, `/init` (writing `CLAUDE.md`) all change agent behavior, but only `/model` currently publishes an event (`model_switched`).
 
-**Stage 1 choice — option (A) from the review**: TUI is a "super-client," not "subscriber #0." Remote clients (mobile, web, IDE plugin) share the **agent ↔ user conversation** axis, NOT the full TUI session state. The "multi-client collaboration" framing is intentionally narrow:
+**Stage 1 choice — option (A) from the review**: don't promote these mutations to wire events. The two deployment modes have different consequences.
 
-- ✅ Multiple clients see the same agent messages, tool calls, file diffs, permission prompts.
-- ❌ Multiple clients see the same approval-mode setting / memory / MCP server list / auth state.
+#### Mode 1 — headless `qwen serve` (this PR)
 
-Why this and not (B) (promoting every TUI mutation to a `session_state_changed` event family): (B) is the more ambitious answer, but it locks Stage 1.5 into a substantially larger wire surface that must also pass cleanly through the planned in-process refactor. We'd rather walk the smaller scope honestly. The session-state-event taxonomy work — enumerating which TUI flows are local-only by design — moves to [#3803](https://github.com/QwenLM/qwen-code/issues/3803), not Stage 1.5 code.
+No TUI shell runs inside the daemon. The slash commands listed above **don't exist** in this mode — there's no terminal UI to issue them from. Session state is therefore:
 
-**Implication for client implementers**: if you need to reflect TUI session state in a remote UI, poll the relevant capability route at attach time (e.g. read the current model via `model_switched` replay through `Last-Event-ID: 0`) and **don't assume real-time mirroring** of TUI-side commands. Reconnect handshakes should re-fetch state, not rely on incremental events.
+- **Boot-time-frozen** for `approval-mode` / `memory` / `mcp servers` / `agents` / `tools` allowlist / `auth` — all loaded from settings + disk when the daemon's `qwen --acp` child starts; immutable for the session's lifetime.
+- **Mutable over HTTP** only via the routes this PR exposes — primarily `POST /session/:id/model` (publishes `model_switched`). Permission votes (`POST /permission/:requestId`) are per-request, not per-session-state.
+
+**Consequence:** remote clients in headless mode see the **full session state**. No TUI hides additional state; no drift is possible. If you want to change `approval-mode` or add an MCP server, restart the daemon with new settings — the daemon doesn't expose runtime mutation for those today.
+
+#### Mode 2 — Stage 1.5 `qwen --serve` co-hosted TUI (not in this PR)
+
+When Stage 1.5 lands `qwen --serve` (TUI process co-hosts the same HTTP server), the TUI **does** exist alongside remote clients. A local operator typing `/approval-mode yolo` or `/mcp add-server` mutates session state, and remote clients on HTTP have no event to observe the change.
+
+In this mode, TUI is a **"super-client"** — it observes the same agent conversation remote clients see, AND can mutate session state remote clients can't. The asymmetry is:
+
+- ✅ Both TUI and remote clients see the same agent messages, tool calls, file diffs, permission prompts.
+- ❌ Only TUI sees / mutates approval-mode / memory / MCP server list / agents / tools allowlist / auth state.
+
+**Consequence in Mode 2:** if a remote-client UI tries to mirror session settings, it can drift after any TUI slash command. Remote clients should **re-fetch state on attach / reconnect** (use `Last-Event-ID: 0` to replay the ring's oldest event for things like `model_switched`); they should NOT rely on incremental events for TUI-side mutations.
+
+#### Why (A) and not (B) (promote mutations to `session_state_changed` event family)
+
+(B) is the more ambitious answer but locks Stage 1.5 into a substantially larger wire surface that must also pass cleanly through the planned in-process refactor. We'd rather walk the smaller scope honestly. The session-state-event taxonomy work — enumerating which TUI flows are local-only by design vs. could plausibly graduate to wire under a future opt-in (B)-flavor extension — moves to [#3803](https://github.com/QwenLM/qwen-code/issues/3803), not Stage 1.5 code.
 
 ### N parallel sessions cost N×
 
