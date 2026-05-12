@@ -704,6 +704,22 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     workspaceKey: string,
     modelServiceId?: string,
   ): Promise<BridgeSession> {
+    // FIXME(stage-1.5): the bridge spawns one `qwen --acp` child per
+    // session today. But the ACP agent in `acp-integration/acpAgent.ts`
+    // (line ~194: `private sessions: Map<string, Session>`) natively
+    // supports multiple concurrent sessions inside one child process
+    // — yiliang114's VSCode plugin already uses this pattern. Stage
+    // 1.5 should refactor here to keep one child per workspace (or
+    // daemon-wide) and call `connection.newSession({ cwd, mcpServers })`
+    // multiple times on the same channel. Sessions then share the
+    // child's OAuth state / FileReadCache / CLAUDE.md parse / process
+    // overhead. This is a bridge-side change; it does NOT require the
+    // #3803 §21 Path A/B/C intra-daemon multi-session workstream
+    // (qwen-code already does that at the agent layer; the bridge
+    // just doesn't plug into it). Pairs naturally with the
+    // `@qwen-code/acp-bridge` package lift (chiga0 finding 1) —
+    // expose a `newSession()` method on the `AcpChannel` interface
+    // distinct from channel creation.
     const channel = await channelFactory(workspaceKey);
     let entry: SessionEntry | undefined;
     const client = new BridgeClient(
