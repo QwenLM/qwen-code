@@ -48,7 +48,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
       : DASHSCOPE_PROXY_BASE_URL;
 
-    const isProxyConfigured = Boolean(
+const isProxyMatch = Boolean(
+  normalizedProxyUrl &&
+    normalizedBaseUrl.toLowerCase() === normalizedProxyUrl.toLowerCase(),
+);
+// ...
+return isDashscopeOrigin || isProxyMatch;
       normalizedProxyUrl &&
         normalizedBaseUrl.toLowerCase() === normalizedProxyUrl.toLowerCase(),
     );
