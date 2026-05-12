@@ -180,10 +180,14 @@ function consumeFrames(buf: string): { frames: string[]; tail: string } {
 
 function parseFrame(raw: string): DaemonEvent | undefined {
   if (!raw) return undefined;
-  if (raw.startsWith(':') || raw.startsWith('retry:')) return undefined;
-  // Per the EventSource spec, a frame may have multiple `data:` lines that
-  // accumulate into the final field value joined by `\n`. Whitespace after
-  // the colon is optional — `data: foo` and `data:foo` are both valid.
+  // Per the EventSource spec, comment lines (`:` prefix) and `retry:`
+  // are line-level fields, not frame-level. A frame may legitimately
+  // contain a leading comment / retry line AND `data:` lines (e.g. an
+  // intermediary that prepends `: keep-alive` to every frame). The
+  // line-level loop below only collects `data:` lines, so a
+  // pure-comment frame still returns undefined via the
+  // `dataLines.length === 0` guard — without us dropping real events
+  // whose first line happens to be a comment (BRgq-).
   // Split on either CRLF or LF (same forgiving stance as frame boundaries).
   const dataLines: string[] = [];
   for (const line of raw.split(/\r?\n/)) {

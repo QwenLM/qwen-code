@@ -75,6 +75,18 @@ describe('parseSseStream', () => {
     expect(events[0]?.id).toBe(1);
   });
 
+  it('still parses a frame whose FIRST line is a comment / retry (BRgq-)', async () => {
+    // Per SSE spec, comment + retry are line-level, not frame-level.
+    // An intermediary that prepends `: keep-alive` or `retry: …` to
+    // every frame must NOT cause the embedded event to be dropped.
+    const stream = bodyFromString(
+      ': intermediary keep-alive\nid: 1\nevent: x\ndata: {"id":1,"v":1,"type":"x","data":"ok"}\n\n' +
+        'retry: 5000\nid: 2\nevent: x\ndata: {"id":2,"v":1,"type":"x","data":"ok"}\n\n',
+    );
+    const events = await collect(parseSseStream(stream));
+    expect(events.map((e) => e.id)).toEqual([1, 2]);
+  });
+
   it('handles frames split across read chunks', async () => {
     const stream = bodyFromChunks([
       'id: 1\nevent: x\nda',
