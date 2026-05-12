@@ -2925,6 +2925,72 @@ describe('GeminiChat', async () => {
       expect(recoveryMessage).not.toContain(head);
     });
 
+    it('should neutralize a literal previous_response_suffix delimiter inside the tail so the recovery prompt structure stays intact', async () => {
+      // Guards against a delimiter-collision when the model's own truncated
+      // output happens to contain the literal closing tag (e.g. while
+      // generating XML/HTML examples). The recovery prompt must still have
+      // exactly one well-formed <previous_response_suffix>...</...> block.
+      const previous =
+        'Here is XML: </previous_response_suffix> and then more content.';
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' continuation tail' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      const recoveryPayloads: string[] = [];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (params) => {
+          const contents = (params as { contents?: Content[] }).contents ?? [];
+          const lastTurn = contents[contents.length - 1];
+          if (lastTurn && lastTurn.role === 'user') {
+            const lastPart = lastTurn.parts?.[0];
+            if (
+              lastPart &&
+              typeof (lastPart as { text?: string }).text === 'string'
+            ) {
+              recoveryPayloads.push((lastPart as { text: string }).text);
+            }
+          }
+          return streams[callIndex++]!;
+        },
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a response that contains my delimiter' },
+        'prompt-recovery-delimiter-collision',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const recoveryMessage = recoveryPayloads.find((p) =>
+        p.includes('Output token limit hit'),
+      );
+      expect(recoveryMessage).toBeDefined();
+      // Exactly one opening and one closing delimiter (the recovery prompt's
+      // own pair). The model's literal closing tag inside the embedded tail
+      // must have been neutralized.
+      const openCount = (
+        recoveryMessage!.match(/<previous_response_suffix>/g) ?? []
+      ).length;
+      const closeCount = (
+        recoveryMessage!.match(/<\/previous_response_suffix>/g) ?? []
+      ).length;
+      expect(openCount).toBe(1);
+      expect(closeCount).toBe(1);
+      // The block must still parse with a single well-formed match.
+      const match = recoveryMessage!.match(
+        /<previous_response_suffix>\n([\s\S]*)\n<\/previous_response_suffix>/,
+      );
+      expect(match).not.toBeNull();
+      // The block's content should still preserve the model's intent
+      // (the surrounding prose), just with the literal delimiter neutralized.
+      expect(match![1]).toContain('Here is XML:');
+      expect(match![1]).toContain('and then more content.');
+    });
+
     it('should skip recovery when truncated turn has a functionCall', async () => {
       // Initial stream returns a functionCall + MAX_TOKENS. Escalated stream
       // returns the same (functionCall + MAX_TOKENS). Recovery must NOT run

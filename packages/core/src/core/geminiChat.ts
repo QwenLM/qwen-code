@@ -258,13 +258,13 @@ function getRecoveryContinuationSuffix(
 function isPlainTextPart(part: Part | undefined): part is Part & {
   text: string;
 } {
-  return (
-    part !== undefined &&
-    typeof part.text === 'string' &&
-    part.thought !== true &&
-    part.functionCall === undefined &&
-    part.functionResponse === undefined
-  );
+  // Delegate to the shared predicate used by normal history consolidation
+  // (see `isValidNonThoughtTextPart` below) so the recovery-merge path and
+  // the consolidated-history path agree on what counts as "plain text".
+  // Keeping the type predicate here gives callers `part.text: string`
+  // narrowing; the underlying checks (thought, thoughtSignature, function*,
+  // inlineData, fileData) live in one place.
+  return part !== undefined && isValidNonThoughtTextPart(part);
 }
 
 function getPlainTextFromParts(parts: Part[] | undefined): string {
@@ -272,6 +272,32 @@ function getPlainTextFromParts(parts: Part[] | undefined): string {
     .filter(isPlainTextPart)
     .map((part) => part.text)
     .join('');
+}
+
+/**
+ * Sanitize the previous-response tail before embedding it inside the
+ * `<previous_response_suffix>...</previous_response_suffix>` block.
+ *
+ * If the model's own truncated output happened to contain the literal
+ * closing delimiter (e.g. while generating XML/HTML examples), the
+ * recovery prompt's structure would break — the model would see a
+ * prematurely closed tag and misinterpret the suffix boundary. We
+ * neutralize any literal opening/closing delimiter occurrences by
+ * inserting a zero-width space between the angle bracket and the rest
+ * of the tag. The text remains visually identical to the model and
+ * preserves the recovery instruction's intent, but no longer collides
+ * with our delimiter scan.
+ */
+function sanitizeRecoverySuffixTail(tail: string): string {
+  if (
+    !tail.includes('</previous_response_suffix>') &&
+    !tail.includes('<previous_response_suffix>')
+  ) {
+    return tail;
+  }
+  return tail
+    .replace(/<\/previous_response_suffix>/g, '<​/previous_response_suffix>')
+    .replace(/<previous_response_suffix>/g, '<​previous_response_suffix>');
 }
 
 function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
@@ -283,10 +309,11 @@ function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
     return OUTPUT_RECOVERY_MESSAGE;
   }
 
-  const tail =
+  const rawTail =
     previousText.length > OUTPUT_RECOVERY_TAIL_CHARS
       ? previousText.slice(-OUTPUT_RECOVERY_TAIL_CHARS)
       : previousText;
+  const tail = sanitizeRecoverySuffixTail(rawTail);
 
   return (
     `${OUTPUT_RECOVERY_MESSAGE}\n\n` +
