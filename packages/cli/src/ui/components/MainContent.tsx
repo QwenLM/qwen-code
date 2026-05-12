@@ -129,6 +129,12 @@ export const MainContent = () => {
   // compactLabel — their callIds are intentionally NOT in this set so the
   // standalone `● <label>` line in HistoryItemDisplay is the label's only
   // path to the screen.
+  // Content-stable absorbedCallIds: when the recomputed Set has identical
+  // membership to the previous render, return the previous reference. Avoids
+  // the cascade where activePtyId/embeddedShellFocused flips while a shell
+  // tool runs produce a fresh empty-or-same Set per tick, invalidating
+  // `isSummaryAbsorbed` → `renderVirtualItem` → every static item re-renders.
+  const prevAbsorbedCallIdsRef = useRef<Set<string>>(EMPTY_ABSORBED_CALL_IDS);
   const absorbedCallIds = useMemo(() => {
     if (!compactMode) return EMPTY_ABSORBED_CALL_IDS;
     const absorbed = new Set<string>();
@@ -145,6 +151,18 @@ export const MainContent = () => {
       }
       for (const tool of item.tools) absorbed.add(tool.callId);
     }
+    const prev = prevAbsorbedCallIdsRef.current;
+    if (prev.size === absorbed.size) {
+      let allMatch = true;
+      for (const id of absorbed) {
+        if (!prev.has(id)) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch) return prev;
+    }
+    prevAbsorbedCallIdsRef.current = absorbed;
     return absorbed;
   }, [
     compactMode,

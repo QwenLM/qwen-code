@@ -55,9 +55,28 @@ vi.mock('./HistoryItemDisplay.js', () => ({
   },
 }));
 
-vi.mock('./ShowMoreLines.js', () => ({
-  ShowMoreLines: () => <Text>SHOW_MORE</Text>,
-}));
+// Context-aware mock — `useOverflowState()` returns undefined when the
+// component is not nested under <OverflowProvider>. We render different
+// markers for the two outcomes so the VP-mode "ShowMoreLines reachable"
+// test can distinguish between "mounted but disconnected from overflow
+// state" and "mounted with a live overflow context".
+vi.mock('./ShowMoreLines.js', async () => {
+  const { useOverflowState } = await vi.importActual<
+    typeof import('../contexts/OverflowContext.js')
+  >('../contexts/OverflowContext.js');
+  return {
+    ShowMoreLines: () => {
+      const overflow = useOverflowState();
+      // Non-overlapping markers so a `toContain('SHOW_MORE')` substring
+      // assertion can't accidentally match the disconnected case.
+      return (
+        <Text>
+          {overflow === undefined ? 'OVERFLOW_DISCONNECTED' : 'SHOW_MORE'}
+        </Text>
+      );
+    },
+  };
+});
 
 vi.mock('./Notifications.js', () => ({
   Notifications: () => <Text>NOTIFICATIONS</Text>,
@@ -597,7 +616,10 @@ describe('<MainContent />', () => {
         }),
       );
 
+      // SHOW_MORE = live overflow context; OVERFLOW_DISCONNECTED = mounted
+      // but the OverflowProvider does not wrap it (the previous bug).
       expect(lastFrame()).toContain('SHOW_MORE');
+      expect(lastFrame()).not.toContain('OVERFLOW_DISCONNECTED');
     });
 
     it('threads source-copy index offsets into renderItem for static history', () => {
