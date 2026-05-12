@@ -488,11 +488,22 @@ export const AppContainer = (props: AppContainerProps) => {
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
-        const historyItems = buildResumedHistoryItems(
-          resumedSessionData,
-          config,
-        );
-        historyManager.loadHistory(historyItems);
+        if (config.isQuietRestore()) {
+          const messageCount = resumedSessionData.conversation.messages.length;
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: `Resumed session with ${messageCount} message${messageCount !== 1 ? 's' : ''}. History display suppressed (--quiet-restore).`,
+            },
+            Date.now(),
+          );
+        } else {
+          const historyItems = buildResumedHistoryItems(
+            resumedSessionData,
+            config,
+          );
+          historyManager.loadHistory(historyItems);
+        }
 
         // Re-arm any `/goal` that was active when the prior session ended.
         try {

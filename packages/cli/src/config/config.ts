@@ -158,6 +158,8 @@ export interface CliArgs {
   continue: boolean | undefined;
   /** Resume a specific session by its ID */
   resume: string | undefined;
+  /** Suppress printing historical messages when resuming a session */
+  quietRestore: boolean | undefined;
   /** Specify a session ID without session resumption */
   sessionId: string | undefined;
   /**
@@ -806,6 +808,13 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description:
             'Resume a specific session by its ID. Use without an ID to show session picker.',
+        })
+        .option('quiet-restore', {
+          type: 'boolean',
+          description:
+            'When resuming a session, suppress printing historical messages to the terminal. ' +
+            'Shows a brief summary instead. The conversation context is still fully loaded for the model.',
+          default: false,
         })
         .option('session-id', {
           type: 'string',
@@ -1614,6 +1623,7 @@ export async function loadCliConfig(
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
+    quietRestore: argv.quietRestore ?? false,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,

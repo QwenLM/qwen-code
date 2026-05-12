@@ -111,9 +111,21 @@ export function useResumeCommand(
       setSessionName?.(customTitle ?? null);
 
       // Reset UI history.
-      const uiHistoryItems = buildResumedHistoryItems(sessionData, config);
-      clearItems?.();
-      loadHistory?.(uiHistoryItems);
+      if (config.isQuietRestore()) {
+        clearItems?.();
+        const messageCount = sessionData.conversation.messages.length;
+        addItem?.(
+          {
+            type: MessageType.INFO,
+            text: `Resumed session with ${messageCount} message${messageCount !== 1 ? 's' : ''}. History display suppressed (--quiet-restore).`,
+          } as Omit<HistoryItem, 'id'>,
+          Date.now(),
+        );
+      } else {
+        const uiHistoryItems = buildResumedHistoryItems(sessionData, config);
+        clearItems?.();
+        loadHistory?.(uiHistoryItems);
+      }
 
       // Update session history core.
       resetBackgroundStateForSessionSwitch(config);
