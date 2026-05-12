@@ -339,8 +339,12 @@ function wrapText(
     wordWrap: true,
   });
   const lines = preserveForegroundAcrossLineBreaks(wrapped).split('\n');
-  // Trim trailing empty lines (wrap-ansi artifacts) but preserve internal ones
-  while (lines.length > 1 && lines[lines.length - 1]!.length === 0) {
+  // Trim trailing empty lines (wrap-ansi artifacts) but preserve internal ones.
+  // Use stripAnsi so a trailing line that contains only ANSI codes injected by
+  // preserveForegroundAcrossLineBreaks (e.g. `\x1b[39m` + reopened fg) is still
+  // recognized as empty — otherwise the inflated line count can flip the row
+  // to vertical layout unnecessarily.
+  while (lines.length > 1 && stripAnsi(lines[lines.length - 1]!).length === 0) {
     lines.pop();
   }
   return lines.length > 0 ? lines : [''];

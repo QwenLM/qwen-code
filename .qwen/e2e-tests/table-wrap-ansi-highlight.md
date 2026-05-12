@@ -21,18 +21,23 @@ names lose their code highlight after wrapping.
 
 ## Commands
 
+Set `FIX_REPO` to a checkout of this branch (`fix/table-wrap-ansi-highlight`) and
+`BASE_REPO` to a separate checkout pinned at the merge-base on `origin/main`
+(used for the failure-first repro). Any two worktrees / clones work.
+
 ```bash
-cd /Users/gawain/Documents/codebase/opensource/qwen-code-table-wrap-ansi-highlight
+FIX_REPO=<path-to-fix-worktree>
+BASE_REPO=<path-to-base-worktree>
 
-cd packages/cli && npx vitest run src/ui/utils/TableRenderer.test.tsx
+cd "$FIX_REPO/packages/cli" && npx vitest run src/ui/utils/TableRenderer.test.tsx
 
-cd /Users/gawain/Documents/codebase/opensource/qwen-code-table-wrap-ansi-highlight
+cd "$FIX_REPO"
 npm run build && npm run typecheck && npm run bundle
 
 QWEN_TUI_E2E_OUT=/tmp/qwen-table-wrap-ansi/fixed \
   npx tsx integration-tests/terminal-capture/table-inline-code-wrap-regression.ts
 
-QWEN_TUI_E2E_REPO=/Users/gawain/Documents/codebase/opensource/qwen-code-table-wrap-ansi-highlight-base \
+QWEN_TUI_E2E_REPO="$BASE_REPO" \
 QWEN_TUI_E2E_OUT=/tmp/qwen-table-wrap-ansi/base \
 QWEN_TUI_E2E_EXPECT_PASS=false \
   npx tsx integration-tests/terminal-capture/table-inline-code-wrap-regression.ts
