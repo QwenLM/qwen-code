@@ -12,6 +12,7 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
+import { SpanStatusCode } from '@opentelemetry/api';
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
@@ -21,9 +22,6 @@ import { microcompactHistory } from '../services/microcompaction/microcompact.js
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import type { ContentGenerator } from './contentGenerator.js';
-import type { ResolvedModelConfig } from '../models/types.js';
-import { AuthType, createContentGenerator } from './contentGenerator.js';
 import { GeminiChat } from './geminiChat.js';
 import {
   getArenaSystemReminder,
@@ -47,9 +45,6 @@ import {
 } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
-
-// Models
-import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -103,6 +98,12 @@ import { createHookOutput } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
+import {
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+  safeSetStatus,
+  withSpan,
+} from '../telemetry/tracer.js';
 
 const MAX_TURNS = 100;
 
@@ -193,14 +194,6 @@ export class GeminiClient {
   private pendingRecallAbortController: AbortController | undefined;
 
   /**
-   * Cache of per-model ContentGenerators keyed by model ID.
-   * Avoids rebuilding the generator (SDK instantiation, config resolution)
-   * on every side query (recap, title, tool summary).
-   * Cleared on session reset (resetChat) to pick up config changes.
-   */
-  private perModelGeneratorCache = new Map<string, Promise<ContentGenerator>>();
-
-  /**
    * Promises for pending background memory tasks (dream / extract).
    * Each promise resolves with a count of memory files touched (0 = nothing written).
    * Consumed by the CLI via `consumePendingMemoryTaskPromises()`.
@@ -271,13 +264,6 @@ export class GeminiClient {
         debugLogger.warn('Failed to restore attribution snapshot');
       }
     }
-  }
-
-  private getContentGeneratorOrFail(): ContentGenerator {
-    if (!this.config.getContentGenerator()) {
-      throw new Error('Content generator not initialized');
-    }
-    return this.config.getContentGenerator();
   }
 
   async addHistory(content: Content) {
@@ -366,13 +352,19 @@ export class GeminiClient {
     // pointing at content the model can no longer retrieve.
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
-    this.perModelGeneratorCache.clear();
+    this.config.getBaseLlmClient().clearPerModelGeneratorCache();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
     if (this.pendingRecallAbortController) {
       this.pendingRecallAbortController.abort();
       this.pendingRecallAbortController = undefined;
     }
+    // Drop any deferred tools revealed this session so /clear really gives
+    // a clean slate. We don't clear inside startChat itself because that path
+    // is also taken by compression (which preserves the session), and
+    // compression should keep previously-revealed tools so the model can
+    // continue using them without re-running ToolSearch.
+    this.config.getToolRegistry().clearRevealedDeferredTools();
     await this.startChat();
   }
 
@@ -391,7 +383,9 @@ export class GeminiClient {
     });
   }
 
-  private getMainSessionSystemInstruction(): string {
+  private getMainSessionSystemInstruction(
+    deferredTools?: Array<{ name: string; description: string }>,
+  ): string {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
@@ -401,6 +395,7 @@ export class GeminiClient {
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
+        deferredTools,
       );
     }
 
@@ -408,6 +403,7 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
+      deferredTools,
     );
   }
 
@@ -419,7 +415,63 @@ export class GeminiClient {
     const history = await getInitialChatHistory(this.config, extraHistory);
 
     try {
-      const systemInstruction = this.getMainSessionSystemInstruction();
+      // Warm the tool registry before building the system prompt so we know
+      // which tools are marked `shouldDefer`. The deferred list is appended to
+      // the prompt so the model knows which tools are reachable via
+      // ToolSearch. warmAll() is idempotent — setTools() below reuses the
+      // warmed state. Revealed-deferred state is NOT cleared here because
+      // startChat is also taken by the compression path (which preserves the
+      // session); `/clear` clears the revealed set via resetChat() before
+      // calling us.
+      const toolRegistry = this.config.getToolRegistry();
+      await toolRegistry.warmAll();
+      const deferredSummary = toolRegistry.getDeferredToolSummary();
+      // Resume support: when a transcript contains prior calls to a deferred
+      // tool, re-reveal that tool so `setTools()` below sends its schema in
+      // the declaration list. Without this, the model sees history like
+      // "I called foo_tool, got result" but the API rejects a follow-up
+      // call to foo_tool because the schema is absent.
+      if (history.length > 0 && deferredSummary.length > 0) {
+        const deferredNames = new Set(deferredSummary.map((t) => t.name));
+        for (const entry of history) {
+          for (const part of entry.parts ?? []) {
+            const callName = part.functionCall?.name;
+            if (callName && deferredNames.has(callName)) {
+              toolRegistry.revealDeferredTool(callName);
+            }
+          }
+        }
+      }
+      // ToolSearch availability gates two things:
+      //   (a) Whether the deferred-tools discovery section appears in the
+      //       prompt (otherwise we'd be telling the model to call a tool
+      //       that isn't registered).
+      //   (b) Whether deferral itself makes sense at all — if the model
+      //       has no way to reveal a deferred tool, the tool is effectively
+      //       hidden + uncallable. Silent disappearance is the worst
+      //       failure mode (user sees no error, just thinks the tool
+      //       doesn't exist), so when ToolSearch is filtered out (e.g. via
+      //       `--exclude-tools tool_search` or a deny rule), reveal every
+      //       deferred tool eagerly so they all land in the declaration
+      //       list. The token-saving rationale of deferral was predicated
+      //       on the discovery surface being available.
+      const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
+      if (!toolSearchAvailable && deferredSummary.length > 0) {
+        for (const t of deferredSummary) {
+          toolRegistry.revealDeferredTool(t.name);
+        }
+      }
+      // Exclude any tools revealed by the resume scan (or the no-ToolSearch
+      // eager-reveal above): their schemas are already in the declaration
+      // list, so advertising them as "reachable via ToolSearch" would
+      // invite redundant lookup calls.
+      const deferredTools = toolSearchAvailable
+        ? deferredSummary.filter(
+            (t) => !toolRegistry.isDeferredToolRevealed(t.name),
+          )
+        : undefined;
+      const systemInstruction =
+        this.getMainSessionSystemInstruction(deferredTools);
 
       this.chat = new GeminiChat(
         this.config,
@@ -1357,189 +1409,92 @@ export class GeminiClient {
     model: string,
     promptIdOverride?: string,
   ): Promise<GenerateContentResponse> {
-    let currentAttemptModel: string = model;
     const promptId =
       promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
 
-    try {
-      const userMemory = this.config.getUserMemory();
-      const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
-        : this.getMainSessionSystemInstruction();
+    return withSpan(
+      'client.generateContent',
+      { model, prompt_id: promptId },
+      async (span) => {
+        let currentAttemptModel: string = model;
 
-      const requestConfig: GenerateContentConfig = {
-        abortSignal,
-        ...generationConfig,
-        systemInstruction: finalSystemInstruction,
-      };
+        try {
+          const userMemory = this.config.getUserMemory();
+          const finalSystemInstruction = generationConfig.systemInstruction
+            ? getCustomSystemPrompt(
+                generationConfig.systemInstruction,
+                userMemory,
+              )
+            : this.getMainSessionSystemInstruction();
 
-      // When the requested model differs from the main model (e.g. fast model
-      // side queries for session recap / title / summary), resolve the target
-      // model's own ContentGeneratorConfig so that per-model settings like
-      // extra_body, samplingParams, and reasoning are not inherited from the
-      // main model's config.
-      const mainModel = this.config.getModel() ?? model;
-      const isPerModel = model !== mainModel;
+          const requestConfig: GenerateContentConfig = {
+            abortSignal,
+            ...generationConfig,
+            systemInstruction: finalSystemInstruction,
+          };
 
-      // Resolve the authType for retry logic. When using a per-model content
-      // generator (e.g. fast model side queries), the retry authType must match
-      // the target model's provider, not the main session's provider. This
-      // ensures QWEN_OAUTH quota detection checks against the right provider.
-      const retryAuthType = isPerModel
-        ? (this.createRetryAuthTypeForModel(model) ??
-          this.config.getContentGeneratorConfig()?.authType ??
-          AuthType.USE_OPENAI)
-        : this.config.getContentGeneratorConfig()?.authType;
+          // When the requested model differs from the main model (e.g. fast model
+          // side queries for session recap / title / summary), resolve the target
+          // model's own ContentGeneratorConfig so that per-model settings like
+          // extra_body, samplingParams, and reasoning are not inherited from the
+          // main model's config. The retry authType is resolved alongside so that
+          // provider-specific checks (e.g. QWEN_OAUTH quota detection) reference
+          // the target model's provider.
+          const { contentGenerator, retryAuthType } = await this.config
+            .getBaseLlmClient()
+            .resolveForModel(model);
 
-      const contentGenerator = isPerModel
-        ? await this.createContentGeneratorForModel(model)
-        : this.getContentGeneratorOrFail();
-      const apiCall = () => {
-        currentAttemptModel = model;
+          const apiCall = () => {
+            currentAttemptModel = model;
 
-        return contentGenerator.generateContent(
-          {
-            model,
-            config: requestConfig,
-            contents,
-          },
-          promptId,
-        );
-      };
-      const result = await retryWithBackoff(apiCall, {
-        authType: retryAuthType,
-        persistentMode: isUnattendedMode(),
-        signal: abortSignal,
-        heartbeatFn: (info) => {
-          process.stderr.write(
-            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+            return contentGenerator.generateContent(
+              {
+                model,
+                config: requestConfig,
+                contents,
+              },
+              promptId,
+            );
+          };
+          const result = await retryWithBackoff(apiCall, {
+            authType: retryAuthType,
+            persistentMode: isUnattendedMode(),
+            signal: abortSignal,
+            heartbeatFn: (info) => {
+              process.stderr.write(
+                `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+              );
+            },
+          });
+          return result;
+        } catch (error: unknown) {
+          if (abortSignal.aborted) {
+            safeSetStatus(span, {
+              code: SpanStatusCode.ERROR,
+              message: API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
+            });
+            throw error;
+          }
+
+          safeSetStatus(span, {
+            code: SpanStatusCode.ERROR,
+            message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+          });
+          await reportError(
+            error,
+            `Error generating content via API with model ${currentAttemptModel}.`,
+            {
+              requestContents: contents,
+              requestConfig: generationConfig,
+            },
+            'generateContent-api',
           );
-        },
-      });
-      return result;
-    } catch (error: unknown) {
-      if (abortSignal.aborted) {
-        throw error;
-      }
-
-      await reportError(
-        error,
-        `Error generating content via API with model ${currentAttemptModel}.`,
-        {
-          requestContents: contents,
-          requestConfig: generationConfig,
-        },
-        'generateContent-api',
-      );
-      throw new Error(
-        `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
-      );
-    }
-  }
-
-  /**
-   * Resolve a model across all authTypes. Handles the case where the target
-   * model is registered under a different authType than the main model
-   * (e.g. main=QWEN_OAUTH, fast=USE_ANTHROPIC).
-   *
-   * TODO: Move cross-authType resolution to ModelRegistry for a cleaner
-   * data-layer solution. Follow-up PR.
-   */
-
-  private resolveModelAcrossAuthTypes(
-    model: string,
-  ): ResolvedModelConfig | undefined {
-    const modelsConfig = this.config.getModelsConfig();
-    const allAuthTypes: AuthType[] = [
-      AuthType.QWEN_OAUTH,
-      AuthType.USE_OPENAI,
-      AuthType.USE_VERTEX_AI,
-      AuthType.USE_ANTHROPIC,
-      AuthType.USE_GEMINI,
-    ];
-
-    // Try the main authType first for early exit
-    const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
-    if (mainAuthType) {
-      const resolved = modelsConfig.getResolvedModel(mainAuthType, model);
-      if (resolved) return resolved;
-    }
-
-    for (const authType of allAuthTypes) {
-      if (authType === mainAuthType) continue;
-      const resolved = modelsConfig.getResolvedModel(authType, model);
-      if (resolved) return resolved;
-    }
-
-    return undefined;
-  }
-
-  /**
-   * Resolve the authType for a given model without creating a full generator.
-   * Used by retry logic to ensure provider-specific checks (e.g. QWEN_OAUTH
-   * quota detection) reference the correct provider.
-   */
-  private createRetryAuthTypeForModel(model: string): string | undefined {
-    return this.resolveModelAcrossAuthTypes(model)?.authType;
-  }
-
-  /**
-   * Return a ContentGenerator for a specific model (e.g. the fast model) with
-   * its own per-model settings from modelProviders.  This prevents the main
-   * model's extra_body / samplingParams / reasoning from leaking into side
-   * queries that target a different model.
-   *
-   * Falls back to the main content generator when the target model is not in
-   * the registry or when creating a dedicated generator fails (e.g. in test
-   * environments without full auth setup).
-   *
-   * Results are cached by model ID to avoid rebuilding the generator
-   * (SDK instantiation, config resolution) on every side query.
-   */
-  private async createContentGeneratorForModel(
-    model: string,
-  ): Promise<ContentGenerator> {
-    // Check cache first (Promise coalescing to prevent redundant SDK instantiations)
-    const cached = this.perModelGeneratorCache.get(model);
-    if (cached) return cached;
-
-    const generatorPromise = (async () => {
-      try {
-        const resolvedModel = this.resolveModelAcrossAuthTypes(model);
-
-        if (!resolvedModel) {
-          debugLogger.warn(
-            `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
+          throw new Error(
+            `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
           );
-          return this.getContentGeneratorOrFail();
         }
-
-        const targetConfig = buildAgentContentGeneratorConfig(
-          this.config,
-          model,
-          {
-            authType: resolvedModel.authType,
-            apiKey: resolvedModel.envKey
-              ? (process.env[resolvedModel.envKey] ?? undefined)
-              : undefined,
-            baseUrl: resolvedModel.baseUrl,
-          },
-        );
-
-        return await createContentGenerator(targetConfig, this.config);
-      } catch (err: unknown) {
-        debugLogger.warn(
-          `Failed to create content generator for model "${model}", falling back to main generator.`,
-          err instanceof Error ? err.message : String(err),
-        );
-        // On failure, delete from cache so subsequent attempts can retry.
-        this.perModelGeneratorCache.delete(model);
-        return this.getContentGeneratorOrFail();
-      }
-    })();
-
-    this.perModelGeneratorCache.set(model, generatorPromise);
-    return generatorPromise;
+      },
+    );
   }
 
   /**

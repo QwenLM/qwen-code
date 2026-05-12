@@ -82,7 +82,7 @@ export function ThemeDialog({
       label: name,
       value: name,
       themeNameDisplay: name,
-      themeTypeDisplay: 'Custom',
+      themeTypeDisplay: t('Custom'),
       key: name,
     })),
   ];

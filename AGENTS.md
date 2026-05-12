@@ -102,7 +102,7 @@ npm run preflight  # Full check: clean → install → format → lint → build
 - **Tests**: Collocated with source (`file.test.ts` next to `file.ts`),
   vitest framework
 - **Commits**: Conventional Commits (e.g., `feat(cli): Add --json flag`)
-- **Node.js**: Development requires `~20.19.0`; production requires `>=20`
+- **Node.js**: Development and production both require `>=22` (Ink 7 + React 19.2 requirement)
 
 ## Development Guidelines
 

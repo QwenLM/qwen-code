@@ -929,14 +929,18 @@ describe('WriteFileTool', () => {
       fs.unlinkSync(filePath);
     });
 
-    it('rejects a write when the previous read was ranged (offset/limit)', async () => {
-      // WriteFile diverges from EditTool here: a partial read counts
-      // for in-place edits (Edit's `old_string` matching is the
-      // content-derived guard against editing bytes the model never
-      // saw), but WriteFile replaces the whole file and has no
-      // equivalent guard — a slice-only read followed by an
-      // overwrite would necessarily hallucinate the rest of the
-      // bytes, which is the issue #2499 data-loss scenario.
+    it('allows a write after a ranged (offset/limit) read', async () => {
+      // Aligns WriteFile with EditTool and Claude Code's
+      // `readFileState`: any prior read clears enforcement. The
+      // earlier asymmetric stance (full read required for
+      // overwrite, partial OK for Edit) created a deadlock on
+      // files larger than the truncate-tool-output limit, where
+      // `read_file` without offset/limit still produced a
+      // truncated read and there was no way to satisfy the
+      // "fully read" precondition (issue #3945). The mtime/size
+      // drift check is the gate that distinguishes "model has
+      // seen current bytes" from "model has seen older bytes",
+      // and it fires identically for Edit and WriteFile.
       const filePath = path.join(rootDir, 'enforce-ranged.txt');
       fs.writeFileSync(filePath, 'unchanged', 'utf-8');
       const stats = fs.statSync(filePath);
@@ -948,13 +952,49 @@ describe('WriteFileTool', () => {
       const result = await tool
         .build({ file_path: filePath, content: 'clobber' })
         .execute(abortSignal);
-      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
-      // Error message should explain why partial reads are not enough
-      // for overwrites, not just say "has not been read".
-      expect(result.error?.message).toMatch(
-        /only been partially read|replaces the entire file/,
-      );
-      expect(fs.readFileSync(filePath, 'utf-8')).toBe('unchanged');
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('clobber');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('allows a write after a truncated full read (issue #3945 deadlock fix)', async () => {
+      // Pre-fix, a `read_file` without offset/limit on a file larger
+      // than the truncate-tool-output limit recorded
+      // `lastReadWasFull: false` (the model only saw the head), and
+      // WriteFile's `requireFullRead: true` rejected the follow-up
+      // overwrite with "only been partially read … re-read without
+      // offset / limit / pages" — but a re-read produces the same
+      // truncated state, deadlocking the user. After dropping
+      // `requireFullRead` (aligning with Claude Code), the truncated
+      // read is enough to clear enforcement; the mtime/size drift
+      // check remains the gate that distinguishes "model saw current
+      // bytes" from "model saw older bytes".
+      //
+      // Coverage split: this test seeds the cache directly (mockConfig
+      // here lacks the `getFileService` / `getTruncateToolOutputLines`
+      // / `getTruncateToolOutputThreshold` / `getContentGeneratorConfig`
+      // wiring ReadFileTool needs). The matching ReadFile-side coverage
+      // that *produces* `{ full: false, cacheable: true }` for a
+      // truncated full read lives in read-file.test.ts under "records
+      // truncated full reads with lastReadCacheable=true (issue #3964)".
+      // A future cache-entry schema change must update both halves to
+      // keep the deadlock-free guarantee end-to-end.
+      const filePath = path.join(rootDir, 'enforce-truncated-full.txt');
+      fs.writeFileSync(filePath, 'unchanged', 'utf-8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        // `full: false` is what a truncated full read records
+        // (read-file.ts: `full: isFullRead && !result.isTruncated`).
+        full: false,
+        cacheable: true,
+      });
+
+      const result = await tool
+        .build({ file_path: filePath, content: 'rewritten' })
+        .execute(abortSignal);
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('rewritten');
 
       fs.unlinkSync(filePath);
     });

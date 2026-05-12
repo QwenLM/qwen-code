@@ -21,6 +21,13 @@ import {
 } from '@google/genai';
 import type OpenAI from 'openai';
 import {
+  SpanStatusCode,
+  context,
+  trace,
+  type Context,
+  type Span,
+} from '@opentelemetry/api';
+import {
   ApiRequestEvent,
   ApiResponseEvent,
   ApiErrorEvent,
@@ -42,11 +49,20 @@ import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
   getErrorMessage,
   getErrorStatus,
   getErrorType,
 } from '../../utils/errors.js';
+import {
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+  safeSetStatus,
+  startSpanWithContext,
+  withSpan,
+} from '../../telemetry/tracer.js';
+
+const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
 const MAX_RESPONSE_TEXT_LENGTH = 4096;
 const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
@@ -154,103 +170,177 @@ export class LoggingContentGenerator implements ContentGenerator {
     );
   }
 
+  private safelyLogApiError(
+    responseId: string | undefined,
+    durationMs: number,
+    error: unknown,
+    model: string,
+    prompt_id: string,
+  ): void {
+    try {
+      this._logApiError(responseId, durationMs, error, model, prompt_id);
+    } catch (loggingError) {
+      debugLogger.warn('Failed to log API error:', loggingError);
+    }
+  }
+
+  private safelyLogApiResponse(
+    responseId: string,
+    durationMs: number,
+    model: string,
+    prompt_id: string,
+    usageMetadata?: GenerateContentResponseUsageMetadata,
+    responseText?: string,
+  ): void {
+    try {
+      this._logApiResponse(
+        responseId,
+        durationMs,
+        model,
+        prompt_id,
+        usageMetadata,
+        responseText,
+      );
+    } catch (loggingError) {
+      debugLogger.warn('Failed to log API response:', loggingError);
+    }
+  }
+
   async generateContent(
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    const startTime = Date.now();
-    const isInternal = isInternalPromptId(userPromptId);
-    if (!isInternal) {
-      this.logApiRequest(
-        this.toContents(req.contents),
-        req.model,
-        userPromptId,
-      );
-    }
-
-    const session = this.startCaptureSession(isInternal);
-
-    try {
-      const response = await session.wrap(() =>
-        this.wrapped.generateContent(req, userPromptId),
-      );
-      const durationMs = Date.now() - startTime;
-      const responseText = isInternal
-        ? undefined
-        : this.extractResponseText(response);
-      this._logApiResponse(
-        response.responseId ?? '',
-        durationMs,
-        response.modelVersion || req.model,
-        userPromptId,
-        response.usageMetadata,
-        responseText,
-      );
-      if (!isInternal) {
-        // Logging must not discard the successful API response if
-        // resolve() or logOpenAIInteraction throws.
+    return withSpan(
+      'api.generateContent',
+      { model: req.model, prompt_id: userPromptId },
+      async (span) => {
+        const startTime = Date.now();
+        const isInternal = isInternalPromptId(userPromptId);
+        const session = this.startCaptureSession(isInternal);
         try {
-          await this.logOpenAIInteraction(await session.resolve(req), response);
-        } catch {
-          // swallow logging-side error
-        }
-      }
-      return response;
-    } catch (error) {
-      const durationMs = Date.now() - startTime;
-      this._logApiError('', durationMs, error, req.model, userPromptId);
-      if (!isInternal) {
-        // Logging must not replace the original API error if
-        // resolve() or logOpenAIInteraction throws.
-        try {
-          await this.logOpenAIInteraction(
-            await session.resolve(req),
-            undefined,
-            error,
+          if (!isInternal) {
+            this.logApiRequest(
+              this.toContents(req.contents),
+              req.model,
+              userPromptId,
+            );
+          }
+          const response = await session.wrap(() =>
+            this.wrapped.generateContent(req, userPromptId),
           );
-        } catch {
-          // swallow logging-side error
+          const durationMs = Date.now() - startTime;
+          const responseText = isInternal
+            ? undefined
+            : this.extractResponseText(response);
+          this.safelyLogApiResponse(
+            response.responseId ?? '',
+            durationMs,
+            response.modelVersion || req.model,
+            userPromptId,
+            response.usageMetadata,
+            responseText,
+          );
+          if (!isInternal) {
+            try {
+              await this.safelyLogOpenAIInteraction(
+                await session.resolve(req),
+                response,
+              );
+            } catch (loggingError) {
+              debugLogger.warn(
+                'Failed to log OpenAI interaction:',
+                loggingError,
+              );
+            }
+          }
+          return response;
+        } catch (error) {
+          const durationMs = Date.now() - startTime;
+          this.safelyLogApiError(
+            '',
+            durationMs,
+            error,
+            req.model,
+            userPromptId,
+          );
+          if (!isInternal) {
+            try {
+              await this.safelyLogOpenAIInteraction(
+                await session.resolve(req),
+                undefined,
+                error,
+              );
+            } catch (loggingError) {
+              debugLogger.warn(
+                'Failed to log OpenAI interaction:',
+                loggingError,
+              );
+            }
+          }
+          safeSetStatus(span, {
+            code: SpanStatusCode.ERROR,
+            message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+          });
+          throw error;
         }
-      }
-      throw error;
-    }
+      },
+    );
   }
 
   async generateContentStream(
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const { span, runInContext } = startSpanWithContext(
+      'api.generateContentStream',
+      { model: req.model, prompt_id: userPromptId },
+    );
+
+    // Capture the span context so the stream wrapper can activate it
+    // during iteration — not just during generator creation.
+    const spanContext = trace.setSpan(context.active(), span);
+
     const startTime = Date.now();
     const isInternal = isInternalPromptId(userPromptId);
-    if (!isInternal) {
-      this.logApiRequest(
-        this.toContents(req.contents),
-        req.model,
-        userPromptId,
-      );
-    }
-
     const session = this.startCaptureSession(isInternal);
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
-      stream = await session.wrap(() =>
-        this.wrapped.generateContentStream(req, userPromptId),
-      );
+      stream = await runInContext(async () => {
+        if (!isInternal) {
+          this.logApiRequest(
+            this.toContents(req.contents),
+            req.model,
+            userPromptId,
+          );
+        }
+        return session.wrap(() =>
+          this.wrapped.generateContentStream(req, userPromptId),
+        );
+      });
     } catch (error) {
+      safeSetStatus(span, {
+        code: SpanStatusCode.ERROR,
+        message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+      });
       const durationMs = Date.now() - startTime;
-      this._logApiError('', durationMs, error, req.model, userPromptId);
+      runInContext(() =>
+        this.safelyLogApiError('', durationMs, error, req.model, userPromptId),
+      );
+      try {
+        span.end();
+      } catch {
+        // OTel errors must not mask the original API error
+      }
       if (!isInternal) {
-        // Logging must not replace the original API error if
-        // resolve() or logOpenAIInteraction throws.
         try {
-          await this.logOpenAIInteraction(
+          await this.safelyLogOpenAIInteraction(
             await session.resolve(req),
             undefined,
             error,
           );
-        } catch {
-          // swallow logging-side error
+        } catch (loggingError) {
+          debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
         }
       }
       throw error;
@@ -260,16 +350,21 @@ export class LoggingContentGenerator implements ContentGenerator {
     if (!isInternal) {
       try {
         resolvedRequest = await session.resolve(req);
-      } catch {
-        // Resolve must not abort the stream that the SDK already returned.
+      } catch (loggingError) {
+        debugLogger.warn('Failed to resolve OpenAI request:', loggingError);
       }
     }
-    return this.loggingStreamWrapper(
-      stream,
-      startTime,
-      userPromptId,
-      req.model,
-      resolvedRequest,
+
+    return runInContext(() =>
+      this.loggingStreamWrapper(
+        stream,
+        startTime,
+        userPromptId,
+        req.model,
+        resolvedRequest,
+        span,
+        spanContext,
+      ),
     );
   }
 
@@ -299,6 +394,8 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
     model: string,
     openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
+    span?: Span,
+    spanContext?: Context,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // For internal prompts we only need the last usage metadata (for /stats);
@@ -310,6 +407,14 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstResponseId = '';
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
+    let terminalStatusAttempted = false;
+
+    // Helper to run code within the span context during iteration.
+    // This ensures debug log lines emitted during stream processing
+    // see the stream span as the active span.
+    const runInSpan = <T>(fn: () => T): T =>
+      spanContext ? context.with(spanContext, fn) : fn();
+
     try {
       for await (const response of stream) {
         if (!firstResponseId && response.responseId) {
@@ -331,40 +436,60 @@ export class LoggingContentGenerator implements ContentGenerator {
       const consolidatedResponse = isInternal
         ? undefined
         : this.consolidateGeminiResponsesForLogging(responses);
-      this._logApiResponse(
-        firstResponseId,
-        durationMs,
-        firstModelVersion || model,
-        userPromptId,
-        lastUsageMetadata,
-        this.extractResponseText(consolidatedResponse),
+      runInSpan(() =>
+        this.safelyLogApiResponse(
+          firstResponseId,
+          durationMs,
+          firstModelVersion || model,
+          userPromptId,
+          lastUsageMetadata,
+          this.extractResponseText(consolidatedResponse),
+        ),
       );
       if (!isInternal) {
-        // Logging must not turn a fully-yielded stream into a thrown error.
-        try {
-          await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
-        } catch {
-          // swallow logging-side error
-        }
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(openaiRequest, consolidatedResponse),
+        );
+      }
+      terminalStatusAttempted = true;
+      if (span) {
+        safeSetStatus(span, { code: SpanStatusCode.OK });
       }
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      this._logApiError(
-        firstResponseId,
-        durationMs,
-        error,
-        firstModelVersion || model,
-        userPromptId,
+      runInSpan(() =>
+        this.safelyLogApiError(
+          firstResponseId,
+          durationMs,
+          error,
+          firstModelVersion || model,
+          userPromptId,
+        ),
       );
       if (!isInternal) {
-        // Logging must not replace the original stream/API error.
-        try {
-          await this.logOpenAIInteraction(openaiRequest, undefined, error);
-        } catch {
-          // swallow logging-side error
-        }
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(openaiRequest, undefined, error),
+        );
+      }
+      terminalStatusAttempted = true;
+      if (span) {
+        safeSetStatus(span, {
+          code: SpanStatusCode.ERROR,
+          message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+        });
       }
       throw error;
+    } finally {
+      if (!terminalStatusAttempted) {
+        if (span) {
+          safeSetStatus(span, { code: SpanStatusCode.OK });
+        }
+      }
+      try {
+        span?.end();
+      } catch {
+        // OTel errors must not mask the original API error
+      }
     }
   }
 
@@ -446,6 +571,18 @@ export class LoggingContentGenerator implements ContentGenerator {
           ? new Error(String(error))
           : undefined,
     );
+  }
+
+  private async safelyLogOpenAIInteraction(
+    openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined,
+    response?: GenerateContentResponse,
+    error?: unknown,
+  ): Promise<void> {
+    try {
+      await this.logOpenAIInteraction(openaiRequest, response, error);
+    } catch (loggingError) {
+      debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
+    }
   }
 
   private convertGeminiResponseToOpenAIForLogging(

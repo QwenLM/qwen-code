@@ -401,9 +401,14 @@ export class AgentCore {
         hasWildcard ||
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
+        // Subagents inherit the full tool surface — including deferred tools
+        // (MCP, low-frequency built-ins). Subagents are one-shot and don't
+        // have the same "save tokens" lifecycle as the main chat, and they
+        // don't see the "Deferred Tools" section of the system prompt, so
+        // hiding schemas would silently break existing `tools: ['*']` configs.
         toolsList.push(
           ...toolRegistry
-            .getFunctionDeclarations()
+            .getFunctionDeclarations({ includeDeferred: true })
             .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
         );
       } else {
@@ -424,10 +429,11 @@ export class AgentCore {
         ),
       );
     } else {
-      // Inherit all available tools by default when not specified.
+      // Inherit all available tools by default when not specified — see the
+      // wildcard branch above for why deferred tools are included.
       toolsList.push(
         ...toolRegistry
-          .getFunctionDeclarations()
+          .getFunctionDeclarations({ includeDeferred: true })
           .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
       );
     }

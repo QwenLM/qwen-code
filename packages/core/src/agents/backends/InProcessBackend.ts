@@ -413,7 +413,7 @@ async function createPerAgentConfig(
 
   const agentRegistry: ToolRegistry = await override.createToolRegistry(
     undefined,
-    { skipDiscovery: true },
+    { skipDiscovery: true, forSubAgent: true },
   );
   agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   override.getToolRegistry = () => agentRegistry;

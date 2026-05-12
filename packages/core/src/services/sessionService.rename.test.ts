@@ -323,6 +323,42 @@ describe('SessionService - rename and custom title', () => {
       expect(matches[0].sessionId).toBe(sessionIdA);
     });
 
+    it('omits messageCount and avoids createReadStream (perf contract)', async () => {
+      // findSessionsByTitle is the second user-facing call site that the
+      // perf work removed `messageCount` from. This test pins both
+      // contracts: matched items must have `messageCount === undefined`,
+      // and the per-match `fs.createReadStream` count pass must not run
+      // — re-introducing it would silently bring back the O(file-size)
+      // cost without any other test failing.
+      const titleContent =
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'my-feature' },
+        }) + '\n';
+
+      setupSessionFiles([
+        { id: sessionIdA, record: recordA1, mtime: now, titleContent },
+      ]);
+
+      readSyncSpy.mockImplementation(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (_fd: number, buffer: any) => {
+          const data = Buffer.from(titleContent);
+          data.copy(buffer);
+          return data.length;
+        },
+      );
+
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const matches = await sessionService.findSessionsByTitle('my-feature');
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0].messageCount).toBeUndefined();
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+
     it('should return empty array when no session matches', async () => {
       setupSessionFiles([{ id: sessionIdA, record: recordA1, mtime: now }]);
 
